@@ -1,0 +1,234 @@
+/* ===========================================================================
+   Phone layout helpers (<=768px, same breakpoint as lib/useMediaQuery.ts)
+
+   Most of the studio is laid out with inline styles written for a 1280px+
+   desktop: fixed side columns, multi-column grids, nested scroll panes. A
+   component opts into a phone behaviour by adding one of the `m-*` classes
+   below; on desktop every class here is a no-op, so the desktop layout does not
+   move by a pixel.
+
+   `!important` is deliberate: the classes exist to override inline `style={}`
+   props, which otherwise always win.
+   =========================================================================== */
+
+@media (max-width: 768px) {
+  /* ── layout switches ─────────────────────────────────────────────────── */
+
+  /* A row (flex or grid) becomes a single full-width column. */
+  .m-stack {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+  .m-stack > * { min-width: 0 !important; max-width: 100% !important; }
+
+  /* A multi-column grid collapses to one column (rows auto-size). */
+  .m-grid-1 {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: none !important;
+    grid-auto-rows: auto !important;
+  }
+  .m-grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    grid-template-rows: none !important;
+    grid-auto-rows: auto !important;
+  }
+  .m-grid-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    grid-template-rows: none !important;
+    grid-auto-rows: auto !important;
+  }
+  .m-wrap { flex-wrap: wrap !important; }
+  .m-static { position: static !important; }
+  .m-hide { display: none !important; }
+  .m-full { width: 100% !important; max-width: 100% !important; min-width: 0 !important; }
+  .m-minw-0 { min-width: 0 !important; }
+  .m-grow > * { flex: 1 1 auto !important; }
+
+  /* Fixed-height panes (dashboards sized to the desktop viewport) grow with
+     their content, and the page scrolls instead of the pane. */
+  .m-h-auto { height: auto !important; min-height: 0 !important; max-height: none !important; }
+  .m-overflow-visible { overflow: visible !important; }
+
+  /* A pane that hosts a virtualised grid (ImageGrid → VirtuosoGrid needs a box
+     with a real height). On a phone the page scrolls, and the pane gets a fixed
+     share of the screen that still leaves the next section peeking in. */
+  .m-pane { flex: none !important; height: 72dvh !important; min-height: 320px !important; }
+  .m-pane-sm { flex: none !important; height: 48dvh !important; min-height: 260px !important; }
+
+  /* A desktop "fill the viewport, scroll inside" column: on a phone the whole
+     page scrolls instead, so nested scroll panes do not trap the finger. */
+  .m-page-scroll {
+    overflow: visible !important;
+    height: auto !important;
+    min-height: 0 !important;
+    flex: none !important;
+  }
+
+  /* Horizontal strip that scrolls sideways (tabs, chips, pipelines). */
+  .m-scroll-x {
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    flex-wrap: nowrap !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .m-scroll-x::-webkit-scrollbar { display: none; }
+  .m-scroll-x > * { flex-shrink: 0 !important; }
+
+  /* Controls never push their row wider than the screen. */
+  .input, select { max-width: 100%; }
+  label:has(> select), label:has(> .input) { max-width: 100%; min-width: 0; }
+
+  /* ── spacing ─────────────────────────────────────────────────────────── */
+  .m-px { padding-left: 16px !important; padding-right: 16px !important; }
+  .m-p { padding: 16px !important; }
+  .m-p-sm { padding: 12px !important; }
+  .m-gap { gap: 12px !important; }
+  .m-gap-sm { gap: 8px !important; }
+
+  /* ── text ────────────────────────────────────────────────────────────── */
+  .m-break { overflow-wrap: anywhere !important; word-break: break-word !important; }
+  .m-nowrap-ellipsis { white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+  .m-text-left { text-align: left !important; }
+
+  /* ── dialogs / drawers ───────────────────────────────────────────────── */
+
+  /* A centered desktop modal becomes a full-screen sheet. */
+  .m-sheet {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+  }
+  /* A fixed-width desktop modal fits the screen with a small margin. */
+  .m-modal {
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: 90dvh !important;
+  }
+  /* A side drawer takes the full width. */
+  .m-drawer-full {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    border-radius: 0 !important;
+  }
+
+  /* ── page header ─────────────────────────────────────────────────────── */
+  .page-header { padding: 14px 16px 12px !important; }
+  .page-header h1 { font-size: 20px !important; line-height: 26px !important; overflow-wrap: anywhere; }
+  .page-header-row { flex-direction: column !important; align-items: stretch !important; gap: 10px !important; }
+  .page-header-actions { flex-wrap: wrap !important; }
+  .page-header-actions > .btn { flex: 1 1 auto; }
+  .page-header-topright { position: static !important; margin-bottom: 8px; }
+
+  /* Step pages: tighter gutters. Pages whose content is a plain list (not a
+     virtualised grid that needs a fixed-height box) also opt into scrolling as
+     a whole page via `mobilePageScroll`, so a tall stacked header does not
+     leave a sliver of scrollable content underneath it. */
+  .step-shell-body { padding: 12px !important; }
+  .step-shell.is-page-scroll { height: auto !important; min-height: 100%; }
+  .step-shell.is-page-scroll > .page-header { position: relative !important; }
+  .step-shell.is-page-scroll > .step-shell-body { overflow: visible !important; flex: none !important; }
+
+  /* Tab rows scroll sideways instead of spilling out of the screen. */
+  .tab { white-space: nowrap; }
+
+  /* Seg controls wrap rather than overflow. */
+  .seg { flex-wrap: wrap; height: auto !important; }
+}
+
+/* ── page-specific: project overview detail tiles ───────────────────────── */
+@media (max-width: 768px) {
+  .overview-detail-top > * { height: 400px !important; }
+  .overview-detail-bottom > * { height: auto !important; min-height: 140px; }
+}
+
+/* ── page-specific: task queue rows ─────────────────────────────────────── */
+@media (max-width: 768px) {
+  .queue-row {
+    grid-template-columns: 44px minmax(0, 1fr) !important;
+    row-gap: 8px !important;
+    column-gap: 10px !important;
+    padding: 12px 14px !important;
+  }
+  .queue-row > :nth-child(n + 3) { grid-column: 2 !important; }
+  .queue-row > :nth-child(3) { justify-self: start; }
+  .queue-row > :last-child { text-align: left !important; }
+  .queue-row > :last-child .items-end { align-items: flex-start !important; }
+}
+
+/* ── page-specific: task detail ─────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .queue-stat-value { font-size: 20px !important; }
+  .queue-kv-row { grid-template-columns: 96px minmax(0, 1fr) !important; padding: 8px 12px !important; }
+  /* The log gets a fixed window of the screen; the page scrolls around it. */
+  .queue-log-pane { flex: none !important; height: 65dvh !important; }
+  /* Output files: name | size | action — the timestamp column goes. */
+  .outputs-row { grid-template-columns: minmax(0, 1fr) 64px auto !important; padding-left: 10px !important; padding-right: 10px !important; }
+  .outputs-row > :nth-child(3) { display: none !important; }
+}
+
+/* ── page-specific: training monitor ────────────────────────────────────── */
+@media (max-width: 768px) {
+  .monitor-status-row { row-gap: 6px !important; }
+  .monitor-progress { flex: 1 0 100% !important; order: 10; }
+  .monitor-stat { padding: 8px 10px !important; }
+  .monitor-stat > :nth-child(2) { font-size: 17px !important; overflow-wrap: anywhere; }
+  .monitor-stat > :nth-child(3) { font-size: 10px !important; overflow-wrap: anywhere; }
+  /* Sample viewer: a real share of the screen instead of the 220px floor. */
+  .monitor-sample-main { flex: none !important; height: min(110vw, 70dvh) !important; }
+  .monitor-chart-card { flex: none !important; height: 220px !important; }
+}
+
+/* ── page-specific: train step ──────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .train-yaml-panel { flex: none !important; height: 70dvh !important; }
+}
+
+/* ── touch screens: no hover, so nothing may hide behind it ─────────────────
+   Selection boxes on thumbnails, per-tag remove buttons and the sidebar's
+   row actions are revealed on hover on desktop. A finger never hovers, so on
+   touch devices they are simply always shown. Keyed off the input capability,
+   not the width, so a touch laptop gets them too. */
+@media (hover: none) {
+  .opacity-0.group-hover\:opacity-100 { opacity: 1 !important; }
+  .hidden.group-hover\:flex { display: flex !important; }
+}
+
+/* ── page-specific: generate / presets ──────────────────────────────────── */
+@media (max-width: 768px) {
+  .generate-history-rail { width: 84px !important; padding: 6px !important; }
+  /* Presets table: name | optimizer | rank — resolution and "updated" go. */
+  .presets-row { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) 48px !important; padding-left: 14px !important; padding-right: 14px !important; }
+  .presets-row > :nth-child(n + 4) { display: none !important; }
+}
+
+/* ── page-specific: preprocess crop / inpaint editors ───────────────────── */
+@media (max-width: 768px) {
+  /* filmstrip / canvas / tool panel: three columns become three rows. */
+  .pp-editor-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: 168px min(64dvh, 110vw) auto !important;
+    height: auto !important;
+  }
+  .pp-editor-grid > :first-child { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
+  .pp-editor-grid > :last-child { height: auto !important; overflow: visible !important; }
+  .pp-editor-grid > :last-child > * { overflow: visible !important; flex: none !important; }
+}
+
+/* Crop handles are 10px squares — fine for a cursor, too small for a finger.
+   Grow the hit area only, not the drawn square. */
+@media (pointer: coarse) {
+  .handle::before { content: ''; position: absolute; inset: -12px; }
+}
+
+/* ── settings: model variant rows ───────────────────────────────────────── */
+@media (max-width: 768px) {
+  .model-row { flex-wrap: wrap !important; row-gap: 4px !important; }
+  .model-row > code.w-32 { width: auto !important; flex: 1 1 55% !important; }
+  .model-row > span[style*="flex: 1"] { display: none !important; }
+  .model-row > .btn { margin-left: auto; }
+}

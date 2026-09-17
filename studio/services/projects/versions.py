@@ -1,0 +1,912 @@
+"""Version 数据模型 + 物理目录 + fork 训练树 + activate。
+
+Version 是 Pipeline 的「实验单元」：每个 version 独立维护 train/ reg/
+output/。label 由用户起（baseline /
+high-lr 这种语义名），同 project 内唯一，且不可改（路径锚点）。
+
+删除：直接 rmtree version 目录 + DELETE db 行。不可恢复。
+若被删的是 active version，自动 reassign 到「最新创建的剩余 version」。
+"""
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+from . import projects
+from ...services.dataset.scan import IMAGE_EXTS
+
+# ADR-0007 §11.3-B：versions 状态机用 status + phase 两个正交字段。
+# 老 stage 已在 PR-5 移除（PR-5 commit 2 删 VALID_STAGES / advance_stage）。
+
+
+class VersionStatus:
+    """版本运行态状态机（5 enum，ADR-0007 §11.3-B）。"""
+
+    PREPARING = "preparing"
+    TRAINING = "training"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+    VALUES: frozenset[str] = frozenset({
+        PREPARING, TRAINING, COMPLETED, FAILED, CANCELED,
+    })
+
+
+class VersionPhase:
+    """版本准备 cursor，仅 status=preparing 时有业务语义（ADR-0007 §11.3-B / §11.5-A）。
+
+    顺序：curating → preprocessing → editing → regularizing → ready。
+    preprocessing / regularizing 可跳过（SKIPPABLE），其余必经。
+
+    ADR 0010 加 preprocessing phase（curating 之后）：用户筛选完图后对 train
+    集做 upscale / crop / 去重等精细处理；可跳过 = 接受训练时默认放大算法。
+
+    自动打标步骤（旧 tagging phase）已移除；caption 通过上传自带 .txt、
+    手动填写（editing）或裸训练提供。旧 tagging 数据由 migration 迁到 editing。
+    """
+
+    CURATING = "curating"
+    PREPROCESSING = "preprocessing"
+    EDITING = "editing"
+    REGULARIZING = "regularizing"
+    READY = "ready"
+
+    ORDER: tuple[str, ...] = (
+        CURATING, PREPROCESSING, EDITING, REGULARIZING, READY,
+    )
+    VALUES: frozenset[str] = frozenset(ORDER)
+    SKIPPABLE: frozenset[str] = frozenset({PREPROCESSING, REGULARIZING})
+
+
+def get_status(v: dict[str, Any]) -> str:
+    """读 version.status；None / 缺字段 fallback → preparing。"""
+    return str(v.get("status") or VersionStatus.PREPARING)
+
+
+def get_phase(v: dict[str, Any]) -> str:
+    """读 version.phase；None / 缺字段 fallback → curating。"""
+    return str(v.get("phase") or VersionPhase.CURATING)
+
+
+# ---------------------------------------------------------------------------
+# ADR-0007 §11.3-C / §6.9: version.status 派生 + 一致性校验
+# ---------------------------------------------------------------------------
+
+
+_TASK_TO_VERSION_STATUS: dict[str, str] = {
+    "done":     VersionStatus.COMPLETED,
+    "failed":   VersionStatus.FAILED,
+    "canceled": VersionStatus.CANCELED,
+}
+
+
+def derive_status_from_tasks(
+    conn: sqlite3.Connection, version_id: int
+) -> str:
+    """按 ADR §11.3-C 派生 version.status：
+
+    - 有 active task（pending / running / paused / scheduled）→ training
+    - 无 active 看最近终态 task → completed / failed / canceled
+    - 从未有 task → preparing
+
+    0.17 P-B：scheduled（计划任务，还没到点）与 pending 同等对待 —— 版本已被
+    该任务占用（enqueue 端点会 409），状态必须体现出来。
+    R-5：台账合并后 tasks 表也装数据作业（tag/download/eval…），派生只看
+    GPU 任务类型 —— 否则一个 pending 打标作业会把 version 顶成「训练中」。
+    """
+    row = conn.execute(
+        "SELECT 1 FROM tasks "
+        "WHERE version_id = ? AND status IN ('pending', 'running', 'paused', 'scheduled') "
+        "AND COALESCE(task_type, 'train') IN ('train', 'reg_ai', 'generate') "
+        "LIMIT 1",
+        (version_id,),
+    ).fetchone()
+    if row:
+        return VersionStatus.TRAINING
+
+    row = conn.execute(
+        "SELECT status FROM tasks "
+        "WHERE version_id = ? AND status IN ('done', 'failed', 'canceled') "
+        "AND COALESCE(task_type, 'train') IN ('train', 'reg_ai', 'generate') "
+        "ORDER BY created_at DESC LIMIT 1",
+        (version_id,),
+    ).fetchone()
+    if row:
+        return _TASK_TO_VERSION_STATUS.get(str(row[0]), VersionStatus.PREPARING)
+
+    return VersionStatus.PREPARING
+
+
+def reconcile_version_status(
+    conn: sqlite3.Connection, version_id: int
+) -> tuple[Optional[dict[str, Any]], bool]:
+    """读 version + 校正 status 不一致；返回 (version, was_corrected)。
+
+    ADR §6.9 安全网：双写过渡期 supervisor 偶尔漏写时，此函数能让
+    任意 read 路径自愈。
+    - 计算 derive_status_from_tasks
+    - 与存储值不一致 → log warning + UPDATE + 返回 corrected version + True
+    - 一致 → 直接返回 (version, False)
+    - version 不存在 → (None, False)
+
+    本函数不发 SSE（保持纯 db 操作），调用方根据 was_corrected 决定要不要 publish。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    v = get_version(conn, version_id)
+    if not v:
+        return None, False
+
+    derived = derive_status_from_tasks(conn, version_id)
+    stored = get_status(v)
+    if stored == derived:
+        return v, False
+
+    logger.warning(
+        "version %d status mismatch: stored=%r derived=%r → correcting",
+        version_id, stored, derived,
+    )
+    update_version(conn, version_id, status=derived)
+    return get_version(conn, version_id), True
+
+# label 必须是路径安全的：字母 / 数字 / 下划线 / 连字符 / 点。
+# 纯点 label（"." / ".."）会让 version_dir 解析到 versions/ 之外
+# （".." == project 根，delete_version 时 rmtree 整个项目），必须拒绝。
+_VALID_LABEL = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]+$")
+
+
+def is_valid_label(label: str) -> bool:
+    """version label 校验，给外部输入源（如 bundle manifest）复用。"""
+    return bool(_VALID_LABEL.fullmatch(label))
+
+
+from studio.domain.errors import DomainError
+
+
+class VersionError(DomainError):
+    """Version 业务错误。
+
+    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    """
+    default_code = "version.error"
+
+
+# ---------------------------------------------------------------------------
+# paths
+# ---------------------------------------------------------------------------
+
+
+def version_dir(project_id: int, slug: str, label: str) -> Path:
+    return projects.project_dir(project_id, slug) / "versions" / label
+
+
+def _natural_key(s: str) -> list[Any]:
+    """自然序 key：字符串里的数字段当 int 比较，让 a_5 < a_60。
+
+    re.split(r'(\\d+)', 'a_60') -> ['a_', '60', '']
+    转换为 ['a_', 60, '']，与同样转换后的 'a_5' -> ['a_', 5, ''] 按位比较。
+    """
+    parts = re.split(r"(\d+)", s)
+    return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+
+def list_lora_ckpts(vdir: Path) -> list[dict[str, Any]]:
+    """扫 versions/{label}/output/*.safetensors，列所有 LoRA ckpt 文件。
+
+    anima_train 输出命名约定（runtime/anima_train.py:2434, 2464）：
+      - {output_name}_step{N}.safetensors    （按 step 保存）
+      - {output_name}_epoch{N}.safetensors   （按 epoch 保存）
+      - {output_name}_final.safetensors      （训练完毕）
+
+    返回每个 ckpt 的 {kind, value, label, path, mtime}：
+      - kind: 'step' | 'epoch' | 'final' | 'other'
+      - value: int（step/epoch 数；final/other → 0）
+      - label: 显示用，"step 2476" / "epoch 5" / "final" / 文件名
+      - path: 绝对路径字符串
+      - mtime: 修改时间戳（前端按时间倒序展示）
+    排序：final 在前 → step 数字降序 → epoch 数字降序 → 其他按 label 自然序升序
+    （让 a_5 < a_60，避免 lex 序把 a_60 排到 a_9 前面或 mtime 序乱掉用户预期）。
+    """
+    output_dir = vdir / "output"
+    if not output_dir.exists():
+        return []
+    items: list[dict[str, Any]] = []
+    for f in output_dir.glob("*.safetensors"):
+        if not f.is_file():
+            continue
+        name = f.stem  # 去掉 .safetensors
+        kind = "other"
+        value = 0
+        label = name
+        # 匹配 *_step{N}
+        m = re.search(r"_step(\d+)$", name)
+        if m:
+            kind = "step"
+            value = int(m.group(1))
+            label = f"step {value}"
+        else:
+            m = re.search(r"_epoch(\d+)$", name)
+            if m:
+                kind = "epoch"
+                value = int(m.group(1))
+                label = f"epoch {value}"
+            elif name.endswith("_final"):
+                kind = "final"
+                label = "final"
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        items.append({
+            "kind": kind, "value": value, "label": label,
+            "path": str(f), "mtime": mtime,
+        })
+
+    # 排序：final 顶部；step/epoch 按 value 降序；other 按 label 自然序升序
+    kind_order = {"final": 0, "step": 1, "epoch": 2, "other": 3}
+
+    def _sort_key(x: dict[str, Any]) -> tuple[Any, ...]:
+        ko = kind_order.get(x["kind"], 9)
+        if x["kind"] in ("step", "epoch"):
+            return (ko, -x["value"], [], -x["mtime"])
+        # final / other：value 都是 0，按 label 自然序升序（other 主要受益）
+        return (ko, 0, _natural_key(x["label"]), -x["mtime"])
+
+    items.sort(key=_sort_key)
+    return items
+
+
+_STATE_FILE_RE = re.compile(r"training_state_(step|epoch)(\d+)\.pt$")
+
+
+def list_state_ckpts(vdir: Path) -> list[dict[str, Any]]:
+    """扫 version output/ 下所有断点续训 state 文件。
+
+    扫描两个位置（ADR 0006 PR-1 路径迁移）：
+      - 旧路径：``output/training_state_step{N}.pt``（pre-PR-1 残留）
+      - 新路径：``output/state/task_<TID>/training_state_step{N}.pt``（PR-1+）
+
+    两种粒度都看（PR-1 顺手修扫描漏 epoch 的旧 bug）：
+      - step  →  ``training_state_step{N}.pt``    label "step N"
+      - epoch →  ``training_state_epoch{N}.pt``   label "epoch N"
+
+    pause 文件（PR-2+ 的 ``pause_step_<N>.pt``）**不在此列**——picker 不应
+    暴露 pause 中间态。命名前缀天然过滤。
+
+    返回 [{step, label, path, mtime}]，step 降序，epoch 单独按 step（int 部分）
+    降序排在 step 项前后；UI 按 mtime/step 自己排即可。
+    """
+    output_dir = vdir / "output"
+    if not output_dir.exists():
+        return []
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    # 同一相对路径不要进两次（理论上不会撞，但 glob 重叠 + symlink 兜底）。
+    candidates: list[Path] = []
+    candidates.extend(output_dir.glob("training_state_*.pt"))
+    state_root = output_dir / "state"
+    if state_root.exists():
+        candidates.extend(state_root.glob("task_*/training_state_*.pt"))
+    for f in candidates:
+        if not f.is_file():
+            continue
+        m = _STATE_FILE_RE.search(f.name)
+        if not m:
+            continue
+        key = str(f.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        kind = m.group(1)  # "step" or "epoch"
+        n = int(m.group(2))
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        items.append({
+            "step": n if kind == "step" else 0,
+            "label": f"{kind} {n}",
+            "path": str(f),
+            "mtime": mtime,
+            "_kind": kind,  # 内部排序用，返回前剥掉
+            "_n": n,
+        })
+    # 先 step 段（按 step 降序），后 epoch 段（按 epoch 降序）。
+    items.sort(key=lambda x: (0 if x["_kind"] == "step" else 1, -x["_n"]))
+    for it in items:
+        it.pop("_kind", None)
+        it.pop("_n", None)
+    return items
+
+
+def list_project_state_ckpts(
+    conn: sqlite3.Connection, project: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """列项目所有 versions 的 state.pt，按 version 分组（Train 页 resume_state picker 用）。
+
+    返回 [{version_id, label, items: [{step, label, path, mtime}, ...]}]，按 version
+    `created_at` 升序，items 按 step 降序。空 version（没产出 .pt）保留分组但 items 为空。
+    """
+    pid = int(project["id"])
+    slug = str(project["slug"])
+    groups: list[dict[str, Any]] = []
+    for v in list_versions(conn, pid):
+        vdir = version_dir(pid, slug, str(v["label"]))
+        groups.append({
+            "version_id": int(v["id"]),
+            "label": str(v["label"]),
+            "items": list_state_ckpts(vdir),
+        })
+    return groups
+
+
+def list_project_lora_ckpts(
+    conn: sqlite3.Connection, project: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """列项目所有 versions 的 LoRA ckpt（.safetensors），按 version 分组（resume_lora picker 用）。
+
+    返回 [{version_id, label, items: [{kind, value, label, path, mtime}, ...]}]，
+    按 version `created_at` 升序；items 按 list_lora_ckpts 内置排序（final → step desc → epoch desc → other）。
+    """
+    pid = int(project["id"])
+    slug = str(project["slug"])
+    groups: list[dict[str, Any]] = []
+    for v in list_versions(conn, pid):
+        vdir = version_dir(pid, slug, str(v["label"]))
+        groups.append({
+            "version_id": int(v["id"]),
+            "label": str(v["label"]),
+            "items": list_lora_ckpts(vdir),
+        })
+    return groups
+
+
+def _write_version_json(v: dict[str, Any], pdir_label_path: Path) -> None:
+    pdir_label_path.mkdir(parents=True, exist_ok=True)
+    (pdir_label_path / "version.json").write_text(
+        json.dumps(v, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+# 默认训练子文件夹：Kohya 风格 N_label，repeat=1。
+# 之所以默认建一个：用户进 Curation 页就能直接复制图，不需要先「+ 新建文件夹」。
+DEFAULT_TRAIN_FOLDER = "1_data"
+
+
+def _ensure_version_tree(vdir: Path) -> None:
+    # samples/ 不再建：采样图是 task 档案（studio_data/tasks/<id>/samples/），
+    # version 树里只有老 task 的历史数据，读兼容由 samples.py 多候选解析负责
+    for sub in ("train", "reg", "output"):
+        (vdir / sub).mkdir(parents=True, exist_ok=True)
+    (vdir / "train" / DEFAULT_TRAIN_FOLDER).mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# CRUD
+# ---------------------------------------------------------------------------
+
+
+def _row_to_version(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
+    return dict(row) if row else None
+
+
+def get_version(
+    conn: sqlite3.Connection, version_id: int
+) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM versions WHERE id = ?", (version_id,)
+    ).fetchone()
+    return _row_to_version(row)
+
+
+def _must_get(conn: sqlite3.Connection, version_id: int) -> dict[str, Any]:
+    v = get_version(conn, version_id)
+    if not v:
+        raise VersionError(
+            "Version not found", code="version.not_found",
+            details={"id": version_id}, http_status=404,
+        )
+    return v
+
+
+def list_versions(
+    conn: sqlite3.Connection, project_id: int
+) -> list[dict[str, Any]]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM versions WHERE project_id = ? ORDER BY created_at ASC",
+            (project_id,),
+        )
+    ]
+
+
+def create_version(
+    conn: sqlite3.Connection,
+    *,
+    project_id: int,
+    label: str,
+    fork_from_version_id: Optional[int] = None,
+    note: Optional[str] = None,
+) -> dict[str, Any]:
+    """label 校验：仅 [A-Za-z0-9_.-]+；同 project 内唯一。
+
+    fork_from_version_id 给了 → 全量复制源 version 的用户产物：
+        train/、reg/、config.yaml、.unlocked.json（PP10.4）
+    输出类（output/、samples/、monitor_state.json）一律不复制。
+    复制 config.yaml 后立即重写一次，把 data_dir / reg_data_dir / output_dir /
+    output_name 强制刷成新 version 的路径。
+
+    ADR-0007 PR-5: fork 不再继承 stage / status / phase；新 version 始终从
+    preparing / curating 默认值开始。用户 fork 后从筛选 phase 接着干。
+    """
+    p = projects.get_project(conn, project_id)
+    if not p:
+        raise VersionError(
+            "Project not found", code="project.not_found",
+            details={"id": project_id}, http_status=404,
+        )
+    if not _VALID_LABEL.fullmatch(label):
+        raise VersionError(
+            f'Invalid version label "{label}"; use letters, digits, '
+            "underscore, hyphen, or dot",
+            code="version.label_invalid", details={"name": label},
+            http_status=400,
+        )
+    # 唯一性
+    if conn.execute(
+        "SELECT 1 FROM versions WHERE project_id = ? AND label = ?",
+        (project_id, label),
+    ).fetchone():
+        raise VersionError(
+            f'Version label "{label}" already exists',
+            code="version.label_exists", details={"name": label},
+            http_status=400,
+        )
+
+    src_config_name: Optional[str] = None
+    if fork_from_version_id is not None:
+        src = get_version(conn, fork_from_version_id)
+        if not src or src["project_id"] != project_id:
+            raise VersionError(
+                "The version to copy from was not found in this project",
+                code="version.fork_source_invalid",
+                details={"id": fork_from_version_id}, http_status=404,
+            )
+        src_config_name = src["config_name"]
+
+    now = time.time()
+    cur = conn.execute(
+        "INSERT INTO versions(project_id, label, config_name, created_at, note) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (project_id, label, src_config_name, now, note),
+    )
+    conn.commit()
+    vid = int(cur.lastrowid)
+
+    vdir = version_dir(project_id, p["slug"], label)
+    _ensure_version_tree(vdir)
+
+    if fork_from_version_id is not None:
+        src = _must_get(conn, fork_from_version_id)
+        src_vdir = version_dir(project_id, p["slug"], src["label"])
+        # train / reg：递归复制目录（存在才复制）
+        for sub in ("train", "reg"):
+            src_sub = src_vdir / sub
+            if src_sub.exists():
+                _copytree(src_sub, vdir / sub)
+        # config.yaml + .unlocked.json：单文件复制
+        for fname in ("config.yaml", ".unlocked.json"):
+            src_file = src_vdir / fname
+            if src_file.exists():
+                shutil.copy2(src_file, vdir / fname)
+        # config.yaml 复制过来后，data_dir / reg_data_dir / output_dir /
+        # output_name 还指向源 version；用 force_project_overrides=True 重写
+        # 一次刷成新 version 的路径。reg_data_dir 由 project_specific_overrides
+        # 自动检测新 version 的 reg/meta.json 是否存在 → 跟随复制结果。
+        v_for_rewrite = _must_get(conn, vid)
+        new_cfg_path = vdir / "config.yaml"
+        if new_cfg_path.exists():
+            from .. import version_config as _vc  # 延迟避免循环
+            try:
+                cfg = _vc.read_version_config(p, v_for_rewrite)
+                _vc.write_version_config(
+                    p, v_for_rewrite, cfg, force_project_overrides=True
+                )
+            except _vc.VersionConfigError:
+                # 源 config 损坏不阻断新建；用户去 Train 页换预设
+                pass
+
+    v = _must_get(conn, vid)
+    _write_version_json(v, vdir)
+
+    # 项目里第一个 version → 自动设为 active
+    if p.get("active_version_id") is None:
+        projects.update_project(conn, project_id, active_version_id=vid)
+
+    return v
+
+
+def _copytree(src: Path, dst: Path) -> None:
+    """递归复制目录（含子文件夹与同名 metadata 文件）。
+
+    Win 上硬链接受限较多，统一走 copy（PP1 说明这点）。
+    PP10.1 起从 _copytree_train 通用化 — train / reg 都用这个。
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    for sub in src.iterdir():
+        target = dst / sub.name
+        if sub.is_dir():
+            _copytree(sub, target)
+        else:
+            shutil.copy2(sub, target)
+
+
+_UPDATABLE = {
+    "note", "config_name", "output_lora_path", "trigger_word",
+    "status", "phase", "last_failure_reason",
+}
+
+
+def update_version(
+    conn: sqlite3.Connection, version_id: int, **fields: Any
+) -> dict[str, Any]:
+    v = _must_get(conn, version_id)
+    keep = {k: val for k, val in fields.items() if k in _UPDATABLE}
+    if "status" in keep and keep["status"] not in VersionStatus.VALUES:
+        raise VersionError(f"Invalid status: {keep['status']!r}")
+    if "phase" in keep and keep["phase"] not in VersionPhase.VALUES:
+        raise VersionError(f"Invalid phase: {keep['phase']!r}")
+    if not keep:
+        return v
+    cols = ", ".join(f"{k} = ?" for k in keep)
+    params: list[Any] = list(keep.values()) + [version_id]
+    conn.execute(f"UPDATE versions SET {cols} WHERE id = ?", params)
+    conn.commit()
+    v = _must_get(conn, version_id)
+    p = projects.get_project(conn, v["project_id"])
+    if p:
+        _write_version_json(v, version_dir(p["id"], p["slug"], v["label"]))
+    return v
+
+
+def delete_version(conn: sqlite3.Connection, version_id: int) -> None:
+    """rmtree version 目录 + DELETE db 行；若是 active 自动 reassign。不可恢复。"""
+    v = _must_get(conn, version_id)
+    p = projects.get_project(conn, v["project_id"])
+    if p:
+        src = version_dir(p["id"], p["slug"], v["label"])
+        if src.exists():
+            shutil.rmtree(src, ignore_errors=True)
+
+        if p.get("active_version_id") == version_id:
+            # 选剩下里 created_at 最新的；都没了就清空
+            row = conn.execute(
+                "SELECT id FROM versions WHERE project_id = ? AND id != ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (v["project_id"], version_id),
+            ).fetchone()
+            new_active = int(row[0]) if row else None
+            projects.update_project(
+                conn, v["project_id"], active_version_id=new_active
+            )
+
+    conn.execute("DELETE FROM versions WHERE id = ?", (version_id,))
+    conn.commit()
+
+
+def activate_version(
+    conn: sqlite3.Connection, version_id: int
+) -> dict[str, Any]:
+    """把当前 version 设为项目的 active_version。返回更新后的 version。"""
+    v = _must_get(conn, version_id)
+    projects.update_project(conn, v["project_id"], active_version_id=version_id)
+    return v
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+
+def _scan_caption_dataset(root: Path) -> tuple[list[dict[str, Any]], int, int]:
+    """扫 root/<folder>/ 的图片数与已打标数（.txt / .json sidecar）。
+
+    train/ 与 validation/ 同构（validation 镜像 train 的子文件夹布局），共用一套扫描。
+    返回 (folders, total, tagged)。
+    """
+    folders: list[dict[str, Any]] = []
+    total = 0
+    tagged = 0
+    if root.exists():
+        for sub in sorted(root.iterdir()):
+            if sub.is_dir():
+                cnt = 0
+                for f in sub.iterdir():
+                    if not (f.is_file() and f.suffix.lower() in IMAGE_EXTS):
+                        continue
+                    cnt += 1
+                    if f.with_suffix(".txt").exists() or f.with_suffix(".json").exists():
+                        tagged += 1
+                folders.append({"name": sub.name, "image_count": cnt})
+                total += cnt
+    return folders, total, tagged
+
+
+def stats_for_version(p: dict[str, Any], v: dict[str, Any]) -> dict[str, Any]:
+    """train / validation 图片与已打标计数 / reg 计数 / output 是否存在。"""
+    vdir = version_dir(p["id"], p["slug"], v["label"])
+    train_folders, train_total, tagged_total = _scan_caption_dataset(vdir / "train")
+    _, val_total, val_tagged = _scan_caption_dataset(vdir / "validation")
+    reg_dir = vdir / "reg"
+    reg_total = 0
+    reg_meta_exists = False
+    if reg_dir.exists():
+        # reg/{train-subfolder-mirror}/{post_id}.png — 递归扫（与源脚本一致）
+        for f in reg_dir.rglob("*"):
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
+                reg_total += 1
+        reg_meta_exists = (reg_dir / "meta.json").exists()
+    output_dir = vdir / "output"
+    has_output = output_dir.exists() and any(output_dir.iterdir())
+    return {
+        "train_image_count": train_total,
+        "tagged_image_count": tagged_total,
+        "train_folders": train_folders,
+        "validation_image_count": val_total,
+        "validation_tagged_count": val_tagged,
+        "reg_image_count": reg_total,
+        "reg_meta_exists": reg_meta_exists,
+        "has_output": has_output,
+    }
+
+
+def compute_bucket_histogram(
+    train_dir: Path,
+    resolutions: list[int],
+    aspect_ratio_limit: float = 2.0,
+    prefer_json: bool = True,
+) -> list[dict[str, Any]]:
+    """按**真正的** BucketManager 算训练集 ARB 桶分布（与实际训练逐桶一致）。
+
+    扫描规则镜像 trainer 的 ``ImageDataset._scan`` / ``_make_sample``，避免预览与实际
+    训练数量不符：
+    - 根目录散图按 repeat=1 + config 分辨率列表计入；
+    - 子文件夹**递归**（``rglob``）扫，按文件夹名 px 覆盖 / repeat 解析；
+    - **只计有 caption 的图**（无 ``.json``/``.txt``/``.caption`` 的会被 trainer 丢弃）。
+
+    每张图按其分辨率 fan-out 落桶，count = 有效样本数（含 repeat × 分辨率档数）。
+    复用 runtime 的 ``BucketManager`` + ``_parse_folder_meta``，不引入桶算法第三份拷贝。
+    返回 ``[{reso, buckets: [{w, h, count}]}]``，按分辨率升序、桶按 count 降序。
+    """
+    from runtime.training.dataset import BucketManager, ImageDataset
+    from PIL import Image
+
+    train_dir = Path(train_dir)
+    base_resos = [int(r) for r in resolutions]
+    mgrs: dict[int, Any] = {}
+
+    def mgr_for(reso: int):
+        if reso not in mgrs:
+            mgrs[reso] = BucketManager(int(reso), aspect_ratio_limit=aspect_ratio_limit)
+        return mgrs[reso]
+
+    def has_caption(img_path: Path) -> bool:
+        # 镜像 _make_sample：prefer_json 且 .json 存在 → json；否则要 .txt 或 .caption。
+        if prefer_json and img_path.with_suffix(".json").exists():
+            return True
+        return img_path.with_suffix(".txt").exists() or img_path.with_suffix(".caption").exists()
+
+    hist: dict[int, dict[tuple[int, int], int]] = {}
+
+    def add_image(img_path: Path, repeat: int, resos: list[int]) -> None:
+        if not has_caption(img_path):
+            return
+        try:
+            with Image.open(img_path) as im:
+                w, h = im.size
+        except Exception:
+            return
+        for target_reso in resos:
+            bw, bh = mgr_for(target_reso).get_bucket(w, h)
+            bmap = hist.setdefault(int(target_reso), {})
+            bmap[(bw, bh)] = bmap.get((bw, bh), 0) + repeat
+
+    if train_dir.exists():
+        # 根目录散图：repeat=1，无 px 前缀 → 用 config 分辨率列表
+        for p in sorted(train_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                add_image(p, 1, base_resos)
+        # 子文件夹：递归扫 + px 覆盖 / repeat 解析
+        for sub in sorted(train_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            reso_override, repeat, _label = ImageDataset._parse_folder_meta(sub.name)
+            resos = [reso_override] if reso_override else base_resos
+            for f in sorted(sub.rglob("*")):
+                if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
+                    add_image(f, repeat, resos)
+
+    out: list[dict[str, Any]] = []
+    for reso in sorted(hist):
+        buckets = [
+            {"w": w, "h": h, "count": c}
+            for (w, h), c in sorted(hist[reso].items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+        ]
+        out.append({"reso": reso, "buckets": buckets})
+    return out
+
+
+class _NavitTokenStub:
+    """给 ``NavitPackBatchSampler`` 喂 token 数列表的最小 dataset 壳。
+
+    ``dataset_token_counts`` 通过 ``token_count_for_index`` 属性发现 token 数，
+    因此打包（含 shuffle/strategy/drop_last）走的是**真打包器同一条代码路径**，
+    不是第二份算法拷贝。
+    """
+
+    def __init__(self, counts: list[int]) -> None:
+        self.token_count_for_index = counts
+
+    def __len__(self) -> int:
+        return len(self.token_count_for_index)
+
+
+def compute_navit_pack_estimate(
+    data_dirs: list[Path],
+    resolutions: list[int],
+    aspect_ratio_limit: float = 2.0,
+    prefer_json: bool = True,
+    *,
+    native_resolution: bool = False,
+    token_budget: int = 16384,
+    max_images_per_pack: int = 0,
+    strategy: str = "next_fit",
+    ffd_window: int = 256,
+    drop_last: bool = False,
+    over_budget: str = "downscale",
+    seed: int = 42,
+) -> dict[str, Any]:
+    """NaViT 打包模式的 epoch 包数预估（= 优化器 steps/epoch 的分子）。
+
+    扫描规则与 ``compute_bucket_histogram`` 同源（镜像 ``ImageDataset._scan``：
+    根目录散图 → 子文件夹 sorted+rglob、只计有 caption 的图、repeat 展开），逐图
+    token 数与打包全部复用 runtime 真实现：
+
+    - ``native_resolution=True``：``plan_native_fit_image``（floor-16 + 超预算
+      downscale），多分辨率 fan-out 收拢为单档（镜像 ``ImageDataset.__init__``）；
+    - 否则按 ARB 桶尺寸推 token（``(w//16)*(h//16)``，与
+      ``dataset_token_counts`` 从 latent 形状推导的口径一致）；
+    - 打包经真 ``NavitPackBatchSampler``（同 shuffle(seed)+strategy+drop_last），
+      epoch-0 包数与训练日志的 ``dataset_len``/steps 逐位一致；后续 epoch 因
+      reshuffle 有 ±几步波动，故对外语义仍是「预估」。
+
+    ``data_dirs`` 传 ``[train_dir]`` 或 ``[train_dir, reg_dir]``（reg 参与同一
+    打包池，与 ``MergedDataset`` 的 main+reg 拼接顺序一致）。
+
+    已知偏差：模型 RoPE 单边 token 上限（训练时从 pos_embedder 读）此处拿不到，
+    按不设限处理——只影响单边 > 上限×16 px 的极端巨图（预算上限仍然生效）。
+
+    返回 ``{packs_per_epoch, samples, avg_images_per_pack, token_min, token_max,
+    token_budget, strategy, native, downscaled, sizes}``；``sizes`` 仅 native 下
+    非空（原生尺寸直方图 ``[{w,h,count}]``，count 含 repeat，按 count 降序）。
+    """
+    from runtime.training.dataset import (
+        ImageDataset,
+        NavitPackBatchSampler,
+        plan_native_fit_image,
+    )
+    from PIL import Image
+
+    base_resos = [int(r) for r in resolutions]
+    if native_resolution and len(base_resos) > 1:
+        # 镜像 ImageDataset.__init__：native 下 fan-out 无意义，收拢为单档
+        base_resos = base_resos[:1]
+    mgrs: dict[int, Any] = {}
+
+    def mgr_for(reso: int):
+        if reso not in mgrs:
+            from runtime.training.dataset import BucketManager
+            mgrs[reso] = BucketManager(int(reso), aspect_ratio_limit=aspect_ratio_limit)
+        return mgrs[reso]
+
+    def has_caption(img_path: Path) -> bool:
+        if prefer_json and img_path.with_suffix(".json").exists():
+            return True
+        return img_path.with_suffix(".txt").exists() or img_path.with_suffix(".caption").exists()
+
+    token_counts: list[int] = []
+    size_hist: dict[tuple[int, int], int] = {}
+    downscaled = 0
+
+    def add_image(img_path: Path, repeat: int, resos: list[int]) -> None:
+        nonlocal downscaled
+        if not has_caption(img_path):
+            return
+        try:
+            with Image.open(img_path) as im:
+                w, h = im.size
+        except Exception:
+            return
+        if native_resolution:
+            try:
+                plan = plan_native_fit_image(
+                    w, h, max_tokens=token_budget, max_side_tokens=0,
+                    over_budget=over_budget,
+                )
+            except ValueError:
+                # over_budget="fail" 的超限图：训练会 fail-fast；预估侧跳过并
+                # 不计入（比抛 500 砸掉整个分布面板好）
+                return
+            token_counts.extend([plan.token_count] * repeat)
+            key = (plan.width, plan.height)
+            size_hist[key] = size_hist.get(key, 0) + repeat
+            if plan.was_downscaled:
+                downscaled += repeat
+        else:
+            # 镜像 _scan 展开顺序：reso fan-out 外层、repeat 内层
+            for target_reso in resos:
+                bw, bh = mgr_for(target_reso).get_bucket(w, h)
+                # 与 dataset_token_counts 的 latent 形状推导同口径：
+                # (px/8 latent) // patch_spatial(2) → px // 16
+                token_counts.extend([(bw // 16) * (bh // 16)] * repeat)
+
+    for data_dir in data_dirs:
+        data_dir = Path(data_dir)
+        if not data_dir.exists():
+            continue
+        for p in sorted(data_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                add_image(p, 1, base_resos)
+        for sub in sorted(data_dir.iterdir()):
+            if not sub.is_dir():
+                continue
+            reso_override, repeat, _label = ImageDataset._parse_folder_meta(sub.name)
+            resos = [reso_override] if reso_override else base_resos
+            for f in sorted(sub.rglob("*")):
+                if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
+                    add_image(f, repeat, resos)
+
+    if not token_counts:
+        return {
+            "packs_per_epoch": 0, "samples": 0, "avg_images_per_pack": 0,
+            "token_min": 0, "token_max": 0, "token_budget": int(token_budget),
+            "strategy": str(strategy), "native": bool(native_resolution),
+            "downscaled": 0, "sizes": [],
+        }
+
+    sampler = NavitPackBatchSampler(
+        _NavitTokenStub(token_counts),
+        token_budget=int(token_budget),
+        max_images_per_pack=int(max_images_per_pack or 0),
+        shuffle=True,
+        seed=int(seed),
+        drop_last=bool(drop_last),
+        strategy=str(strategy or "next_fit"),
+        ffd_window=int(ffd_window or 0),
+    )
+    packs = len(sampler)
+    samples = len(token_counts)
+    return {
+        "packs_per_epoch": packs,
+        "samples": samples,
+        "avg_images_per_pack": round(samples / packs, 1) if packs else 0,
+        "token_min": min(token_counts),
+        "token_max": max(token_counts),
+        "token_budget": int(token_budget),
+        "strategy": str(strategy),
+        "native": bool(native_resolution),
+        "downscaled": downscaled,
+        "sizes": [
+            {"w": w, "h": h, "count": c}
+            for (w, h), c in sorted(size_hist.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+        ],
+    }

@@ -1,0 +1,52 @@
+"""`anima-studio` / `python -m studio.server` uvicorn 启动入口（PR-5 从 server.py 抽出）。
+
+uvicorn 启动字符串仍指 `studio.server:app` —— 老 server.py 内 130 个
+route decorator 在 import 时全部注册到 `api.app.app`，server.py 顶部
+`from .api.app import app` re-export 同一对象。
+"""
+from __future__ import annotations
+
+
+def main() -> None:
+    import argparse
+    import uvicorn
+
+    # 第三方缓存收进 `<仓库>/.cache/`（本 fork）。cli.py 起 server 时已在自己
+    # 的 import 期设过、子进程继承；这里覆盖的是**直接** `python -m
+    # studio.server` 的入口 —— 训练子进程由本进程 spawn，缓存变量必须在这一层
+    # 就位，否则底模下载和 HF 缓存还是会落到系统盘。重复调用是幂等的
+    # （已有值不覆盖）。
+    from ..infrastructure import local_cache
+    from ..infrastructure.paths import REPO_ROOT
+
+    local_cache.apply(REPO_ROOT)
+
+    parser = argparse.ArgumentParser(description="AnimaStudio daemon")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--reload", action="store_true", help="dev mode (auto-reload on edit)"
+    )
+    args = parser.parse_args()
+
+    # Remote-access autostart runs inside the app lifespan, which has no other
+    # way to learn the port it is being served on.
+    import os
+    os.environ["ALS_STUDIO_PORT"] = str(args.port)
+
+    # ADR 0012：SPA 入口在根路径 /（不再用 /studio 子路径）。
+    print(f"[AnimaStudio] http://{args.host}:{args.port}/")
+    uvicorn.run(
+        "studio.server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="info",
+        # 浏览器开着时 /api/events 的 SSE 长连接不会主动断，graceful shutdown
+        # 默认无限等 →「Waiting for connections to close」卡死；且 py3.12+ 的
+        # Server.wait_closed() 等全部活跃连接，二次 Ctrl+C 的 force_exit 也
+        # 解不开（transport 不被强关）。给 graceful 一个上限：超时后 uvicorn
+        # cancel 剩余连接 task → 连接关闭 → lifespan 正常收尾（supervisor /
+        # daemon 优雅停）。
+        timeout_graceful_shutdown=3,
+    )

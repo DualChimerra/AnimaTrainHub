@@ -1,0 +1,76 @@
+"""共享 dependency helpers（PR-6 起从 server.py 抽出）。
+
+跨 router 共用的 helper：拿 Supervisor 实例、版本 / 项目记录验证等。
+未来会改 FastAPI `Depends(...)` 形式，本次先维持「直接调函数」风格保
+零行为变更。
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from ..domain.errors import DomainError, ValidationError
+from ..supervisor import Supervisor
+
+
+def _check_no_running_tasks() -> None:
+    """重启 / 迁移 / 删资产前置：所有 task 必须 done / failed / canceled / pending。
+
+    有 running 直接 422 + task 列表，让前端给用户友好的提示（"先暂停以下任务"）。
+    本 fork：原上游放在 routers/system.py（自更新 router，本 fork 移除），
+    迁到 deps.py 供 models_storage / studio_data 共用。
+    """
+    from .. import db  # noqa: PLC0415 — late import 避免循环
+    with db.connection_for() as conn:
+        running = db.list_tasks(conn, status="running")
+    if running:
+        raise ValidationError(
+            "Tasks are running; cancel or wait for them to finish first",
+            code="system.tasks_running",
+            details={
+                "tasks": [
+                    {
+                        "id": t["id"],
+                        "name": t.get("name", ""),
+                        "task_type": t.get("task_type", "train"),
+                    }
+                    for t in running
+                ],
+            },
+            http_status=422,
+        )
+
+
+def _supervisor() -> Supervisor:
+    """从 app.state 取 Supervisor。lifespan startup 还没跑完时返 503。
+
+    本 helper 内做 late import 避免 `api/app.py ↔ api/routers/* ↔ api/deps.py`
+    三方循环——routers 在 app.py include 时还在初始化，此时 import api.app
+    虽然拿得到 `app`（`app = FastAPI(...)` 已执行）但循环关系不健康。
+    """
+    from .app import app
+    sup: Optional[Supervisor] = getattr(app.state, "supervisor", None)
+    if sup is None:
+        raise DomainError(
+            "The service is still starting; try again in a moment",
+            code="system.starting", http_status=503,
+        )
+    return sup
+
+
+def _resolve_model_paths(
+    base_model: Optional[str] = None, *, family: str = "anima"
+) -> dict[str, str]:
+    """解析 base 模型默认路径（先验生成 / 测试出图共用）。
+
+    与新建训练 version 用的同一套解析（`default_paths_for_new_version`）：用户在
+    Settings → 模型 切换选中底模（官方 variant 或注册的本地 custom
+    `.safetensors`）即同时影响这里的主权重路径——所以能「在微调权重上测试出图」。
+
+    `base_model` 非空 → 本次请求临时覆盖底模（先验生成 / 测试页面的「底模」
+    下拉选了非默认值时），只换 transformer 权重，其余路径仍跟随全局设置。
+
+    `family` 由调用方从请求 / config 取；generate 侧请求 schema 加 model_family
+    后（P4-4）本函数更名去 anima 前缀。
+    """
+    from ..services.models import default_paths_for_new_version
+    return default_paths_for_new_version(base_model, family=family)

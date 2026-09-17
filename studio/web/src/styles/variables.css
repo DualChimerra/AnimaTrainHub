@@ -1,0 +1,56 @@
+/* ===========================================================================
+   AnimaLoraStudio — raw palette
+   Based on the Tailark (shadcn registry) Quartz / Dusk kits: zinc neutrals,
+   indigo primary, Geist type. The semantic layer in tokens.css maps these onto
+   the app's --bg / --fg / --accent variables — components never read the raw
+   --palette-* names directly.
+   =========================================================================== */
+:root {
+  /* zinc (Tailwind zinc scale) */
+  --palette-zinc-0:   #ffffff;
+  --palette-zinc-25:  #fcfcfd;
+  --palette-zinc-50:  #fafafa;
+  --palette-zinc-100: #f4f4f5;
+  --palette-zinc-150: #ececee;
+  --palette-zinc-200: #e4e4e7;
+  --palette-zinc-300: #d4d4d8;
+  --palette-zinc-400: #a1a1aa;
+  --palette-zinc-500: #71717a;
+  --palette-zinc-600: #52525b;
+  --palette-zinc-700: #3f3f46;
+  --palette-zinc-800: #27272a;
+  --palette-zinc-900: #18181b;
+  --palette-zinc-950: #09090b;
+
+  /* indigo — primary */
+  --palette-indigo-50:  #eef2ff;
+  --palette-indigo-100: #e0e7ff;
+  --palette-indigo-200: #c7d2fe;
+  --palette-indigo-500: #6366f1;
+  --palette-indigo-600: #4f46e5;
+  --palette-indigo-700: #4338ca;
+
+  /* status */
+  --palette-emerald-50:  #ecfdf5;
+  --palette-emerald-200: #a7f3d0;
+  --palette-emerald-600: #059669;
+  --palette-emerald-700: #047857;
+  --palette-amber-50:    #fffbeb;
+  --palette-amber-200:   #fde68a;
+  --palette-amber-600:   #d97706;
+  --palette-amber-700:   #b45309;
+  --palette-red-50:      #fef2f2;
+  --palette-red-200:     #fecaca;
+  --palette-red-600:     #dc2626;
+  --palette-red-700:     #b91c1c;
+  --palette-sky-50:      #f0f9ff;
+  --palette-sky-200:     #bae6fd;
+  --palette-sky-700:     #0369a1;
+
+  /* type families */
+  --font-geist: 'Geist', 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-geist-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --leading-body: 1.5;
+  --tracking-body: -0.006em;
+}

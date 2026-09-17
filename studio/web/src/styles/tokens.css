@@ -1,0 +1,402 @@
+/* ===========================================================================
+   AnimaLoraStudio — design system
+   Visual language follows the Tailark (tailark.com) shadcn registry kits:
+   zinc neutrals, a single indigo primary, hairline alpha borders, 10px base
+   radius, Geist type, restrained shadows.
+
+   The whole app consumes the SEMANTIC names below (--bg-*, --fg-*, --accent*,
+   --r-*, --t-*, --sh-*, status colors) plus the .btn/.card/.badge/.input
+   primitives. Tailwind (tailwind.config.js) maps its color/size/radius/shadow
+   utilities onto these same variables. The shadcn/Tailark variable names
+   (--background, --foreground, --primary, --muted, --border, --ring, --radius…)
+   are exposed too, so registry blocks drop in without re-theming.
+
+   Keep names stable — restyle by changing values here, not by renaming.
+   Light-only (see lib/theme.ts). The app boots with .density-tight.
+   =========================================================================== */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap');
+@import './variables.css';
+
+:root {
+  color-scheme: light;
+
+  /* — surfaces — */
+  --bg-canvas:   var(--palette-zinc-50);    /* page background */
+  --bg-surface:  var(--palette-zinc-0);     /* cards, inputs */
+  --bg-sunken:   var(--palette-zinc-100);   /* wells, tracks, segmented controls */
+  --bg-overlay:  rgb(9 9 11 / 0.05);        /* hover (Tailark: hover:bg-foreground/5) */
+  --bg-elevated: var(--palette-zinc-0);     /* popovers, dialogs */
+
+  /* — text — */
+  --fg-primary:   var(--palette-zinc-950);
+  --fg-secondary: var(--palette-zinc-600);
+  --fg-tertiary:  var(--palette-zinc-500);
+  --fg-disabled:  var(--palette-zinc-400);
+  --fg-inverse:   var(--palette-zinc-0);
+
+  /* — borders (hairlines) — */
+  --border-subtle:  rgb(9 9 11 / 0.065);
+  --border-default: rgb(9 9 11 / 0.1);
+  --border-strong:  rgb(9 9 11 / 0.18);
+
+  /* — primary accent — */
+  --accent:       var(--palette-indigo-500);
+  --accent-hover: var(--palette-indigo-600);
+  --accent-soft:  var(--palette-indigo-50);
+  --accent-veil:  var(--palette-indigo-100);
+  --accent-line:  var(--palette-indigo-200);
+  --accent-fg:    var(--palette-zinc-0);
+  --row-selected-border: var(--palette-indigo-500);
+  --row-selected-bg:     var(--palette-indigo-50);
+
+  /* — status — (base = text / solid, soft = tinted fill, line = tinted border) */
+  --ok:        var(--palette-emerald-700);
+  --ok-soft:   var(--palette-emerald-50);
+  --ok-line:   var(--palette-emerald-200);
+  --warn:      var(--palette-amber-700);
+  --warn-soft: var(--palette-amber-50);
+  --warn-line: var(--palette-amber-200);
+  --err:       var(--palette-red-600);
+  --err-soft:  var(--palette-red-50);
+  --err-line:  var(--palette-red-200);
+  --danger:    var(--palette-red-600);
+  --info:      var(--palette-sky-700);
+  --info-soft: var(--palette-sky-50);
+  --info-line: var(--palette-sky-200);
+  --border-warn: var(--warn-line);
+  --bg-warn-soft: var(--warn-soft);
+
+  /* — type — */
+  --font-sans:    var(--font-geist);
+  --font-display: var(--font-geist);
+  --font-alt:     var(--font-geist);
+  --font-serif:   ui-serif, Georgia, "Times New Roman", serif;  /* legacy .serif shim */
+  --font-mono:    var(--font-geist-mono);
+
+  --t-2xs: 11px;
+  --t-xs:  12px;
+  --t-sm:  13px;
+  --t-base: 14px;
+  --t-md:  15px;
+  --t-lg:  17px;
+  --t-xl:  20px;
+  --t-2xl: 24px;
+  --t-3xl: 30px;
+  --t-4xl: 40px;
+  --t-display: 52px;
+
+  /* — spacing — */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 56px;
+  --s-16: 80px;
+
+  /* — radius (Tailark: --radius 0.625rem) — */
+  --radius: 0.625rem;
+  --r-sm:   6px;    /* chips, small controls */
+  --r-md:   8px;    /* buttons, inputs, nav items */
+  --r-lg:   10px;   /* images, tiles */
+  --r-card: 12px;   /* cards, panels */
+  --r-xl:   16px;   /* dialogs, large surfaces */
+  --r-pill: 9999px;
+
+  /* — elevation — */
+  --sh-xs: 0 1px 1px rgb(9 9 11 / 0.03);
+  --sh-sm: 0 1px 2px rgb(9 9 11 / 0.05);
+  --sh-md: 0 1px 2px rgb(9 9 11 / 0.04), 0 4px 12px -2px rgb(9 9 11 / 0.07);
+  --sh-lg: 0 0 0 1px rgb(9 9 11 / 0.05), 0 12px 32px -8px rgb(9 9 11 / 0.16), 0 4px 8px -4px rgb(9 9 11 / 0.06);
+  --sh-xl: 0 0 0 1px rgb(9 9 11 / 0.06), 0 24px 64px -12px rgb(9 9 11 / 0.24), 0 8px 16px -8px rgb(9 9 11 / 0.08);
+  --ring-focus: 0 0 0 3px rgb(99 102 241 / 0.3);
+
+  /* — layout — */
+  --sidebar-w: 244px;
+  --sidebar-collapsed-w: 56px;
+  --topbar-h: 52px;
+
+  /* — shadcn / Tailark compatibility aliases — */
+  --background: var(--bg-canvas);
+  --foreground: var(--fg-primary);
+  --card: var(--bg-surface);
+  --card-foreground: var(--fg-primary);
+  --popover: var(--bg-elevated);
+  --popover-foreground: var(--fg-primary);
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-fg);
+  --secondary: var(--bg-sunken);
+  --secondary-foreground: var(--fg-primary);
+  --muted: var(--bg-sunken);
+  --muted-foreground: var(--fg-secondary);
+  --destructive: var(--err);
+  --destructive-foreground: var(--palette-zinc-0);
+  --border: var(--border-default);
+  --input: var(--border-default);
+  --ring: var(--accent);
+}
+
+/* — density — the app boots with .density-tight (lib/theme.ts); the root scale
+   above IS the tight scale, so the class only exists as a hook. — */
+.density-tight { }
+.density-loose {
+  --s-3: 16px; --s-4: 20px; --s-5: 24px; --s-6: 28px; --s-8: 40px;
+  --t-2xs: 12px; --t-xs: 13px; --t-sm: 14px; --t-base: 15px;
+  --t-md: 16px; --t-lg: 18px; --t-xl: 22px; --t-2xl: 26px; --t-3xl: 32px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  font-family: var(--font-sans);
+  font-size: var(--t-base);
+  line-height: var(--leading-body);
+  letter-spacing: var(--tracking-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
+
+button { font-family: inherit; cursor: pointer; letter-spacing: inherit; }
+a { color: inherit; text-decoration: none; }
+input, select, textarea { font-family: inherit; color: inherit; letter-spacing: inherit; }
+
+/* Native <option> dropdown keeps theme colors. */
+select option { background-color: var(--bg-surface); color: var(--fg-primary); }
+select option:checked { background-color: var(--accent-soft); color: var(--accent); }
+
+::selection { background: var(--accent-veil); color: var(--fg-primary); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
+
+/* scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--palette-zinc-300) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--palette-zinc-300); border-radius: 9999px; border: 3px solid transparent; background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background-color: var(--palette-zinc-400); }
+
+/* — primitives — ported from the Tailark kit sources (registry/bases/radix/{mist,dusk}/ui) — */
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.font-mono { letter-spacing: 0; }
+.tnum { font-variant-numeric: tabular-nums; }
+.serif { font-family: var(--font-serif); }
+.caption {
+  font-family: var(--font-sans); font-size: var(--t-2xs); font-weight: 500;
+  color: var(--fg-tertiary); letter-spacing: 0.04em; text-transform: uppercase;
+  line-height: 1.4;
+}
+
+/* Button — Tailark Mist `buttonVariants`: h-9 px-4 rounded-md text-sm font-medium;
+   outline = bg-background ring-1 ring-foreground/10 shadow-sm; ghost = hover:bg-foreground/5 */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  font-size: var(--t-sm); font-weight: 500;
+  letter-spacing: -0.005em;
+  transition: background-color 200ms ease, border-color 200ms ease, color 200ms ease, box-shadow 200ms ease, filter 200ms ease, transform 200ms ease;
+  white-space: nowrap; line-height: 1.2;
+  user-select: none;
+}
+.btn:active:not(:disabled) { transform: scale(0.98); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--ring); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary {
+  background: var(--accent); color: var(--accent-fg);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.1);
+}
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.btn-secondary {
+  background: var(--bg-surface); color: var(--fg-primary);
+  border-color: var(--border-default);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+}
+.btn-secondary:hover:not(:disabled) { background: var(--palette-zinc-50); border-color: var(--border-strong); }
+.btn-ghost { background: transparent; color: rgb(9 9 11 / 0.75); }
+.btn-ghost:hover:not(:disabled) { background: rgb(9 9 11 / 0.05); color: var(--fg-primary); }
+.btn-danger { background: var(--err); color: #fff; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.1); }
+.btn-danger:hover:not(:disabled) { background: var(--palette-red-700); }
+.btn-warn { background: var(--warn); color: #fff; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.1); }
+.btn-warn:hover:not(:disabled) { filter: brightness(0.95); }
+.btn-sm { min-height: 32px; padding: 0 12px; font-size: var(--t-sm); gap: 6px; }
+.btn-xs { min-height: 24px; padding: 0 8px; font-size: var(--t-xs); font-weight: 500; border-radius: var(--r-sm); gap: 4px; }
+
+/* Card — Tailark Mist `cardVariants.default`: bg-card rounded-xl shadow ring-1 ring-foreground/5 */
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-card);
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+}
+.card-hover { transition: box-shadow 200ms ease, border-color 200ms ease; }
+.card-hover:hover { box-shadow: 0 4px 16px -4px rgb(0 0 0 / 0.1), 0 1px 3px 0 rgb(0 0 0 / 0.06); border-color: var(--border-default); }
+
+/* Kbd — Tailark Dusk `Kbd`: bg-foreground/5 inset-ring-foreground/5 h-5 min-w-5 rounded-sm px-1 font-sans text-xs font-medium */
+.kbd {
+  font-family: var(--font-sans); font-size: var(--t-xs); font-weight: 500;
+  height: 20px; min-width: 20px; padding: 0 5px;
+  background: rgb(9 9 11 / 0.05);
+  box-shadow: inset 0 0 0 1px rgb(9 9 11 / 0.05);
+  border-radius: var(--r-sm); color: var(--fg-secondary);
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  line-height: 1;
+}
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-sans); font-size: var(--t-xs); font-weight: 500;
+  padding: 1px 8px; border-radius: var(--r-pill); letter-spacing: 0;
+  white-space: nowrap; line-height: 1.5;
+  box-shadow: inset 0 0 0 1px var(--badge-line, transparent);
+}
+.badge-ok      { background: var(--ok-soft);   color: var(--ok);   --badge-line: var(--ok-line); }
+.badge-warn    { background: var(--warn-soft); color: var(--warn); --badge-line: var(--warn-line); }
+.badge-err     { background: var(--err-soft);  color: var(--err);  --badge-line: var(--err-line); }
+.badge-info    { background: var(--info-soft); color: var(--info); --badge-line: var(--info-line); }
+.badge-neutral { background: rgb(9 9 11 / 0.05); color: var(--fg-secondary); --badge-line: rgb(9 9 11 / 0.05); }
+.badge-accent  { background: var(--accent-soft); color: var(--accent-hover); --badge-line: var(--accent-line); }
+
+.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: none; }
+.dot-ok { background: var(--palette-emerald-600); }
+.dot-warn { background: var(--palette-amber-600); }
+.dot-err { background: var(--err); }
+.dot-neutral { background: var(--fg-disabled); }
+.dot-running { background: var(--accent); animation: pulse 1.6s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* Input — Tailark `Input`: border-input h-9 rounded-md px-3 shadow-xs text-sm,
+   focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] */
+.input {
+  background: var(--bg-surface);
+  border: 1px solid var(--palette-zinc-200);
+  border-radius: var(--r-md);
+  padding: 7px 12px;
+  font-size: var(--t-sm); line-height: 20px; color: var(--fg-primary);
+  outline: none; width: 100%; min-width: 0;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  transition: color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+.input:focus { border-color: var(--ring); box-shadow: var(--ring-focus); }
+.input:disabled { background: var(--palette-zinc-50); opacity: 0.6; cursor: not-allowed; }
+.input::placeholder { color: var(--fg-tertiary); }
+.input-mono { font-family: var(--font-mono); font-size: var(--t-sm); letter-spacing: 0; }
+textarea.input { line-height: 1.55; }
+/* Select — Tailark SelectTrigger: ChevronsUpDown icon at 50% opacity */
+select.input {
+  appearance: none; -webkit-appearance: none;
+  padding-right: 30px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%2309090b' stroke-opacity='0.5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 15 5 5 5-5'/%3E%3Cpath d='m7 9 5-5 5 5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center; background-size: 12px;
+}
+
+/* Segmented control — Tailark ToggleGroup: muted track, active item lifts to a white pill */
+.seg {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 3px; border-radius: var(--r-md);
+  background: rgb(9 9 11 / 0.05);
+  box-shadow: inset 0 0 0 1px rgb(9 9 11 / 0.03);
+}
+.seg-item {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 26px; padding: 0 10px;
+  border: 0; border-radius: 6px; background: transparent;
+  font-size: var(--t-xs); font-weight: 500; line-height: 1.2;
+  color: var(--fg-secondary); white-space: nowrap; cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+.seg-item:hover { color: var(--fg-primary); }
+.seg-item.is-active {
+  background: var(--bg-surface); color: var(--fg-primary);
+  box-shadow: 0 0 0 1px rgb(9 9 11 / 0.06), 0 1px 2px 0 rgb(0 0 0 / 0.08);
+}
+.seg-item:disabled, .seg-item.is-disabled { color: var(--fg-disabled); cursor: not-allowed; }
+.seg-item:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ring); }
+
+/* Tabs — underline navigation (sits on a parent with a bottom hairline) */
+.tab {
+  position: relative; display: inline-flex; align-items: center; gap: 6px;
+  height: 40px; padding: 0 2px; margin-bottom: -1px;
+  border: 0; border-bottom: 2px solid transparent; background: transparent;
+  font-size: var(--t-sm); font-weight: 500; color: var(--fg-tertiary);
+  white-space: nowrap; cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.tab:hover { color: var(--fg-primary); }
+.tab.is-active { color: var(--fg-primary); border-bottom-color: var(--fg-primary); }
+
+.divider { height: 1px; background: var(--border-subtle); }
+
+/* striped image placeholder */
+.ph {
+  background-color: var(--bg-sunken);
+  background-image: repeating-linear-gradient(135deg, transparent 0 9px, color-mix(in srgb, var(--fg-tertiary) 7%, transparent) 9px 10px);
+  display: grid; place-items: center;
+  color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--t-2xs);
+  letter-spacing: 0.02em; overflow: hidden; text-align: center;
+}
+
+/* page transitions */
+.fade-in { animation: fade-in 200ms ease-out; }
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in, .dot-running { animation: none; }
+}
+
+/* ===========================================================================
+   Phone layout (2026 refresh)
+
+   The shell handles the big move (sidebar → off-canvas drawer, see
+   App.tsx/RootLayout). What is left are the things no component should have to
+   repeat: comfortable touch targets, no accidental horizontal scroll, and
+   media that never pushes the page wider than the screen.
+
+   Scoped to <=768px so the desktop layout is byte-for-byte what it was.
+   =========================================================================== */
+@media (max-width: 768px) {
+  :root {
+    /* A little more air back: fingers are less precise than a cursor, and the
+       phone has no hover to reveal what a cramped row is. */
+    --s-3: 12px;
+    --s-4: 16px;
+    --topbar-h: 54px;
+  }
+
+  /* iOS zooms the page in when a focused input is under 16px. Keeping the
+     control font at 16px is the only reliable way to stop that. */
+  input, select, textarea { font-size: 16px; }
+
+  /* Apple's 44px HIG minimum, applied where it is cheap: real buttons. Icon
+     buttons that already size themselves keep their own box. */
+  .btn { min-height: 40px; }
+
+  /* Media and preformatted blocks are the usual culprits behind a page that
+     scrolls sideways. */
+  img, video, canvas, svg, pre { max-width: 100%; }
+  pre { overflow-x: auto; }
+
+  /* Tables stay readable by scrolling inside their own box rather than
+     stretching the page. */
+  table { display: block; overflow-x: auto; }
+
+  /* Modals sit inside the viewport instead of spilling past its edges. */
+  [role="dialog"] > * { max-width: calc(100vw - 24px); }
+}
+
+/* Sample / preview images: tap to view large. On a phone the grid thumbnails
+   are the primary way to judge a run, so they get the full width they can. */
+@media (max-width: 480px) {
+  .sample-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)) !important; }
+}

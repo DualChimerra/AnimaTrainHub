@@ -1,0 +1,2192 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import type { TFunction } from 'i18next'
+import { Trans, useTranslation } from 'react-i18next'
+import { getStoredLangWithDefault, setStoredLang } from '../../i18n'
+import {
+  api,
+  DEFAULT_WD14_MODELS,
+  type LLMPreset,
+  type FlashAttnStatus,
+  type XformersStatus,
+  type ModelDownloadStatus,
+  type ModelsCatalog,
+  type Secrets,
+  type SecretsPatch,
+  type TorchCuTag,
+  type TorchStatus,
+  type TunnelProvider,
+  type TunnelState,
+} from '../../api/client'
+import { useDialog } from '../../components/Dialog'
+import { InfoButton } from '../../components/InfoButton'
+import {
+  AddLocalModelButton,
+  LocalModelRows,
+} from '../../components/LocalModelSources'
+import PageHeader from '../../components/PageHeader'
+import { useToast } from '../../components/Toast'
+import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
+import { useSettingsData } from '../../lib/SettingsData'
+import { useSettingsDrawer } from '../../lib/SettingsDrawer'
+
+const MASK = '***'
+
+type Section =
+  | 'gelbooru'
+  | 'danbooru'
+  | 'download'
+  | 'huggingface'
+  | 'wandb'
+  | 'modelscope'
+  | 'llm_tagger'
+  | 'wd14'
+  | 'cltagger'
+  | 'models'
+  | 'queue'
+  | 'generate'
+  | 'training'
+  | 'proxy'
+
+// Settings 现在只有「训练」一组配置（打标 / 测试 / 外观 / 系统 tab 已移除）。
+// 右侧 sticky 导航的 section index。
+/** Languages offered in Settings. Labels stay in their own language on
+ *  purpose — that is how you find yours when the UI is in one you cannot read. */
+const LANGUAGES: { code: string; label: string }[] = [
+  { code: 'en', label: 'English' },
+  { code: 'ru', label: 'Русский' },
+  { code: 'zh', label: '中文' },
+]
+
+const TRAINING_SECTIONS: { id: string; labelKey: string }[] = [
+  { id: 'appearance', labelKey: 'settings.appearance' },
+  { id: 'runtime-mode', labelKey: 'runtimeMode.current' },
+  { id: 'remote-access', labelKey: 'remote.title' },
+  { id: 'download-source', labelKey: 'settings.modelSource' },
+  { id: 'queue', labelKey: 'settings.queueSchedule' },
+  { id: 'training-runtime', labelKey: 'settings.trainingRuntime' },
+  { id: 'pytorch', labelKey: 'settings.torch' },
+  { id: 'flash-attn', labelKey: 'settings.flashAttn' },
+  { id: 'xformers', labelKey: 'settings.xformers' },
+  { id: 'models', labelKey: 'settings.trainingModels' },
+]
+
+// fallback 预设：仅在 GET /api/secrets 失败时充当占位，真实 prompt 由后端 builtin
+// json 文件提供。命中此 fallback 然后 PUT 回去不会破坏 builtin（后端 validator
+// 会再补全 builtin defaults）。
+function _makeFallbackPreset(id: string, label: string, output_format: 'json' | 'text', extra: Partial<LLMPreset> = {}): LLMPreset {
+  return {
+    id,
+    label,
+    builtin: true,
+    base_url: '',
+    api_key: '',
+    model: '',
+    model_ids: [],
+    endpoint: 'chat_completions',
+    messages: [
+      { type: 'text', role: 'system', content: '' },
+      { type: 'image', role: 'user', content: '' },
+    ],
+    output_format,
+    temperature: 0.2,
+    max_tokens: 700,
+    max_side: 1280,
+    jpeg_quality: 85,
+    max_image_mb: 5,
+    timeout: 60,
+    max_retries: 3,
+    concurrency: 1,
+    requests_per_second: 0,
+    max_requests_per_minute: 0,
+    assist_tagger: '',
+    ...extra,
+  }
+}
+
+const DEFAULT_LLM_PRESETS: LLMPreset[] = [
+  _makeFallbackPreset('style_json', 'Style LoRA JSON', 'json'),
+  _makeFallbackPreset('general_json', 'General LoRA JSON', 'json'),
+  _makeFallbackPreset('txt_tags', 'TXT tag list', 'json'),
+  _makeFallbackPreset('joycaption', 'JoyCaption (vLLM local)', 'text', {
+    base_url: 'http://localhost:8000/v1',
+    model: 'fancyfeast/llama-joycaption-beta-one-hf-llava',
+    temperature: 0.6,
+    max_tokens: 300,
+  }),
+]
+
+const DEFAULT_WANDB_PRESET = {
+  id: 'default',
+  label: 'Default',
+  api_key: '',
+  project: 'AnimaLoraStudio',
+  entity: '',
+  base_url: '',
+  mode: 'online' as const,
+  log_samples: true,
+  sample_max_side: 1216,
+  sample_every_n_steps: 0,
+  upload_model: false,
+  upload_model_policy: 'last' as const,
+  upload_state_manual: false,
+  upload_state_manual_policy: 'last' as const,
+  upload_state_auto: false,
+  upload_state_auto_policy: 'last' as const,
+}
+
+const EMPTY: Secrets = {
+  gelbooru: { user_id: '', api_key: '' },
+  danbooru: { username: '', api_key: '', account_type: 'free' },
+  download: {
+    exclude_tags: [],
+    parallel_workers: 4,
+    api_rate_per_sec: 2,
+    cdn_rate_per_sec: 5,
+    save_tags: false,
+    convert_to_png: true,
+    remove_alpha_channel: true,
+  },
+  reg: { default_excluded_tags: [] },
+  huggingface: { token: '', endpoint: '' },
+  wandb: {
+    enabled: false,
+    current_preset: 'default',
+    presets: [DEFAULT_WANDB_PRESET],
+  },
+  modelscope: { token: '' },
+  eval_metrics: {
+    clip_model_name: 'openai/clip-vit-base-patch32',
+    dino_model_name: 'facebook/dinov2-small',
+    ccip_model_name: 'ccip-caformer-24-randaug-pruned',
+    enabled_metrics: [],
+    eval_baseline_enabled: true,
+  },
+  download_source: 'huggingface',
+  download_sources: {},
+  llm_tagger: {
+    current_preset: 'style_json',
+    presets: [...DEFAULT_LLM_PRESETS],
+  },
+  wd14: {
+    model_id: 'SmilingWolf/wd-eva02-large-tagger-v3',
+    model_ids: [...DEFAULT_WD14_MODELS],
+    threshold_general: 0.35,
+    threshold_character: 0.85,
+    blacklist_tags: [],
+    batch_size: 8,
+  },
+  cltagger: {
+    model_id: 'cella110n/cl_tagger',
+    model_path: 'cl_tagger_1_02/model.onnx',
+    tag_mapping_path: 'cl_tagger_1_02/tag_mapping.json',
+    threshold_general: 0.35,
+    threshold_character: 0.6,
+    add_copyright_tag: true,
+    add_artist_tag: false,
+    add_meta_tag: false,
+    add_model_tag: false,
+    add_rating_tag: false,
+    add_quality_tag: false,
+    blacklist_tags: [],
+    batch_size: 8,
+  },
+  models: {
+    root: null,
+    selected_anima: '1.0',
+    selected: { anima: '1.0' },
+    selected_te: {},
+    custom_anima_paths: [],
+    selected_upscaler: '4x-AnimeSharp',
+    auto_sync_paths: true,
+  },
+  queue: { light_tasks_during_train: true },
+  generate: {
+    preview_every_n_steps: 3,
+    attention_backend: 'auto',
+    vae_precision: 'bf16',
+    idle_timeout_minutes: 10,
+    task_timeout_minutes: 0,
+    vram_policy: 'auto',
+    ram_guard: false,
+    save_test_images: false,
+  },
+  training: { ram_guard: false },
+  runtime: { mode: '', asked: false },
+  proxy: {
+    enabled: false,
+    http_proxy: '',
+    https_proxy: '',
+    no_proxy: '',
+  }
+}
+
+const textInputClass = 'w-full px-2 py-1 outline-none rounded-sm bg-sunken border border-subtle text-sm text-fg-primary focus:border-accent'
+
+const MODEL_DESCRIPTION_KEYS: Record<string, string> = {
+  anima_main: 'settings.modelDescriptions.animaMain',
+  anima_vae: 'settings.modelDescriptions.animaVae',
+  qwen3: 'settings.modelDescriptions.qwen3',
+  t5_tokenizer: 'settings.modelDescriptions.t5Tokenizer',
+  wd14: 'settings.modelDescriptions.wd14',
+  cltagger: 'settings.modelDescriptions.cltagger',
+}
+
+function translatedCatalogText(keys: Record<string, string>, id: string, fallback: string | undefined, t: TFunction): string {
+  const key = keys[id]
+  return key ? t(key, { defaultValue: fallback ?? '' }) : (fallback ?? '')
+}
+
+export default function SettingsPage() {
+  const { t } = useTranslation()
+  // 共享数据层（SettingsDataProvider）：secrets / catalog / SSE / downloadBusy 都在根级常驻，
+  // 本组件 mount/unmount（抽屉开关）不再触发重拉。`server` 别名保留是为了让下方
+  // 大段表单代码改动最小。
+  const {
+    secrets: server,
+    secretsError,
+    setSecrets: setServer,
+    catalog,
+    catalogError,
+    reloadCatalog,
+    downloadBusy,
+    startDownload,
+  } = useSettingsData()
+  const [draft, setDraft] = useState<Secrets>(EMPTY)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const { toast } = useToast()
+  const drawer = useSettingsDrawer()
+  // 右侧 section index 用：sticky nav 的 IntersectionObserver root + 滚动平移容器
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // 第一次拿到 secrets 时把 draft 同步过来；之后 server 变化（save 后）不再
+  // 覆盖 draft，避免抹掉用户的未保存编辑（save 里会自己 setDraft(next)）。
+  const draftInitRef = useRef(false)
+  useEffect(() => {
+    if (server && !draftInitRef.current) {
+      setDraft(server)
+      draftInitRef.current = true
+    }
+  }, [server])
+  // 数据层 fetch secrets 失败时把错误透出到本组件 error 状态，复用底部错误条。
+  useEffect(() => { if (secretsError) setError(secretsError) }, [secretsError])
+
+  const dirty = useMemo(
+    () => server !== null && JSON.stringify(server) !== JSON.stringify(draft),
+    [server, draft]
+  )
+
+  // 抽屉关闭前用这个 ref 询问"是否 dirty"；ref 每次 render 刷新，
+  // 注册的函数只挂载一次，避免 effect churn。
+  const dirtyRef = useRef(false)
+  dirtyRef.current = dirty
+  useEffect(() => {
+    drawer.registerDirtyGuard(() => dirtyRef.current)
+    return () => drawer.registerDirtyGuard(null)
+  }, [drawer])
+
+  // 抽屉以 open({ section }) 打开时跳到对应 section（取代旧的 ?section= URL 参数）。
+  // sectionRequest 带 nonce，相同 section 重复 open 也会触发 effect 重跑。
+  const drawerSectionReq = drawer.sectionRequest
+  useEffect(() => {
+    if (!drawerSectionReq) return
+    const section = drawerSectionReq.section
+    const t1 = setTimeout(() => {
+      const el = document.getElementById(section)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 50)
+    return () => clearTimeout(t1)
+  }, [drawerSectionReq])
+
+  const update = <S extends Section, K extends keyof Secrets[S]>(
+    section: S,
+    key: K,
+    value: Secrets[S][K]
+  ) => {
+    setDraft((prev) => ({
+      ...prev,
+      [section]: { ...prev[section], [key]: value },
+    }))
+  }
+
+  /** 更新 Secrets 顶层非对象字段（如 download_source）。 */
+  const updateTop = <K extends keyof Secrets>(key: K, value: Secrets[K]) => {
+    setDraft((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const save = async () => {
+    if (!server) return
+    const patch = buildPatch(draft, server)
+    setSaving(true)
+    setError(null)
+    try {
+      const next = await api.updateSecrets(patch)
+      setServer(next)
+      setDraft(next)
+      // 候选 model_ids 改了之后，catalog 里的 wd14 variants 需要刷新
+      void reloadCatalog()
+      toast(t('settings.saved'), 'success')
+    } catch (e) {
+      setError(String(e))
+      toast(t('settings.saveFailed'), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (error && !server) {
+    return (
+      <div className="text-err font-mono text-sm p-4 bg-err-soft rounded-md">
+        {error}
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <PageHeader
+        title={t('settings.title')}
+        sticky
+        actions={
+          <>
+            <button
+              onClick={save}
+              disabled={!dirty || saving}
+              className={dirty ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+            >
+              {saving ? t('common.saving') : t('common.save')}
+            </button>
+            {drawer.isOpen && (
+              <button
+                onClick={() => void drawer.close()}
+                title={t('settings.drawerClose')}
+                aria-label={t('settings.drawerClose')}
+                className="btn btn-ghost btn-sm w-8 px-0"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M6 6l12 12M18 6l-12 12" />
+                </svg>
+              </button>
+            )}
+          </>
+        }
+      />
+
+      <div ref={scrollContainerRef} className="px-6 pt-5 pb-12 flex-1 overflow-y-auto">
+      {/* 原型抽屉是 single-column、无 PAGE INDEX —— 内容收成一列；SectionIndex 仍挂
+          着（隐藏）以保留其 IntersectionObserver 依赖，避免未用变量。 */}
+      <div className="max-w-[860px]">
+      <div className="flex flex-col gap-8 min-w-0">
+
+      {error && (
+        <div className="p-3 rounded-md bg-err-soft border border-err text-err text-sm font-mono">
+          {error}
+        </div>
+      )}
+
+      <AppearanceSection />
+
+      <RuntimeModeSection />
+
+      <RemoteAccessSection />
+
+      <SettingsSection id="download-source" title={t('settings.modelSource')}>
+        <SettingsField
+          label={t('settings.downloadSource')}
+          helpTooltip={
+            <p>{t('settings.downloadSourceHelp')}</p>
+          }
+        >
+          <DownloadSourceSelect
+            value={draft.download_source}
+            onChange={(v) => updateTop('download_source', v)}
+          />
+        </SettingsField>
+
+        {/* 下方按当前下载源条件渲染对应凭证配置。HF/ModelScope token 都保留在
+         * secrets 里（即便切换源也不丢失），只是 UI 一次只露面一份。 */}
+        {draft.download_source === 'huggingface' ? (
+          <>
+            <SettingsField
+              label="token"
+              helpTooltip={
+                <p>{t('settings.hfTokenHelp')}</p>
+              }
+            >
+              <SensitiveInput
+                value={draft.huggingface.token}
+                serverValue={server?.huggingface.token ?? ''}
+                onChange={(v) => update('huggingface', 'token', v)}
+              />
+            </SettingsField>
+            <SettingsField
+              label="endpoint"
+              helpTooltip={<p>{t('settings.hfEndpointHelp')}</p>}
+            >
+              <HFEndpointSelect
+                value={draft.huggingface.endpoint}
+                onChange={(v) => update('huggingface', 'endpoint', v)}
+              />
+            </SettingsField>
+          </>
+        ) : (
+          <SettingsField
+            label="token"
+            helpTooltip={
+              <>
+                <p>{t('settings.modelscopeTokenHelp')}</p>
+                <p><Trans i18nKey="settings.modelscopeInstallHelp" components={{ code: <code /> }} /></p>
+              </>
+            }
+          >
+            <SensitiveInput
+              value={draft.modelscope.token}
+              serverValue={server?.modelscope.token ?? ''}
+              onChange={(v) => update('modelscope', 'token', v)}
+            />
+          </SettingsField>
+        )}
+      </SettingsSection>
+
+      <SettingsSection id="queue" title={t('settings.queueSchedule')}>
+        <SettingsField label={t('settings.lightTasksDuringTrain')}>
+          <div className="flex items-center gap-3">
+            <Bool value={draft.queue.light_tasks_during_train} onChange={(v) => update('queue', 'light_tasks_during_train', v)} />
+            <span className="text-xs text-warn">
+              {t('settings.lightTasksDuringTrainHint')}
+            </span>
+          </div>
+        </SettingsField>
+      </SettingsSection>
+
+      <SettingsSection id="training-runtime" title={t('settings.trainingRuntime')}>
+        <SettingsField
+          label={t('settings.trainingRamGuard')}
+          helpTooltip={
+            <>
+              <p>{t('settings.trainingRamGuardHelp')}</p>
+              <p>{t('settings.trainingRamGuardDefaultHelp')}</p>
+            </>
+          }
+        >
+          <Bool
+            value={draft.training.ram_guard}
+            onChange={(v) => update('training', 'ram_guard', v)}
+          />
+        </SettingsField>
+      </SettingsSection>
+
+      <PyTorchSection />
+
+      <FlashAttentionSection />
+
+      <XformersSection />
+
+      <ModelsSection
+        catalog={catalog}
+        busy={downloadBusy}
+        start={startDownload}
+        reloadCatalog={reloadCatalog}
+        catalogError={catalogError}
+        t={t}
+      />
+
+    </div>
+
+    <div className="hidden"><SectionIndex sections={TRAINING_SECTIONS} scrollContainer={scrollContainerRef} /></div>
+    </div>
+    </div>
+    </div>
+  )
+}
+
+// ── Runtime mode (Colab / Local) ───────────────────────────────────────────
+
+/** 运行模式切换（本 fork）。首屏 `RuntimeModeGate` 问过一次后，这里是唯一的改法。
+ *
+ *  刻意**不**走 draft/save 那套：模式不是训练配置的一部分，它有自己的端点
+ *  (`PUT /api/runtime`)，而且改完要提示"重启后绑定地址才生效" —— 混进批量
+ *  Save 里这条提示就没地方挂了。 */
+function RuntimeModeSection() {
+  const { t } = useTranslation()
+  const runtime = useRuntimeModeOptional()
+  const { toast } = useToast()
+  const [busy, setBusy] = useState(false)
+
+  const info = runtime?.info
+  const mode = runtime?.mode ?? 'local'
+  if (!runtime || !info) return null
+
+  const apply = async (next: 'local' | 'colab') => {
+    if (next === mode || busy) return
+    setBusy(true)
+    try {
+      await runtime.setMode(next)
+      toast(t('runtimeMode.switched', { mode: t(`runtimeMode.${next}.name`) }), 'success')
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <SettingsSection id="runtime-mode" title={t('runtimeMode.current')}>
+      <div className="flex flex-wrap items-center gap-2">
+        {info.modes.map((m) => (
+          <button
+            key={m}
+            type="button"
+            disabled={busy || info.locked}
+            onClick={() => void apply(m)}
+            className={mode === m ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+          >
+            {t(`runtimeMode.${m}.name`)}
+          </button>
+        ))}
+      </div>
+      <p className="m-0 text-xs text-fg-tertiary">
+        {t(`runtimeMode.${mode}.summary`)}
+      </p>
+      {info.locked && (
+        <p className="m-0 text-xs text-warn">
+          {t('runtimeMode.lockedBy', { env: 'ALS_RUNTIME_MODE' })}
+        </p>
+      )}
+      <div className="text-xs text-fg-tertiary font-mono break-all">
+        studio_data: {info.environment.studio_data}
+      </div>
+    </SettingsSection>
+  )
+}
+
+
+// ── Remote access (reach the studio from a phone) ──────────────────────────
+
+/** Provider errors carry the page to open (e.g. Tailscale's "allow Funnel"
+ *  consent link); make those clickable instead of making the user copy them. */
+function linkify(text: string): React.ReactNode[] {
+  return text.split(/(https?:\/\/[^\s)]+)/g).map((part, i) =>
+    /^https?:\/\//.test(part)
+      ? <a key={i} href={part} target="_blank" rel="noreferrer" className="underline break-all">{part}</a>
+      : part,
+  )
+}
+
+const TUNNEL_PROVIDERS: TunnelProvider[] = ['tailscale', 'ngrok', 'cloudflare']
+
+/** Public link to the studio, with a choice of how it is made.
+ *
+ *  Tailscale Funnel and ngrok (with its free static domain) give a permanent
+ *  address; Cloudflare's quick tunnel needs no account but changes on every
+ *  start. The access key is persistent too, so with a permanent provider the
+ *  whole link stays the same and can live in the phone's bookmarks. "Open on
+ *  startup" brings the link up as soon as the studio starts.
+ *
+ *  Deliberately blunt about what the link is: a public address onto a machine
+ *  whose API can read files and start jobs. */
+function RemoteAccessSection() {
+  const { t } = useTranslation()
+  const { toast } = useToast()
+  const { confirm } = useDialog()
+  const [state, setState] = useState<TunnelState | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [domain, setDomain] = useState('')
+  const [token, setToken] = useState('')
+
+  useEffect(() => {
+    api.getTunnel().then((s) => {
+      setState(s)
+      setDomain(s.ngrok_domain ?? '')
+    }).catch(() => setState(null))
+  }, [])
+
+  const run = async (fn: () => Promise<TunnelState>) => {
+    setBusy(true)
+    try {
+      const s = await fn()
+      setState(s)
+      return s
+    } catch (e) {
+      toast(String((e as Error).message || e), 'error')
+      // The server keeps the reason; refresh so it shows under the button.
+      api.getTunnel().then(setState).catch(() => {})
+      return null
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copy = async () => {
+    if (!state?.url) return
+    try {
+      await navigator.clipboard.writeText(state.url)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch {
+      toast(t('remote.copyFailed'), 'error')
+    }
+  }
+
+  if (!state) return null
+
+  const provider = state.provider ?? 'cloudflare'
+  const info = state.providers?.[provider]
+  const installed = info?.installed ?? state.installed
+  const ngrokReady = provider !== 'ngrok' || state.has_ngrok_token
+  const runningOther = state.running && state.running_provider && state.running_provider !== provider
+
+  const saveNgrok = () => run(() => api.configureTunnel({
+    ngrok_domain: domain.trim(),
+    ...(token.trim() ? { ngrok_authtoken: token.trim() } : {}),
+  })).then((s) => { if (s) { setToken(''); toast(t('remote.ngrokSaved'), 'success') } })
+
+  const rotate = async () => {
+    if (!(await confirm(t('remote.rotateConfirm'), { tone: 'danger', okText: t('remote.rotate') }))) return
+    await run(api.rotateTunnelKey)
+  }
+
+  return (
+    <SettingsSection id="remote-access" title={t('remote.title')}>
+      <p className="m-0 text-xs text-fg-tertiary">{t('remote.blurb')}</p>
+
+      {/* provider */}
+      <div className="flex flex-col gap-2">
+        <span className="caption">{t('remote.providerLabel')}</span>
+        <div className="flex flex-col gap-1.5">
+          {TUNNEL_PROVIDERS.map((p) => {
+            const active = provider === p
+            return (
+              <label
+                key={p}
+                className={`flex items-start gap-2.5 rounded-md border px-3 py-2.5 cursor-pointer transition-colors ${
+                  active ? 'border-selected bg-selected-soft' : 'border-subtle hover:border-dim'
+                } ${state.running ? 'opacity-70 cursor-not-allowed' : ''}`}
+              >
+                <input
+                  type="radio" name="tunnel-provider" className="mt-0.5"
+                  checked={active} disabled={busy || state.running}
+                  onChange={() => void run(() => api.configureTunnel({ provider: p }))}
+                />
+                <span className="flex flex-col gap-0.5 min-w-0">
+                  <span className="text-sm font-medium text-fg-primary flex items-center gap-2 flex-wrap">
+                    {t(`remote.provider.${p}.name`)}
+                    <span className={`badge ${p === 'cloudflare' ? 'badge-neutral' : 'badge-ok'}`}>
+                      {p === 'cloudflare' ? t('remote.addressChanges') : t('remote.addressPermanent')}
+                    </span>
+                  </span>
+                  <span className="text-xs text-fg-tertiary">{t(`remote.provider.${p}.hint`)}</span>
+                </span>
+              </label>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* provider-specific setup */}
+      {provider === 'tailscale' && !installed && (
+        <p className="m-0 text-xs text-warn">
+          {t('remote.tailscaleMissing')}{' '}
+          <a href={state.providers.tailscale.download_url} target="_blank" rel="noreferrer" className="text-accent underline">
+            tailscale.com/download
+          </a>
+        </p>
+      )}
+      {provider === 'tailscale' && installed && !state.running && (
+        <p className="m-0 text-xs text-fg-tertiary">{t('remote.tailscaleSteps')}</p>
+      )}
+
+      {provider === 'ngrok' && (
+        <div className="flex flex-col gap-2 rounded-md border border-subtle bg-sunken p-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-fg-secondary">
+              {t('remote.ngrokToken')}{' '}
+              <a href={state.providers.ngrok.token_url} target="_blank" rel="noreferrer" className="text-accent underline">
+                {t('remote.whereToGet')}
+              </a>
+            </span>
+            <input
+              className="input input-mono" type="password" autoComplete="off"
+              placeholder={state.has_ngrok_token ? t('remote.ngrokTokenSaved') : t('remote.ngrokTokenPlaceholder')}
+              value={token} onChange={(e) => setToken(e.target.value)} disabled={state.running}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-fg-secondary">
+              {t('remote.ngrokDomain')}{' '}
+              <a href={state.providers.ngrok.domains_url} target="_blank" rel="noreferrer" className="text-accent underline">
+                {t('remote.whereToGet')}
+              </a>
+            </span>
+            <input
+              className="input input-mono" placeholder="calm-otter-123.ngrok-free.app"
+              value={domain} onChange={(e) => setDomain(e.target.value)} disabled={state.running}
+              autoCapitalize="off" autoCorrect="off" spellCheck={false}
+            />
+          </label>
+          <p className="m-0 text-xs text-fg-tertiary">{t('remote.ngrokHint')}</p>
+          <div>
+            <button
+              type="button" className="btn btn-secondary btn-sm"
+              disabled={busy || state.running || (!token.trim() && domain.trim() === (state.ngrok_domain ?? ''))}
+              onClick={() => void saveNgrok()}
+            >
+              {t('common.save')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {provider !== 'tailscale' && !installed && (
+        <div className="flex flex-col gap-1.5">
+          <p className="m-0 text-xs text-warn">{t(provider === 'ngrok' ? 'remote.ngrokNotInstalled' : 'remote.notInstalled')}</p>
+          <div>
+            <button
+              type="button" className="btn btn-secondary btn-sm" disabled={busy || !info?.can_install}
+              onClick={() => void run(() => api.installTunnel(provider))}
+            >
+              {busy ? t('remote.installing') : t(provider === 'ngrok' ? 'remote.installNgrok' : 'remote.install')}
+            </button>
+          </div>
+          {!info?.can_install && (
+            <p className="m-0 text-xs text-fg-tertiary">{t('remote.installManually')}</p>
+          )}
+        </div>
+      )}
+
+      {/* autostart */}
+      <label className="flex items-start gap-2.5 cursor-pointer">
+        <input
+          type="checkbox" className="mt-0.5" checked={state.autostart} disabled={busy}
+          onChange={(e) => void run(() => api.configureTunnel({ autostart: e.target.checked }))}
+          data-testid="tunnel-autostart"
+        />
+        <span className="flex flex-col gap-0.5">
+          <span className="text-sm text-fg-primary">{t('remote.autostart')}</span>
+          <span className="text-xs text-fg-tertiary">
+            {state.permanent ? t('remote.autostartHintPermanent') : t('remote.autostartHintQuick')}
+          </span>
+        </span>
+      </label>
+
+      {/* link / start / stop */}
+      {state.running && state.url ? (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="flex-1 min-w-[200px] text-xs font-mono break-all p-2.5 rounded-md bg-sunken border border-subtle">
+              {state.url}
+            </code>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => void copy()}>
+              {copied ? t('remote.copied') : t('remote.copy')}
+            </button>
+          </div>
+          {runningOther && <p className="m-0 text-xs text-fg-tertiary">{t('remote.restartToApply')}</p>}
+          <p className="m-0 text-xs text-warn">{t('remote.shareWarning')}</p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button" className="btn btn-secondary btn-sm" disabled={busy}
+              onClick={() => void run(api.stopTunnel)}
+            >
+              {t('remote.stop')}
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void rotate()}>
+              {t('remote.rotate')}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div>
+            <button
+              type="button" className="btn btn-primary btn-sm"
+              disabled={busy || !installed || !ngrokReady}
+              onClick={() => void run(api.startTunnel)}
+            >
+              {busy ? t('remote.starting') : t('remote.start')}
+            </button>
+          </div>
+          {state.error && <p className="m-0 text-xs text-err break-words">{linkify(state.error)}</p>}
+        </>
+      )}
+    </SettingsSection>
+  )
+}
+
+// ── Section / Field ────────────────────────────────────────────────────────
+
+/** Language picker. A pure client-side preference kept in localStorage, so this
+ *  section never touches the API.
+ *
+ *  Density deliberately has no switch here: it was removed by design decision
+ *  (see lib/theme.ts) and the app is pinned to the compact scale. */
+function AppearanceSection() {
+  const { t, i18n } = useTranslation()
+  const [lang, setLang] = useState(() => getStoredLangWithDefault())
+
+  const applyLang = (next: string) => {
+    setLang(next)
+    setStoredLang(next)
+    void i18n.changeLanguage(next)
+  }
+
+  return (
+    <SettingsSection id="appearance" title={t('settings.appearance')}>
+      <SettingsField label={t('settings.language')} desc={t('settings.languageDesc')}>
+        <div className="flex flex-wrap gap-1.5">
+          {LANGUAGES.map((option) => (
+            <button
+              key={option.code}
+              type="button"
+              onClick={() => applyLang(option.code)}
+              className={`px-3 py-1.5 rounded-md border text-sm transition-colors ${
+                lang === option.code
+                  ? 'border-selected bg-selected-soft text-accent font-medium'
+                  : 'border-subtle bg-surface text-fg-secondary hover:border-dim'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </SettingsField>
+
+    </SettingsSection>
+  )
+}
+
+function SettingsSection({
+  id, title, headerExtras, children,
+}: {
+  id?: string
+  title: string
+  headerExtras?: React.ReactNode  // 可选 slot：渲染在 h2 右侧（紧贴），给 ⓘ tooltip 之类用
+  children: React.ReactNode
+}) {
+  const titleEl = <h2 className="text-sm font-semibold text-fg-primary">{title}</h2>
+  return (
+    <section id={id} className="card p-5 flex flex-col gap-4 scroll-mt-24">
+      {headerExtras ? (
+        <div className="flex items-center gap-2 mb-0.5">
+          {titleEl}
+          {headerExtras}
+        </div>
+      ) : (
+        <div className="mb-0.5">{titleEl}</div>
+      )}
+      {children}
+    </section>
+  )
+}
+
+/**
+ * 右侧 sticky section 目录。基于 IntersectionObserver 在 scrollContainer 视口内
+ * 跟踪当前可见 section，并提供点击平滑滚动。
+ *
+ * rootMargin 调整为顶部 -20%、底部 -70%：让"当前可见"判定集中在视口偏上区域，
+ * 滚动时高亮跟随更自然（用户视线在 viewport 上 1/3 处）。
+ */
+function SectionIndex({
+  sections,
+  scrollContainer,
+}: {
+  sections: { id: string; labelKey: string }[]
+  scrollContainer: RefObject<HTMLDivElement>
+}) {
+  const { t } = useTranslation()
+  const [active, setActive] = useState<string>(sections[0]?.id ?? '')
+
+  useEffect(() => {
+    // 切换 tab 后重置 active 到第一条
+    setActive(sections[0]?.id ?? '')
+  }, [sections])
+
+  useEffect(() => {
+    const root = scrollContainer.current
+    if (!root || sections.length === 0) return
+    // jsdom（vitest 环境）没有 IntersectionObserver；非浏览器环境直接跳过。
+    if (typeof IntersectionObserver === 'undefined') return
+    const observers: IntersectionObserver[] = []
+    // 收集 (id, top) 用来在 onIntersect 时挑当前最靠上的可见 section
+    const visible = new Set<string>()
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) visible.add(e.target.id)
+          else visible.delete(e.target.id)
+        }
+        // 按 sections 顺序取第一个可见的作为 active
+        const next = sections.find((s) => visible.has(s.id))
+        if (next) setActive(next.id)
+      },
+      { root, rootMargin: '-20% 0px -70% 0px', threshold: 0 },
+    )
+    sections.forEach((s) => {
+      const el = document.getElementById(s.id)
+      if (el) obs.observe(el)
+    })
+    observers.push(obs)
+    return () => observers.forEach((o) => o.disconnect())
+  }, [sections, scrollContainer])
+
+  const onJump = (id: string) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setActive(id)
+  }
+
+  return (
+    <aside className="hidden lg:block">
+      <nav className="sticky top-4 flex flex-col gap-0.5">
+        <div className="caption mb-2 px-2">{t('settings.pageIndex')}</div>
+        {sections.map((s) => (
+          <button
+            key={s.id}
+            onClick={() => onJump(s.id)}
+            className={`text-left text-xs px-2 h-7 rounded-md transition-colors ${
+              active === s.id
+                ? 'text-fg-primary font-medium bg-overlay'
+                : 'text-fg-tertiary hover:text-fg-primary hover:bg-overlay'
+            }`}
+          >
+            {t(s.labelKey)}
+          </button>
+        ))}
+      </nav>
+    </aside>
+  )
+}
+
+function SettingsField({ label, desc, helpTooltip, children }: {
+  label: string
+  desc?: string
+  /** 可选 ⓘ tooltip slot，渲染在 label 旁边。中长说明（≥20 字 / 详细用法）
+   *  适合放这里，避免 inline desc 把字段名行撑得过长。一般和 desc 二选一。 */
+  helpTooltip?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-3 items-start">
+      <div className="flex flex-col gap-0.5 pt-1.5">
+        <div className="flex items-center gap-2 min-w-0">
+          <label className="text-sm font-medium text-fg-primary leading-5">{label}</label>
+          {helpTooltip && <InfoButton>{helpTooltip}</InfoButton>}
+        </div>
+        {desc && <p className="text-xs text-fg-tertiary m-0 leading-snug">{desc}</p>}
+      </div>
+      <div className="min-w-0">{children}</div>
+    </div>
+  )
+}
+
+function Bool({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <input
+      type="checkbox"
+      checked={value}
+      onChange={(e) => onChange(e.target.checked)}
+      className="w-4 h-4"
+      style={{ accentColor: 'var(--accent)' }}
+    />
+  )
+}
+
+function SensitiveInput({ value, serverValue, onChange }: {
+  value: string; serverValue: string; onChange: (v: string) => void
+}) {
+  const { t } = useTranslation()
+  const [localValue, setLocalValue] = useState(value)
+
+  useEffect(() => {
+    setLocalValue(value)
+  }, [value])
+
+  const masked = localValue === MASK
+
+  const handleBlur = () => {
+    if (localValue !== value) {
+      onChange(localValue)
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.currentTarget.blur()
+    }
+  }
+
+  return (
+    <input
+      type="password"
+      value={masked ? '' : localValue}
+      placeholder={serverValue === MASK ? t('settings.sensitiveSavedPlaceholder') : ''}
+      onChange={(e) => setLocalValue(e.target.value || MASK)}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      autoComplete="new-password"
+      data-lpignore="true"
+      data-1p-ignore
+      data-form-type="other"
+      className={textInputClass}
+    />
+  )
+}
+
+
+// ── HFEndpointSelect ────────────────────────────────────────────────────────
+//
+// HF 模型下载 endpoint 选择器：preset + 自定义 URL 输入。
+// 0.8.2 hotfix：hf-mirror.com preset 暂时隐藏（服务端 redirect 改动后所有
+// huggingface_hub 版本均失败，详见 docs/todo/hf-mirror-recheck.md）。endpoint
+// 字段本身仍接受任意 URL，用户可通过「自定义 URL」粘贴 hf-mirror / sjtug /
+// 腾讯镜像 / 自建反代。复活后把 preset 加回来即可。
+
+const HF_ENDPOINT_PRESETS: { value: string; label: string; hintKey: string }[] = [
+  { value: '', label: 'huggingface.co', hintKey: 'settings.hfOfficialHint' },
+  { value: '__custom__', label: 'Custom URL...', hintKey: 'settings.hfCustomHint' },
+]
+
+function HFEndpointSelect({ value, onChange }: {
+  value: string; onChange: (v: string) => void
+}) {
+  const { t } = useTranslation()
+  const isPreset = HF_ENDPOINT_PRESETS.some(p => p.value !== '__custom__' && p.value === value)
+  const [mode, setMode] = useState<'preset' | 'custom'>(isPreset ? 'preset' : 'custom')
+  const selectedPreset = isPreset
+    ? value
+    : (mode === 'custom' ? '__custom__' : '')
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <select
+        value={selectedPreset}
+        onChange={(e) => {
+          const v = e.target.value
+          if (v === '__custom__') {
+            setMode('custom')
+            // 不清当前值，让用户在下方输入
+          } else {
+            setMode('preset')
+            onChange(v)
+          }
+        }}
+        className={`${textInputClass} max-w-md`}
+      >
+        {HF_ENDPOINT_PRESETS.map(p => (
+          <option key={p.value} value={p.value}>
+            {p.label}{p.hintKey ? ` — ${t(p.hintKey)}` : ''}
+          </option>
+        ))}
+      </select>
+      {mode === 'custom' && (
+        <input
+          type="text"
+          value={value && !isPreset ? value : ''}
+          placeholder="https://your-mirror.example.com"
+          onChange={(e) => onChange(e.target.value.trim())}
+          className={`${textInputClass} max-w-md`}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── DownloadSourceSelect ────────────────────────────────────────────────────
+
+function DownloadSourceSelect({ value, onChange }: {
+  value: string; onChange: (v: string) => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={`${textInputClass} max-w-xs`}
+    >
+      <option value="huggingface">{t('settings.downloadSourceHuggingface')}</option>
+      <option value="modelscope">{t('settings.downloadSourceModelscope')}</option>
+    </select>
+  )
+}
+
+// 顶层非 object 字段（string / number / bool），直接比较后塞入 patch。
+const TOP_LEVEL_SCALARS: (keyof Secrets)[] = ['download_source']
+
+function buildPatch(draft: Secrets, server: Secrets): SecretsPatch {
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(draft) as (keyof Secrets)[]) {
+    if (TOP_LEVEL_SCALARS.includes(key)) {
+      if (draft[key] !== server[key]) out[key] = draft[key]
+      continue
+    }
+    const sub: Record<string, unknown> = {}
+    const d = draft[key] as unknown as Record<string, unknown>
+    const s = server[key] as unknown as Record<string, unknown>
+    for (const k of Object.keys(d)) {
+      const dv = d[k]
+      const sv = s[k]
+      if (dv === MASK) continue
+      if (JSON.stringify(dv) !== JSON.stringify(sv)) sub[k] = dv
+    }
+    if (Object.keys(sub).length) out[key] = sub
+  }
+  return out as SecretsPatch
+}
+
+// ── Models Section ─────────────────────────────────────────────────────────
+
+// 本地主模型的「工作模式」= 它挂在哪个模型族下：族决定训练配置的默认值
+// （采样器 / timestep / caption 能力位，见 domain/common.py 的能力矩阵）与
+// 配套的 VAE / 文本编码器解析。domain 名与 catalog.model_sources 的键一致。
+const FAMILY_DOMAIN_OPTIONS = [
+  { value: 'anima', label: 'Anima' },
+  { value: 'krea2', label: 'Krea 2' },
+]
+
+/** 绝对路径 → 末段文件 / 目录名（toast 里显示"选中了哪个权重"）。 */
+function basename(p: string): string {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+  return i >= 0 ? p.slice(i + 1) : p
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }: {
+  catalog: ModelsCatalog | null
+  busy: Set<string>
+  start: (model_id: string, variant?: string) => Promise<void>
+  reloadCatalog: () => Promise<unknown>
+  catalogError: string | null
+  t: TFunction
+}) {
+  const { toast } = useToast()
+  const [rootDraft, setRootDraft] = useState<string>('')
+  const [serverRoot, setServerRoot] = useState<string | null>(null)
+  const [savingRoot, setSavingRoot] = useState(false)
+  const [selectedAnima, setSelectedAnima] = useState<string>('1.0')
+  const [selectedKrea2, setSelectedKrea2] = useState<string>('raw')
+  const [selectedKrea2Te, setSelectedKrea2Te] = useState<string>('bf16')
+  // VAE 是族无关共享资产 → 单个选中值（''=官方落点）；Anima 的文本编码器只有
+  // 一份官方目录，所以它的选中值同样是 ''（官方）或本地目录绝对路径。
+  const [selectedVae, setSelectedVae] = useState<string>('')
+  const [selectedAnimaTe, setSelectedAnimaTe] = useState<string>('')
+  const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
+  const [savingAutoSync, setSavingAutoSync] = useState(false)
+  const [secretsLoaded, setSecretsLoaded] = useState(false)
+
+  // 一次性拉一份 secrets 取 models.root + selected（按族）+ auto_sync_paths
+  // （这几项走独立 PUT，不进 SettingsPage 的全局 dirty 流程）。catalog 由父级注入。
+  useEffect(() => {
+    void api.getSecrets().then((sec) => {
+      setServerRoot(sec.models?.root ?? null)
+      setSelectedAnima(sec.models?.selected?.anima ?? sec.models?.selected_anima ?? '1.0')
+      setSelectedKrea2(sec.models?.selected?.krea2 ?? 'raw')
+      setSelectedKrea2Te(sec.models?.selected_te?.krea2 ?? 'bf16')
+      setSelectedVae(sec.models?.selected_vae ?? '')
+      setSelectedAnimaTe(sec.models?.selected_te?.anima ?? '')
+      setAutoSyncPaths(sec.models?.auto_sync_paths ?? true)
+      setSecretsLoaded(true)
+    }).catch(() => { setSecretsLoaded(true) })
+  }, [])
+
+  // secrets + catalog 都到位后，把输入框预填成「已保存值」或「实际默认绝对路径」。
+  // 用 prev !== '' 当作"已初始化 / 用户已编辑"的标志，避免覆盖用户输入。
+  useEffect(() => {
+    if (!secretsLoaded || !catalog) return
+    setRootDraft((prev) => (prev !== '' ? prev : (serverRoot ?? catalog.models_root ?? '')))
+  }, [secretsLoaded, catalog, serverRoot])
+
+  const pickAnima = async (variant: string) => {
+    if (variant === selectedAnima) return
+    setSelectedAnima(variant)
+    try {
+      await api.updateSecrets({ models: { selected_anima: variant, selected: { anima: variant } } })
+      toast(t('settings.mainModelSelected', { name: variant }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  const pickKrea2 = async (variant: string) => {
+    if (variant === selectedKrea2) return
+    setSelectedKrea2(variant)
+    try {
+      await api.updateSecrets({ models: { selected: { krea2: variant } } })
+      toast(t('settings.mainModelSelected', { name: variant }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  const pickKrea2Te = async (variant: string) => {
+    if (variant === selectedKrea2Te) return
+    setSelectedKrea2Te(variant)
+    try {
+      await api.updateSecrets({ models: { selected_te: { krea2: variant } } })
+      toast(t('settings.teSelected', { name: variant }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  // VAE / 文本编码器的选中写回：与 pickAnima / pickKrea2Te 同形（乐观更新 +
+  // 失败回滚 = 重新拉 catalog + secrets）。
+  const pickVae = async (value: string) => {
+    if (value === selectedVae) return
+    const prev = selectedVae
+    setSelectedVae(value)
+    try {
+      await api.updateSecrets({ models: { selected_vae: value } })
+      toast(t('settings.vaeSelected', {
+        name: value ? basename(value) : t('settings.officialWeights'),
+      }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      setSelectedVae(prev)
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  const pickAnimaTe = async (value: string) => {
+    if (value === selectedAnimaTe) return
+    const prev = selectedAnimaTe
+    setSelectedAnimaTe(value)
+    try {
+      await api.updateSecrets({ models: { selected_te: { anima: value } } })
+      toast(t('settings.teSelected', {
+        name: value ? basename(value) : t('settings.officialWeights'),
+      }), 'success')
+      await reloadCatalog()
+    } catch (e) {
+      setSelectedAnimaTe(prev)
+      toast(String(e), 'error')
+      void reloadCatalog()
+    }
+  }
+
+  // 本地候选注册 / 注销 / 改模式后：catalog 与 secrets 都可能变（服务端会把
+  // 失效的选中值回退默认），两边一起重拉才不会显示成脏状态。
+  const reloadSources = async () => {
+    await reloadCatalog()
+    try {
+      const sec = await api.getSecrets()
+      setSelectedAnima(sec.models?.selected?.anima ?? sec.models?.selected_anima ?? '1.0')
+      setSelectedKrea2(sec.models?.selected?.krea2 ?? 'raw')
+      setSelectedKrea2Te(sec.models?.selected_te?.krea2 ?? 'bf16')
+      setSelectedVae(sec.models?.selected_vae ?? '')
+      setSelectedAnimaTe(sec.models?.selected_te?.anima ?? '')
+    } catch {
+      // 读 secrets 失败不该让刚成功的注册看起来像失败：catalog 已刷新，
+      // 下次进页面会再对齐一次。
+    }
+  }
+
+  const sourceRows = (domain: string) => catalog?.model_sources?.[domain] ?? []
+
+  // 本地主模型改「工作模式」后，在新族里把它重新选中（LocalModelRows 只知道
+  // domain，写回选中值的入口按族分派）。
+  const selectMainInDomain = async (domain: string, value: string) => {
+    if (domain === 'krea2') await pickKrea2(value)
+    else await pickAnima(value)
+  }
+
+  const saveRoot = async () => {
+    const v = rootDraft.trim()
+    setSavingRoot(true)
+    try {
+      await api.updateSecrets({ models: { root: v ? v : null } })
+      toast(v ? t('settings.modelRootSaved', { path: v }) : t('settings.modelRootDefault'), 'success')
+      setServerRoot(v ? v : null)
+      await reloadCatalog()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setSavingRoot(false)
+    }
+  }
+
+  const saveAutoSync = async (next: boolean) => {
+    setSavingAutoSync(true)
+    const prev = autoSyncPaths
+    setAutoSyncPaths(next)
+    try {
+      await api.updateSecrets({ models: { auto_sync_paths: next } })
+      toast(next ? t('settings.autoSyncPathsOn') : t('settings.autoSyncPathsOff'), 'success')
+    } catch (e) {
+      setAutoSyncPaths(prev)
+      toast(String(e), 'error')
+    } finally {
+      setSavingAutoSync(false)
+    }
+  }
+
+  const rootDirty = rootDraft.trim() !== (serverRoot ?? '')
+  const error = catalogError
+
+  return (
+    <SettingsSection id="models" title={t('settings.trainingModelsOneClick')}>
+      <SettingsField label={t('settings.modelsRoot')}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="text"
+            value={rootDraft}
+            onChange={(e) => setRootDraft(e.target.value)}
+            className={`${textInputClass} flex-1`}                                  />
+          <button onClick={saveRoot} disabled={!rootDirty || savingRoot} className="btn btn-primary btn-sm"
+            title={rootDirty ? t('settings.savePathConfig') : t('settings.notModified')}>
+            {savingRoot ? t('common.saving') : t('settings.savePath')}
+          </button>
+          <button onClick={() => setRootDraft(serverRoot ?? (catalog?.models_root ?? ''))} disabled={!rootDirty || savingRoot}
+            className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm"
+            style={{ opacity: !rootDirty ? 0.3 : 1 }}
+          >↻</button>
+        </div>
+      </SettingsField>
+
+      <SettingsField
+        label={t('settings.autoSyncPathsLabel')}
+        helpTooltip={<p>{t('settings.autoSyncPathsHelp')}</p>}
+      >
+        <label className="flex items-center gap-2 pt-1.5">
+          <input
+            type="checkbox"
+            checked={autoSyncPaths}
+            onChange={(e) => void saveAutoSync(e.target.checked)}
+            disabled={savingAutoSync}
+            style={{ height: 16, width: 16 }}
+          />
+        </label>
+      </SettingsField>
+
+      {error && <div className="text-err text-xs font-mono">{error}</div>}
+      {!catalog ? (
+        <p className="text-fg-tertiary text-xs">{t('settings.loadingModelCatalog')}</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {/* Anima 主模型 */}
+          <ModelGroupCard
+            title={catalog.anima_main.name}
+            helpTooltip={
+              <>
+                <p><Trans i18nKey="settings.repoHelp" values={{ desc: translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_main', catalog.anima_main.description, t), repo: catalog.anima_main.repo }} components={{ code: <code /> }} /></p>
+                <p><Trans i18nKey="settings.defaultTransformerHelp" components={{ strong: <strong /> }} /></p>
+              </>
+            }
+          >
+            <ul className="list-none m-0 p-0 flex flex-col gap-1">
+              {catalog.anima_main.variants.map((v) => {
+                const key = `anima_main:${v.variant}`
+                const dl = catalog.downloads[key]
+                const isSel = v.variant === selectedAnima
+                const canSelect = v.exists && dl?.status !== 'running'
+                return (
+                  <li key={v.variant} className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                    isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+                  }`}>
+                    <input type="radio" name="anima_variant" checked={isSel} disabled={!canSelect}
+                      onChange={() => void pickAnima(v.variant)}
+                      className="shrink-0"
+                      style={{ accentColor: 'var(--accent)' }}
+                      title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                    />
+                    <code className="font-mono text-fg-primary w-32 shrink-0 truncate" title={v.variant}>{v.variant}</code>
+                    <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
+                    <span style={{ flex: 1 }} />
+                    {v.kind === 'custom'
+                      ? <span className="text-fg-tertiary shrink-0" title={v.target_path}>{t('settings.localBaseModel')}</span>
+                      : <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('anima_main', v.variant)} />}
+                  </li>
+                )
+              })}
+            </ul>
+            {/* 自己的权重：注册本地 .safetensors，与官方 variant 同一组单选 */}
+            <LocalModelRows
+              domain="anima"
+              rows={sourceRows('anima')}
+              radioName="anima_variant"
+              onSelect={(value) => void pickAnima(value)}
+              onChanged={reloadSources}
+              familyOptions={FAMILY_DOMAIN_OPTIONS}
+              selectInDomain={selectMainInDomain}
+            />
+            <AddLocalModelButton
+              domain="anima"
+              shape="file"
+              initialPath={catalog.models_root}
+              onChanged={reloadSources}
+            />
+          </ModelGroupCard>
+
+          {/* VAE（两族共用一份，可换成自己的本地权重） */}
+          <ModelGroupCard
+            title={catalog.anima_vae.name}
+            helpTooltip={<p>{t('settings.vaeHelp')}</p>}
+          >
+            <ul className="list-none m-0 p-0 flex flex-col gap-1">
+              <li className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                selectedVae === '' ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+              }`}>
+                <input type="radio" name="vae_source" checked={selectedVae === ''}
+                  onChange={() => void pickVae('')}
+                  className="shrink-0"
+                  style={{ accentColor: 'var(--accent)' }}
+                  title={t('settings.selectDefaultVae')}
+                />
+                <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)} · <code>{catalog.anima_vae.repo}</code></span>
+                <ModelStatusBadge exists={catalog.anima_vae.exists} size={catalog.anima_vae.size} status={catalog.downloads.anima_vae?.status} />
+                <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
+              </li>
+            </ul>
+            <LocalModelRows
+              domain="vae"
+              rows={sourceRows('vae')}
+              radioName="vae_source"
+              onSelect={(value) => void pickVae(value)}
+              onChanged={reloadSources}
+            />
+            <AddLocalModelButton
+              domain="vae"
+              shape="file"
+              initialPath={catalog.models_root}
+              onChanged={reloadSources}
+            />
+          </ModelGroupCard>
+
+          {/* Krea 2 主模型（0.20 第二模型族；VAE 与 Anima 共享 qwen_image_vae） */}
+          {catalog.krea2_main && (
+            <ModelGroupCard
+              title={catalog.krea2_main.name}
+              helpTooltip={<p>{t('settings.krea2MainHelp')}</p>}
+            >
+              <ul className="list-none m-0 p-0 flex flex-col gap-1">
+                {catalog.krea2_main.variants.map((v) => {
+                  const key = `krea2_main:${v.variant}`
+                  const dl = catalog.downloads[key]
+                  const isSel = v.variant === selectedKrea2
+                  const canSelect = v.exists && dl?.status !== 'running'
+                  return (
+                    <li key={v.variant} className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                      isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+                    }`}>
+                      <input type="radio" name="krea2_variant" checked={isSel} disabled={!canSelect}
+                        onChange={() => void pickKrea2(v.variant)}
+                        className="shrink-0"
+                        style={{ accentColor: 'var(--accent)' }}
+                        title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                      />
+                      <code className="font-mono text-fg-primary w-32 shrink-0 truncate" title={v.variant}>{v.variant}</code>
+                      {v.purpose && (
+                        <span className={`badge badge-${v.purpose === 'training' ? 'accent' : 'neutral'} text-[10px]`}>
+                          {v.purpose === 'training' ? t('settings.purposeTraining') : t('settings.purposeInference')}
+                        </span>
+                      )}
+                      <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
+                      <span style={{ flex: 1 }} />
+                      <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('krea2_main', v.variant)} />
+                    </li>
+                  )
+                })}
+              </ul>
+              <LocalModelRows
+                domain="krea2"
+                rows={sourceRows('krea2')}
+                radioName="krea2_variant"
+                onSelect={(value) => void pickKrea2(value)}
+                onChanged={reloadSources}
+                familyOptions={FAMILY_DOMAIN_OPTIONS}
+                selectInDomain={selectMainInDomain}
+              />
+              <AddLocalModelButton
+                domain="krea2"
+                shape="file"
+                initialPath={catalog.models_root}
+                onChanged={reloadSources}
+              />
+            </ModelGroupCard>
+          )}
+
+          {/* Krea 2 文本编码器 Qwen3-VL：bf16 目录版 + 官方 fp8 单文件版（单选） */}
+          {catalog.krea2_text_encoder && (
+            <ModelGroupCard title={catalog.krea2_text_encoder.name} helpTooltip={<p>{t('settings.krea2TeHelp')}</p>}>
+              <ul className="list-none m-0 p-0 flex flex-col gap-1">
+                {([['bf16', catalog.krea2_text_encoder], ['fp8', catalog.krea2_text_encoder_fp8]] as const).map(([teKey, m]) => {
+                  if (!m) return null
+                  const dlKey = teKey === 'bf16' ? 'krea2_text_encoder' : 'krea2_text_encoder_fp8'
+                  const dl = catalog.downloads[dlKey]
+                  const allExist = m.files.every((f) => f.exists)
+                  const totalSize = m.files.reduce((s, f) => s + f.size, 0)
+                  const isSel = teKey === selectedKrea2Te
+                  const canSelect = allExist && dl?.status !== 'running'
+                  return (
+                    <li key={teKey} className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                      isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+                    }`}>
+                      <input type="radio" name="krea2_te" checked={isSel} disabled={!canSelect}
+                        onChange={() => void pickKrea2Te(teKey)}
+                        className="shrink-0"
+                        style={{ accentColor: 'var(--accent)' }}
+                        title={canSelect ? t('settings.selectDefaultTe') : allExist ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                      />
+                      <code className="font-mono text-fg-primary w-32 shrink-0 truncate">{teKey}</code>
+                      <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
+                      <span style={{ flex: 1 }} />
+                      <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(dlKey)} onClick={() => void start(dlKey)} />
+                    </li>
+                  )
+                })}
+              </ul>
+              {/* 自定义文本编码器：本地 transformers 目录（含 config.json） */}
+              <LocalModelRows
+                domain="krea2_te"
+                rows={sourceRows('krea2_te')}
+                radioName="krea2_te"
+                onSelect={(value) => void pickKrea2Te(value)}
+                onChanged={reloadSources}
+              />
+              <AddLocalModelButton
+                domain="krea2_te"
+                shape="dir"
+                initialPath={catalog.krea2_text_encoder?.target_dir ?? catalog.models_root}
+                onChanged={reloadSources}
+              />
+            </ModelGroupCard>
+          )}
+
+          {/* Anima 文本编码器：官方 Qwen3 目录 + 用户注册的本地编码器（单选） */}
+          <ModelGroupCard title={catalog.qwen3.name} helpTooltip={<p>{t('settings.animaTeHelp')}</p>}>
+            <ul className="list-none m-0 p-0 flex flex-col gap-1">
+              {(() => {
+                const m = catalog.qwen3
+                const dl = catalog.downloads.qwen3
+                const allExist = m.files.every((f) => f.exists)
+                const totalSize = m.files.reduce((sum, f) => sum + f.size, 0)
+                return (
+                  <li className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
+                    selectedAnimaTe === '' ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
+                  }`}>
+                    <input type="radio" name="anima_te" checked={selectedAnimaTe === ''}
+                      onChange={() => void pickAnimaTe('')}
+                      className="shrink-0"
+                      style={{ accentColor: 'var(--accent)' }}
+                      title={t('settings.selectDefaultTe')}
+                    />
+                    <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'qwen3', m.description, t)} · <code>{m.repo}</code></span>
+                    <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
+                    <DownloadButton exists={allExist} status={dl?.status} busy={busy.has('qwen3')} onClick={() => void start('qwen3')} />
+                  </li>
+                )
+              })()}
+            </ul>
+            <LocalModelRows
+              domain="anima_te"
+              rows={sourceRows('anima_te')}
+              radioName="anima_te"
+              onSelect={(value) => void pickAnimaTe(value)}
+              onChanged={reloadSources}
+            />
+            <AddLocalModelButton
+              domain="anima_te"
+              shape="dir"
+              initialPath={catalog.qwen3.target_dir}
+              onChanged={reloadSources}
+            />
+          </ModelGroupCard>
+
+          {/* T5 tokenizer（Anima 专用，无自定义入口——只是 tokenizer 文件） */}
+          {(['t5_tokenizer'] as const).map((id) => {
+            const m = catalog[id]
+            const dl = catalog.downloads[id]
+            const allExist = m.files.every((f) => f.exists)
+            const totalSize = m.files.reduce((s, f) => s + f.size, 0)
+            return (
+              <ModelGroupCard key={id} title={m.name}>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-fg-tertiary">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, id, m.description, t)} · <code>{m.repo}</code></span>
+                  <span style={{ flex: 1 }} />
+                  <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
+                  <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(id)} onClick={() => void start(id)} />
+                </div>
+              </ModelGroupCard>
+            )
+          })}
+
+          {/* 下载日志 */}
+          {Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length > 0 && (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-fg-tertiary">
+                {t('settings.downloadLogs', { n: Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length })}
+              </summary>
+              <div className="mt-1 flex flex-col gap-2">
+                {Object.values(catalog.downloads).map((d) => (
+                  <div key={d.key} className="rounded-sm border border-subtle bg-sunken p-2">
+                    <div className="flex items-center gap-2 mb-1">
+                      <code className="font-mono text-fg-secondary">{d.key}</code>
+                      <ModelStatusBadge exists={d.status === 'done'} size={0} status={d.status} />
+                      {d.message && <span className="text-err overflow-hidden text-ellipsis whitespace-nowrap">{d.message}</span>}
+                    </div>
+                    <pre className="text-xs font-mono text-fg-tertiary max-h-32 overflow-auto whitespace-pre-wrap m-0">
+                      {d.log_tail.join('\n') || t('settings.emptyLog')}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </SettingsSection>
+  )
+}
+
+function ModelGroupCard({
+  title, helpTooltip, children,
+}: {
+  title: string
+  helpTooltip?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <div className="rounded-sm border border-subtle bg-sunken p-2.5">
+      <h4 className="text-xs font-semibold text-fg-primary mb-1.5 flex items-center gap-2">
+        <span>{title}</span>
+        {helpTooltip && <InfoButton>{helpTooltip}</InfoButton>}
+      </h4>
+      {children}
+    </div>
+  )
+}
+
+function ModelStatusBadge({ exists, size, status, fileCount, existsCount }: {
+  exists: boolean; size: number; status?: ModelDownloadStatus['status']; fileCount?: number; existsCount?: number
+}) {
+  const { t } = useTranslation()
+  if (status === 'running') {
+    return <StatusLabel bg="bg-warn-soft" fg="text-warn" text={t('settings.downloadInProgress')} pulse />
+  }
+  if (status === 'failed') {
+    return <StatusLabel bg="bg-err-soft" fg="text-err" text={t('status.failed')} />
+  }
+  if (exists) {
+    return <StatusLabel bg="bg-ok-soft" fg="text-ok" text={`✓ ${fmtBytes(size)}${fileCount !== undefined ? ` (${existsCount}/${fileCount})` : ''}`} />
+  }
+  if (fileCount !== undefined && existsCount! > 0) {
+    return <StatusLabel bg="bg-warn-soft" fg="text-warn" text={t('settings.partialFiles', { exists: existsCount, total: fileCount })} />
+  }
+  return <StatusLabel bg="bg-overlay" fg="text-fg-tertiary" text={t('settings.notDownloaded')} />
+}
+
+function StatusLabel({ bg, fg, text, pulse }: { bg: string; fg: string; text: string; pulse?: boolean }) {
+  return (
+    <span className={`text-xs px-1.5 py-0.5 rounded-sm font-mono ${bg} ${fg}`}
+      style={pulse ? { animation: 'pulse 1.5s infinite' } : undefined}
+    >{text}</span>
+  )
+}
+
+function DownloadButton({ exists, status, busy, onClick }: {
+  exists: boolean; status?: ModelDownloadStatus['status']; busy: boolean; onClick: () => void
+}) {
+  const { t } = useTranslation()
+  const running = status === 'running' || busy
+  if (running) {
+    return <button disabled className="btn btn-secondary btn-sm" style={{ opacity: 0.5 }}>...</button>
+  }
+  return (
+    <button onClick={onClick} className={exists ? 'btn btn-secondary btn-sm' : 'btn btn-primary btn-sm'}
+      title={exists ? t('settings.redownloadTitle') : t('common.download')}>
+      {exists ? t('settings.redownload') : t('settings.downloadAction')}
+    </button>
+  )
+}
+
+// ── PyTorch Section（训练 tab）──────────────────────────────────────────────
+//
+// 已有 venv 用户的「一键修」入口。PR-4 启动期会 warn「检测到 GPU 但 torch 是
+// CPU 版」并给 pip 命令；这里把命令 UI 化，普通用户不用进终端。
+//
+// 三种状态：
+// - cuda_available=True               → ✓ 一切 OK（折叠默认；提供「换 CUDA 版本」高级选项）
+// - is_cpu_with_gpu=True               → 红色误装提示 + 显著「重装为 CUDA」主按钮
+// - is_cuda_build_unavailable=True     → 黄色驱动警告（pip 修不了，给文档链接）
+
+function PyTorchSection() {
+  const { t } = useTranslation()
+  const dialog = useDialog()
+  const [status, setStatus] = useState<TorchStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const { toast } = useToast()
+
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.getTorchStatus()
+      setStatus(s)
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const reinstall = async (target: 'auto' | TorchCuTag) => {
+    const tag = target === 'auto' ? status?.recommended_cu_tag ?? '?' : target
+    // 注册 → 用户 Ctrl+C 重启 → launcher 进程跑 pip。Windows 上 torch.pyd 被
+    // 当前 server 进程锁住，没法直接 replace；只能 defer 到 launcher。
+    if (!(await dialog.confirm(
+      t('settings.confirmRegisterTorch', { tag }),
+      { tone: 'warn', okText: t('settings.registerRequest') },
+    ))) return
+    setBusy(true)
+    try {
+      const result = await api.reinstallTorch(target)
+      // 后端已写 marker，server 进程没真装；提示用户去重启
+      toast(result.message, 'success')
+    } catch (e) {
+      toast(t('settings.registerFailed', { error: String(e) }), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const hasIssue = !!error || (status && (status.is_cpu_with_gpu || status.is_cuda_build_unavailable || !status.installed))
+  const statusOk = status?.cuda_available && !error
+  const statusLabel = error
+    ? t('settings.loadFailedShort')
+    : !status
+      ? t('settings.loadingStatus')
+      : !status.installed
+        ? t('settings.notInstalledShort')
+        : status.is_cpu_with_gpu
+          ? t('settings.cpuBuildMisinstalled')
+          : !status.cuda_available && status.cuda_build !== 'cpu'
+            ? t('settings.cudaUnavailableDriver')
+            : status.cuda_available
+              ? `CUDA ✓ ${status.cuda_build}`
+              : `CPU ${status.cuda_build}`
+
+  return (
+    <details id="pytorch" open={!!hasIssue} className="rounded-md border border-subtle bg-surface group scroll-mt-24">
+      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
+        <h2 className="text-sm font-semibold text-fg-primary m-0">PyTorch</h2>
+        <span className="text-xs text-fg-tertiary">{t('settings.trainingCoreDependency')}</span>
+        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : status?.is_cpu_with_gpu ? 'text-err' : 'text-warn'}`}>
+          {statusLabel}
+        </span>
+      </summary>
+
+      <div className="px-4 pb-4 flex flex-col gap-3">
+        {error && <div className="text-err text-xs font-mono">{error}</div>}
+        {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
+
+        {status && (<>
+          {/* 当前状态卡 */}
+          <div className="rounded-sm border border-subtle bg-sunken p-2 flex flex-col gap-1 text-xs">
+            <div className="flex gap-4 flex-wrap">
+              <span className="text-fg-tertiary">torch: <code className="text-fg-secondary font-mono">{status.version ?? t('settings.notInstalledParen')}</code></span>
+              {status.cuda_build && (
+                <span className="text-fg-tertiary">build: <code className="text-fg-secondary font-mono">{status.cuda_build}</code></span>
+              )}
+              {status.cuda_available && status.device_name && (
+                <span className="text-fg-tertiary">GPU: <code className="text-fg-secondary font-mono">{status.device_name}</code></span>
+              )}
+            </div>
+            <div className="flex gap-4 flex-wrap">
+              <span className="text-fg-tertiary">
+                {t('settings.driverLabel')}:{' '}
+                <code className="text-fg-secondary font-mono">
+                  {status.cuda_detect.driver_version ?? t('settings.notDetected')}
+                </code>
+              </span>
+              {status.cuda_detect.gpu_name && !status.cuda_available && (
+                <span className="text-fg-tertiary">
+                  {t('settings.systemGpu')}:{' '}
+                  <code className="text-fg-secondary font-mono">{status.cuda_detect.gpu_name}</code>
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* 误装：CPU torch + 有 GPU */}
+          {status.is_cpu_with_gpu && (
+            <div className="rounded-sm border border-err bg-err-soft px-2 py-1.5 text-err text-xs">
+              <Trans
+                i18nKey="settings.torchCpuWithGpuWarning"
+                values={{ tag: status.recommended_cu_tag }}
+                components={{ code: <code className="font-mono" /> }}
+              />
+            </div>
+          )}
+
+          {/* CUDA build 但运行时不可用：驱动 / WSL 问题 */}
+          {status.is_cuda_build_unavailable && (
+            <div className="rounded-sm border border-warn bg-warn-soft px-2 py-1.5 text-warn text-xs">
+              <Trans
+                i18nKey="settings.torchCudaUnavailableWarning"
+                components={{ code: <code className="font-mono" /> }}
+              />
+            </div>
+          )}
+
+          {/* 操作按钮 */}
+          <div className="flex gap-1.5 items-center flex-wrap">
+            <button
+              onClick={() => void reinstall('auto')}
+              disabled={busy || !status.cuda_detect.available}
+              className={status.is_cpu_with_gpu ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+              title={status.cuda_detect.available
+                ? t('settings.autoSelect', { tag: status.recommended_cu_tag })
+                : t('settings.noNvidiaDriverCannotCuda')}
+            >
+              {busy ? t('settings.installing') : status.is_cpu_with_gpu
+                ? t('settings.reinstallCudaBuild', { tag: status.recommended_cu_tag })
+                : t('settings.reinstallAuto', { tag: status.recommended_cu_tag })}
+            </button>
+            <button onClick={() => void refresh()} disabled={busy}
+              className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm">↻</button>
+            <button type="button" onClick={() => setAdvancedOpen(!advancedOpen)}
+              className="btn btn-ghost btn-sm text-xs text-fg-tertiary ml-auto">
+              {advancedOpen ? '▾' : '▸'} {t('settings.advancedManualCuda')}
+            </button>
+          </div>
+
+          {/* 手动选版本 */}
+          {advancedOpen && (
+            <div className="flex flex-col gap-1.5 pt-2 border-t border-subtle text-xs">
+              <p className="text-fg-tertiary m-0">
+                {t('settings.manualCudaHint')}
+              </p>
+              <div className="flex gap-1.5 flex-wrap">
+                {(['cu128', 'cu126', 'cu124', 'cu118', 'cpu'] as const).map((tag) => (
+                  <button
+                    key={tag}
+                    onClick={() => void reinstall(tag)}
+                    disabled={busy}
+                    className={`btn btn-secondary btn-sm ${
+                      status.cuda_build === tag ? 'border-accent' : ''
+                    }`}
+                    title={
+                      tag === 'cpu'
+                        ? t('settings.installCpuBuildHint')
+                        : t('settings.installCudaBuildHint', { tag })
+                    }
+                  >
+                    {tag}{status.cuda_build === tag ? ' ✓' : ''}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </>)}
+      </div>
+    </details>
+  )
+}
+
+// ── Flash Attention Section（训练 tab）─────────────────────────────────────
+//
+// 训练加速的可选优化。装好 flash_attn 后启动期会自动 set_flash_attn_enabled(True)。
+// 本组件给 UI 一键装 wheel 的能力，复用 PR-7a 的 service：状态 + GitHub 候选 + 安装。
+//
+// 设计要点：
+// - install 是同步 pip（几分钟），用 confirm() + busy 状态防误触
+// - Python ABI 不一致的 wheel（usable=false）灰显，但保留「强制安装」按钮（
+//   极少数情况用户可能在 ABI 兼容子集里跑）
+// - GitHub API 限流时 candidates=[] + fetch_error，给手动 URL 输入兜底
+
+function FlashAttentionSection() {
+  const { t } = useTranslation()
+  const dialog = useDialog()
+  const [status, setStatus] = useState<FlashAttnStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [candidatesOpen, setCandidatesOpen] = useState(false)
+  const [manualUrl, setManualUrl] = useState('')
+  const { toast } = useToast()
+
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.getFlashAttnStatus()
+      setStatus(s)
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const install = async (url: string | null) => {
+    const msg = url ? t('settings.confirmInstallFlashUrl') : t('settings.confirmInstallFlashAuto')
+    if (!(await dialog.confirm(msg, { tone: 'warn', okText: t('settings.startInstall') }))) return
+    setBusy(true)
+    try {
+      const result = await api.installFlashAttn(url)
+      toast(t('settings.flashAttnInstalled', { version: result.version ?? '?' }), 'success')
+      await refresh()
+    } catch (e) {
+      toast(t('settings.installFailed', { error: String(e) }), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const env = status?.env
+  const candidates = status?.candidates ?? []
+  const fetchError = status?.fetch_error ?? null
+  const usable = candidates.filter((c) => c.usable)
+  const bestCandidate = usable[0] ?? null
+  const hasIssue = !!error || (status && !status.installed)
+  const canAutoInstall = !!env?.torch_tag && !!env?.platform && usable.length > 0
+
+  const statusLabel = error
+    ? t('settings.loadFailedShort')
+    : !status
+      ? t('settings.loadingStatus')
+      : status.installed
+        ? t('settings.installedVersion', { version: status.version ?? '?' })
+        : t('settings.notInstalledShort')
+  const statusOk = status?.installed && !error
+
+  return (
+    <details id="flash-attn" open={!!hasIssue} className="rounded-md border border-subtle bg-surface group scroll-mt-24">
+      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
+        <h2 className="text-sm font-semibold text-fg-primary m-0">Flash Attention</h2>
+        <span className="text-xs text-fg-tertiary">{t('settings.trainingAccelerationOptional')}</span>
+        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : 'text-warn'}`}>{statusLabel}</span>
+      </summary>
+
+      <div className="px-4 pb-4 flex flex-col gap-3">
+        {error && <div className="text-err text-xs font-mono">{error}</div>}
+        {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
+
+        {status && env && (<>
+          {/* 环境信息 */}
+          <div className="rounded-sm border border-subtle bg-sunken p-2 flex flex-col gap-1 text-xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-fg-tertiary shrink-0">flash_attn:</span>
+              <code className="font-mono text-fg-primary">
+                {status.installed ? `v${status.version ?? '?'}` : t('settings.notInstalledParen')}
+              </code>
+              {status.installed && <StatusLabel bg="bg-ok-soft" fg="text-ok" text={t('settings.installed')} />}
+            </div>
+            <div className="flex gap-4 flex-wrap">
+              <span className="text-fg-tertiary">Python: <code className="text-fg-secondary font-mono">{env.python_tag}</code></span>
+              <span className="text-fg-tertiary">CUDA: <code className="text-fg-secondary font-mono">{env.cuda_tag ?? t('settings.notDetected')}</code></span>
+              <span className="text-fg-tertiary">PyTorch: <code className="text-fg-secondary font-mono">{env.torch_tag ?? t('settings.notDetected')}</code></span>
+              <span className="text-fg-tertiary">{t('settings.platform')}: <code className="text-fg-secondary font-mono">{env.platform ?? t('settings.unsupported')}</code></span>
+            </div>
+          </div>
+
+          {/* GitHub API 失败 */}
+          {fetchError && (
+            <div className="rounded-sm border border-err bg-err-soft px-2 py-1.5 text-err text-xs">
+              {t('settings.githubApiFailed')}
+              <code className="block mt-0.5 break-all">{fetchError}</code>
+            </div>
+          )}
+
+          {/* 没匹配 wheel */}
+          {!canAutoInstall && !fetchError && env.platform && env.torch_tag && (
+            <div className="rounded-sm border border-warn bg-warn-soft px-2 py-1.5 text-warn text-xs">
+              {t('settings.noWheelForPython', { python: env.python_tag })}
+            </div>
+          )}
+
+          {/* 操作按钮 */}
+          <div className="flex gap-1.5 items-center flex-wrap">
+            <button
+              onClick={() => void install(null)}
+              disabled={busy || !canAutoInstall}
+              className="btn btn-primary btn-sm"
+              title={canAutoInstall
+                ? t('settings.autoSelect', { tag: bestCandidate?.name ?? '' })
+                : t('settings.noWheelManual')}
+            >
+              {busy ? t('settings.installing') : status.installed ? t('settings.reinstallAutoMatch') : t('settings.autoMatchInstall')}
+            </button>
+            <button onClick={() => void refresh()} disabled={busy}
+              className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm">↻</button>
+            <button type="button" onClick={() => setCandidatesOpen(!candidatesOpen)}
+              className="btn btn-ghost btn-sm text-xs text-fg-tertiary ml-auto">
+              {candidatesOpen ? '▾' : '▸'} {t('settings.candidateWheels', { n: usable.length })}
+            </button>
+          </div>
+
+          {/* 候选列表 + 手动 URL */}
+          {candidatesOpen && (
+            <div className="flex flex-col gap-2 pt-2 border-t border-subtle">
+              {candidates.length === 0 ? (
+                <p className="text-xs text-fg-tertiary m-0">{t('settings.wheelQueryFailed')}</p>
+              ) : (
+                <ul className="list-none m-0 p-0 flex flex-col gap-1">
+                  {candidates.map((c) => (
+                    <li key={c.url} className={`flex items-start gap-2 text-xs px-2 py-1.5 rounded-sm border ${
+                      c.usable ? 'border-subtle bg-sunken' : 'border-transparent bg-transparent opacity-50'
+                    }`}>
+                      <div className="flex flex-col gap-0.5 flex-1 min-w-0">
+                        <code className="font-mono text-fg-primary text-[11px] break-all">{c.name}</code>
+                        {c.notes.map((n, i) => (
+                          <span key={i} className="text-warn text-[10px]">{n}</span>
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => void install(c.url)}
+                        disabled={busy}
+                        className={c.usable ? 'btn btn-primary btn-sm shrink-0' : 'btn btn-secondary btn-sm shrink-0'}
+                        title={c.usable ? t('settings.installWheel') : t('settings.wheelAbiIncompatible')}
+                      >
+                        {c.usable ? t('settings.installAction') : t('settings.forceInstall')}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="flex flex-col gap-1 pt-1 border-t border-subtle">
+                <p className="text-xs text-fg-tertiary m-0">{t('settings.manualUrl')}</p>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={manualUrl}
+                    onChange={(e) => setManualUrl(e.target.value)}
+                    placeholder="https://github.com/.../flash_attn-...whl"
+                    className={`${textInputClass} flex-1`}
+                  />
+                  <button
+                    onClick={() => { if (manualUrl.trim()) void install(manualUrl.trim()) }}
+                    disabled={busy || !manualUrl.trim()}
+                    className="btn btn-secondary btn-sm shrink-0"
+                  >{t('settings.install')}</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>)}
+      </div>
+    </details>
+  )
+}
+
+// ── xformers Section（训练 tab）─────────────────────────────────────────────
+//
+// 简化版 attention 加速（替代 flash_attn 的另一选项）。xformers 走 PyPI 直装，
+// 不需要 flash_attn 那种 GitHub 候选 wheel 列表。失败时给 stderr 让用户排错。
+
+function XformersSection() {
+  const { t } = useTranslation()
+  const dialog = useDialog()
+  const [status, setStatus] = useState<XformersStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const { toast } = useToast()
+
+  const refresh = useCallback(async () => {
+    try {
+      const s = await api.getXformersStatus()
+      setStatus(s)
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const install = async () => {
+    if (
+      !(await dialog.confirm(
+        t('settings.confirmInstallXformers'),
+        { tone: 'warn', okText: t('settings.startInstall') },
+      ))
+    ) return
+    setBusy(true)
+    try {
+      const r = await api.installXformers()
+      toast(t('settings.xformersInstalled', { version: r.version ?? '?' }), 'success')
+      await refresh()
+    } catch (e) {
+      toast(t('settings.installFailed', { error: String(e) }), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const statusLabel = error
+    ? t('settings.loadFailedShort')
+    : !status
+      ? t('settings.loadingStatus')
+      : status.installed
+        ? t('settings.installedVersion', { version: status.version ?? '?' })
+        : t('settings.notInstalledShort')
+  const statusOk = status?.installed && !error
+  const hasIssue = !!error
+
+  return (
+    <details id="xformers" open={!!hasIssue} className="rounded-md border border-subtle bg-surface group scroll-mt-24">
+      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
+        <h2 className="text-sm font-semibold text-fg-primary m-0">xformers</h2>
+        <span className="text-xs text-fg-tertiary">{t('settings.xformersSubtitle')}</span>
+        <InfoButton>
+          <p><Trans i18nKey="settings.xformersHelp1" components={{ strong: <strong />, code: <code /> }} /></p>
+          <p>{t('settings.xformersHelp2')}</p>
+          <p>{t('settings.xformersHelp3')}</p>
+        </InfoButton>
+        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : 'text-warn'}`}>{statusLabel}</span>
+      </summary>
+
+      <div className="px-4 pb-4 flex flex-col gap-3">
+        {error && <div className="text-err text-xs font-mono">{error}</div>}
+        {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
+
+        {status && (<>
+          <div className="rounded-sm border border-subtle bg-sunken p-2 flex items-center gap-2 text-xs">
+            <span className="text-fg-tertiary shrink-0">xformers:</span>
+            <code className="font-mono text-fg-primary">
+              {status.installed ? `v${status.version ?? '?'}` : t('settings.notInstalledParen')}
+            </code>
+            {status.installed && <StatusLabel bg="bg-ok-soft" fg="text-ok" text={t('settings.installed')} />}
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => void install()}
+              disabled={busy}
+              className="btn btn-primary btn-sm"
+            >
+              {busy
+                ? t('settings.installing')
+                : status.installed
+                  ? t('settings.reinstallAutoMatchPlain')
+                  : t('settings.installAutoMatchPlain')}
+            </button>
+            <button
+              onClick={() => void refresh()}
+              disabled={busy}
+              className="btn btn-ghost btn-sm"
+              title={t('settings.refreshStatus')}
+            >↻</button>
+          </div>
+        </>)}
+      </div>
+    </details>
+  )
+}
+
