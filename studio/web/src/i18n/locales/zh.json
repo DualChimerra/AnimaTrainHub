@@ -133,7 +133,7 @@
   },
   "sidebar": {
     "title": "Anima",
-    "subtitle": "lora studio",
+    "subtitle": "train hub",
     "newVersion": "新版本",
     "export": "导出",
     "exportTitle": "打包导出当前版本训练集",
@@ -2734,7 +2734,7 @@
     }
   },
   "onboarding": {
-    "title": "欢迎使用 AnimaLoraStudio",
+    "title": "欢迎使用 AnimaTrainHub",
     "subtitle": "下面是建议安装的基础能力,勾选后一键安装。已装好的会自动打勾。",
     "downloadSource": "下载源",
     "downloadSourceHint": "已为你按语言推荐,可以改。下载源同时影响后续所有模型下载。",
@@ -3070,7 +3070,7 @@
     "advanced": "高级参数"
   },
   "runtimeMode": {
-    "title": "以哪种模式运行 AnimaLora Studio？",
+    "title": "以哪种模式运行 AnimaTrainHub？",
     "subtitle": "只需选一次 —— 它决定后端绑定地址、要不要自动开浏览器、数据落在哪。之后可在设置里改。",
     "recommended": "已探测",
     "detectedAs": "自动探测结果：{{mode}}",
@@ -3090,7 +3090,7 @@
         "绑定 127.0.0.1 —— 只有本机能访问",
         "启动后自动打开浏览器",
         "数据留在仓库旁边的 studio_data/",
-        "推荐用 AnimaLoraStudio 启动器 / studio.bat 启动"
+        "推荐用启动器（AnimaLoraStudio.exe）/ studio.bat 启动"
       ]
     },
     "colab": {

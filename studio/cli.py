@@ -784,7 +784,7 @@ def _apply_runtime_mode_defaults(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="studio", description="AnimaStudio 启动器")
+    p = argparse.ArgumentParser(prog="studio", description="AnimaTrainHub 启动器")
     sub = p.add_subparsers(dest="cmd")
 
     p_run = sub.add_parser("run", help="构建前端（如缺）+ 起后端")

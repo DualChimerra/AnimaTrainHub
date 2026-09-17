@@ -53,7 +53,7 @@ from .routers.queue import io as queue_io_router
 from .routers.queue import lifecycle as queue_lifecycle
 from .routers.queue import outputs as queue_outputs
 
-app = FastAPI(title="AnimaStudio", version=__version__, lifespan=lifespan)
+app = FastAPI(title="AnimaTrainHub", version=__version__, lifespan=lifespan)
 # Middleware 注册顺序：starlette 后注册的 middleware 在 stack 外层。
 # TraceIdMiddleware 最先注册 → 实际包在 GZip 外层 → trace_id 在 GZip
 # 之前 bind，gzip handler 内 logger.x 也能拿到。

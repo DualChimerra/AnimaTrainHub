@@ -1,6 +1,6 @@
 <div align="center">
 
-# Anima LoRA Studio
+# AnimaTrainHub
 
 **A local studio for training LoRA / LoKr adapters for Anima and Krea 2.**<br>
 From raw images to test renders in a single browser window, including from your phone.
@@ -138,36 +138,134 @@ Nothing is opened on your router. The link carries a persistent access key, and 
 
 ## Differences from upstream
 
-This is a fork of [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). The training core and backend are synced with upstream v0.20.2. Everything a person actually touches is reworked:
+> [!NOTE]
+> AnimaTrainHub started as a fork of [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio). The training core and backend are synced with upstream **v0.20.2**. Everything a person actually touches is reworked.
 
-- **A new interface** on the [Tailark](https://tailark.com) design system (zinc + indigo, Geist), fully translated into English and Russian, with no Chinese left in the UI.
-- **An explanation for every setting**, plus recommended starting values.
-- **An honest estimate before you start**: steps, time and VRAM.
-- **A phone layout and remote access** at a permanent link, with autostart and an access key.
-- **Checkpoint soup**, EMA, DOP (with a trigger-word field that can read the word back from the captions), Style-Friendly SNR.
-- **Local / Colab modes**, chosen on first launch.
-- **Backported from upstream v0.21–v0.25**: training-side block swap and fixes for memory leaks and spurious OOMs. NaViT packing now works together with block swap.
-- Not backported: generation-side block swap, the v0.22 evaluation page rework and GPU selection on multi-GPU machines.
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**🎨 Interface**<br>
+New design on [Tailark](https://tailark.com) (zinc + indigo, Geist). Fully in English and Russian, no Chinese left in the UI.
+
+</td>
+<td width="33%" valign="top">
+
+**📖 Explanations**<br>
+Every setting has a plain description and a recommended starting value.
+
+</td>
+<td width="33%" valign="top">
+
+**⏱ Honest estimate**<br>
+Steps, time and VRAM are shown before you press Start.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**📱 Phone + remote access**<br>
+Phone layout on every page and a permanent link with autostart and an access key.
+
+</td>
+<td valign="top">
+
+**🧪 Training toolbox**<br>
+Checkpoint soup, EMA, DOP with a trigger-word field, Style-Friendly SNR.
+
+</td>
+<td valign="top">
+
+**☁️ Local / Colab**<br>
+Runtime mode chosen on first launch: binding, browser and data location follow it.
+
+</td>
+</tr>
+</table>
+
+**Backported from upstream v0.21–v0.25:** training-side block swap (Krea 2 on 16 GB, Anima on 6 GB), fixes for memory leaks and spurious OOMs; NaViT packing now works together with block swap.<br>
+**Not backported:** generation-side block swap, the v0.22 evaluation page rework, GPU selection on multi-GPU machines.
 
 <br>
 
 ## Quick start
 
-**1. Prepare your system**: an NVIDIA driver, Python 3.10+, Node.js 18+ (builds the UI), Git.
+<table>
+<tr>
+<td width="33%" valign="top">
 
-**2. Clone and launch**
+### 1 · Prepare
+
+- NVIDIA driver
+- Python **3.10+**
+- Node.js **18+** (builds the UI)
+- Git
+
+</td>
+<td width="33%" valign="top">
+
+### 2 · Launch
 
 ```bash
 git clone https://github.com/DualChimerra/AnimaTrainHub
 cd AnimaTrainHub
 ```
 
-- **Windows**: double-click `AnimaLoraStudio.exe` (or run `studio.bat`).
-- **Linux / macOS**: `./studio.sh`.
+**Windows**: `AnimaLoraStudio.exe` or `studio.bat`<br>
+**Linux / macOS**: `./studio.sh`
 
-The first launch takes a while: it sets up the environment, downloads PyTorch for your GPU and builds the UI. Then <http://127.0.0.1:8765> opens.
+</td>
+<td width="33%" valign="top">
 
-**3. Download models**: **Settings → Models**, one button per model family. Files go to `./models/`.
+### 3 · Get models
+
+Open **Settings → Models** and press download for your model family. Files go to `./models/`.
+
+Then create a project and follow the sidebar.
+
+</td>
+</tr>
+</table>
+
+> [!TIP]
+> The first launch takes a while: it creates the environment, downloads PyTorch for your GPU and builds the UI. Then <http://127.0.0.1:8765> opens by itself.
+
+### How a LoRA gets made
+
+```mermaid
+flowchart LR
+    A[📥 Dataset] --> B[1 · Curation]
+    B --> C[2 · Preprocess]
+    C --> D[3 · Tags]
+    D --> E[4 · Reg set]
+    E --> F[5 · Train]
+    F --> G[📈 Queue / Monitor]
+    G --> H[🎨 Generate / Soup]
+    style C stroke-dasharray: 4 3
+    style E stroke-dasharray: 4 3
+```
+
+<sub>Dashed steps are optional.</sub>
+
+<details>
+<summary><b>Step by step</b></summary>
+
+<br>
+
+| Step | What you do |
+|---|---|
+| **Projects → New project** | The first version is created automatically |
+| **Dataset** | Upload images or a zip with captions, or scrape Booru |
+| **Curation** | Move what you want into train, group it into concepts, set aside a validation set |
+| **Preprocess** | Remove duplicates, upscale small images, crop — or skip |
+| **Tags** | Clean up captions with bulk operations |
+| **Reg set** | Generate one with the base model, collect one from Booru — or skip |
+| **Train** | Pick a preset, adjust parameters, enter the trigger word for DOP, press **Start training** |
+| **Queue / Monitor** | Watch loss, samples and logs; pause and resume |
+| **Generate** | Test epochs with single renders or an XY matrix, blend the best into a soup |
+
+</details>
 
 <details>
 <summary><b>Commands and flags</b></summary>
@@ -189,60 +287,83 @@ python tools/download_models.py --endpoint URL   # via your own mirror
 
 </details>
 
-<details>
-<summary><b>How a LoRA gets made</b></summary>
-
-```
-Dataset ─▶ 1. Curation ─▶ 2. Preprocess ─▶ 3. Tags ─▶ 4. Reg set ─▶ 5. Train ─▶ Queue / Monitor ─▶ Generate
-                          (optional)                  (optional)
-```
-
-1. **Projects → New project.** The first version is created automatically.
-2. **Dataset.** Upload images or a zip with captions.
-3. **Curation.** Move what you want into train, group it into concepts, optionally set aside a validation set.
-4. **Preprocess.** Remove duplicates, upscale small images, crop, or skip the step.
-5. **Tags.** Clean up captions with bulk operations.
-6. **Reg set.** Generate one with the base model, collect one from Booru, or skip the step.
-7. **Train.** Pick a preset, adjust parameters, enter the trigger word if you use DOP, and press **Start training**.
-8. **Queue / Monitor.** Watch loss, samples and logs; pause and resume.
-9. **Generate.** Test epochs with single renders or an XY matrix, and blend the best into a soup.
-
-</details>
-
 <br>
 
 ## Requirements
 
+<table>
+<tr>
+<td width="50%" valign="top">
+
+#### 🖥 Hardware
+
 | | Minimum | Recommended |
 |---|---|---|
-| **GPU** | NVIDIA 6 GB (Anima + block swap) | NVIDIA 16 GB+ |
-| **RAM** | 16 GB | 32 GB (block swap pins up to 3.6 GB for Anima and ~11 GB for Krea 2 fp8) |
-| **Storage** | SSD, ~20 GB for models and environment | SSD with headroom for latent caches and samples |
+| **GPU** | NVIDIA 6 GB | NVIDIA 16 GB+ |
+| **RAM** | 16 GB | 32 GB |
+| **Disk** | SSD, ~20 GB | SSD with headroom |
 
-| Model | Architecture | Text encoder | Adapters |
-|---|---|---|---|
-| [**Anima**](https://huggingface.co/circlestone-labs/Anima) | Cosmos-Predict2 DiT, 2B | Qwen3-0.6B | LoRA, LoKr, LoHa |
-| **Krea 2** | single-stream MMDiT (fp8 base supported) | Qwen3-VL-4B | LoRA, LoKr, LoHa |
+<sub>6 GB works for Anima with block swap. Block swap pins up to 3.6 GB of RAM for Anima and ~11 GB for Krea 2 fp8.</sub>
 
-AMD GPUs and Apple Silicon are not supported.
+</td>
+<td width="50%" valign="top">
+
+#### 🧠 Models
+
+| Model | Base | Text encoder |
+|---|---|---|
+| [**Anima**](https://huggingface.co/circlestone-labs/Anima) | Cosmos-Predict2 DiT, 2B | Qwen3-0.6B |
+| **Krea 2** | single-stream MMDiT, fp8 base supported | Qwen3-VL-4B |
+
+<sub>Both train LoRA, LoKr and LoHa; outputs load into ComfyUI as they are.</sub>
+
+</td>
+</tr>
+</table>
+
+> [!WARNING]
+> AMD GPUs and Apple Silicon are not supported.
 
 <br>
 
 ## Documentation
 
-| Section | Contents |
-|---|---|
-| [docs/user-guide](docs/user-guide/) | captions and tags, regularization, optimizers, training parameters, custom models |
-| [docs/ema-and-dop.md](docs/ema-and-dop.md) · [docs/style-friendly-snr.md](docs/style-friendly-snr.md) · [docs/navit-packing.md](docs/navit-packing.md) | EMA and DOP, Style-Friendly SNR, NaViT packing |
-| [docs/architecture](docs/architecture/) · [docs/adr](docs/adr/) | how the studio is built, architecture decisions |
-| [studio/README.md](studio/README.md) · [runtime/training/README.md](runtime/training/README.md) | backend and frontend modules, training core and plugins |
-| [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) | development process and release history |
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**📘 [User guide](docs/user-guide/)**<br>
+Captions and tags, regularization, optimizers, training parameters, custom models.
+
+</td>
+<td width="50%" valign="top">
+
+**🧪 Algorithms**<br>
+[EMA and DOP](docs/ema-and-dop.md) · [Style-Friendly SNR](docs/style-friendly-snr.md) · [NaViT packing](docs/navit-packing.md)
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🏗 Architecture**<br>
+[How the studio is built](docs/architecture/) · [Decision records](docs/adr/) · [Backend and frontend](studio/README.md) · [Training core and plugins](runtime/training/README.md)
+
+</td>
+<td valign="top">
+
+**🤝 Project**<br>
+[Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+
+</td>
+</tr>
+</table>
 
 <details>
 <summary><b>Repository layout</b></summary>
 
 ```
-AnimaLoraStudio/
+AnimaTrainHub/
 ├── runtime/        # training core, generation, inference daemon (usable from the CLI)
 ├── studio/         # web studio: FastAPI (api / services / domain / infrastructure / workers)
 │   └── web/        # UI: React + Vite + Tailwind
@@ -260,15 +381,27 @@ AnimaLoraStudio/
 
 ## Acknowledgements
 
-- Original project: [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio).
-- Training scripts derive from [Moeblack/AnimaLoraToolkit](https://github.com/Moeblack/AnimaLoraToolkit).
-- Model and VAE: [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima). Adapters: [LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS).
-- Other algorithm and code sources are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+| Part | Source |
+|---|---|
+| **Original project** | [WalkingMeatAxolotl/AnimaLoraStudio](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio) |
+| **Training scripts** | [Moeblack/AnimaLoraToolkit](https://github.com/Moeblack/AnimaLoraToolkit) |
+| **Model and VAE** | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) |
+| **Adapters** | [LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS) |
+| **Everything else** | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) |
 
 ## License
 
-The code is released under **GPL-3.0** ([LICENSE](LICENSE)). Some third-party components (NVIDIA Cosmos, Wan2.1) are Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)). Model weights (Anima, Qwen, VAE) have their own licenses, including non-commercial restrictions: check the model cards.
+Code: **GPL-3.0** ([LICENSE](LICENSE)). Some third-party components (NVIDIA Cosmos, Wan2.1) are **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)).
+
+> [!IMPORTANT]
+> Model weights (Anima, Qwen, VAE) have their own licenses, including non-commercial restrictions. Check the model cards before using a trained LoRA commercially.
+
+<br>
 
 <div align="center">
+
+**AnimaTrainHub** · made for people who train LoRAs, not for people who read training scripts
+
 <sub>Screenshots use demo data.</sub>
+
 </div>

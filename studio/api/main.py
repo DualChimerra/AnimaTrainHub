@@ -21,7 +21,7 @@ def main() -> None:
 
     local_cache.apply(REPO_ROOT)
 
-    parser = argparse.ArgumentParser(description="AnimaStudio daemon")
+    parser = argparse.ArgumentParser(description="AnimaTrainHub daemon")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -35,7 +35,7 @@ def main() -> None:
     os.environ["ALS_STUDIO_PORT"] = str(args.port)
 
     # ADR 0012：SPA 入口在根路径 /（不再用 /studio 子路径）。
-    print(f"[AnimaStudio] http://{args.host}:{args.port}/")
+    print(f"[AnimaTrainHub] http://{args.host}:{args.port}/")
     uvicorn.run(
         "studio.server:app",
         host=args.host,

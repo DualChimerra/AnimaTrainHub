@@ -34,7 +34,7 @@ def root() -> FileResponse | JSONResponse:
         return FileResponse(index)
     return JSONResponse(
         {
-            "message": "AnimaStudio is running. Build the React app at studio/web/ "
+            "message": "AnimaTrainHub is running. Build the React app at studio/web/ "
             "(npm install && npm run build) to enable the new UI."
         }
     )

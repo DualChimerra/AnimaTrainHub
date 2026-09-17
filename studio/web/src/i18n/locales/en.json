@@ -133,7 +133,7 @@
   },
   "sidebar": {
     "title": "Anima",
-    "subtitle": "lora studio",
+    "subtitle": "train hub",
     "newVersion": "New version",
     "export": "Export",
     "exportTitle": "Export the active version's train set",
@@ -2853,7 +2853,7 @@
     }
   },
   "onboarding": {
-    "title": "Welcome to AnimaLoraStudio",
+    "title": "Welcome to AnimaTrainHub",
     "subtitle": "Here are the basics you'll want set up. Tick what you need and install them in one go. Already-installed items are auto-checked.",
     "downloadSource": "Download source",
     "downloadSourceHint": "Pre-selected based on your language; feel free to change. This source is used for all model downloads.",
@@ -3189,7 +3189,7 @@
     "advanced": "Advanced parameters"
   },
   "runtimeMode": {
-    "title": "How do you want to run AnimaLora Studio?",
+    "title": "How do you want to run AnimaTrainHub?",
     "subtitle": "Pick once — this sets sane defaults for where the server binds, whether a browser opens, and where your data lives. You can change it later in Settings.",
     "recommended": "Detected",
     "detectedAs": "Auto-detected: {{mode}}",
@@ -3209,7 +3209,7 @@
         "Binds to 127.0.0.1 — reachable only from this machine",
         "Opens your browser automatically on start",
         "Data stays in studio_data/ next to the repo",
-        "Best launched via the AnimaLoraStudio launcher / studio.bat"
+        "Best launched via the launcher (AnimaLoraStudio.exe) / studio.bat"
       ]
     },
     "colab": {

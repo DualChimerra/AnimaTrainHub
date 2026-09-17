@@ -135,7 +135,7 @@ export default function ProjectsPage() {
     <div className="fade-in">
       <PageHeader
         title={t('projects.title')}
-        eyebrow="Anima · LoRA Studio"
+        eyebrow="AnimaTrainHub"
         subtitle={t('projects.description')}
         actions={
           <>

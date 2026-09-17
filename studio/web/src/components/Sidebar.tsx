@@ -581,7 +581,7 @@ export default function Sidebar({
         </span>
         {!collapsed && (
           <span className="text-sm font-semibold tracking-tight text-fg-primary whitespace-nowrap">
-            Anima <span className="text-fg-tertiary font-medium">Studio</span>
+            Anima<span className="text-fg-tertiary font-medium">TrainHub</span>
           </span>
         )}
       </div>
