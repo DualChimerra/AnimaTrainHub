@@ -463,8 +463,12 @@ class _Tunnel:
         waiting (killed after the timeout, e.g. Tailscale asking for consent)."""
         proc = self._spawn(cmd, dict(os.environ))
         self._await(proc, lambda _line: None, until_exit=True)
-        code = proc.poll()
-        if code is None:
+        # Output EOF can arrive a moment before the OS records the exit code
+        # (seen on Windows: poll() still None ~30 ms after the CLI finished).
+        try:
+            code: Optional[int] = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            code = None
             self._stop_process(proc)
         return list(self._log), code
 
