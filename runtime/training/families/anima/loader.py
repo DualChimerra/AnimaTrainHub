@@ -188,6 +188,12 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *,
         num_blocks, num_heads = 36, 40
     else:
         raise RuntimeError(f"未知的 model_channels={model_channels}")
+    # 层数以 checkpoint 为准：同为 2048 宽也有 28 层（2B）和 40 层（2.9B）两种。
+    # 写死 28 会让 strict=False 的加载静默丢掉多出来的层。
+    header_blocks = block_count_from_header(transformer_path)
+    if header_blocks and header_blocks != num_blocks:
+        logger.info("Anima DiT 层数按 checkpoint 取 %d（默认 %d）", header_blocks, num_blocks)
+        num_blocks = header_blocks
 
     config = dict(
         max_img_h=1024, max_img_w=1024, max_frames=128,
@@ -209,6 +215,12 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *,
 
     # 加载权重
     sd = _load_safetensors_state_dict(Path(transformer_path))
+    # RoPE 表（seq = arange(最大长度) 等）由 config 推出；有的导出把它们按别的
+    # 最大长度存进了权重（2.9B: seq 256 vs 模型 512），交给模型自己重建。
+    sd = {
+        k: v for k, v in sd.items()
+        if not ("pos_embedder." in k and k.rsplit(".", 1)[-1] in ("seq", "dim_spatial_range", "dim_temporal_range"))
+    }
     info = _load_weights_best_effort(model, sd, label="Transformer")
 
     # 如果 checkpoint 中完全没有 llm_adapter 权重，随机初始化会把 cross-attn 条件搞乱，直接禁用更安全

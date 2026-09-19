@@ -160,13 +160,24 @@ def _unlink(path: Path) -> None:
         raise SoupError(f"Could not delete the file: {exc}") from exc
 
 
+def _temp_part(directory: Path) -> Path:
+    """Reserve a unique `.part` file and release its handle right away.
+
+    mkstemp leaves the file open; on Windows that open handle blocks the
+    writer (safetensors gets "access denied") and the cleanup unlink.
+    """
+    fd, name = tempfile.mkstemp(dir=str(directory), suffix=".part")
+    os.close(fd)
+    return Path(name)
+
+
 def save_upload(name: str, data: bytes) -> dict[str, Any]:
     """Store an uploaded adapter, after checking it is a readable safetensors."""
     ensure_dirs()
     if not data:
         raise SoupError("The uploaded file is empty.")
     path = upload_path(name)
-    tmp = Path(tempfile.mkstemp(dir=str(UPLOAD_DIR), suffix=".part")[1])
+    tmp = _temp_part(UPLOAD_DIR)
     try:
         tmp.write_bytes(data)
         # Parse before accepting: a truncated upload should fail here, not two
@@ -409,7 +420,7 @@ def merge(
 
     meta = _soup_metadata(base_info, paths, raw_weights, weights, method)
 
-    tmp = Path(tempfile.mkstemp(dir=str(OUTPUT_DIR), suffix=".part")[1])
+    tmp = _temp_part(OUTPUT_DIR)
     try:
         save_file(merged, str(tmp), metadata=meta)
         os.replace(tmp, out)
