@@ -1,6 +1,6 @@
 """Queue 任务生命周期（PR-6 commit 6 从 server.py 抽出）。
 
-13 routes：
+14 routes：
     GET   /api/queue                 list（默认隐藏 generate / reg_ai）
     POST  /api/queue                 enqueue（按 preset 名，可带 scheduled_at 定时）
     POST  /api/queue/{task_id}/start_now  scheduled 手动提前转 pending（0.17 P-B）
@@ -9,6 +9,7 @@
     POST  /api/queue/release         恢复调度
     POST  /api/queue/reorder         按 id 列表重排
     GET   /api/queue/{task_id}       task DB 行（含 is_pausable / is_resumable 信号）
+    PUT   /api/queue/{task_id}/note    任务备注（v20 tasks.note；右键 / 详情页写）
     POST  /api/queue/{task_id}/cancel
     POST  /api/queue/{task_id}/pause   ADR 0006 §4.1
     POST  /api/queue/{task_id}/resume  ADR 0006 §6 路径 A + Addendum 2（paused/failed/canceled）
@@ -23,7 +24,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 
 from ...deps import _supervisor
-from ...schemas.queue import EnqueueRequest, ReorderRequest
+from ...schemas.queue import EnqueueRequest, ReorderRequest, TaskNoteBody
 from .... import db
 from ....domain.errors import (
     ConflictError,
@@ -99,6 +100,9 @@ def _enrich_tasks(items: list[dict[str, Any]]) -> None:
 
 # 0.17 P-E — history 分页 page_size 上限，防一次拉爆。
 _MAX_PAGE_SIZE = 100
+
+# 备注长度上限 —— UI 是「一句话便签」，不是日志。超长截断而不是 422。
+_MAX_NOTE_LEN = 500
 
 
 @router.get("/api/queue")
@@ -297,6 +301,32 @@ def get_queue_item(task_id: int) -> dict[str, Any]:
         task["is_pausable"] = False
     task["is_resumable"] = _is_resumable(task)
     return task
+
+
+@router.put("/api/queue/{task_id}/note")
+def set_task_note(task_id: int, body: TaskNoteBody) -> dict[str, Any]:
+    """写 / 清 任务备注（v20 tasks.note）。
+
+    队列页右键任一行写，任务详情页 overview 也能编辑。纯 UI 元数据：任何
+    状态的 task 都能改（跑完很久的历史任务也能补一句「这个最好用」）。
+    空串 / 纯空白 → 清空（存 NULL）。
+    """
+    raw = (body.note or "").strip()
+    note = raw[:_MAX_NOTE_LEN] or None
+    with db.connection_for() as conn:
+        if not db.get_task(conn, task_id):
+            raise NotFoundError(
+                "Task not found", code="task.not_found", details={"task_id": task_id}
+            )
+        db.update_task(conn, task_id, note=note)
+        task = db.get_task(conn, task_id)
+    # 队列页 / 详情页可能同时开着 —— 复用 task_state_changed 让两边都刷新。
+    bus.publish({
+        "type": "task_state_changed",
+        "task_id": task_id,
+        "status": (task or {}).get("status"),
+    })
+    return task or {"id": task_id, "note": note}
 
 
 @router.post("/api/queue/{task_id}/cancel")

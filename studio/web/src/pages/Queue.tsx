@@ -6,10 +6,14 @@ import { HoldQueueModal, type HoldDecision } from '../components/HoldQueueModal'
 import { PauseConfirmModal } from '../components/PauseConfirmModal'
 import { PauseProgressModal } from '../components/PauseProgressModal'
 import StepShell from '../components/StepShell'
+import TaskSampleStrip from '../components/TaskSampleStrip'
 import { useDialog } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import { useEventStream } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
+
+/** 备注输入上限 —— 与后端 _MAX_NOTE_LEN 对齐（超了后端截断，这里先拦住）。 */
+const MAX_NOTE_LEN = 500
 
 
 type TaskKind = 'train' | 'tag' | 'reg' | 'download' | 'curate' | 'unknown'
@@ -67,8 +71,12 @@ export default function QueuePage() {
   const [exporting, setExporting] = useState(false)
   const reloadTimer = useRef<number | null>(null)
   const { toast } = useToast()
-  const { confirm } = useDialog()
+  const { confirm, prompt } = useDialog()
   const navigate = useNavigate()
+  // 右键菜单（备注 / 折叠采样条）：null = 关闭；否则记录锚点坐标 + 目标 task。
+  const [menu, setMenu] = useState<{ x: number; y: number; task: Task } | null>(null)
+  // 采样条默认展开；用户按任务折叠，记在这里（只在本次会话内存活）。
+  const [stripsHidden, setStripsHidden] = useState<ReadonlySet<number>>(new Set())
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
     scheduled: t('status.queued'),
@@ -232,6 +240,41 @@ export default function QueuePage() {
         toast(t('queue.resumeFailed', { reason: msg }), 'error')
       }
     }
+  }
+
+  // ── 备注（_v20 tasks.note）────────────────────────────────────────────────
+  // 右键任一行 → 写一句话（"这次 alpha=16"、"数据集换 v3"）。备注跟着 task 走，
+  // 队列行上直接显示，任务详情页 overview 也能看 / 改。
+  const editNote = async (task: Task) => {
+    const next = await prompt(t('queue.notePrompt', { id: task.id }), {
+      title: task.note ? t('queue.noteEdit') : t('queue.noteAdd'),
+      defaultValue: task.note ?? '',
+      placeholder: t('queue.notePlaceholder'),
+      validate: (v) =>
+        v.length > MAX_NOTE_LEN ? t('queue.noteTooLong', { max: MAX_NOTE_LEN }) : null,
+      okText: t('common.save'),
+    })
+    if (next === null) return
+    await saveNote(task, next)
+  }
+
+  const saveNote = async (task: Task, note: string) => {
+    try {
+      const updated = await api.setTaskNote(task.id, note)
+      setTasks((ts) => ts.map((x) => (x.id === task.id ? { ...x, note: updated.note } : x)))
+      toast(updated.note ? t('queue.noteSaved') : t('queue.noteCleared'), 'success')
+    } catch (e) {
+      toast(t('queue.noteFailed', { reason: String(e) }), 'error')
+    }
+  }
+
+  const toggleStrip = (taskId: number) => {
+    setStripsHidden((prev) => {
+      const next = new Set(prev)
+      if (next.has(taskId)) next.delete(taskId)
+      else next.add(taskId)
+      return next
+    })
   }
 
   const cancelPaused = async (task: Task) => {
@@ -416,14 +459,30 @@ export default function QueuePage() {
               const eta = estimateEta(task)
               const tone = STATUS_TONE[task.status]
 
+              // 训练类任务才有采样图目录；其余（download/tag/…）不铺采样条，
+              // 也就不会为它们发那条清单请求。
+              const canShowSamples = !!task.monitor_state_path && !stripsHidden.has(task.id)
+
               return (
-                <button
+                <div
                   key={task.id}
-                  onClick={() => navigate(`/queue/${task.id}`)}
-                  className={`card card-hover block overflow-hidden text-left p-0 ${isRunning ? 'cursor-pointer border border-accent bg-accent-soft' : 'cursor-default border border-subtle bg-surface'}`}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    setMenu({ x: e.clientX, y: e.clientY, task })
+                  }}
+                  className={`card card-hover overflow-hidden text-left p-0 ${isRunning ? 'border border-accent bg-accent-soft' : 'border border-subtle bg-surface'}`}
                 >
                   <div
-                    className="queue-row px-[22px] py-4 grid gap-4 items-center"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => navigate(`/queue/${task.id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        navigate(`/queue/${task.id}`)
+                      }
+                    }}
+                    className={`queue-row px-[22px] py-4 grid gap-4 items-center ${isRunning ? 'cursor-pointer' : 'cursor-default'}`}
                     style={{ gridTemplateColumns: '64px minmax(0,1fr) 120px minmax(0,1.1fr) 170px' }}
                   >
                     <span className={`font-mono text-sm ${isRunning ? 'text-accent font-semibold' : 'text-fg-tertiary font-normal'}`}>
@@ -558,12 +617,68 @@ export default function QueuePage() {
                       )}
                     </span>
                   </div>
-                </button>
+
+                  {/* 备注条 —— 右键写的一句话，队列里一眼可见（详情页 overview 同源）。 */}
+                  {task.note && (
+                    <div
+                      className="px-[22px] py-2 border-t border-subtle bg-overlay/40 flex items-start gap-2"
+                      data-testid={`task-note-${task.id}`}
+                    >
+                      <span className="text-xs text-fg-tertiary font-mono uppercase tracking-wider shrink-0 mt-px">
+                        {t('queue.note')}
+                      </span>
+                      <span className="text-xs text-fg-secondary break-words min-w-0 flex-1">
+                        {task.note}
+                      </span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void editNote(task) }}
+                        className="btn btn-ghost btn-xs shrink-0"
+                      >
+                        {t('queue.noteEdit')}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 内联采样条 —— 不用点进详情就能翻这次训练出的图，点开灯箱。 */}
+                  {canShowSamples && (
+                    <TaskSampleStrip taskId={task.id} live={isRunning} />
+                  )}
+                </div>
               )
             })}
           </div>
         )}
       </div>
+
+      {/* 右键菜单 —— 备注 + 采样条折叠。点任意处 / ESC 关（见组件内部）。 */}
+      {menu && (
+        <TaskContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={[
+            {
+              label: menu.task.note ? t('queue.noteEdit') : t('queue.noteAdd'),
+              onSelect: () => void editNote(menu.task),
+            },
+            ...(menu.task.note ? [{
+              label: t('queue.noteRemove'),
+              tone: 'err' as const,
+              onSelect: () => void saveNote(menu.task, ''),
+            }] : []),
+            ...(menu.task.monitor_state_path ? [{
+              label: stripsHidden.has(menu.task.id)
+                ? t('queue.samplesShow')
+                : t('queue.samplesHide'),
+              onSelect: () => toggleStrip(menu.task.id),
+            }] : []),
+            {
+              label: t('queue.taskDetailTooltip'),
+              onSelect: () => navigate(`/queue/${menu.task.id}`),
+            },
+          ]}
+        />
+      )}
 
       {/* ADR Addendum 1 §UI：暂停 confirm modal — 告知用户语义后才调 api。 */}
       {pauseConfirmTaskId !== null && (
@@ -592,5 +707,77 @@ export default function QueuePage() {
         />
       )}
     </StepShell>
+  )
+}
+
+// ── TaskContextMenu ─────────────────────────────────────────────────────────
+// 队列行右键弹出的小菜单。定位用 fixed + 视口边界夹紧（靠右/靠下的行不出屏）。
+// 任何一次点击 / 滚动 / ESC 都关闭 —— 菜单本身的点击由条目 onSelect 先跑完。
+
+interface MenuItem {
+  label: string
+  onSelect: () => void
+  tone?: 'err'
+}
+
+function TaskContextMenu({ x, y, items, onClose }: {
+  x: number
+  y: number
+  items: MenuItem[]
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [pos, setPos] = useState({ x, y })
+
+  // 挂载后按真实尺寸夹回视口内（菜单高度随条目数变，先渲染再量）。
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    setPos({
+      x: Math.min(x, window.innerWidth - r.width - 8),
+      y: Math.min(y, window.innerHeight - r.height - 8),
+    })
+  }, [x, y])
+
+  useEffect(() => {
+    const close = () => onClose()
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    // capture 阶段 + 下一帧注册：避免打开菜单的那次 contextmenu/click 立刻关掉它。
+    const tid = window.setTimeout(() => {
+      window.addEventListener('click', close)
+      window.addEventListener('contextmenu', close)
+      window.addEventListener('scroll', close, true)
+    }, 0)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.clearTimeout(tid)
+      window.removeEventListener('click', close)
+      window.removeEventListener('contextmenu', close)
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      data-testid="queue-context-menu"
+      className="fixed z-[70] min-w-[180px] py-1 rounded-md border border-subtle bg-elevated shadow-xl"
+      style={{ left: pos.x, top: pos.y }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {items.map((it) => (
+        <button
+          key={it.label}
+          role="menuitem"
+          onClick={() => { it.onSelect(); onClose() }}
+          className={`block w-full text-left px-3 py-1.5 text-sm bg-transparent border-none cursor-pointer hover:bg-overlay ${it.tone === 'err' ? 'text-err' : 'text-fg-primary'}`}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
   )
 }

@@ -273,6 +273,9 @@ export default function QueueDetailPage() {
           </div>
         )}
 
+        {/* 备注（_v20 tasks.note）—— 队列页右键写的那句话，这里完整显示 + 可改。 */}
+        {task && <TaskNoteCard task={task} onSaved={setTask} />}
+
         {/* Stat cards for running tasks */}
         {task && task.status === 'running' && (
           <div className="grid grid-cols-4 gap-2.5 mt-1 m-grid-2">
@@ -341,6 +344,104 @@ export default function QueueDetailPage() {
           onClose={() => setPauseModalOpen(false)}
         />
       )}
+    </div>
+  )
+}
+
+// ── TaskNoteCard ────────────────────────────────────────────────────────────
+// 队列页右键给任务贴的备注（_v20 tasks.note）在训练页顶部完整显示，就地可改。
+// 这里给 textarea（多行）而队列页给单行 prompt —— 同一个字段，详情页是「写长
+// 一点」的地方。
+
+function TaskNoteCard({ task, onSaved }: {
+  task: Task
+  onSaved: (t: Task) => void
+}) {
+  const { t } = useTranslation()
+  const { toast } = useToast()
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(task.note ?? '')
+  const [saving, setSaving] = useState(false)
+
+  const startEdit = () => {
+    setDraft(task.note ?? '')
+    setEditing(true)
+  }
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      const updated = await api.setTaskNote(task.id, draft)
+      onSaved(updated)
+      toast(updated.note ? t('queue.noteSaved') : t('queue.noteCleared'), 'success')
+      setEditing(false)
+    } catch (e) {
+      toast(t('queue.noteFailed', { reason: String(e) }), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-2 px-3.5 py-3 rounded-md border border-subtle bg-surface">
+        <span className="text-xs text-fg-tertiary font-mono uppercase tracking-wider">
+          {t('queue.note')}
+        </span>
+        <textarea
+          autoFocus
+          value={draft}
+          maxLength={500}
+          rows={3}
+          placeholder={t('queue.notePlaceholder')}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { e.preventDefault(); setEditing(false) }
+            // Ctrl/Cmd+Enter 保存 —— 纯 Enter 留给换行。
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void save() }
+          }}
+          className="input w-full text-sm resize-y"
+          data-testid="task-note-input"
+        />
+        <div className="flex gap-2">
+          <button onClick={() => void save()} disabled={saving} className="btn btn-primary btn-sm">
+            {saving ? t('common.saving') : t('common.save')}
+          </button>
+          <button onClick={() => setEditing(false)} disabled={saving} className="btn btn-ghost btn-sm">
+            {t('common.cancel')}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (!task.note) {
+    return (
+      <button
+        onClick={startEdit}
+        className="btn btn-ghost btn-xs self-start text-fg-tertiary"
+        title={t('queue.noteHint')}
+        data-testid="task-note-add"
+      >
+        + {t('queue.noteAdd')}
+      </button>
+    )
+  }
+
+  return (
+    <div
+      className="flex items-start gap-2.5 px-3.5 py-2.5 rounded-md border border-subtle bg-surface"
+      data-testid="task-note"
+    >
+      <span className="text-xs text-fg-tertiary font-mono uppercase tracking-wider shrink-0 mt-0.5">
+        {t('queue.note')}
+      </span>
+      <span className="text-sm text-fg-secondary whitespace-pre-wrap break-words flex-1 min-w-0">
+        {task.note}
+      </span>
+      <button onClick={startEdit} className="btn btn-ghost btn-xs shrink-0">
+        {t('queue.noteEdit')}
+      </button>
     </div>
   )
 }

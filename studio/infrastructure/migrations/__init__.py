@@ -34,6 +34,7 @@ from ._v16_scheduled_at import migrate as _migrate_v16
 from ._v17_job_created_at import migrate as _migrate_v17
 from ._v18_unified_ledger import migrate as _migrate_v18
 from ._v19_legacy_jobs_freeze import migrate as _migrate_v19
+from ._v20_task_note import migrate as _migrate_v20
 
 Migration = Callable[[sqlite3.Connection], None]
 
@@ -59,6 +60,7 @@ MIGRATIONS: list[Migration] = [
     _migrate_v17, # 上游 v16: project_jobs.created_at（0.17 P-G 数据作业详情页入队时间）
     _migrate_v18, # 上游 v17: tasks.params（R-2 台账合并——tasks 承接数据作业 kind 参数）
     _migrate_v19, # 上游 v18: 冻结旧 project_jobs（R-3 写路径翻转，残留 pending/running→canceled）
+    _migrate_v20, # v20: tasks.note（队列任务备注，右键写、详情页可编辑）
 ]
 
 
