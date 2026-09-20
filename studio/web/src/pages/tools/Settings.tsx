@@ -220,6 +220,27 @@ const EMPTY: Secrets = {
   }
 }
 
+/** Keep the settings screen compatible with older secrets payloads.
+ *
+ * New sections are added over time, while an already running backend or a
+ * test fixture can still return the previous shape.  The UI must not crash
+ * during that short mismatch.  Secrets are only two levels deep, so a
+ * shallow merge per section is sufficient and preserves server values.
+ */
+function withSecretsDefaults(value: Secrets): Secrets {
+  const merged = { ...EMPTY, ...value } as Record<string, unknown>
+  for (const key of Object.keys(EMPTY) as (keyof Secrets)[]) {
+    const fallback = EMPTY[key]
+    const actual = value[key]
+    if (fallback && actual
+      && typeof fallback === 'object' && !Array.isArray(fallback)
+      && typeof actual === 'object' && !Array.isArray(actual)) {
+      merged[key as string] = { ...fallback, ...actual }
+    }
+  }
+  return merged as unknown as Secrets
+}
+
 const textInputClass = 'w-full px-2 py-1 outline-none rounded-sm bg-sunken border border-subtle text-sm text-fg-primary focus:border-accent'
 
 const MODEL_DESCRIPTION_KEYS: Record<string, string> = {
@@ -242,7 +263,7 @@ export default function SettingsPage() {
   // 本组件 mount/unmount（抽屉开关）不再触发重拉。`server` 别名保留是为了让下方
   // 大段表单代码改动最小。
   const {
-    secrets: server,
+    secrets: rawServer,
     secretsError,
     setSecrets: setServer,
     catalog,
@@ -251,6 +272,10 @@ export default function SettingsPage() {
     downloadBusy,
     startDownload,
   } = useSettingsData()
+  const server = useMemo(
+    () => (rawServer ? withSecretsDefaults(rawServer) : null),
+    [rawServer],
+  )
   const [draft, setDraft] = useState<Secrets>(EMPTY)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -2189,4 +2214,3 @@ function XformersSection() {
     </details>
   )
 }
-

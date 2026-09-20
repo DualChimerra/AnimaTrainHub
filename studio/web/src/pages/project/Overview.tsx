@@ -10,7 +10,7 @@
  *  Live 训练进度 (step/total/ETA) 不实装 —— 需 SSE/monitor state 整合，留 follow-up。
  *  "复制配置开新版本" / "调小 batch 重训" 需新后端 API，渲染为占位按钮 toast 提示。
  */
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import {
@@ -33,6 +33,7 @@ import { arBucket } from '../../lib/aspectRatio'
 import { computePixelHist } from '../../lib/pixelBins'
 import { useProjectCtx } from '../../context/ProjectContext'
 import { useToast } from '../../components/Toast'
+import { useEventStream } from '../../lib/useEventStream'
 
 type OverviewTab = 'details' | 'tasks' | 'output'
 
@@ -1102,7 +1103,7 @@ export default function ProjectOverview() {
 
   // 项目全部 task（最近优先）— 右栏 Recent runs + banner / Output 数据源
   const [projTasks, setProjTasks] = useState<Task[]>([])
-  useEffect(() => {
+  const loadProjectTasks = useCallback(() => {
     let cancelled = false
     void api.listQueue()
       .then((items) => {
@@ -1115,6 +1116,15 @@ export default function ProjectOverview() {
       .catch(() => { if (!cancelled) setProjTasks([]) })
     return () => { cancelled = true }
   }, [project.id])
+  useEffect(() => loadProjectTasks(), [loadProjectTasks])
+
+  useEventStream((evt) => {
+    if (evt.type === 'train_loop_started'
+      || evt.type === 'auto_epoch_backup_written'
+      || evt.type === 'task_state_changed') {
+      loadProjectTasks()
+    }
+  })
 
   const latestTask = useMemo(
     () => projTasks.find((tk) => tk.version_id === selectedVid) ?? null,

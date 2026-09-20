@@ -121,9 +121,18 @@ export default function DataJobsPanel({
       paused: t('status.paused'), scheduled: t('status.scheduled'),
     }
     return (
-      <button
+      <div
         key={task.id}
+        role="button"
+        tabIndex={0}
         onClick={() => navigate(`/queue/${task.id}`)}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            navigate(`/queue/${task.id}`)
+          }
+        }}
         title={t('queue.taskDetailTooltip')}
         className={`card card-hover block overflow-hidden text-left p-0 cursor-pointer ${task.status === 'running' ? 'border border-accent bg-accent-soft' : 'border border-subtle bg-surface'}`}
         data-testid={`job-row-${task.id}`}
@@ -188,7 +197,7 @@ export default function DataJobsPanel({
             )}
           </div>
         </div>
-      </button>
+      </div>
     )
   }
 

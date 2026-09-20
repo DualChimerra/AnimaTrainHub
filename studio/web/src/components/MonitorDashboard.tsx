@@ -531,7 +531,7 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
     } finally {
       setRunning(false)
     }
-  }, [pid, vid, taskId, selected, load])
+  }, [pid, vid, taskId, selected, load, t])
 
   const latestByKey = useMemo(() => {
     const out: Partial<Record<EvalMetricKey, { result: EvalMetricResult; value: number | null; state?: EvalMetricState }>> = {}
