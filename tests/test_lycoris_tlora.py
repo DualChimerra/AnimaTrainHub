@@ -140,6 +140,59 @@ def test_tlora_clear_mask_restores_full_rank() -> None:
     assert int(adapter._tlora_mask.sum().item()) == min_rank
 
 
+def test_tlora_weight_rebuild_uses_lycoris4_functional_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain T-LoRA keeps its mask but delegates ΔW to LyCORIS 4 kernels."""
+    from lycoris.functional import locon as functional_locon
+
+    class _TinyDiT(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.q_proj = nn.Linear(16, 16, bias=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.q_proj(x)
+
+    model = _TinyDiT()
+    adapter = AnimaLycorisAdapter(
+        preset=ANIMA_PRESET,
+        algo="tlora",
+        rank=4,
+        alpha=4.0,
+        tlora_min_rank=1,
+    )
+    adapter.inject(model)
+    adapter._set_tlora_mask(torch.tensor([0.5]))
+
+    calls: list[tuple[torch.Tensor, ...]] = []
+    real_diff_weight = functional_locon.diff_weight
+
+    def _spy_diff_weight(*weights, **kwargs):
+        calls.append(weights)
+        return real_diff_weight(*weights, **kwargs)
+
+    monkeypatch.setattr(functional_locon, "diff_weight", _spy_diff_weight)
+    layer = adapter._tlora_modules[0]
+    weight = layer.make_weight(device=layer.lora_up.weight.device)
+
+    assert calls, "T-LoRA make_weight должен использовать functional dispatch LyCORIS 4"
+    assert weight.shape == layer.shape
+
+    bypass_calls: list[tuple[torch.Tensor, ...]] = []
+    real_bypass = functional_locon.bypass_forward_diff
+
+    def _spy_bypass(*weights, **kwargs):
+        bypass_calls.append(weights)
+        return real_bypass(*weights, **kwargs)
+
+    monkeypatch.setattr(functional_locon, "bypass_forward_diff", _spy_bypass)
+    model(torch.randn(2, 16))
+
+    assert layer.bypass_mode is True
+    assert bypass_calls, "T-LoRA forward должен использовать fused bypass API LyCORIS 4"
+
+
 # ── test 3: sample_runner 入口调 clear_timestep_mask ────────────────────
 
 
@@ -251,46 +304,25 @@ def test_run_sample_no_clear_method_does_not_crash() -> None:
         sr.optimizer_eval_mode = orig_eval  # type: ignore[assignment]
 
 
-# ── test 4: bypass_mode invariant ──────────────────────────────────────────
-#
-# 设计 invariant：AnimaLycorisAdapter.inject() 只允许两条 bypass 路径：
-#   1. self.algo == "lora" and not self.weight_decompose
-#   2. self.algo == "lokr" and has_fp8_base
-# algo == "tlora" 永远不进这两条分支，必走 rebuild (make_weight) 路径，
-# 让 _install_tlora_masks 的 mask patch 真正生效。
-#
-# 这里不依赖完整 inject (lycoris preset 与本机版本不兼容)，直接 inspect
-# AnimaLycorisAdapter.inject 源码确认 tlora 不会被设 bypass_mode=True。
+# ── test 4: DoRA bypass invariant ──────────────────────────────────────────
 
 
-def test_tlora_inject_never_sets_bypass_mode() -> None:
-    """inject() 只允许 LoRA 或 FP8 LoKr 设置 bypass_mode=True；
-    algo='tlora' 不进，必走 make_weight rebuild 路径让 mask patch 生效。
+def test_tlora_dora_keeps_rebuild_path() -> None:
+    """DoRA 依赖完整 weight decomposition，不能切到 bypass forward。"""
 
-    防止后续维护误把 tlora 也加进 bypass 路径让 mask 静默失效。"""
-    import re
-    import inspect
-    src = inspect.getsource(AnimaLycorisAdapter.inject)
-    # 找形如 `extra["bypass_mode"] = ...` 或 `extra['bypass_mode'] = ...` 的赋值
-    pattern = re.compile(r'extra\[["\']bypass_mode["\']\]\s*=', re.MULTILINE)
-    matches = list(pattern.finditer(src))
-    assert matches, (
-        "inject 源码里找不到 extra['bypass_mode'] 赋值；"
-        "源码结构变了，需重写本 invariant 测试或重新评估 bypass_mode 默认行为。"
+    class _TinyDiT(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.q_proj = nn.Linear(16, 16, bias=False)
+
+    adapter = AnimaLycorisAdapter(
+        preset=ANIMA_PRESET,
+        algo="tlora",
+        rank=4,
+        alpha=4.0,
+        weight_decompose=True,
     )
-    for m in matches:
-        # 该赋值之前 ~250 字符内必须出现两个受支持守卫之一，且不能提到 tlora。
-        # FP8 LoKr 必须同时检查 has_fp8_base，避免普通 LoKr 被误切到 bypass。
-        ctx_start = max(0, m.start() - 250)
-        ctx = src[ctx_start:m.start()]
-        has_lora_guard = bool(re.search(r'self\.algo\s*==\s*["\']lora["\']', ctx))
-        has_fp8_lokr_guard = bool(re.search(
-            r'self\.algo\s*==\s*["\']lokr["\']\s+and\s+has_fp8_base', ctx,
-        ))
-        mentions_tlora_nearby = "tlora" in ctx.lower()
-        assert (has_lora_guard or has_fp8_lokr_guard) and not mentions_tlora_nearby, (
-            f"extra['bypass_mode'] 赋值 (位置 {m.start()}) 上方 250 字符内未见到"
-            f" LoRA 或 FP8 LoKr 的独立守卫；可能让 tlora / 普通 LoKr 误走"
-            f" bypass，让 make_weight 路径静默失效。"
-            f" 上下文：\n{ctx[-200:]}"
-        )
+    adapter.inject(_TinyDiT())
+
+    assert adapter._tlora_modules
+    assert all(not layer.bypass_mode for layer in adapter._tlora_modules)

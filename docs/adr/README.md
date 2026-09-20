@@ -16,6 +16,7 @@
 | 0008 | [studio/ 4 层重构（0.11.0）](0008-studio-restructure-0.11.0.md) | Accepted | 2026-05-28 |
 | 0009 | [统一日志 + 错误体系（0.12.0）](0009-logging-error-system.md) | Accepted | 2026-05-28 |
 | 0010 | [preprocess scope 从项目级 download 下沉到 version 级 train](0010-preprocess-train-scope.md) | Accepted | 2026-06-03 |
+| 0014 | [LyCORIS 4 fused kernels 与 Windows Triton](0014-lycoris4-fused-kernels.md) | Accepted | 2026-09-20 |
 
 ## 状态值
 

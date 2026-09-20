@@ -493,6 +493,26 @@ masterpiece, best quality, newest, safe,
 
 ## 硬件优化
 
+### LyCORIS 4 fused kernels（Windows / NVIDIA）
+
+项目使用 LyCORIS 4.0，并在 Windows 自动校正与当前 PyTorch 配对的 Triton；
+例如 PyTorch 2.11 对应 `triton-windows 3.6`。启动时应看到类似：
+
+```text
+[studio] LoRA kernels：LyCORIS 4.0.0 · preferred=triton · fused=triton · Triton 3.6.0.post26
+```
+
+backend 按调用自动选择：Triton → TileLang → `torch.compile` → eager PyTorch。
+某个 shape、dtype 或 dropout 不适合 fused kernel 时会自动回退，不需要手工切换。
+首次遇到新 shape 会有 JIT / tuning 预热，后续从项目内 `.cache/triton` 复用缓存。
+
+普通 LoRA / LoHa / LoKr / DoRA 可使用官方 fused 路径；plain T-LoRA 保留 timestep
+rank mask，并调用不创建独立 `ΔW` 的官方 fused bypass。`T-LoRA + Ortho` 使用项目自己的 Cayley/SVD
+参数化，不会伪装成 LyCORIS 算法，因此目前不走这套 fused kernels。
+
+这些数字只加速 adapter 运算，不代表整个训练步会同倍数提速；模型 attention / MLP、
+数据和采样通常仍是主耗时。
+
 ### RTX 3090/4090 (24GB)
 
 ```yaml

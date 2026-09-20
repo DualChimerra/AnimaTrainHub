@@ -199,7 +199,7 @@ class LycorisAdapter:
         # 是 LoRA 论文 + sd-scripts + PEFT 的标准 forward；对外行为完全等价但 ~2× 快。
         # DoRA(weight_decompose) 路径数学上必须 rebuild —— lycoris bypass forward 不走 wd
         # 分支，会让 DoRA 静默失效；这里 guard。参考 lycoris docs/Network-Args.md "Bypass Mode"。
-        if self.algo == "lora" and not self.weight_decompose:
+        if self.algo in {"lora", "tlora"} and not self.weight_decompose:
             extra["bypass_mode"] = True
 
         # Krea2 FP8 checkpoints keep frozen Linear weights in float8 and
@@ -306,7 +306,12 @@ class LycorisAdapter:
                 continue
             original_make_weight = lora.make_weight
 
-            def _make_weight_with_tlora(device=None, *, _lora=lora, _original_make_weight=original_make_weight):
+            def _make_weight_with_tlora(
+                device=None,
+                *,
+                _lora=lora,
+                _original_make_weight=original_make_weight,
+            ):
                 wa = _lora.lora_up.weight.to(device)
                 wb = _lora.lora_down.weight.to(device)
                 mask = getattr(_lora, "_anima_tlora_mask", None)
@@ -316,17 +321,22 @@ class LycorisAdapter:
                     view_down = (-1, 1) + (1,) * max(0, wb.dim() - 2)
                     wa = wa * mask.view(*view_up)
                     wb = wb * mask.view(*view_down)
-                if getattr(_lora, "tucker", False):
-                    t = _lora.lora_mid.weight
-                    wa_t = wa.view(wa.size(0), -1).transpose(0, 1)
-                    wb_t = wb.view(wb.size(0), -1)
-                    from lycoris.modules.locon import rebuild_tucker
-                    weight = rebuild_tucker(t, wa_t, wb_t)
-                else:
-                    weight = wa.view(wa.size(0), -1) @ wb.view(wb.size(0), -1)
-                weight = weight.view(_lora.shape)
+                # LyCORIS 4 functional API owns eager/compile/Triton/TileLang
+                # selection.  Keeping the timestep mask on the factors and
+                # delegating the rebuild preserves T-LoRA semantics while
+                # allowing the new fused merge forward/backward kernels.
+                from lycoris.functional.locon import diff_weight
+
+                t = (
+                    _lora.lora_mid.weight.to(device)
+                    if getattr(_lora, "tucker", False)
+                    else None
+                )
+                weight = diff_weight(wb, wa, t, gamma=1.0).view(_lora.shape)
                 if _lora.training and _lora.rank_dropout:
-                    drop = (torch.rand(weight.size(0), device=device) > _lora.rank_dropout).to(weight.dtype)
+                    drop = (
+                        torch.rand(weight.size(0), device=device) > _lora.rank_dropout
+                    ).to(weight.dtype)
                     drop = drop.view(-1, *[1] * len(weight.shape[1:]))
                     if _lora.rank_dropout_scale:
                         drop /= drop.mean()
@@ -335,6 +345,74 @@ class LycorisAdapter:
 
             lora._anima_original_make_weight = original_make_weight
             lora.make_weight = _make_weight_with_tlora
+
+            if getattr(lora, "bypass_mode", False):
+                original_bypass_forward_diff = lora.bypass_forward_diff
+
+                def _bypass_forward_diff_with_tlora(
+                    x,
+                    scale=1,
+                    *,
+                    _lora=lora,
+                ):
+                    wa = _lora.lora_up.weight.to(x)
+                    wb = _lora.lora_down.weight.to(x)
+                    mask = getattr(_lora, "_anima_tlora_mask", None)
+                    if mask is not None:
+                        mask = mask.to(device=x.device, dtype=wa.dtype)
+                        view_up = (1, -1) + (1,) * max(0, wa.dim() - 2)
+                        view_down = (-1, 1) + (1,) * max(0, wb.dim() - 2)
+                        wa = wa * mask.view(*view_up)
+                        wb = wb * mask.view(*view_down)
+
+                    if _lora.training and _lora.rank_dropout:
+                        drop = (
+                            torch.rand(_lora.lora_dim, device=x.device)
+                            > _lora.rank_dropout
+                        ).to(wb.dtype)
+                        if _lora.rank_dropout_scale:
+                            drop /= drop.mean()
+                        wb = wb * drop.view(
+                            -1,
+                            *[1] * (wb.dim() - 1),
+                        )
+
+                    t = (
+                        _lora.lora_mid.weight.to(x)
+                        if getattr(_lora, "tucker", False)
+                        else None
+                    )
+                    op = (
+                        _lora.lora_mid
+                        if getattr(_lora, "tucker", False)
+                        else _lora.lora_down
+                    )
+                    extra_args = (
+                        {
+                            "stride": op.stride,
+                            "padding": op.padding,
+                            "dilation": op.dilation,
+                            "groups": op.groups,
+                        }
+                        if _lora.isconv
+                        else {}
+                    )
+                    from lycoris.functional.locon import bypass_forward_diff
+
+                    diff = bypass_forward_diff(
+                        x,
+                        None,
+                        wb,
+                        wa,
+                        t,
+                        gamma=_lora.scale * scale,
+                        extra_args=extra_args,
+                    )
+                    scalar = _lora.scalar.to(device=diff.device, dtype=diff.dtype)
+                    return _lora.dropout(diff * scalar)
+
+                lora._anima_original_bypass_forward_diff = original_bypass_forward_diff
+                lora.bypass_forward_diff = _bypass_forward_diff_with_tlora
             lora._anima_tlora_patched = True
         logger.info(
             "T-LoRA timestep rank mask enabled on %s/%s LoRA layers (min_rank=%s, alpha_rank_scale=%s)",
