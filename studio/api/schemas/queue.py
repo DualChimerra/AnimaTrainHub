@@ -34,3 +34,11 @@ class ExportOutputsBody(BaseModel):
 
 class DeleteOutputsBody(BaseModel):
     files: list[str]
+
+
+class TaskNoteBody(BaseModel):
+    """PUT /api/queue/{task_id}/note —— 队列任务备注（v20 tasks.note）。
+
+    `note` 传空串 / 只有空白 → 清除备注（存 NULL）。
+    """
+    note: Optional[str] = None

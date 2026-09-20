@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_from": "studio.server.app",
-  "count": 211,
+  "count": 213,
   "routes": [
     {
       "path": "/",
@@ -1258,6 +1258,14 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/queue/{task_id}/note",
+      "methods": [
+        "PUT"
+      ],
+      "name": "set_task_note",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/queue/{task_id}/open-folder",
       "methods": [
         "POST"
@@ -1319,6 +1327,14 @@
         "POST"
       ],
       "name": "retry_task",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/queue/{task_id}/samples",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_task_samples",
       "type": "APIRoute"
     },
     {

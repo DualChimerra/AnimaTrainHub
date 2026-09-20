@@ -1802,6 +1802,20 @@ export interface Task {
   /** ADR 0006 Addendum 2 — is_resumable 信号：status ∈ paused/failed/canceled
    *  且恢复点文件在盘上。UI 用来决定是否显示"继续训练"按钮。 */
   is_resumable?: boolean
+  /** _v20 — 用户手写的任务备注（队列页右键写 / 详情页编辑）。空 = null。 */
+  note?: string | null
+}
+
+/** GET /api/queue/{id}/samples 的一行 —— 训练采样图（扫盘得到，含已结束任务）。 */
+export interface TaskSample {
+  filename: string
+  /** 文件 mtime（unix 秒），清单按它升序 = 训练时间轴。 */
+  mtime: number
+  size: number
+  /** 从文件名解析；`epoch_N_*.png` 才有。 */
+  epoch: number | null
+  /** 从文件名解析；`step_N_*.png` 才有。 */
+  step: number | null
 }
 
 /** 0.17 P-E — /api/queue?group=history 的分页响应。 */
@@ -3064,6 +3078,15 @@ export const api = {
     req<{ task_id: number; canceled: boolean }>(`/api/queue/${id}/cancel`, {
       method: 'POST',
     }),
+  /** _v20 — 写 / 清 任务备注。空串 → 清空（后端存 NULL）。任何状态都能改。 */
+  setTaskNote: (id: number, note: string) =>
+    req<Task>(`/api/queue/${id}/note`, {
+      method: 'PUT',
+      body: JSON.stringify({ note }),
+    }),
+  /** 某 task 的训练采样图清单（扫盘，已结束任务也有）。队列页内联采样条用。 */
+  listTaskSamples: (id: number) =>
+    req<{ items: TaskSample[]; total: number }>(`/api/queue/${id}/samples`),
   /** 0.17 P-B — scheduled task 手动提前：立即转 pending 参与调度。非 scheduled 409。 */
   startTaskNow: (id: number) =>
     req<{ task_id: number; status: string }>(`/api/queue/${id}/start_now`, {
