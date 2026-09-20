@@ -13,7 +13,14 @@ wandb>=0.16.0
                         #           总能装上，而 adamw8bit 是可选优化器而非默认。未装时选它
                         #           会在训练启动期报可操作错误（optimizers/adamw8bit.py
                         #           validate），不会跑到一半才炸。装：pip install bitsandbytes
-lycoris-lora>=1.9.0
+# LyCORIS 4 brings fused adapter kernels and keeps the wrapper/module API used
+# by this project.  Pin the major migration so internal compatibility patches
+# remain auditable instead of silently running against a future breaking API.
+lycoris-lora==4.0.0
+# Windows PyTorch does not bring Triton itself.  The Studio bootstrap narrows
+# this broad range to the minor paired with the installed PyTorch (for example,
+# torch 2.10/2.11 -> Triton 3.6) before importing flash-attn/xformers.
+triton-windows>=3.6.0.post26,<3.9; sys_platform == "win32"
 prodigyopt>=1.0          # Prodigy 优化器（anima_train.py optimizer=prodigy 时必需）
 # ProdigyPlusScheduleFree (LoganBooker) — Flux/Qwen-Image LoRA 社区主流，解决 Prodigy 的
 # mutation ep 问题。pin >=2.0.0 因为 v1.9.2 ↔ v2.0.0 的 state_dict 不兼容。

@@ -531,13 +531,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args, passthrough = parser.parse_known_args(argv)
 
-    say(f"{APP_NAME} launcher")
+    print()
+    say("+----------------------------------------------------------+")
+    say(f"| {APP_NAME:<56} |")
+    say("+----------------------------------------------------------+")
     repo = find_repo(args.repo)
-    say(f"folder: {repo}")
+    say(f"workspace : {repo}")
     # 在任何 pip 调用之前 —— 见 apply_local_caches 的说明。
     cached = apply_local_caches(repo)
     if cached:
-        say(f"caches -> {repo / '.cache'} (set ALS_SYSTEM_CACHES=1 to use system locations)")
+        say(f"cache     : {repo / '.cache'}")
+        say("            ALS_SYSTEM_CACHES=1 restores system locations")
 
     if args.check:
         return run_check(repo)
