@@ -179,11 +179,50 @@ def test_forward_rejects_invalid_temporal_and_conditioning_shapes() -> None:
         )
 
 
-def test_attention_gqa_preserves_shape() -> None:
+def test_attention_gqa_preserves_shape_and_does_not_expand_kv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     attention = Attention(dim=64, heads=4, kvheads=2)
     x = torch.randn(2, 7, 64)
     mask = torch.ones(2, 1, 1, 7, dtype=torch.bool)
+
+    observed: dict[str, object] = {}
+
+    def _fake_sdpa(q, k, v, **kwargs):
+        observed["heads"] = (q.shape[1], k.shape[1], v.shape[1])
+        observed["enable_gqa"] = kwargs.get("enable_gqa")
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(krea2_modeling.F, "scaled_dot_product_attention", _fake_sdpa)
+
     assert attention(x, mask=mask).shape == x.shape
+    assert observed == {"heads": (4, 2, 2), "enable_gqa": True}
+
+
+def test_native_gqa_matches_explicit_kv_expansion_on_cpu() -> None:
+    torch.manual_seed(17)
+    q = torch.randn(2, 4, 7, 16)
+    k = torch.randn(2, 2, 7, 16)
+    v = torch.randn(2, 2, 7, 16)
+    mask = torch.ones(2, 1, 1, 7, dtype=torch.bool)
+
+    native = krea2_modeling._native_gqa_attention(
+        q,
+        k,
+        v,
+        mask,
+        enable_gqa=True,
+    )
+    expanded = torch.nn.functional.scaled_dot_product_attention(
+        q,
+        k.repeat_interleave(2, dim=1),
+        v.repeat_interleave(2, dim=1),
+        attn_mask=mask,
+        dropout_p=0.0,
+        is_causal=False,
+    )
+
+    torch.testing.assert_close(native, expanded)
 
 
 def test_modeling_layer_only_imports_torch_einops_and_stdlib() -> None:

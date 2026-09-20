@@ -512,7 +512,7 @@ grad_accum: 2
 resolution: 1024
 grad_checkpoint: true
 mixed_precision: "bf16"
-attention_backend: "none"  # 用 PyTorch SDPA（也可选 "xformers" / "flash_attn"）
+attention_backend: "none"  # PyTorch SDPA；Krea2 CUDA 路径使用 cuDNN + native GQA
 cache_latents: true
 ```
 
