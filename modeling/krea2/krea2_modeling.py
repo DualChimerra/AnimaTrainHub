@@ -22,6 +22,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 def _rope(pos: Tensor, dim: int, theta: float) -> Tensor:
@@ -42,6 +43,42 @@ def _apply_rope(q: Tensor, k: Tensor, freqs: Tensor) -> tuple[Tensor, Tensor]:
     q_out = matrix[..., 0] * q_float[..., 0] + matrix[..., 1] * q_float[..., 1]
     k_out = matrix[..., 0] * k_float[..., 0] + matrix[..., 1] * k_float[..., 1]
     return q_out.reshape_as(q).to(q.dtype), k_out.reshape_as(k).to(k.dtype)
+
+
+def _native_gqa_attention(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    mask: Tensor | None,
+    *,
+    enable_gqa: bool,
+) -> Tensor:
+    """Run Krea2 attention without expanding its 12 K/V heads to 48.
+
+    The official Krea2 implementation pins CUDA to cuDNN SDPA and passes GQA
+    through natively.  Check support first so unusual shapes/devices retain
+    PyTorch's normal backend selection instead of failing at runtime.
+    """
+    kwargs = {
+        "attn_mask": mask,
+        "dropout_p": 0.0,
+        "is_causal": False,
+        "enable_gqa": enable_gqa,
+    }
+    if q.device.type == "cuda":
+        params = torch.backends.cuda.SDPAParams(
+            q,
+            k,
+            v,
+            mask,
+            0.0,
+            False,
+            enable_gqa,
+        )
+        if torch.backends.cuda.can_use_cudnn_attention(params):
+            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                return F.scaled_dot_product_attention(q, k, v, **kwargs)
+    return F.scaled_dot_product_attention(q, k, v, **kwargs)
 
 
 def _timestep_embedding(t: Tensor, dim: int, *, dtype: torch.dtype) -> Tensor:
@@ -178,18 +215,13 @@ class Attention(nn.Module):
         q, k = self.qknorm(q, k)
         if freqs is not None:
             q, k = _apply_rope(q, k, freqs)
-        if self.kvheads != self.heads:
-            repeat = self.heads // self.kvheads
-            k = k.repeat_interleave(repeat, dim=1)
-            v = v.repeat_interleave(repeat, dim=1)
 
-        out = F.scaled_dot_product_attention(
+        out = _native_gqa_attention(
             q,
             k,
             v,
-            attn_mask=mask,
-            dropout_p=0.0,
-            is_causal=False,
+            mask,
+            enable_gqa=self.kvheads != self.heads,
         )
         out = rearrange(out, "b h l d -> b l (h d)")
         return self.wo(out * torch.sigmoid(gate))
