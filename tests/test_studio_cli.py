@@ -22,10 +22,19 @@ from studio import cli
 @pytest.fixture
 def fake_calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
+
     def fake(cmd, **kwargs: Any) -> int:
         calls.append(list(cmd))
         return 0
+
     monkeypatch.setattr(cli.subprocess, "call", fake)
+    # Tests using this fixture exercise command dispatch only.  Avoid importing
+    # the real CUDA/Triton stack in those unit tests.
+    monkeypatch.setattr(cli, "_check_torch_cuda", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_windows_triton", lambda: None)
+    monkeypatch.setattr(cli, "_try_enable_flash_attn", lambda: None)
+    monkeypatch.setattr(cli, "_report_lycoris_kernels", lambda: None)
+    monkeypatch.setattr(cli, "_check_onnxruntime", lambda: None)
     return calls
 
 
@@ -434,6 +443,105 @@ def test_check_torch_cuda_warns_on_cuda_build_but_unavailable(
     assert "pip install torch" not in out.err
 
 
+def test_report_lycoris_kernels_prints_preferred_backend(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """启动诊断展示版本、首选 backend 与可用 fused backend。"""
+    import importlib.metadata
+    import sys as _sys
+    import types
+
+    versions = {
+        "lycoris-lora": "4.0.0",
+        "triton-windows": "3.6.0.post26",
+    }
+
+    def _version(name: str) -> str:
+        if name in versions:
+            return versions[name]
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    kernels = types.ModuleType("lycoris.kernels")
+    kernels.available_backends = lambda: ("triton", "compile", "torch")
+    kernels.resolve_backend = lambda: "triton"
+    lycoris = types.ModuleType("lycoris")
+    lycoris.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setattr(importlib.metadata, "version", _version)
+    monkeypatch.setitem(_sys.modules, "lycoris", lycoris)
+    monkeypatch.setitem(_sys.modules, "lycoris.kernels", kernels)
+
+    cli._report_lycoris_kernels()
+    out = capsys.readouterr()
+    assert "LyCORIS 4.0.0" in out.out
+    assert "preferred=triton" in out.out
+    assert "fused=triton" in out.out
+    assert "Triton 3.6.0.post26" in out.out
+    assert out.err == ""
+
+
+def test_report_lycoris_kernels_silent_when_not_installed(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import importlib.metadata
+
+    def _missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", _missing)
+    cli._report_lycoris_kernels()
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err == ""
+
+
+def test_ensure_windows_triton_installs_torch_211_pair(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import importlib.metadata
+
+    _install_fake_torch(
+        monkeypatch,
+        _FakeTorch(available=True, cuda_build="12.8", version="2.11.0+cu128"),
+    )
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+
+    def _missing(_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError
+
+    installs: list[list[str]] = []
+    monkeypatch.setattr(importlib.metadata, "version", _missing)
+    monkeypatch.setattr(
+        cli,
+        "_pip_install",
+        lambda args: installs.append(args) or 0,
+    )
+
+    cli._ensure_windows_triton()
+
+    assert installs == [["triton-windows>=3.6,<3.7"]]
+    assert "torch 2.11 requires Triton 3.6" in capsys.readouterr().out
+
+
+def test_ensure_windows_triton_keeps_matching_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.metadata
+
+    _install_fake_torch(
+        monkeypatch,
+        _FakeTorch(available=True, cuda_build="12.8", version="2.11.0+cu128"),
+    )
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "3.6.0.post26")
+    monkeypatch.setattr(
+        cli,
+        "_pip_install",
+        lambda _args: pytest.fail("matching Triton must not be reinstalled"),
+    )
+
+    cli._ensure_windows_triton()
+
+
 # ---------------------------------------------------------------------------
 # PR-5 — _print_npm_install_hint
 # ---------------------------------------------------------------------------
@@ -541,7 +649,9 @@ def _stub_run_bootstrap(
     monkeypatch.setattr(cli, "_apply_update_pending", lambda: None, raising=False)
     monkeypatch.setattr(cli, "_apply_pending_install", lambda: None)
     monkeypatch.setattr(cli, "_check_torch_cuda", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_windows_triton", lambda: None)
     monkeypatch.setattr(cli, "_try_enable_flash_attn", lambda: None)
+    monkeypatch.setattr(cli, "_report_lycoris_kernels", lambda: None)
     monkeypatch.setattr(cli, "_check_onnxruntime", lambda: None)
     monkeypatch.setattr(cli, "_spawn_browser_opener", lambda *a, **k: None)
     return dist

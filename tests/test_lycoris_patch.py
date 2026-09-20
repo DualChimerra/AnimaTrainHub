@@ -1,7 +1,7 @@
-"""utils.lycoris_patch — lycoris-lora 3.4.0 LokrModule.get_weight device patch。
+"""utils.lycoris_patch — LyCORIS 3.4/4.0 LoKr rank-dropout device patch。
 
 覆盖：
-- 命中受影响版本（3.4.0）→ patch 真实生效（torch.rand 调用得到 device=weight.device 的 mask）
+- 命中受影响版本 → patch 生效且保留 upstream weight builder
 - 未装 lycoris → skipped_not_installed
 - 未知版本 → skipped_version_unknown + warn
 - 同进程内幂等 → skipped_already_patched
@@ -52,15 +52,24 @@ def fresh_patch_module(monkeypatch: pytest.MonkeyPatch):
             delattr(LokrModule, mod._PATCHED_FLAG)
 
 
+@pytest.mark.parametrize("affected_version", ["3.4.0", "4.0.0"])
 def test_apply_on_known_affected_version_patches_get_weight(
-    fresh_patch_module, monkeypatch: pytest.MonkeyPatch
+    fresh_patch_module, monkeypatch: pytest.MonkeyPatch, affected_version: str,
 ) -> None:
-    """3.4.0 安装时 patch 应替换 LokrModule.get_weight 且生成的 mask 在 weight.device 上。"""
+    """受影响版本的 mask 应跟随 weight device，且 upstream builder 仍被调用。"""
     pytest.importorskip("lycoris.modules.lokr")
     import torch
     from lycoris.modules.lokr import LokrModule
 
-    monkeypatch.setattr(fresh_patch_module, "version", lambda _: "3.4.0")
+    upstream_calls: list[object] = []
+
+    def _fake_upstream(self, shape):
+        upstream_calls.append(shape)
+        assert self.rank_dropout == 0.0
+        return self.weight.clone()
+
+    monkeypatch.setattr(LokrModule, "get_weight", _fake_upstream)
+    monkeypatch.setattr(fresh_patch_module, "version", lambda _: affected_version)
 
     status = fresh_patch_module.apply_lokr_device_patch()
     assert status == "applied"
@@ -77,22 +86,18 @@ def test_apply_on_known_affected_version_patches_get_weight(
 
     monkeypatch.setattr(torch, "rand", _spy_rand)
 
-    # 用 mock self（不构造完整 LokrModule，单测只关心 torch.rand 这一行）
+    # 用 mock self，不依赖不同 LyCORIS 版本的 LoKr constructor 细节。
     class _FakeSelf:
         training = True
         rank_dropout = 0.5
         rank_dropout_scale = False
-        use_w1 = True
-        use_w2 = True
-        tucker = False
-        scale = 1.0
-        lokr_w1 = torch.eye(4)
-        lokr_w2 = torch.eye(4)
+        weight = torch.eye(4)
 
     fake = _FakeSelf()
-    # 直接调被替换后的 get_weight；shape=None 让 weight 保持原状
-    LokrModule.get_weight(fake, None)
-    assert captured["device"] is not None, "patched get_weight 没把 device 传给 torch.rand"
+    LokrModule.get_weight(fake, (4, 4))
+    assert upstream_calls == [(4, 4)]
+    assert fake.rank_dropout == 0.5, "wrapper 必须恢复 module 的 rank_dropout"
+    assert captured["device"] == fake.weight.device
 
 
 def test_apply_when_not_installed_returns_skipped(
@@ -123,6 +128,6 @@ def test_apply_idempotent(
 ) -> None:
     """同进程内重复调用：第一次 applied，之后 skipped_already_patched。"""
     pytest.importorskip("lycoris.modules.lokr")
-    monkeypatch.setattr(fresh_patch_module, "version", lambda _: "3.4.0")
+    monkeypatch.setattr(fresh_patch_module, "version", lambda _: "4.0.0")
     assert fresh_patch_module.apply_lokr_device_patch() == "applied"
     assert fresh_patch_module.apply_lokr_device_patch() == "skipped_already_patched"

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -392,6 +393,121 @@ def _try_enable_flash_attn() -> None:
         )
 
 
+def _report_lycoris_kernels() -> None:
+    """打印 LyCORIS 4 的 adapter-kernel 选择，不触发 JIT 编译。
+
+    ``available_backends`` 只探测模块是否可导入；真正的 shape/device 选择仍由
+    LyCORIS 每次调用完成。这里用 ``preferred`` 而不是 ``active``，避免把尚未
+    首次编译的 Triton kernel 描述成已经执行过。
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+        lycoris_version = version("lycoris-lora")
+    except PackageNotFoundError:
+        return
+    except Exception as exc:  # noqa: BLE001
+        print(f"[studio] LyCORIS 状态读取失败（{exc}）", file=sys.stderr)
+        return
+
+    try:
+        from lycoris.kernels import available_backends, resolve_backend  # noqa: PLC0415
+
+        available = available_backends()
+        preferred = resolve_backend()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[studio] 警告：LyCORIS {lycoris_version} kernel backend 初始化失败（{exc}）",
+            file=sys.stderr,
+        )
+        return
+
+    triton_version = None
+    for dist_name in ("triton-windows", "triton"):
+        try:
+            triton_version = version(dist_name)
+            break
+        except PackageNotFoundError:
+            continue
+
+    fused = ",".join(name for name in available if name in {"triton", "tilelang"}) or "none"
+    triton_label = f" · Triton {triton_version}" if triton_version else ""
+    _say(
+        f"LoRA kernels：LyCORIS {lycoris_version} · preferred={preferred} "
+        f"· fused={fused}{triton_label}"
+    )
+
+
+_WINDOWS_TRITON_FOR_TORCH: dict[tuple[int, int], tuple[int, int]] = {
+    (2, 10): (3, 6),
+    (2, 11): (3, 6),
+    (2, 12): (3, 7),
+    (2, 13): (3, 7),
+    (2, 14): (3, 8),
+}
+
+
+def _major_minor(raw: str) -> Optional[tuple[int, int]]:
+    match = re.match(r"^(\d+)\.(\d+)", raw)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _ensure_windows_triton() -> None:
+    """Match triton-windows to PyTorch before xformers imports Triton.
+
+    PyTorch and Triton minor releases have an ABI/toolchain pairing.  A static
+    requirement cannot express that dependency, so the launcher repairs a
+    missing or mismatched Windows wheel from the official compatibility table.
+    Unsupported/older Torch builds keep LyCORIS' compile/eager fallback.
+    """
+    if sys.platform != "win32":
+        return
+
+    try:
+        import torch  # noqa: PLC0415
+
+        torch_minor = _major_minor(torch.__version__)
+    except Exception:  # noqa: BLE001
+        return
+
+    target = _WINDOWS_TRITON_FOR_TORCH.get(torch_minor)
+    if target is None:
+        if torch_minor is not None:
+            print(
+                f"[studio] 警告：暂无 torch {torch_minor[0]}.{torch_minor[1]} "
+                "对应的 Windows Triton pin；LyCORIS 将自动回退",
+                file=sys.stderr,
+            )
+        return
+
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    try:
+        installed_minor = _major_minor(version("triton-windows"))
+    except PackageNotFoundError:
+        installed_minor = None
+    if installed_minor == target:
+        return
+
+    lower = f"{target[0]}.{target[1]}"
+    upper = f"{target[0]}.{target[1] + 1}"
+    requirement = f"triton-windows>={lower},<{upper}"
+    installed = (
+        f"{installed_minor[0]}.{installed_minor[1]}"
+        if installed_minor is not None
+        else "not installed"
+    )
+    _say(
+        f"torch {torch_minor[0]}.{torch_minor[1]} requires Triton {lower} "
+        f"(current: {installed}); installing compatible wheel..."
+    )
+    if _pip_install([requirement]) != 0:
+        print(
+            "[studio] 警告：Triton 安装失败；LyCORIS 将使用 compile/eager fallback",
+            file=sys.stderr,
+        )
+
+
 def _check_torch_cuda() -> None:
     """启动期检查 torch 是否能用 CUDA；CPU-only torch 跑训练 / 出图会极慢。
 
@@ -637,7 +753,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not getattr(args, 'skip_pending', False):
             _apply_pending_install()
         _check_torch_cuda()
+        _ensure_windows_triton()
         _try_enable_flash_attn()
+        _report_lycoris_kernels()
         _check_onnxruntime()
         url = f"http://{args.host}:{args.port}/"
         _say(f"启动后端 → {url}")
@@ -692,7 +810,9 @@ def cmd_dev(args: argparse.Namespace) -> int:
     if not getattr(args, 'skip_pending', False):
         _apply_pending_install()
     _check_torch_cuda()
+    _ensure_windows_triton()
     _try_enable_flash_attn()
+    _report_lycoris_kernels()
     _check_onnxruntime()
 
     pg = ProcGroup()
