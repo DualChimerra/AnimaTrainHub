@@ -1,14 +1,14 @@
 """Task config snapshot — ADR-0007 §11.7。
 
-task 启动时把当时的 version config.yaml 冻结一份到
+task 入队时把当时的 version config.yaml 冻结一份到
 ``studio_data/tasks/{task_id}/snapshot/config.yaml``。
 
 设计要点：
 - **仅冻 config**，不冻 caption / 图 / 正则集（跨 OS export OK，磁盘代价 KB 级）
 - 心智分离 UI：task 详情独立 [关联配置] tab，**不点 task 跳 version config 编辑页**
   → 让 user 理解 config 是历史快照，caption / 图是 version 当前状态
-- 冻结时机：supervisor `_spawn_task` 把 cfg_path 给 worker 之前
-- 失败不阻塞 task 启动（snapshot 是 forensics 不是必需）
+- 冻结时机：新 task 入队时；老 task 仍由 supervisor 启动时补冻结
+- 新 task 若无法冻结则不入队；老 task 的启动时补冻结仍为非阻塞
 
 用 user 视角："点 task 详情 [关联配置] 看当时跑的什么参数，按'套用此配置'按钮
 跳到 ⑦ 训练 phase 页面 + prefill → 编辑 → 训练 = 新 task" （§11.7 流程）。
@@ -53,6 +53,11 @@ def freeze_config(task_id: int, source: Path) -> Path:
         raise FileNotFoundError(f"snapshot source not found: {source}")
     dst = snapshot_config_path(task_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
+    # 新 task 入队时已把 config_path 指向这份快照。supervisor
+    # 启动时仍会调用本函数以兼容老 task，此时 source == dst，
+    # 应直接复用，不要让 shutil.copy2 报 SameFileError。
+    if dst.exists() and source.samefile(dst):
+        return dst
     shutil.copy2(source, dst)
     return dst
 

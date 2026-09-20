@@ -136,8 +136,12 @@ def create_task(
     params: Optional[dict[str, Any]] = None,
     project_id: Optional[int] = None,
     version_id: Optional[int] = None,
+    commit: bool = True,
 ) -> int:
     """建 pending（或 scheduled）task。
+
+    ``commit=False`` 仅供需要在同一事务内先写入 task-scoped
+    config 快照的入队端点使用；其他调用保持原有的立即提交行为。
 
     R-2 台账合并：tasks 表承接全部工作项。`task_type` 缺省 'train'（老调用方
     兼容）；数据作业类（download/tag/…）带 `params`（kind 专属参数 JSON）+
@@ -165,7 +169,8 @@ def create_task(
          _json.dumps(params) if params is not None else None,
          project_id, version_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid)
 
 

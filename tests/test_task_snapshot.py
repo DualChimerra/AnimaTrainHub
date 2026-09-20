@@ -60,6 +60,17 @@ def test_freeze_config_overwrites_existing(isolated, tmp_path: Path) -> None:
     assert final["config"]["lr"] == 0.0005
 
 
+def test_freeze_config_is_idempotent_when_source_is_snapshot(
+    isolated, tmp_path: Path
+) -> None:
+    src = tmp_path / "cfg.yaml"
+    src.write_text("lr: 0.001\n", encoding="utf-8")
+    dst = task_snapshot.freeze_config(7, src)
+
+    assert task_snapshot.freeze_config(7, dst) == dst
+    assert dst.read_text(encoding="utf-8") == "lr: 0.001\n"
+
+
 def test_freeze_config_missing_source_raises(isolated, tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         task_snapshot.freeze_config(7, tmp_path / "nonexistent.yaml")

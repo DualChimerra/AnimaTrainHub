@@ -23,6 +23,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     from studio.api.routers import logs as _logs_router
     from studio.api.routers.queue import lifecycle as _queue_lifecycle
+    from studio.infrastructure import paths as _paths
 
     dbfile = tmp_path / "studio.db"
     db.init_db(dbfile)
@@ -39,6 +40,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(server.db, "STUDIO_DB", dbfile)  # connect() 默认路径
     # PR-6 commit 6：queue lifecycle 用自己 import 的 USER_PRESETS_DIR
     monkeypatch.setattr(_queue_lifecycle, "USER_PRESETS_DIR", presets)
+    monkeypatch.setattr(_paths, "TASKS_DIR", tmp_path / "tasks")
     # PR-6 commit 1：logs router 用自己 import 的 LOGS_DIR
     monkeypatch.setattr(_logs_router, "LOGS_DIR", logs)
     return tmp_path
@@ -87,6 +89,9 @@ def test_enqueue_and_get(client: TestClient) -> None:
     assert data["config_name"] == "good"
     assert data["status"] == "pending"
     tid = data["id"]
+    from studio.services import task_snapshot
+    assert data["config_path"] == str(task_snapshot.snapshot_config_path(tid))
+    assert task_snapshot.snapshot_config_path(tid).exists()
 
     got = client.get(f"/api/queue/{tid}")
     assert got.status_code == 200
@@ -168,6 +173,19 @@ def test_retry_copies_full_training_context(client: TestClient) -> None:
     assert new.get("finished_at") is None
     assert new.get("error_msg") is None
     assert new.get("monitor_state_path") is None
+
+
+def test_retry_gets_its_own_frozen_config(client: TestClient) -> None:
+    from studio.services import task_snapshot
+
+    tid = client.post("/api/queue", json={"config_name": "good"}).json()["id"]
+    with db.connection_for() as conn:
+        db.update_task(conn, tid, status="failed")
+
+    new = client.post(f"/api/queue/{tid}/retry").json()
+    expected = task_snapshot.snapshot_config_path(new["id"])
+    assert new["config_path"] == str(expected)
+    assert expected.read_text(encoding="utf-8") == "epochs: 1\n"
 
 
 def test_outputs_list_with_files(

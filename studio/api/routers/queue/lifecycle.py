@@ -35,6 +35,7 @@ from ....domain.errors import (
 )
 from ....infrastructure.event_bus import bus
 from ....paths import USER_PRESETS_DIR, task_dir
+from ....services import task_snapshot
 from ....supervisor.resources import (
     JOB_KIND_RESOURCE_CLASS,
     RESOURCE_EXCLUSIVE,
@@ -216,7 +217,14 @@ def enqueue(body: EnqueueRequest) -> dict[str, Any]:
         task_id = db.create_task(
             conn, name=name, config_name=body.config_name, priority=body.priority,
             scheduled_at=body.scheduled_at,
+            commit=False,
         )
+        frozen_cfg = task_snapshot.freeze_config(task_id, cfg_path)
+        conn.execute(
+            "UPDATE tasks SET config_path = ? WHERE id = ?",
+            (str(frozen_cfg), task_id),
+        )
+        conn.commit()
         task = db.get_task(conn, task_id)
     bus.publish({
         "type": "task_state_changed",
@@ -476,6 +484,7 @@ def retry_task(task_id: int) -> dict[str, Any]:
             name=original["name"],
             config_name=original["config_name"],
             priority=original["priority"],
+            commit=False,
         )
         copy_fields: dict[str, Any] = {}
         # R-3：task_type / params 必须一并复制——数据作业类 task 重跑靠它们
@@ -483,8 +492,18 @@ def retry_task(task_id: int) -> dict[str, Any]:
         for k in ("config_path", "project_id", "version_id", "task_type", "params"):
             if original.get(k) is not None:
                 copy_fields[k] = original[k]
+        source_cfg = original.get("config_path")
+        if source_cfg and Path(source_cfg).exists():
+            copy_fields["config_path"] = str(
+                task_snapshot.freeze_config(new_id, Path(source_cfg))
+            )
         if copy_fields:
-            db.update_task(conn, new_id, **copy_fields)
+            cols = ", ".join(f"{key} = ?" for key in copy_fields)
+            conn.execute(
+                f"UPDATE tasks SET {cols} WHERE id = ?",
+                [*copy_fields.values(), new_id],
+            )
+        conn.commit()
         new_task = db.get_task(conn, new_id)
     bus.publish(
         {"type": "task_state_changed", "task_id": new_id, "status": "pending"}

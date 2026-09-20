@@ -710,9 +710,10 @@ class Supervisor:
         )
 
     def _freeze_task_snapshot(self, task_id: int, cfg_path: Path) -> None:
-        """ADR-0007 §11.7 / PR-3 commit 4：task 启动 → 冻结当时的 config
-        到 studio_data/tasks/{tid}/snapshot/config.yaml。失败不阻 task
-        启动（snapshot 是 forensics 不是必需）。
+        """ADR-0007 §11.7：兼容老 task，启动时补冻结 config。
+
+        新 task 在入队时已冻结，此处为同一文件的幂等调用。补冻结失败
+        不阻塞老 task 启动。
         """
         try:
             from ..services import task_snapshot

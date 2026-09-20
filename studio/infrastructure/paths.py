@@ -77,7 +77,7 @@ THUMB_CACHE_DIR = STUDIO_DATA / "thumb_cache"
 # Task-scoped 档案根目录。每个 task 独立子目录，跟 version 解耦，
 # 删 version 不会带走 task 历史（loss / 参数 / sample / 日志）。
 # 子目录约定（snapshot/ 已由 task_snapshot.py 引入 ADR-0007 §11.7）：
-#   tasks/<id>/snapshot/config.yaml   ← task 启动时 freeze 的 config
+#   tasks/<id>/snapshot/config.yaml   ← task 入队时 freeze 的 config
 #   tasks/<id>/monitor/state.json     ← 训练监控状态（loss/LR/sample 索引）
 #   tasks/<id>/samples/*.png          ← 训练采样图
 #   tasks/<id>/run.log                ← worker 子进程 stdout/stderr

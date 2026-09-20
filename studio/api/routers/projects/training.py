@@ -78,7 +78,7 @@ from ....services.dataset import scan as datasets
 from ....domain import RegAiConfig
 from ....infrastructure.event_bus import bus
 from ....paths import STUDIO_DATA, safe_join
-from ....services import model_downloader, version_config
+from ....services import model_downloader, task_snapshot, version_config
 from ....services import presets as preset_flow
 from ....services.tagging import caption_snapshot
 from ....services.reg import builder as reg_builder, dedup as reg_dedup
@@ -963,6 +963,13 @@ def enqueue_version_training(
              str(cfg_path), req_tid, scheduled_at),
         )
         tid = int(cur.lastrowid)
+        # 任务的模型和其他训练参数在入队这一刻就冻结。
+        # 后续切换全局模型或编辑 version config 只影响新任务。
+        frozen_cfg = task_snapshot.freeze_config(tid, cfg_path)
+        conn.execute(
+            "UPDATE tasks SET config_path = ? WHERE id = ?",
+            (str(frozen_cfg), tid),
+        )
         conn.commit()
         # ADR-0007 PR-5: version.status 由 supervisor 在 _spawn_task 推到 training；
         # project 无 stage；这里不再 advance。
