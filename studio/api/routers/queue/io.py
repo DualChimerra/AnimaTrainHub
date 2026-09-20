@@ -1,7 +1,7 @@
 """Queue task snapshot（PR-6 commit 6 从 server.py 抽出）。
 
 1 route：
-    GET /api/queue/{task_id}/snapshot/config    ADR-0007 §11.7 task 启动 freeze 的 config
+    GET /api/queue/{task_id}/snapshot/config    ADR-0007 §11.7 task 入队 freeze 的 config
 
 历史：本文件曾有 /api/queue/export + /api/queue/import（预设池时代的队列 JSON
 分享）。R-5 删除——现代任务 config 是 version 私有，导出恒空、导入恒跳过，
@@ -22,7 +22,7 @@ router = APIRouter()
 
 @router.get("/api/queue/{task_id}/snapshot/config")
 def get_task_snapshot_config(task_id: int) -> dict[str, Any]:
-    """ADR-0007 §11.7：返回 task 启动时冻结的 config。
+    """ADR-0007 §11.7：返回 task 入队时冻结的 config。
 
     返回 ``{"yaml": str, "config": dict}``。task 不存在 / 无 snapshot → 404。
     UI [关联配置] tab 用此 + 触发 "套用此配置" 路由跳转到 ⑦ 训练 phase + prefill。

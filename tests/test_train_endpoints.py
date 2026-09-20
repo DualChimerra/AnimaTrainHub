@@ -13,11 +13,13 @@ from studio.schema import TrainingConfig
 
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from studio.infrastructure import paths as _paths
     dbfile = tmp_path / "studio.db"
     db.init_db(dbfile)
     monkeypatch.setattr(db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(server.db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(projects, "PROJECTS_DIR", tmp_path / "projects")
+    monkeypatch.setattr(_paths, "TASKS_DIR", tmp_path / "tasks")
     presets_dir = tmp_path / "presets"
     presets_dir.mkdir()
     from studio.services.presets import io as presets_io
@@ -315,8 +317,53 @@ def test_enqueue_creates_task_with_ids_and_config_path(
     assert task["status"] == "pending"
     assert task["project_id"] == pid
     assert task["version_id"] == vid
-    assert task["config_path"] and task["config_path"].endswith("config.yaml")
+    from studio.services import task_snapshot
+    expected = task_snapshot.snapshot_config_path(task["id"])
+    assert task["config_path"] == str(expected)
+    assert expected.exists()
     # ADR-0007 PR-5: version.status 由 supervisor 在 spawn 时推 training；enqueue 时仍 preparing
+
+
+def test_each_enqueued_task_keeps_model_selected_at_that_moment(
+    client: TestClient, env, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """切换全局模型后，旧 task 仍用入队时的模型，新 task 用新模型。"""
+    from studio.services import task_snapshot, version_config
+
+    pid, vid = _make(client)
+    _seed_preset(env, "tpl")
+    client.post(
+        f"/api/projects/{pid}/versions/{vid}/config/from_preset",
+        json={"name": "tpl"},
+    )
+
+    selected = {"path": (tmp_path / "model-a.safetensors").as_posix()}
+
+    def overlay(data):
+        result = dict(data)
+        result["transformer_path"] = selected["path"]
+        return result
+
+    monkeypatch.setattr(version_config, "apply_global_path_overlay", overlay)
+
+    first = client.post(f"/api/projects/{pid}/versions/{vid}/queue").json()
+    first_snapshot = task_snapshot.read_snapshot_config(first["id"])
+    assert first_snapshot is not None
+    assert first_snapshot["config"]["transformer_path"] == selected["path"]
+
+    with db.connection_for(env["db"]) as conn:
+        db.update_task(conn, first["id"], status="done")
+
+    selected["path"] = (tmp_path / "model-b.safetensors").as_posix()
+    second = client.post(f"/api/projects/{pid}/versions/{vid}/queue").json()
+    second_snapshot = task_snapshot.read_snapshot_config(second["id"])
+    assert second_snapshot is not None
+    assert second_snapshot["config"]["transformer_path"] == selected["path"]
+
+    # Первая задача не изменилась после переключения.
+    first_snapshot = task_snapshot.read_snapshot_config(first["id"])
+    assert first_snapshot is not None
+    assert first_snapshot["config"]["transformer_path"].endswith("model-a.safetensors")
 
 
 def test_enqueue_rejects_active_task(client: TestClient, env) -> None:
