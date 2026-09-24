@@ -1,7 +1,7 @@
 import type { TFunction } from 'i18next'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useOutletContext } from 'react-router-dom'
+import { Link, useOutletContext } from 'react-router-dom'
 import {
   api,
   type Job,
@@ -15,8 +15,8 @@ import {
 } from '../../../api/client'
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
-import JobProgress from '../../../components/JobProgress'
 import StepShell from '../../../components/StepShell'
+import KebabMenu from '../../../components/ds/KebabMenu'
 import { TranslatedTag } from '../../../components/tagDisplay/TranslatedTag'
 import { TagSuggestList } from '../../../components/tagSuggest/TagSuggestList'
 import { useTagSuggest } from '../../../components/tagSuggest/useTagSuggest'
@@ -65,9 +65,8 @@ export default function RegularizationPage() {
   const [autoTag, setAutoTag] = useState(true)
   // A3 — reg 自动打标的 tagger 选择。UI 暴露 wd14 / cltagger；后端 422 校验同。
   const [autoTagKind, setAutoTagKind] = useState<'wd14' | 'cltagger'>('wd14')
-  // A4 v2 — build 模式 + 自动去重，默认增量 + 开。模式取代了原来的「开始 / 补足」
-  // 两按钮（去掉补足，统一一个「开始生成」按钮按 mode 跑）。
-  const [mode, setMode] = useState<'full' | 'incremental'>('incremental')
+  // Auto dedup after the build, on by default. Whether a run keeps the
+  // existing images is picked per run: "Top up" (incremental) or "Start" (full).
   const [autoDedup, setAutoDedup] = useState(true)
   // B1（PR-2）— 构建模式 + 目标数（仅 flat 模式生效）。默认 flat，target 留空 = train 总数。
   const [buildMode, setBuildMode] = useState<'mirror' | 'flat'>('flat')
@@ -97,7 +96,6 @@ export default function RegularizationPage() {
   const [aiSteps, setAiSteps] = useState(25)
   const [aiCfg, setAiCfg] = useState(4.0)
   const [aiSeed, setAiSeed] = useState(0)
-  const [aiIncremental, setAiIncremental] = useState(false)
   // reg 子文件夹 repeat 前缀（N_data）。reg 集独立于 train repeat，默认 1
   // （DreamBooth 标准：reg 每张每 epoch 见 1 次）。见 anima-phase-cursor-sse-desync 周边讨论。
   const [aiRepeat, setAiRepeat] = useState(1)
@@ -290,7 +288,7 @@ export default function RegularizationPage() {
     })
   }
 
-  const handleAiGenerate = async () => {
+  const handleAiGenerate = async (incremental: boolean) => {
     if (!vid) return
     if (trainImageCount <= 0) {
       toast(t('reg.noTrainForAi'), 'error')
@@ -308,7 +306,7 @@ export default function RegularizationPage() {
         steps: aiSteps,
         cfg_scale: aiCfg,
         seed: aiSeed,
-        incremental: aiIncremental,
+        incremental,
         repeat: aiRepeat,
       }
       const task = await api.enqueueRegPrior(project.id, vid, body)
@@ -320,13 +318,12 @@ export default function RegularizationPage() {
     }
   }
 
-  const startBuild = async () => {
+  const startBuild = async (incremental: boolean) => {
     if (!vid) return
     if (trainImageCount <= 0) {
       toast(t('reg.noTrainForBuild'), 'error')
       return
     }
-    const incremental = mode === 'incremental'
     const parsedTarget = targetCount.trim() === '' ? null : Number(targetCount)
     const body: RegBuildRequest = {
       excluded_tags: Array.from(excluded),
@@ -384,94 +381,90 @@ export default function RegularizationPage() {
     return <p className="text-fg-tertiary p-6">{t('reg.noVersion')}</p>
   }
 
-  return (
-    <StepShell
-      idx={5}
-      eyebrow={`Step 4 · ${project.title} / ${activeVersion?.label ?? '—'}`}
-      title={t('steps.reg.title')}
-      subtitle={t('steps.reg.subtitle')}
-      actions={
-        <button
-          onClick={() => {
-            if (source === 'ai') void handleAiGenerate()
-            else void startBuild()
-          }}
-          disabled={isLive || trainImageCount <= 0}
-          className="btn btn-primary"
-        >
-          {isLive
-            ? t('reg.generatingBtn')
-            : source === 'ai'
-              ? t('reg.aiGenerateBtn')
-              : t('reg.startBuildBtn')}
+  const trainUrl = `/projects/${project.id}/v/${vid}/train`
+  const regCount = reg?.image_count ?? 0
+  // how many images a run aims for: the train total unless a flat booru set
+  // was given its own target
+  const runTarget = source === 'booru' && buildMode === 'flat' && targetCount.trim() !== ''
+    ? Math.max(1, Number(targetCount) || trainImageCount)
+    : trainImageCount
+
+  // "Top up" keeps what is there; "Start" rebuilds, so ask first when a set exists
+  const run = async (incremental: boolean) => {
+    if (!incremental && reg?.exists && regCount > 0) {
+      const ok = await confirm(t('reg.confirmFullRun', { n: regCount }), { tone: 'danger', okText: t('reg.startBuildBtn') })
+      if (!ok) return
+    }
+    if (source === 'ai') await handleAiGenerate(incremental)
+    else await startBuild(incremental)
+  }
+
+  const cancelJob = async () => {
+    if (!job) return
+    try {
+      await api.cancelJob(job.id)
+      toast(t('reg.cancelToast'), 'success')
+    } catch (e) {
+      toast(String(e), 'error')
+    }
+  }
+
+  const tabsCard = (
+    <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flex: activeTab === 'images' ? 1 : undefined }}>
+      <div className="ds-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={activeTab === 'generate'} className={`ds-tab${activeTab === 'generate' ? ' ds-is-active' : ''}`} onClick={() => setActiveTab('generate')}>
+          {t('reg.tabGenerate')}
+          {isLive && <span className="ds-badge ds-warn">live</span>}
         </button>
-      }
-    >
-    <div className="flex flex-col h-full gap-3 min-h-0">
-
-      {/* restyle: 状态条 — 4 cell info bar + 右端清空 */}
-      <StatusStrip
-        reg={reg}
-        onDelete={onDelete}
-        disabled={isLive}
-        autoTagKind={autoTagKind}
-      />
-
-      {/* restyle: tab — 生成 / 图片 */}
-      <div className="flex items-center gap-6 border-b border-subtle shrink-0">
-        <RegTab
-          active={activeTab === 'generate'}
-          onClick={() => setActiveTab('generate')}
-          label={t('reg.tabGenerate')}
-          live={isLive}
-        />
-        <RegTab
-          active={activeTab === 'images'}
-          onClick={() => setActiveTab('images')}
-          label={t('reg.tabImages')}
-          count={reg && reg.image_count > 0 ? reg.image_count : undefined}
-        />
+        <button type="button" role="tab" aria-selected={activeTab === 'images'} className={`ds-tab${activeTab === 'images' ? ' ds-is-active' : ''}`} onClick={() => setActiveTab('images')}>
+          {t('reg.tabImages')}
+          {regCount > 0 && <span className="ds-badge ds-mute">{regCount}</span>}
+        </button>
       </div>
 
-      {/* tab 内容（占满剩余高度，全宽） */}
       {activeTab === 'generate' ? (
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <div className="max-w-[1380px] py-2">
+        <>
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            <div style={{ padding: '14px 17px 15px', borderBottom: '1px solid var(--line)' }}>
+              <div className="ds-cap" style={{ marginBottom: 10 }}>{t('reg.sourceLabel')}</div>
+              <div className="ds-optcards" role="radiogroup" aria-label={t('reg.sourceLabel')}>
+                <SourceCard
+                  on={source === 'booru'}
+                  onClick={() => setSource('booru')}
+                  icon={Icon.globe}
+                  name={t('reg.sourceBooru')}
+                  badge={t('reg.sourceBooruSub')}
+                  desc={t('reg.sourceBooruDesc')}
+                />
+                <SourceCard
+                  on={source === 'ai'}
+                  onClick={() => setSource('ai')}
+                  icon={Icon.spark}
+                  name={t('reg.sourceAi')}
+                  badge="GPU"
+                  desc={t('reg.sourceAiDesc')}
+                />
+              </div>
+            </div>
 
-            {/* 来源 segmented control + hint */}
-            <SourceSegmented
-              source={source}
-              onChange={setSource}
-            />
-
-            {/* AI / Booru 表单 */}
             {source === 'ai' ? (
               <AiForm
-                trainTags={trainTags}
-                excluded={excluded}
-                onToggleExcluded={toggleTag}
                 neg={aiNeg} onNegChange={setAiNeg}
                 width={aiWidth} onWidthChange={setAiWidth}
                 height={aiHeight} onHeightChange={setAiHeight}
                 steps={aiSteps} onStepsChange={setAiSteps}
                 cfg={aiCfg} onCfgChange={setAiCfg}
                 seed={aiSeed} onSeedChange={setAiSeed}
-                incremental={aiIncremental}
-                onIncrementalChange={setAiIncremental}
                 repeat={aiRepeat} onRepeatChange={setAiRepeat}
               />
             ) : (
               <BooruForm
-                trainTags={trainTags}
                 trainImageCount={trainImageCount}
-                excluded={excluded}
-                onToggleExcluded={toggleTag}
                 apiSource={apiSource} onApiSourceChange={setApiSource}
                 buildMode={buildMode} onBuildModeChange={setBuildMode}
                 modeLocked={modeLocked}
                 existingMode={existingMode}
                 targetCount={targetCount} onTargetCountChange={setTargetCount}
-                mode={mode} onModeChange={setMode}
                 autoTag={autoTag} onAutoTagChange={setAutoTag}
                 autoTagKind={autoTagKind} onAutoTagKindChange={setAutoTagKind}
                 autoDedup={autoDedup} onAutoDedupChange={setAutoDedup}
@@ -479,58 +472,98 @@ export default function RegularizationPage() {
               />
             )}
 
-            {/* 运行日志：全宽置底 */}
-            {(job || aiTask) && (
-              <LogPanel
-                job={job}
-                jobLogs={logs}
-                onCancelJob={async () => {
-                  if (!job) return
-                  try {
-                    await api.cancelJob(job.id)
-                    toast(t('reg.cancelToast'), 'success')
-                  } catch (e) {
-                    toast(String(e), 'error')
-                  }
-                }}
-                aiTask={aiTask}
-                aiLogs={aiLogs}
-              />
-            )}
-
+            <ExcludeTags
+              trainTags={trainTags}
+              excluded={excluded}
+              onToggle={toggleTag}
+            />
           </div>
-        </div>
+
+          <div className="ds-cardfoot">
+            <span className="ds-hint">
+              {trainImageCount <= 0 ? t('reg.noTrainForBuild') : t('reg.collected', { n: regCount, target: runTarget })}
+            </span>
+            <span className="ds-cardfoot-act">
+              <button
+                type="button"
+                className="ds-ctl"
+                style={{ height: 34 }}
+                onClick={() => void run(true)}
+                disabled={isLive || trainImageCount <= 0 || regCount >= runTarget}
+                title={source === 'ai' ? t('reg.modeIncrementalAi') : t('reg.modeIncrementalBooru')}
+              >{t('reg.topUpTo', { n: runTarget })}</button>
+              <button
+                type="button"
+                className="ds-btn-primary"
+                style={{ height: 34 }}
+                onClick={() => void run(false)}
+                disabled={isLive || trainImageCount <= 0 || (source === 'booru' && modeLocked)}
+                title={source === 'ai' ? t('reg.modeFullAi') : t('reg.modeFullBooru')}
+              >{isLive ? t('reg.generatingBtn') : t('reg.startBuildBtn')}</button>
+            </span>
+          </div>
+        </>
+      ) : reg && regCount > 0 ? (
+        <RegImages
+          pid={project.id}
+          vid={vid}
+          reg={reg}
+          isLive={isLive}
+          runTarget={runTarget}
+          onTopUp={() => void run(true)}
+          onPreview={(idx) => void openPreview(idx)}
+          onChanged={() => {
+            void refreshReg()
+            void reload()
+          }}
+        />
       ) : (
-        reg && reg.image_count > 0 ? (
-          <RegPreview
-            pid={project.id}
-            vid={vid}
-            reg={reg}
-            isLive={isLive}
-            onPick={(idx) => void openPreview(idx)}
-            onDeleted={() => {
-              void refreshReg()
-              void reload()
-            }}
-            onRenamed={() => {
-              void refreshReg()
-              void reload()
-            }}
-          />
-        ) : (
-          <section
-            className="flex-1 flex flex-col items-center justify-center gap-1.5 text-center rounded-md border border-subtle bg-surface text-fg-tertiary"
-            style={{ minHeight: 0 }}
-          >
-            <div className="text-sm text-fg-secondary font-medium">
-              {t('reg.emptyRegTitle')}
-            </div>
-            <div className="text-2xs">
-              {t('reg.emptyRegHint')}
-            </div>
-          </section>
-        )
+        <div className="ds-empty" style={{ margin: 17 }}>
+          <span style={{ fontWeight: 500, color: 'var(--ink-2)' }}>{t('reg.emptyRegTitle')}</span>
+          <span style={{ fontSize: 11.5 }}>{t('reg.emptyRegHint')}</span>
+        </div>
       )}
+    </div>
+  )
+
+  return (
+    <StepShell
+      idx={5}
+      eyebrow={t('reg.eyebrow')}
+      title={t('steps.reg.title')}
+      subtitle={t('steps.reg.subtitle')}
+      actions={
+        <>
+          {!reg?.exists && <Link className="ds-ctl" to={trainUrl}>{t('reg.skipStep')}</Link>}
+          <KebabMenu
+            label={t('reg.moreActions')}
+            trigger="icon"
+            items={[{ label: t('reg.deleteBtn'), tone: 'err', onSelect: () => void onDelete(), disabled: isLive || !reg?.exists }]}
+          />
+          <Link className="ds-btn-primary" to={trainUrl}>
+            {t('reg.next')}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13m-5-6 6 6-6 6" /></svg>
+          </Link>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minHeight: 0, overflowY: 'auto', paddingTop: 2 }}>
+        <StatusCard reg={reg} existingMode={existingMode} job={job} aiTask={aiTask} />
+
+        {activeTab === 'generate' ? (
+          <div className="ds-formsplit ds-even ds-fill" style={{ flex: 1, minHeight: 0 }}>
+            {tabsCard}
+            <RunLog
+              source={source}
+              job={job}
+              jobLogs={logs}
+              aiTask={aiTask}
+              aiLogs={aiLogs}
+              onCancelJob={cancelJob}
+            />
+          </div>
+        ) : tabsCard}
+      </div>
 
       {previewIdx !== null && reg && reg.files[previewIdx] && (
         <ImagePreviewModal
@@ -549,326 +582,273 @@ export default function RegularizationPage() {
           }
         />
       )}
-    </div>
     </StepShell>
   )
 }
 
 // ---------------------------------------------------------------------------
-// 子组件 — restyle（按设计稿 `tmp/reg-restyle-design/.../正则集 restyle.html`）
+// Pieces of the page (mockup Reg / RegImages)
 // ---------------------------------------------------------------------------
 
-// 状态条：4 cells 信息 + grow + 右端「清空」。锚定设计稿 `.status`。
-function StatusStrip({
-  reg,
-  onDelete,
-  disabled,
-  autoTagKind,
+const Icon = {
+  globe: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></svg>
+  ),
+  spark: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6" /></svg>
+  ),
+  x: (
+    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+  ),
+  minus: (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M5 12h14" /></svg>
+  ),
+  plus: (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+  ),
+}
+
+/** Finished-state label shared by the booru job and the prior task. */
+function runStatusLabel(status: string, t: TFunction): string {
+  if (status === 'done') return t('reg.aiStatusDone')
+  if (status === 'running') return t('reg.aiStatusRunning')
+  if (status === 'failed') return t('reg.aiStatusFailed')
+  if (status === 'pending') return t('reg.aiStatusPending')
+  if (status === 'canceled') return t('reg.aiStatusCanceled')
+  return status
+}
+
+function runBadgeTone(status: string): string {
+  if (status === 'done') return 'ds-ok'
+  if (status === 'failed') return 'ds-err'
+  if (status === 'running' || status === 'pending') return 'ds-info'
+  return 'ds-mute'
+}
+
+// Four numbers about the current set: size + structure, source + tagger,
+// tags the booru search could not use, and when it was last built.
+function StatusCard({
+  reg, existingMode, job, aiTask,
 }: {
   reg: RegStatus | null
-  onDelete: () => void
-  disabled: boolean
-  autoTagKind: string
+  existingMode: 'mirror' | 'flat' | null
+  job: Job | null
+  aiTask: Task | null
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const m = reg?.exists ? reg.meta : null
+  const folderCount = useMemo(() => {
+    const s = new Set<string>()
+    for (const rel of reg?.files ?? []) {
+      const i = rel.indexOf('/')
+      s.add(i >= 0 ? rel.slice(0, i) : '')
+    }
+    return s.size
+  }, [reg])
+  const failed = m?.failed_tags ?? []
+  const latestRun = job ?? aiTask
+  const cell = (last: boolean, cap: string, value: React.ReactNode, key: React.ReactNode, big = false, title?: string) => (
+    <div style={{ padding: '14px 17px', borderRight: last ? undefined : '1px solid var(--line)' }} title={title}>
+      <div className="ds-cap">{cap}</div>
+      <div style={big
+        ? { fontSize: 18, fontWeight: 600, letterSpacing: '-.03em', marginTop: 5 }
+        : { fontSize: 14, fontWeight: 600, marginTop: 6 }}
+      >{value}</div>
+      <div className="ds-cell-key">{key}</div>
+    </div>
+  )
   if (!reg) {
-    return (
-      <section className="rounded-md border border-subtle bg-surface px-3 py-2 text-xs text-fg-tertiary shrink-0">
-        {t('reg.statusLoading')}
-      </section>
-    )
+    return <div className="ds-card" style={{ padding: '14px 17px', fontSize: 12, color: 'var(--ink-3)' }}>{t('reg.statusLoading')}</div>
   }
-  if (!reg.exists) {
-    return (
-      <section className="rounded-md border border-subtle bg-surface px-3 py-2 text-xs text-fg-tertiary shrink-0">
-        {t('reg.statusNotExist')}
-      </section>
-    )
-  }
-  const m = reg.meta
-  const failedCount = m?.failed_tags.length ?? 0
-  const sourceLabel = m
-    ? m.generation_method === 'ai_base'
-      ? t('reg.statusAiGen')
-      : m.api_source
+  const date = m
+    ? new Intl.DateTimeFormat(i18n.language, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(m.generated_at * 1000)
     : '—'
-  const taggerLabel = m
-    ? m.auto_tagged
-      ? (m.auto_tag_kind ?? autoTagKind ?? 'wd14')
-      : null
-    : null
   return (
-    <section className="rounded-lg border border-subtle bg-surface flex items-stretch overflow-hidden shrink-0">
-      <StatusCell label={t('reg.statusCellSet')}>
-        <span className="font-mono">
-          <span className="text-ok">{reg.image_count}</span>
-          {m && (
-            <span className="text-fg-tertiary text-2xs font-normal ml-1">
-              / {m.target_count} {t('reg.nImagesShort')}
-            </span>
-          )}
-        </span>
-      </StatusCell>
-      <StatusCell label={t('reg.statusCellSourceTag')}>
-        <span className="font-mono">
-          {sourceLabel}
-          {taggerLabel && (
-            <span className="text-ok text-2xs font-normal ml-1.5">
-              ✓ {taggerLabel}
-            </span>
-          )}
-        </span>
-      </StatusCell>
-      <StatusCell label={t('reg.statusCellInvalidTags')}>
-        <span className="font-mono">
-          {failedCount > 0 ? (
-            <>
-              <span className="text-warn">{failedCount}</span>
-              <span className="text-fg-tertiary text-2xs font-normal ml-1">
-                {t('reg.statusCellSkipped')}
-              </span>
-            </>
-          ) : (
-            <span className="text-fg-tertiary">0</span>
-          )}
-        </span>
-      </StatusCell>
-      <StatusCell label={t('reg.statusCellLatest')}>
-        <span className="font-normal text-fg-secondary text-sm">
-          {m ? formatAgo(m.generated_at, t) : '—'}
-        </span>
-      </StatusCell>
-      <div className="flex-1 border-r border-subtle" />
-      <div className="flex items-center gap-2 px-3 border-l border-subtle">
-        <button
-          onClick={onDelete}
-          disabled={disabled}
-          className="btn btn-sm bg-transparent text-err border border-err-soft hover:bg-err-soft"
-        >
-          {t('reg.deleteBtn')}
+    <div className="ds-card">
+      <div className="ds-reg-status">
+        {cell(false, t('reg.statusCellSet'),
+          <>{reg.exists ? reg.image_count : 0} <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--ink-3)' }}>{t('reg.nImagesShort')}</span></>,
+          !reg.exists ? t('reg.statusNotBuilt')
+            : existingMode === 'flat' ? t('reg.structFlat')
+              : existingMode === 'mirror' ? t('reg.structMirror', { count: folderCount })
+                : '—',
+          true)}
+        {cell(false, t('reg.statusCellSourceTag'),
+          m ? (m.generation_method === 'ai_base' ? t('reg.sourceAi') : t('reg.sourceBooru')) : '—',
+          m
+            ? [m.generation_method === 'ai_base' ? t('reg.sourceAiSub') : m.api_source,
+              m.auto_tagged ? (m.auto_tag_kind ?? t('reg.taggerUnknown')) : t('reg.statusTaggerOff')].join(' · ')
+            : '—')}
+        {cell(false, t('reg.statusCellInvalidTags'),
+          <span style={{ color: failed.length > 0 ? 'var(--amber-text)' : undefined }}>{m ? failed.length : '—'}</span>,
+          m ? (failed.length > 0 ? t('reg.invalidKey') : t('reg.invalidNone')) : '—',
+          true,
+          failed.length > 0 ? t('reg.failedTagsTitle', { tags: failed.join(', ') }) : undefined)}
+        {cell(true, t('reg.statusCellLatest'),
+          date,
+          latestRun ? t('reg.latestRun', { id: latestRun.id, status: runStatusLabel(latestRun.status, t) }) : (m ? formatAgo(m.generated_at, t) : '—'))}
+      </div>
+    </div>
+  )
+}
+
+function SourceCard({ on, onClick, icon, name, badge, desc }: {
+  on: boolean
+  onClick: () => void
+  icon: React.ReactNode
+  name: string
+  badge: string
+  desc: string
+}) {
+  return (
+    <button type="button" role="radio" aria-checked={on} className={`ds-optcard${on ? ' ds-is-on' : ''}`} onClick={onClick}>
+      <span className="ds-optcard-ico">{icon}</span>
+      <span className="ds-optcard-txt">
+        <span className="ds-optcard-name">{name}<span className="ds-badge ds-mute">{badge}</span></span>
+        <span className="ds-optcard-desc">{desc}</span>
+      </span>
+      <span className={`ds-radio${on ? ' ds-on' : ''}`} />
+    </button>
+  )
+}
+
+function SubGroup({ name, keyName, meta }: { name: string; keyName?: string; meta?: React.ReactNode }) {
+  return (
+    <div className="ds-subgroup">
+      <span className="ds-sg-name">{name}</span>
+      {keyName && <span className="ds-sg-key">{keyName}</span>}
+      <span style={{ flex: 1 }} />
+      {meta != null && <span className="ds-kpi-meta">{meta}</span>}
+    </div>
+  )
+}
+
+// One setting row: name + parameter key + explanation, control on the right.
+function Row({ label, keyName, desc, children }: {
+  label: string
+  keyName?: string
+  desc?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <div className="ds-field">
+      <div className="ds-field-txt">
+        <div className="ds-field-name"><span className="ds-label">{label}</span>{keyName && <span className="ds-key">{keyName}</span>}</div>
+        {desc && <div className="ds-field-desc">{desc}</div>}
+      </div>
+      <div className="ds-field-ctl">{children}</div>
+    </div>
+  )
+}
+
+function Stepper({ value, onChange, step = 1, min, max, placeholder, disabled, ariaLabel }: {
+  value: string
+  onChange: (v: string) => void
+  step?: number
+  min?: number
+  max?: number
+  placeholder?: string
+  disabled?: boolean
+  ariaLabel?: string
+}) {
+  const { t } = useTranslation()
+  const bump = (d: number) => {
+    const base = value.trim() === '' ? Number(placeholder) || 0 : Number(value) || 0
+    let next = Math.round((base + d) * 1000) / 1000
+    if (min != null) next = Math.max(min, next)
+    if (max != null) next = Math.min(max, next)
+    onChange(String(next))
+  }
+  return (
+    <span className="ds-stepper" style={disabled ? { opacity: 0.55 } : undefined}>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+        inputMode="decimal"
+        aria-label={ariaLabel}
+      />
+      <button type="button" aria-label={t('reg.less')} onClick={() => bump(-step)} disabled={disabled}>{Icon.minus}</button>
+      <button type="button" aria-label={t('reg.more')} onClick={() => bump(step)} disabled={disabled}>{Icon.plus}</button>
+    </span>
+  )
+}
+
+/** Numeric stepper bound to a number state; out-of-range input is clamped. */
+function NumStepper({ value, onChange, step = 1, min, max, ariaLabel }: {
+  value: number
+  onChange: (v: number) => void
+  step?: number
+  min?: number
+  max?: number
+  ariaLabel?: string
+}) {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => { setDraft(String(value)) }, [value])
+  return (
+    <Stepper
+      value={draft}
+      step={step}
+      min={min}
+      max={max}
+      ariaLabel={ariaLabel}
+      onChange={(v) => {
+        setDraft(v)
+        const n = Number(v)
+        if (v.trim() === '' || !Number.isFinite(n)) return
+        let c = n
+        if (min != null) c = Math.max(min, c)
+        if (max != null) c = Math.min(max, c)
+        onChange(c)
+      }}
+    />
+  )
+}
+
+function Switch({ on, onChange, disabled, label }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      className={`ds-switch${on ? ' ds-on' : ''}`}
+      onClick={() => onChange(!on)}
+      disabled={disabled}
+      style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
+    ><i /></button>
+  )
+}
+
+function Seg<T extends string>({ value, options, onChange, disabled, label }: {
+  value: T
+  options: Array<[T, string]>
+  onChange: (v: T) => void
+  disabled?: boolean
+  label: string
+}) {
+  return (
+    <div className="ds-seg" style={{ display: 'flex', width: '100%' }} role="group" aria-label={label}>
+      {options.map(([id, text]) => (
+        <button key={id} type="button" className={`ds-seg-item${value === id ? ' ds-is-active' : ''}`} style={{ flex: 1 }} aria-pressed={value === id} onClick={() => onChange(id)} disabled={disabled}>
+          {text}
         </button>
-      </div>
-    </section>
-  )
-}
-
-function StatusCell({
-  label, children,
-}: {
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="px-4 py-2.5 border-r border-subtle flex flex-col gap-0.5">
-      <span className="caption">
-        {label}
-      </span>
-      <span className="text-sm text-fg-primary font-medium">
-        {children}
-      </span>
+      ))}
     </div>
   )
 }
 
-// Tab：设计稿 `.tab`，border-bottom 下划线（accent 色）。
-function RegTab({
-  active, onClick, label, count, live,
-}: {
-  active: boolean
-  onClick: () => void
-  label: string
-  count?: number
-  live?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={'tab ' + (active ? 'is-active' : '')}
-    >
-      <span>{label}</span>
-      {count !== undefined && count > 0 && (
-        <span className="text-2xs font-medium tabular-nums px-1.5 rounded-full text-fg-secondary bg-overlay">
-          {count}
-        </span>
-      )}
-      {live && (
-        <span className="text-2xs font-medium px-1.5 rounded-full text-warn bg-warn-soft">
-          live
-        </span>
-      )}
-    </button>
-  )
-}
-
-// 来源 segmented control + 下方常驻 hint。
-function SourceSegmented({
-  source, onChange,
-}: {
-  source: 'ai' | 'booru'
-  onChange: (s: 'ai' | 'booru') => void
-}) {
-  const { t } = useTranslation()
-  return (
-    <div className="mb-4">
-      <div
-        className="seg"
-      >
-        <SourceSegBtn
-          active={source === 'ai'}
-          onClick={() => onChange('ai')}
-          label={t('reg.sourceAi')}
-          sub={t('reg.sourceAiSub')}
-        />
-        <SourceSegBtn
-          active={source === 'booru'}
-          onClick={() => onChange('booru')}
-          label={t('reg.sourceBooru')}
-          sub={t('reg.sourceBooruSub')}
-        />
-      </div>
-      <p className="mt-2 text-xs text-fg-tertiary leading-relaxed max-w-[720px]">
-        {source === 'ai' ? t('reg.sourceAiHint') : t('reg.sourceBooruHint')}
-      </p>
-    </div>
-  )
-}
-
-function SourceSegBtn({
-  active, onClick, label, sub,
-}: {
-  active: boolean
-  onClick: () => void
-  label: string
-  sub: string
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={
-        'seg-item px-3.5 min-h-[30px] text-sm ' + (active ? 'is-active' : '')
-      }
-    >
-      <span>{label}</span>
-      <span
-        className={
-          'text-2xs font-normal ' +
-          (active ? 'opacity-80' : 'text-fg-tertiary')
-        }
-      >
-        · {sub}
-      </span>
-    </button>
-  )
-}
-
-// 分组卡（grp）：标题 + 标签 + 可选折叠
-function GrpCard({
-  title, tag, meta, collapsible, defaultOpen, children,
-}: {
-  title: string
-  tag?: string
-  meta?: React.ReactNode
-  collapsible?: boolean
-  defaultOpen?: boolean
-  children: React.ReactNode
-}) {
-  const { t } = useTranslation()
-  const [open, setOpen] = useState(!collapsible || defaultOpen !== false)
-  return (
-    <div className="rounded-lg border border-subtle bg-surface mb-3.5 overflow-hidden">
-      <div
-        onClick={collapsible ? () => setOpen((v) => !v) : undefined}
-        className={
-          'flex items-center gap-2.5 px-4 py-3 ' +
-          (collapsible ? 'cursor-pointer' : '')
-        }
-      >
-        <span className="text-sm font-semibold text-fg-primary">{title}</span>
-        {tag && (
-          <span
-            className="font-mono text-2xs uppercase tracking-wider rounded-full px-2 py-0.5 border"
-            style={{
-              color: 'var(--accent-text, var(--accent))',
-              background: 'var(--accent-soft)',
-              borderColor: 'rgba(237,107,58,0.42)',
-            }}
-          >
-            {tag}
-          </span>
-        )}
-        {meta && (
-          <span className="text-xs text-fg-tertiary">{meta}</span>
-        )}
-        {collapsible && (
-          <span className="ml-auto inline-flex items-center gap-2 text-xs text-fg-tertiary">
-            <span className="font-mono">
-              {open ? t('reg.grpCollapse') : t('reg.grpExpand')}
-            </span>
-            <span
-              className="inline-block transition-transform"
-              style={{ transform: open ? 'rotate(90deg)' : undefined }}
-            >
-              ›
-            </span>
-          </span>
-        )}
-      </div>
-      {open && (
-        <div className="border-t border-subtle px-4 pt-1 pb-4">
-          {children}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// 单字段封装：label + control。
-function Field({
-  label, hint, locked, children,
-}: {
-  label: React.ReactNode
-  hint?: React.ReactNode
-  locked?: React.ReactNode
-  children: React.ReactNode
-}) {
-  return (
-    <div className="pt-4">
-      <label className="block text-xs text-fg-secondary mb-1.5 font-medium">
-        {label}
-        {hint && (
-          <span className="ml-1.5 text-fg-tertiary font-normal text-2xs">
-            {hint}
-          </span>
-        )}
-      </label>
-      {children}
-      {locked && (
-        <div className="font-mono text-2xs text-fg-tertiary mt-1.5">
-          {locked}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// AI 表单 — grp 卡：出图（常用）/ 排除 tag / 采样（进阶）
+// AI prior settings: what to generate, then the sampler.
 function AiForm({
-  trainTags,
-  excluded, onToggleExcluded,
   neg, onNegChange,
   width, onWidthChange,
   height, onHeightChange,
   steps, onStepsChange,
   cfg, onCfgChange,
   seed, onSeedChange,
-  incremental, onIncrementalChange,
   repeat, onRepeatChange,
 }: {
-  trainTags: RegTagCount[]
-  excluded: Set<string>
-  onToggleExcluded: (tag: string) => void
   neg: string
   onNegChange: (v: string) => void
   width: number; onWidthChange: (v: number) => void
@@ -876,137 +856,57 @@ function AiForm({
   steps: number; onStepsChange: (v: number) => void
   cfg: number; onCfgChange: (v: number) => void
   seed: number; onSeedChange: (v: number) => void
-  incremental: boolean; onIncrementalChange: (v: boolean) => void
   repeat: number; onRepeatChange: (v: number) => void
 }) {
   const { t } = useTranslation()
   return (
     <>
-      <GrpCard title={t('reg.grpAiGen')} tag={t('reg.grpTagCommon')}>
-        <Field label={t('reg.negPrompt')}>
-          <textarea
-            className="input font-mono text-sm"
-            style={{ minHeight: 78, lineHeight: 1.6, padding: '10px 12px' }}
-            rows={3}
-            value={neg}
-            onChange={(e) => onNegChange(e.target.value)}
-          />
-        </Field>
-        <div className="grid grid-cols-2 gap-3.5">
-          <Field label={t('reg.widthLabel')}>
-            <UnitInput
-              value={width}
-              onChange={onWidthChange}
-              unit="px"
-              min={256}
-              max={4096}
-              step={64}
-            />
-          </Field>
-          <Field label={t('reg.heightLabel')}>
-            <UnitInput
-              value={height}
-              onChange={onHeightChange}
-              unit="px"
-              min={256}
-              max={4096}
-              step={64}
-            />
-          </Field>
-        </div>
-        <Field
-          label={t('reg.modeLabel')}
-          hint={t('reg.modeHintAi')}
-        >
-          <select
-            className="select input"
-            value={incremental ? 'incremental' : 'full'}
-            onChange={(e) => onIncrementalChange(e.target.value === 'incremental')}
-          >
-            <option value="incremental">{t('reg.modeIncrementalAi')}</option>
-            <option value="full">{t('reg.modeFullAi')}</option>
-          </select>
-        </Field>
-        <Field
-          label={t('reg.repeatLabel')}
-          hint={t('reg.repeatHint')}
-        >
-          <input
-            type="number"
-            className="input font-mono"
-            value={repeat}
-            onChange={(e) => onRepeatChange(Math.max(1, Number(e.target.value) || 1))}
-            min={1} max={100}
-          />
-        </Field>
-      </GrpCard>
+      <SubGroup name={t('reg.grpAiGen')} keyName="ai_prior" meta={t('reg.nFields', { count: 4 })} />
+      <Row label={t('reg.negPrompt')} keyName="negative_prompt" desc={t('reg.negPromptDesc')}>
+        <textarea
+          className="ds-inp ds-mono"
+          style={{ height: 84, padding: '8px 10px', resize: 'vertical', lineHeight: 1.5 }}
+          value={neg}
+          onChange={(e) => onNegChange(e.target.value)}
+          aria-label={t('reg.negPrompt')}
+        />
+      </Row>
+      <Row label={t('reg.widthLabel')} keyName="width" desc={t('reg.sizeDesc')}>
+        <NumStepper value={width} onChange={onWidthChange} step={64} min={256} max={4096} ariaLabel={t('reg.widthLabel')} />
+      </Row>
+      <Row label={t('reg.heightLabel')} keyName="height">
+        <NumStepper value={height} onChange={onHeightChange} step={64} min={256} max={4096} ariaLabel={t('reg.heightLabel')} />
+      </Row>
+      <Row label={t('reg.repeatLabel')} keyName="repeat" desc={t('reg.repeatHint')}>
+        <NumStepper value={repeat} onChange={onRepeatChange} min={1} max={100} ariaLabel={t('reg.repeatLabel')} />
+      </Row>
 
-      <ExcludeTags
-        trainTags={trainTags}
-        excluded={excluded}
-        onToggle={onToggleExcluded}
-      />
-
-      <GrpCard
-        title={t('reg.grpSampling')}
-        meta={t('reg.grpSamplingMeta')}
-        collapsible
-        defaultOpen={false}
-      >
-        <div className="grid grid-cols-3 gap-3.5">
-          <Field label={t('reg.stepsLabel')}>
-            <input
-              type="number"
-              className="input font-mono"
-              value={steps}
-              onChange={(e) => onStepsChange(Number(e.target.value) || 0)}
-              min={1} max={150}
-            />
-          </Field>
-          <Field label="CFG Scale">
-            <input
-              type="number"
-              className="input font-mono"
-              value={cfg}
-              onChange={(e) => onCfgChange(Number(e.target.value) || 0)}
-              min={0} max={20} step={0.5}
-            />
-          </Field>
-          <Field
-            label={t('reg.seedLabel')}
-            hint={t('reg.seedHintRandom')}
-          >
-            <input
-              type="number"
-              className="input font-mono"
-              value={seed}
-              onChange={(e) => onSeedChange(Number(e.target.value) || 0)}
-              min={0}
-            />
-          </Field>
-        </div>
-      </GrpCard>
+      <SubGroup name={t('reg.grpSampling')} keyName="sampler" meta={t('reg.nFields', { count: 3 })} />
+      <Row label={t('reg.stepsLabel')} keyName="steps">
+        <NumStepper value={steps} onChange={onStepsChange} min={1} max={150} ariaLabel={t('reg.stepsLabel')} />
+      </Row>
+      <Row label="CFG Scale" keyName="cfg_scale">
+        <NumStepper value={cfg} onChange={onCfgChange} step={0.5} min={0} max={20} ariaLabel="CFG Scale" />
+      </Row>
+      <Row label={t('reg.seedLabel')} keyName="seed" desc={t('reg.seedHintRandom')}>
+        <NumStepper value={seed} onChange={onSeedChange} min={0} ariaLabel={t('reg.seedLabel')} />
+      </Row>
     </>
   )
 }
 
-// Booru 表单 — grp 卡：抓取（常用）/ 排除 tag / 进阶
+// Booru scrape settings, then post-processing.
 function BooruForm({
-  trainTags, trainImageCount,
-  excluded, onToggleExcluded,
+  trainImageCount,
   apiSource, onApiSourceChange,
   buildMode, onBuildModeChange, modeLocked, existingMode,
   targetCount, onTargetCountChange,
-  mode, onModeChange,
   autoTag, onAutoTagChange,
   autoTagKind, onAutoTagKindChange,
   autoDedup, onAutoDedupChange,
   advanced, onAdvancedChange,
 }: {
-  trainTags: RegTagCount[]
   trainImageCount: number
-  excluded: Set<string>
-  onToggleExcluded: (tag: string) => void
   apiSource: 'gelbooru' | 'danbooru'
   onApiSourceChange: (v: 'gelbooru' | 'danbooru') => void
   buildMode: 'mirror' | 'flat'
@@ -1015,8 +915,6 @@ function BooruForm({
   existingMode: 'mirror' | 'flat' | null
   targetCount: string
   onTargetCountChange: (v: string) => void
-  mode: 'full' | 'incremental'
-  onModeChange: (v: 'full' | 'incremental') => void
   autoTag: boolean
   onAutoTagChange: (v: boolean) => void
   autoTagKind: 'wd14' | 'cltagger'
@@ -1028,172 +926,86 @@ function BooruForm({
 }) {
   const { t } = useTranslation()
   const mirror = buildMode === 'mirror'
+  const set = <K extends keyof AdvancedParams>(k: K, v: AdvancedParams[K]) =>
+    onAdvancedChange({ ...advanced, [k]: v })
   return (
     <>
-      <GrpCard title={t('reg.grpBooruScrape')} tag={t('reg.grpTagCommon')}>
-        <div className="grid grid-cols-2 gap-3.5">
-          <Field label={t('reg.source')}>
-            <select
-              className="select input"
-              value={apiSource}
-              onChange={(e) => onApiSourceChange(e.target.value as 'gelbooru' | 'danbooru')}
-            >
-              <option value="gelbooru">Gelbooru</option>
-              <option value="danbooru">Danbooru</option>
-            </select>
-          </Field>
-          <Field
-            label={t('reg.buildModeLabel')}
-            hint={modeLocked ? t('reg.buildModeLocked', { mode: existingMode }) : undefined}
-          >
-            <select
-              className="select input"
-              value={buildMode}
-              onChange={(e) => onBuildModeChange(e.target.value as 'mirror' | 'flat')}
-              disabled={modeLocked}
-            >
-              <option value="flat">{t('reg.buildModeFlat')}</option>
-              <option value="mirror">{t('reg.buildModeMirror')}</option>
-            </select>
-          </Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3.5">
-          <Field
-            label={t('reg.targetCount')}
-            hint={t('reg.targetCountHint')}
-            locked={mirror ? t('reg.targetMirrorLocked', { n: trainImageCount }) : undefined}
-          >
-            <input
-              type="number"
-              className="input font-mono"
-              value={mirror ? String(trainImageCount) : targetCount}
-              onChange={(e) => onTargetCountChange(e.target.value)}
-              placeholder={String(trainImageCount)}
-              disabled={mirror}
-              min={1}
-            />
-          </Field>
-          <Field
-            label={t('reg.modeLabel')}
-            hint={t('reg.modeHintBooru')}
-          >
-            <select
-              className="select input"
-              value={mode}
-              onChange={(e) => onModeChange(e.target.value as 'full' | 'incremental')}
-            >
-              <option value="incremental">{t('reg.modeIncrementalBooru')}</option>
-              <option value="full">{t('reg.modeFullBooru')}</option>
-            </select>
-          </Field>
-        </div>
-        <Field label="">
-          <CheckRow
-            checked={autoTag}
-            onChange={onAutoTagChange}
-            label={t('reg.autoTagLabel')}
-          />
-        </Field>
-      </GrpCard>
+      <SubGroup name={t('reg.grpBooruScrape')} keyName="booru" meta={t('reg.nFields', { count: 6 })} />
+      <Row label={t('reg.source')} keyName="api_source">
+        <Seg value={apiSource} options={[['gelbooru', 'Gelbooru'], ['danbooru', 'Danbooru']]} onChange={onApiSourceChange} label={t('reg.source')} />
+      </Row>
+      <Row label={t('reg.buildModeLabel')} keyName="build_mode" desc={t('reg.buildModeTitle')}>
+        <Seg
+          value={buildMode}
+          options={[['flat', t('reg.buildModeFlatShort')], ['mirror', t('reg.buildModeMirrorShort')]]}
+          onChange={onBuildModeChange}
+          disabled={modeLocked}
+          label={t('reg.buildModeLabel')}
+        />
+        {modeLocked && <span className="ds-ctl-note">{t('reg.buildModeLocked', { mode: existingMode })}</span>}
+      </Row>
+      <Row label={t('reg.targetCount')} keyName="target_count" desc={t('reg.targetCountDesc')}>
+        <Stepper
+          value={mirror ? String(trainImageCount) : targetCount}
+          onChange={onTargetCountChange}
+          placeholder={String(trainImageCount)}
+          min={1}
+          disabled={mirror}
+          ariaLabel={t('reg.targetCount')}
+        />
+        <span className="ds-ctl-note">{mirror ? t('reg.targetMirrorLocked', { n: trainImageCount }) : t('reg.targetCountHint')}</span>
+      </Row>
+      <Row label={t('reg.autoTagLabel')} keyName="auto_tag" desc={t('reg.autoTagDesc')}>
+        <Switch on={autoTag} onChange={onAutoTagChange} label={t('reg.autoTagLabel')} />
+      </Row>
+      <Row label={t('reg.autoTagKindLabel')} keyName="auto_tag_kind">
+        <Seg value={autoTagKind} options={[['wd14', 'WD14'], ['cltagger', 'CLTagger']]} onChange={onAutoTagKindChange} disabled={!autoTag} label={t('reg.autoTagKindLabel')} />
+        {!autoTag && <span className="ds-ctl-note">{t('reg.autoTagKindDisabled')}</span>}
+      </Row>
+      <Row label={t('reg.autoDedupLabel')} keyName="auto_dedup" desc={t('reg.autoDedupTitle')}>
+        <Switch on={autoDedup} onChange={onAutoDedupChange} label={t('reg.autoDedupLabel')} />
+      </Row>
 
-      <ExcludeTags
-        trainTags={trainTags}
-        excluded={excluded}
-        onToggle={onToggleExcluded}
-        modeHint={t('reg.excludeHintBooru')}
-      />
-
-      <GrpCard
-        title={t('reg.grpAdvanced')}
-        meta={t('reg.grpAdvancedMetaBooru')}
-        collapsible
-        defaultOpen={false}
-      >
-        <Field
-          label={t('reg.autoTagKindLabel')}
-          hint={!autoTag ? t('reg.autoTagKindDisabled') : undefined}
+      <SubGroup name={t('reg.grpAdvanced')} keyName="postprocess" meta={t('reg.nFields', { count: 4 })} />
+      <Row label={t('reg.aspectFilter')} keyName="aspect_ratio_filter" desc={t('reg.aspectFilterHint')}>
+        <Switch on={advanced.aspect_ratio_filter_enabled} onChange={(v) => set('aspect_ratio_filter_enabled', v)} label={t('reg.aspectFilter')} />
+        {advanced.aspect_ratio_filter_enabled && (
+          <div style={{ display: 'flex', gap: 6, width: '100%' }}>
+            <NumStepper value={advanced.min_aspect_ratio} onChange={(v) => set('min_aspect_ratio', v)} step={0.05} min={0.1} max={1} ariaLabel={t('reg.aspectMin')} />
+            <NumStepper value={advanced.max_aspect_ratio} onChange={(v) => set('max_aspect_ratio', v)} step={0.1} min={1} max={10} ariaLabel={t('reg.aspectMax')} />
+          </div>
+        )}
+      </Row>
+      <Row label={t('reg.postprocess')} keyName="postprocess_method">
+        <select
+          className="ds-inp"
+          value={advanced.postprocess_method}
+          onChange={(e) => set('postprocess_method', e.target.value as 'smart' | 'stretch' | 'crop')}
+          aria-label={t('reg.postprocess')}
         >
-          <select
-            className="select input"
-            value={autoTagKind}
-            onChange={(e) => onAutoTagKindChange(e.target.value as 'wd14' | 'cltagger')}
-            disabled={!autoTag}
-          >
-            <option value="wd14">WD14</option>
-            <option value="cltagger">CLTagger</option>
-          </select>
-        </Field>
-        <Field label="">
-          <CheckRow
-            checked={autoDedup}
-            onChange={onAutoDedupChange}
-            label={t('reg.autoDedupLabel')}
-            sub={t('reg.autoDedupSub')}
-          />
-        </Field>
-        <AdvancedFields value={advanced} onChange={onAdvancedChange} />
-      </GrpCard>
+          <option value="smart">{t('reg.postprocessSmart')}</option>
+          <option value="stretch">{t('reg.postprocessStretch')}</option>
+          <option value="crop">{t('reg.postprocessCrop')}</option>
+        </select>
+      </Row>
+      <Row label={t('reg.maxCropLabel')} keyName="postprocess_max_crop_ratio" desc={t('reg.maxCropTitle')}>
+        <NumStepper value={advanced.postprocess_max_crop_ratio} onChange={(v) => set('postprocess_max_crop_ratio', v)} step={0.05} min={0.05} max={0.5} ariaLabel={t('reg.maxCropLabel')} />
+      </Row>
+      <Row label={t('reg.skipSimilarLabel')} keyName="skip_similar" desc={t('reg.skipSimilarTitle')}>
+        <Switch on={advanced.skip_similar} onChange={(v) => set('skip_similar', v)} label={t('reg.skipSimilarLabel')} />
+      </Row>
     </>
   )
 }
 
-// 数字输入 + 单位后缀（px）
-function UnitInput({
-  value, onChange, unit, min, max, step,
-}: {
-  value: number
-  onChange: (v: number) => void
-  unit: string
-  min?: number; max?: number; step?: number
-}) {
-  return (
-    <div className="relative">
-      <input
-        type="number"
-        className="input font-mono"
-        style={{ paddingRight: 36 }}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value) || 0)}
-        min={min} max={max} step={step}
-      />
-      <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-2xs text-fg-tertiary pointer-events-none">
-        {unit}
-      </span>
-    </div>
-  )
-}
-
-// checkbox 行
-function CheckRow({
-  checked, onChange, label, sub,
-}: {
-  checked: boolean
-  onChange: (v: boolean) => void
-  label: string
-  sub?: string
-}) {
-  return (
-    <label className="inline-flex items-center gap-2.5 cursor-pointer text-sm text-fg-secondary select-none">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 accent-accent cursor-pointer"
-      />
-      <span>{label}</span>
-      {sub && <span className="text-2xs text-fg-tertiary">{sub}</span>}
-    </label>
-  )
-}
-
-// 排除 tag — train 高频 tag 一栏列出 + 自定义排除一栏
+// Excluded tags: the chips that are out (train-derived plain, own ones amber),
+// a "+ tag" field, then the frequent train tags to click out.
 export function ExcludeTags({
-  trainTags, excluded, onToggle, modeHint,
+  trainTags, excluded, onToggle,
 }: {
   trainTags: RegTagCount[]
   excluded: Set<string>
   onToggle: (tag: string) => void
-  modeHint?: string
 }) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState('')
@@ -1206,14 +1018,14 @@ export function ExcludeTags({
     onPick: ({ suggestion }) => { setDraft(suggestion.tag) },
   })
   const trainTagSet = useMemo(
-    () => new Set(trainTags.map((t) => t.tag)),
+    () => new Set(trainTags.map((x) => x.tag)),
     [trainTags]
   )
-  const customTags = useMemo(
-    () => Array.from(excluded).filter((t) => !trainTagSet.has(t)).sort(),
+  const excludedList = useMemo(
+    () => Array.from(excluded).sort((a, b) => Number(!trainTagSet.has(a)) - Number(!trainTagSet.has(b)) || a.localeCompare(b)),
     [excluded, trainTagSet]
   )
-  const excludedCount = excluded.size
+  const candidates = trainTags.filter((x) => !excluded.has(x.tag))
   const normalize = (raw: string): string =>
     raw.trim().toLowerCase().replace(/\s+/g, '_')
   const addCustom = () => {
@@ -1229,279 +1041,156 @@ export function ExcludeTags({
   }
 
   return (
-    <GrpCard
-      title={t('reg.excludeTitle')}
-      meta={
-        <>
-          {t('reg.excludeMetaPrefix')}{' '}
-          <b style={{ color: 'var(--accent-text, var(--accent))' }}>{excludedCount}</b>
-          {modeHint && <span className="ml-1">· {modeHint}</span>}
-        </>
-      }
-      collapsible
-      defaultOpen
-    >
-      {trainTags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {trainTags.map((info) => {
-            const on = excluded.has(info.tag)
+    <>
+      <SubGroup name={t('reg.excludeTitle')} keyName="excluded_tags" meta={t('reg.excludedN', { count: excluded.size })} />
+      <div style={{ padding: '12px 17px 14px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {excludedList.map((tag) => {
+            const custom = !trainTagSet.has(tag)
             return (
-              <button
-                key={info.tag}
-                onClick={() => onToggle(info.tag)}
-                className={
-                  'inline-flex items-center gap-1.5 h-6 max-w-full overflow-hidden whitespace-nowrap px-2.5 rounded-md font-mono text-xs cursor-pointer transition-colors border ' +
-                  (on
-                    ? 'text-accent-hover'
-                    : 'bg-sunken text-fg-secondary hover:text-fg-primary')
-                }
-                style={
-                  on
-                    ? { background: 'var(--accent-soft)', borderColor: 'rgba(237,107,58,0.42)' }
-                    : { borderColor: 'var(--border-default)' }
-                }
-                title={on ? t('reg.excludeUnclick') : t('reg.excludeClick')}
+              <span
+                key={tag}
+                className="ds-chip max-w-full overflow-hidden whitespace-nowrap"
+                style={custom ? { background: 'var(--amber-soft)', color: 'var(--amber-text)' } : undefined}
+                title={custom ? t('reg.excludeCustomRemoveTitle') : undefined}
               >
-                <span className={`shrink-0 ${on ? 'text-accent' : 'text-fg-tertiary'}`}>
-                  {on ? '✕' : '+'}
+                <span className="min-w-0 truncate text-left" title={tag.replace(/_/g, ' ')}>
+                  <TranslatedTag tag={tag.replace(/_/g, ' ')} />
                 </span>
-                <span
-                  className="min-w-0 truncate text-left"
-                  title={info.tag.replace(/_/g, ' ')}
-                >
-                  <TranslatedTag tag={info.tag.replace(/_/g, ' ')} />
-                </span>
-                <span className="shrink-0 text-fg-disabled text-2xs">×{info.count}</span>
-              </button>
+                <button type="button" className="ds-chip-x" onClick={() => onToggle(tag)} aria-label={t('reg.excludeCustomRemoveAria', { tag })}>
+                  {Icon.x}
+                </button>
+              </span>
             )
           })}
-        </div>
-      )}
-      <div className="caption mt-4 mb-2 flex items-center gap-2">
-        <span>{t('reg.tierCustom')}</span>
-        <span className="flex-1 h-px bg-subtle" />
-      </div>
-      {customTags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mb-2.5">
-          {customTags.map((tag) => (
-            <span
-              key={tag}
-              className="inline-flex items-center gap-1.5 h-6 max-w-full overflow-hidden whitespace-nowrap px-2.5 rounded-md font-mono text-xs border"
-              style={{
-                background: 'var(--warn-soft)',
-                borderColor: 'rgba(224,162,58,0.4)',
-                color: 'var(--warn)',
+          <span style={{ position: 'relative', display: 'inline-flex' }}>
+            <input
+              ref={inputRef}
+              className="ds-chip-add ds-mono"
+              style={{ width: draft ? Math.max(110, draft.length * 7.2 + 26) : 80, outline: 'none', background: 'transparent', color: 'var(--ink)' }}
+              value={draft}
+              onChange={(e) => { setDraft(e.target.value); suggest.notifyChange() }}
+              onKeyDown={(e) => {
+                if (suggest.handleKeyDown(e)) return
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  addCustom()
+                }
               }}
-            >
-              <span
-                className="min-w-0 truncate text-left"
-                title={tag.replace(/_/g, ' ')}
-              >
-                <TranslatedTag tag={tag.replace(/_/g, ' ')} />
-              </span>
-              <button
-                onClick={() => onToggle(tag)}
-                className="shrink-0 bg-transparent border-none cursor-pointer p-0 text-warn opacity-80"
-                aria-label={t('reg.excludeCustomRemoveAria', { tag })}
-              >
-                ×
-              </button>
-            </span>
-          ))}
+              onFocus={() => suggest.notifyFocus()}
+              onBlur={() => suggest.notifyBlur()}
+              placeholder={t('reg.excludePlaceholder')}
+              aria-label={t('reg.excludePlaceholder')}
+            />
+            <TagSuggestList
+              open={suggest.open}
+              suggestions={suggest.suggestions}
+              activeIdx={suggest.activeIdx}
+              onPick={(s) => suggest.pickAt(suggest.suggestions.indexOf(s))}
+              onHover={suggest.setActiveIdx}
+              inputRef={inputRef}
+              cursor={suggest.cursor}
+              positionDeps={[draft]}
+            />
+          </span>
         </div>
-      )}
-      <div className="flex gap-2 mt-3">
-        <div className="relative flex-1">
-          <input
-            ref={inputRef}
-            className="input font-mono w-full text-sm"
-            value={draft}
-            onChange={(e) => { setDraft(e.target.value); suggest.notifyChange() }}
-            onKeyDown={(e) => {
-              if (suggest.handleKeyDown(e)) return
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                addCustom()
-              }
-            }}
-            onFocus={() => suggest.notifyFocus()}
-            onBlur={() => suggest.notifyBlur()}
-            placeholder={t('reg.excludePlaceholder')}
-          />
-          <TagSuggestList
-            open={suggest.open}
-            suggestions={suggest.suggestions}
-            activeIdx={suggest.activeIdx}
-            onPick={(s) => suggest.pickAt(suggest.suggestions.indexOf(s))}
-            onHover={suggest.setActiveIdx}
-            inputRef={inputRef}
-            cursor={suggest.cursor}
-            positionDeps={[draft]}
-          />
-        </div>
-        <button
-          onClick={addCustom}
-          disabled={!draft.trim()}
-          className="btn btn-secondary btn-sm"
-        >
-          {t('reg.excludeAdd')}
-        </button>
-      </div>
-    </GrpCard>
-  )
-}
 
-// Booru 进阶里的 PP5.5 后处理 + 长宽比 — 设计稿没强调但功能保留
-function AdvancedFields({
-  value, onChange,
-}: {
-  value: AdvancedParams
-  onChange: (v: AdvancedParams) => void
-}) {
-  const { t } = useTranslation()
-  const set = <K extends keyof AdvancedParams>(k: K, v: AdvancedParams[K]) =>
-    onChange({ ...value, [k]: v })
-  return (
-    <>
-      <Field label={t('reg.aspectFilter')}>
-        <CheckRow
-          checked={value.aspect_ratio_filter_enabled}
-          onChange={(v) => set('aspect_ratio_filter_enabled', v)}
-          label={t('reg.aspectFilterEnable')}
-          sub={t('reg.aspectFilterHint')}
-        />
-        {value.aspect_ratio_filter_enabled && (
-          <div className="grid grid-cols-2 gap-3.5 mt-2">
-            <input
-              type="number" className="input font-mono"
-              min={0.1} max={1} step={0.05}
-              value={value.min_aspect_ratio}
-              onChange={(e) =>
-                set('min_aspect_ratio', Math.max(0.1, Math.min(1, Number(e.target.value) || 0.5)))
-              }
-            />
-            <input
-              type="number" className="input font-mono"
-              min={1} max={10} step={0.1}
-              value={value.max_aspect_ratio}
-              onChange={(e) =>
-                set('max_aspect_ratio', Math.max(1, Math.min(10, Number(e.target.value) || 2)))
-              }
-            />
+        {candidates.length > 0 ? (
+          <div>
+            <div className="ds-cap" style={{ marginBottom: 8 }}>{t('reg.excludeTrainTitle')}</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {candidates.map((info) => (
+                <button
+                  key={info.tag}
+                  type="button"
+                  onClick={() => onToggle(info.tag)}
+                  className="ds-chip max-w-full overflow-hidden whitespace-nowrap"
+                  style={{ background: 'transparent', boxShadow: 'inset 0 0 0 1px var(--line-2)', paddingRight: 9 }}
+                  title={t('reg.excludeClick')}
+                >
+                  <span className="min-w-0 truncate text-left" title={info.tag.replace(/_/g, ' ')}>
+                    <TranslatedTag tag={info.tag.replace(/_/g, ' ')} />
+                  </span>
+                  <b>{info.count}</b>
+                </button>
+              ))}
+            </div>
           </div>
-        )}
-      </Field>
-      <Field label={t('reg.postprocess')}>
-        <div className="grid grid-cols-2 gap-3.5">
-          <select
-            className="select input"
-            value={value.postprocess_method}
-            onChange={(e) => set('postprocess_method', e.target.value as 'smart' | 'stretch' | 'crop')}
-          >
-            <option value="smart">{t('reg.postprocessSmart')}</option>
-            <option value="stretch">{t('reg.postprocessStretch')}</option>
-            <option value="crop">{t('reg.postprocessCrop')}</option>
-          </select>
-          <input
-            type="number" className="input font-mono"
-            min={0.05} max={0.5} step={0.05}
-            value={value.postprocess_max_crop_ratio}
-            onChange={(e) =>
-              set('postprocess_max_crop_ratio', Math.max(0.05, Math.min(0.5, Number(e.target.value) || 0.1)))
-            }
-            title={t('reg.maxCropTitle')}
-          />
-        </div>
-      </Field>
-      <Field label={t('reg.selectImages')}>
-        <CheckRow
-          checked={value.skip_similar}
-          onChange={(v) => set('skip_similar', v)}
-          label="skip_similar"
-          sub={t('reg.skipSimilarTitle')}
-        />
-      </Field>
+        ) : trainTags.length === 0 ? (
+          <div className="ds-field-desc" style={{ marginTop: 0 }}>{t('reg.excludeNoTags')}</div>
+        ) : null}
+      </div>
     </>
   )
 }
 
-// 运行日志全宽置底
-function LogPanel({
-  job, jobLogs, onCancelJob, aiTask, aiLogs,
+/** Right card of the generate tab: the run's stdout. Shows the run of the
+ *  picked source, or whichever run exists. */
+function RunLog({
+  source, job, jobLogs, aiTask, aiLogs, onCancelJob,
 }: {
+  source: 'ai' | 'booru'
   job: Job | null
   jobLogs: string[]
-  onCancelJob: () => Promise<void>
   aiTask: Task | null
   aiLogs: string[]
+  onCancelJob: () => Promise<void>
 }) {
   const { t } = useTranslation()
-  // 优先显示进行中的 job；否则展示 aiTask
-  if (job) {
-    return (
-      <div className="mt-4">
-        <JobProgress
-          job={job}
-          logs={jobLogs}
-          onCancel={onCancelJob}
-        />
-      </div>
-    )
-  }
-  if (aiTask) {
-    return (
-      <div className="mt-4 rounded-lg border border-subtle bg-surface overflow-hidden">
-        <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-subtle text-sm font-semibold">
-          <span>{t('reg.aiLogTitle')}</span>
-          <AiTaskBadge task={aiTask} />
+  const preRef = useRef<HTMLPreElement>(null)
+  const showJob = job != null && (source === 'booru' || aiTask == null)
+  const lines = showJob ? jobLogs : aiTask ? aiLogs : []
+  const run = showJob ? job : aiTask
+  useEffect(() => {
+    if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight
+  }, [jobLogs, aiLogs, showJob])
+  const jobLive = showJob && (job.status === 'running' || job.status === 'pending')
+  return (
+    <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }}>
+      <div className="ds-card-head ds-pad">
+        <div>
+          <div className="ds-card-title">{t('reg.logTitle')}</div>
+          <div className="ds-card-sub">{showJob ? t('reg.logSubBooru') : aiTask ? t('reg.logSubAi') : t('reg.logSubIdle')}</div>
         </div>
-        {aiLogs.length > 0 && (
-          <pre className="m-0 px-4 py-3.5 bg-sunken font-mono text-xs leading-relaxed text-fg-tertiary max-h-72 overflow-auto whitespace-pre-wrap break-words">
-            {aiLogs.join('\n')}
+        <div className="ds-card-tools">
+          {run && (
+            <span className={`ds-badge ${runBadgeTone(run.status)}`}>
+              {t('reg.latestRun', { id: run.id, status: runStatusLabel(run.status, t) })}
+            </span>
+          )}
+          {jobLive && (
+            <button type="button" className="ds-ctl ds-ghost" style={{ height: 26 }} onClick={() => void onCancelJob()}>{t('common.cancel')}</button>
+          )}
+        </div>
+      </div>
+      <div className="ds-card-body" style={{ paddingTop: 2, flex: 1, minHeight: 0, display: 'flex' }}>
+        {lines.length > 0 ? (
+          <pre ref={preRef} className="ds-console" style={{ flex: 1, minHeight: 240, margin: 0, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            {lines.map((line, i) => (
+              <div key={i} className={/error|failed|traceback/i.test(line) ? 'ds-e' : /warn|skip/i.test(line) ? 'ds-w' : /\bdone\b|完成/i.test(line) ? 'ds-g' : undefined}>{line || ' '}</div>
+            ))}
           </pre>
+        ) : (
+          <div className="ds-empty" style={{ flex: 1, justifyContent: 'center', minHeight: 240 }}>{t('reg.logEmpty')}</div>
         )}
       </div>
-    )
-  }
-  return null
-}
-
-function AiTaskBadge({ task }: { task: Task }) {
-  const { t } = useTranslation()
-  const label =
-    task.status === 'done' ? t('reg.aiStatusDone') :
-    task.status === 'running' ? t('reg.aiStatusRunning') :
-    task.status === 'failed' ? t('reg.aiStatusFailed') :
-    task.status === 'pending' ? t('reg.aiStatusPending') :
-    task.status === 'canceled' ? t('reg.aiStatusCanceled') : task.status
-  const cls =
-    task.status === 'done' ? 'bg-ok-soft text-ok' :
-    task.status === 'running' ? 'bg-info-soft text-info' :
-    task.status === 'failed' ? 'bg-err-soft text-err' : 'bg-overlay text-fg-tertiary'
-  return (
-    <span className={`font-mono text-2xs px-2 py-0.5 rounded-full ${cls}`}>
-      {label} · #{task.id}
-    </span>
+    </div>
   )
 }
 
-
-function RegPreview({
-  pid,
-  vid,
-  reg,
-  isLive,
-  onPick,
-  onDeleted,
-  onRenamed,
+// Images tab (mockup RegImages): folder chips + grid on the left, the picked
+// image with its caption on the right.
+function RegImages({
+  pid, vid, reg, isLive, runTarget, onTopUp, onPreview, onChanged,
 }: {
   pid: number
   vid: number
   reg: RegStatus
   isLive: boolean
-  onPick: (idx: number) => void
-  onDeleted: () => void
-  onRenamed: () => void
+  runTarget: number
+  onTopUp: () => void
+  onPreview: (idx: number) => void
+  onChanged: () => void
 }) {
   const { t } = useTranslation()
   const { toast } = useToast()
@@ -1516,22 +1205,15 @@ function RegPreview({
         return {
           name: rel,
           folder,
+          file: name,
           thumbUrl: api.versionThumbUrl(pid, vid, 'reg', name, folder),
         }
       }),
     [reg.files, pid, vid]
   )
-  // A1 — 按子文件夹分 tab。"" 视作根（reg/ 直接子文件，无子目录的老 build 才有）。
-  // 排序：保留出现顺序（builder 按 train 子文件夹排），但根放最末（通常空）。
+  // 按子文件夹分 chip；根（""，老 build 才有）放最后
   const folders = useMemo(() => {
-    const seen = new Set<string>()
-    const order: string[] = []
-    for (const it of allItems) {
-      if (!seen.has(it.folder)) {
-        seen.add(it.folder)
-        order.push(it.folder)
-      }
-    }
+    const order = Array.from(new Set(allItems.map((it) => it.folder)))
     order.sort((a, b) => {
       if (a === '' && b !== '') return 1
       if (b === '' && a !== '') return -1
@@ -1547,14 +1229,10 @@ function RegPreview({
   // null = 全部；否则限定到该 folder
   const [activeFolder, setActiveFolder] = useState<string | null>(null)
   const items = useMemo(
-    () =>
-      activeFolder === null
-        ? allItems
-        : allItems.filter((it) => it.folder === activeFolder),
+    () => (activeFolder === null ? allItems : allItems.filter((it) => it.folder === activeFolder)),
     [allItems, activeFolder]
   )
   const names = useMemo(() => items.map((it) => it.name), [items])
-  // indexByName 用 allItems 的全局索引：onPick 走的是主组件 reg.files 的下标
   const allIndexByName = useMemo(() => {
     const m = new Map<string, number>()
     allItems.forEach((it, i) => m.set(it.name, i))
@@ -1562,12 +1240,13 @@ function RegPreview({
   }, [allItems])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [anchor, setAnchor] = useState<string | null>(null)
-  // 切 tab：清空选择 + anchor。多选只在当前 tab 范围内生效。
+  const [active, setActive] = useState<string | null>(null)
+  // 切 folder：清空选择 + anchor。多选只在当前范围内生效。
   useEffect(() => {
     setSelected(new Set())
     setAnchor(null)
   }, [activeFolder])
-  // reg.files 变化（删除完 refreshReg 后）：把已不存在的 name 从 selected 清掉
+  // reg.files 变化（删除完 refresh 后）：把已不存在的 name 从 selected 清掉
   useEffect(() => {
     const fileSet = new Set(allItems.map((it) => it.name))
     setSelected((prev) => {
@@ -1579,26 +1258,27 @@ function RegPreview({
       }
       return changed ? next : prev
     })
+    setActive((a) => (a && fileSet.has(a) ? a : allItems[0]?.name ?? null))
   }, [allItems])
 
-  const openByName = (name: string) => {
+  const openFull = (name: string) => {
     const i = allIndexByName.get(name)
-    if (i !== undefined) onPick(i)
+    if (i !== undefined) onPreview(i)
   }
 
-  const onDelete = async () => {
-    if (selected.size === 0) return
+  const deleteNames = async (list: string[]) => {
+    if (list.length === 0) return
     const ok = await confirm(
-      t('reg.confirmDeleteFiles', { n: selected.size }),
+      t('reg.confirmDeleteFiles', { n: list.length }),
       { tone: 'danger', okText: t('reg.deleteOkText') }
     )
     if (!ok) return
     try {
-      const r = await api.deleteRegFiles(pid, vid, Array.from(selected))
+      const r = await api.deleteRegFiles(pid, vid, list)
       toast(t('reg.deleteFilesDone', { n: r.count }), 'success')
       setSelected(new Set())
       setAnchor(null)
-      onDeleted()
+      onChanged()
     } catch (e) {
       toast(String(e), 'error')
     }
@@ -1618,7 +1298,7 @@ function RegPreview({
       toast(t('reg.renameFolderDone', { from: renaming.from, to: next }), 'success')
       if (activeFolder === renaming.from) setActiveFolder(next)
       setRenaming(null)
-      onRenamed()
+      onChanged()
     } catch (e) {
       toast(String(e), 'error')
     } finally {
@@ -1626,7 +1306,7 @@ function RegPreview({
     }
   }
 
-  // A4 — 自动去重：用默认参数扫，把每组里的"推荐删除"项直接删，没 review panel。
+  // 自动去重：用默认参数扫，把每组里的"推荐删除"项直接删，没 review panel。
   // reg 集 quality bar 比 train 低，不需要逐组人工选保留。
   const [dedupBusy, setDedupBusy] = useState(false)
   const onDedup = async () => {
@@ -1646,7 +1326,7 @@ function RegPreview({
       )
       setSelected(new Set())
       setAnchor(null)
-      onDeleted()
+      onChanged()
     } catch (e) {
       toast(String(e), 'error')
     } finally {
@@ -1654,137 +1334,177 @@ function RegPreview({
     }
   }
 
-  return (
-    <section className="rounded-md border border-subtle bg-surface p-2 flex-1 min-h-0 flex flex-col gap-2">
-      {/* tab 条（pill chip 风格，对齐 TagEdit）+ 选中数 + 删除按钮 */}
-      <div className="flex items-center gap-1 flex-wrap pb-1.5 border-b border-subtle">
-        <RegFolderTab
-          label={t('reg.folderAll')}
-          count={allItems.length}
-          active={activeFolder === null}
-          onClick={() => setActiveFolder(null)}
-        />
-        {folders.map((f) => (
-          <RegFolderTab
-            key={f || '__root__'}
-            label={f || t('reg.folderRoot')}
-            count={folderCounts.get(f) ?? 0}
-            active={activeFolder === f}
-            onClick={() => setActiveFolder(f)}
-          />
-        ))}
-        <span className="flex-1" />
-        {selected.size > 0 && (
-          <span className="text-2xs text-accent pr-2">
-            {t('reg.regPreviewSelected', { n: selected.size })}
-          </span>
-        )}
-        {activeFolder !== null && activeFolder !== '' && (
-          <button
-            onClick={() => setRenaming({ from: activeFolder, value: activeFolder })}
-            disabled={isLive || dedupBusy || renameBusy}
-            className="btn btn-sm"
-            title={t('reg.renameFolderTitle')}
-          >
-            {t('reg.renameFolderBtn')}
-          </button>
-        )}
-        <button
-          onClick={() => void onDedup()}
-          disabled={dedupBusy || isLive}
-          className="btn btn-sm"
-          title={t('reg.dedupTitle')}
-        >
-          {dedupBusy ? t('reg.dedupRunning') : t('reg.dedupBtn')}
-        </button>
-        <button
-          onClick={() => void onDelete()}
-          disabled={selected.size === 0 || isLive || dedupBusy}
-          className="btn btn-sm bg-err-soft text-err border-err"
-          title={t('reg.deleteFilesTitle')}
-        >
-          {t('reg.deleteFilesBtn', { n: selected.size })}
-        </button>
-      </div>
+  const busy = isLive || dedupBusy || renameBusy
+  const activeItem = active ? allItems.find((it) => it.name === active) ?? null : null
 
-      {renaming && (
-        <div className="flex items-center gap-2 pb-1.5 border-b border-subtle">
-          <span className="text-2xs text-fg-secondary">
-            {t('reg.renameFolderLabel', { name: renaming.from })}
-          </span>
-          <input
-            autoFocus
-            className="input font-mono"
-            style={{ maxWidth: 180 }}
-            value={renaming.value}
-            onChange={(e) => setRenaming({ from: renaming.from, value: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void doRename()
-              if (e.key === 'Escape') setRenaming(null)
-            }}
-          />
-          <button
-            className="btn btn-sm btn-primary"
-            onClick={() => void doRename()}
-            disabled={renameBusy}
-          >
-            {t('reg.renameFolderOk')}
+  return (
+    <div className="ds-reg-images">
+      <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, borderRight: '1px solid var(--line)' }}>
+        <div style={{ padding: '12px 17px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <button type="button" className={`ds-chip${activeFolder === null ? ' ds-is-active' : ''}`} style={{ paddingRight: 9 }} onClick={() => setActiveFolder(null)} aria-pressed={activeFolder === null}>
+            {t('reg.folderAll')} <b>{allItems.length}</b>
           </button>
+          {folders.length > 1 && folders.map((f) => (
+            <button key={f || '__root__'} type="button" className={`ds-chip ds-mono${activeFolder === f ? ' ds-is-active' : ''}`} style={{ paddingRight: 9 }} onClick={() => setActiveFolder(f)} aria-pressed={activeFolder === f}>
+              {f || t('reg.folderRoot')} <b>{folderCounts.get(f) ?? 0}</b>
+            </button>
+          ))}
+          <span style={{ flex: 1 }} />
+          {selected.size > 0 ? (
+            <button type="button" className="ds-ctl ds-ghost" style={{ height: 28 }} onClick={() => { setSelected(new Set()); setAnchor(null) }}>{t('common.deselect')}</button>
+          ) : (
+            <button type="button" className="ds-ctl ds-ghost" style={{ height: 28 }} onClick={() => setSelected(new Set(names))} disabled={names.length === 0}>{t('common.selectAll')}</button>
+          )}
           <button
-            className="btn btn-sm"
-            onClick={() => setRenaming(null)}
-            disabled={renameBusy}
-          >
-            {t('reg.renameFolderCancel')}
+            type="button"
+            className="ds-ctl ds-ghost"
+            style={{ height: 28 }}
+            onClick={() => void deleteNames(Array.from(selected))}
+            disabled={selected.size === 0 || busy}
+            title={t('reg.deleteFilesTitle')}
+          >{t('reg.deleteFilesBtn', { n: selected.size })}</button>
+        </div>
+
+        {renaming && (
+          <div style={{ padding: '10px 17px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="ds-kpi-meta">{t('reg.renameFolderLabel', { name: renaming.from })}</span>
+            <input
+              autoFocus
+              className="ds-inp ds-mono"
+              style={{ maxWidth: 180, height: 28 }}
+              value={renaming.value}
+              onChange={(e) => setRenaming({ from: renaming.from, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void doRename()
+                if (e.key === 'Escape') setRenaming(null)
+              }}
+            />
+            <button type="button" className="ds-btn-primary" style={{ height: 28 }} onClick={() => void doRename()} disabled={renameBusy}>{t('reg.renameFolderOk')}</button>
+            <button type="button" className="ds-ctl ds-ghost" style={{ height: 28 }} onClick={() => setRenaming(null)} disabled={renameBusy}>{t('reg.renameFolderCancel')}</button>
+          </div>
+        )}
+
+        <div style={{ padding: '14px 17px', flex: 1, minHeight: 0 }}>
+          <ImageGrid
+            items={items.map((it) => ({ name: it.name, thumbUrl: it.thumbUrl }))}
+            selected={selected}
+            activeName={active ?? undefined}
+            onSelect={(name, e) => {
+              const r = applySelection(selected, name, e, names, anchor)
+              setSelected(r.next)
+              setAnchor(r.anchor)
+            }}
+            onActivate={setActive}
+            onPreview={openFull}
+            clickMode="activate"
+            columnsClass="grid-cols-[repeat(auto-fill,minmax(84px,1fr))]"
+            ariaLabel="reg-preview"
+          />
+        </div>
+
+        <div style={{ borderTop: '1px solid var(--line)', padding: '10px 17px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="ds-kpi-meta">
+            {t('reg.imagesFooter', { n: allItems.length, folders: folders.length })}
+            {selected.size > 0 && ` · ${t('reg.regPreviewSelected', { n: selected.size })}`}
+          </span>
+          <span style={{ flex: 1 }} />
+          {activeFolder !== null && activeFolder !== '' && (
+            <button
+              type="button"
+              className="ds-ctl ds-ghost"
+              style={{ height: 28 }}
+              onClick={() => setRenaming({ from: activeFolder, value: activeFolder })}
+              disabled={busy}
+              title={t('reg.renameFolderTitle')}
+            >{t('reg.renameFolderBtn')}</button>
+          )}
+          <button type="button" className="ds-ctl ds-ghost" style={{ height: 28 }} onClick={() => void onDedup()} disabled={busy} title={t('reg.dedupTitle')}>
+            {dedupBusy ? t('reg.dedupRunning') : t('reg.dedupBtn')}
+          </button>
+          <button type="button" className="ds-ctl" style={{ height: 28 }} onClick={onTopUp} disabled={busy || allItems.length >= runTarget}>
+            {t('reg.topUpTo', { n: runTarget })}
           </button>
         </div>
-      )}
-
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <p className="text-2xs text-fg-tertiary px-1 pb-1 m-0">
-          {t('reg.regPreviewTitle', { n: items.length })}
-        </p>
-        <ImageGrid
-          items={items}
-          selected={selected}
-          onSelect={(name, e) => {
-            const r = applySelection(selected, name, e, names, anchor)
-            setSelected(r.next)
-            setAnchor(r.anchor)
-          }}
-          onActivate={openByName}
-          onPreview={openByName}
-          clickMode="activate"
-          ariaLabel="reg-preview"
-        />
       </div>
-    </section>
+
+      <RegImageDetail
+        pid={pid}
+        vid={vid}
+        item={activeItem}
+        meta={reg.meta}
+        busy={busy}
+        onOpenFull={() => activeItem && openFull(activeItem.name)}
+        onDelete={() => activeItem && void deleteNames([activeItem.name])}
+      />
+    </div>
   )
 }
 
-function RegFolderTab({
-  label, count, active, onClick,
-}: {
-  label: string
-  count: number
-  active: boolean
-  onClick: () => void
+function RegImageDetail({ pid, vid, item, meta, busy, onOpenFull, onDelete }: {
+  pid: number
+  vid: number
+  item: { name: string; folder: string; file: string } | null
+  meta: RegStatus['meta']
+  busy: boolean
+  onOpenFull: () => void
+  onDelete: () => void
 }) {
-  // 跟 TagEdit / Preprocess 同款 pill chip 风格（rounded-full + bg-accent 主色填充）。
+  const { t } = useTranslation()
+  const [caption, setCaption] = useState<string | null>(null)
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
+  const name = item?.name
+  useEffect(() => {
+    setDims(null)
+    if (!name) { setCaption(null); return }
+    let alive = true
+    setCaption(t('reg.captionLoading'))
+    api.getRegCaption(pid, vid, name)
+      .then((r) => { if (alive) setCaption(r.tags.length ? r.tags.join(', ') : t('reg.captionEmpty')) })
+      .catch((e) => { if (alive) setCaption(t('reg.captionFailed', { error: String(e) })) })
+    return () => { alive = false }
+  }, [pid, vid, name, t])
+
+  if (!item) {
+    return <div className="ds-empty" style={{ margin: 16 }}>{t('reg.pickImage')}</div>
+  }
+  const repeat = /^(\d+)_/.exec(item.folder)?.[1]
+  const source = meta ? (meta.generation_method === 'ai_base' ? t('reg.sourceAi') : meta.api_source) : '—'
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={
-        'px-2 py-0.5 rounded-full text-xs transition-colors ' +
-        (active
-          ? 'bg-accent-soft text-accent font-semibold'
-          : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
-      }
-    >
-      <span className="font-mono">{label}</span>
-      <span className="ml-1 opacity-70">{count}</span>
-    </button>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
+      <div className="ds-pane-head">
+        <div className="ds-card-title ds-mono" style={{ flex: 1, fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.name}>{item.file}</div>
+        <KebabMenu
+          label={t('reg.imageActions')}
+          items={[
+            { label: t('reg.openFull'), onSelect: onOpenFull },
+            { label: t('reg.deleteThis'), tone: 'err', onSelect: onDelete, disabled: busy },
+          ]}
+        />
+      </div>
+      <div className="ds-reg-detail" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 14, overflowY: 'auto', minHeight: 0 }}>
+        <button type="button" className="ds-thumb" style={{ aspectRatio: '1', width: '100%', display: 'block', flex: 'none' }} onClick={onOpenFull} aria-label={t('reg.openFull')}>
+          <img
+            src={regOrigUrl(pid, vid, item.name)}
+            alt={item.file}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            onLoad={(e) => setDims({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+          />
+        </button>
+        <div>
+          <div className="ds-cap" style={{ marginBottom: 8 }}>{t('reg.captionTitle')}</div>
+          <div className="ds-card ds-flat ds-mono" style={{ padding: '9px 11px', border: '1px solid var(--line-2)', background: 'var(--card)', fontSize: 11.5, lineHeight: 1.55, wordBreak: 'break-word' }}>
+            {caption ?? '—'}
+          </div>
+          <div className="ds-ctl-note" style={{ marginTop: 6 }}>{t('reg.captionNote')}</div>
+        </div>
+        <div style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+          <div className="ds-kv"><span className="ds-k">{t('reg.kvSource')}</span><span className="ds-v">{source}</span></div>
+          <div className="ds-kv"><span className="ds-k">{t('reg.kvSize')}</span><span className="ds-v">{dims ? `${dims.w} × ${dims.h}` : '—'}</span></div>
+          <div className="ds-kv"><span className="ds-k">{t('reg.kvFolder')}</span><span className="ds-v">{item.folder || t('reg.folderRoot')}</span></div>
+          <div className="ds-kv"><span className="ds-k">{t('reg.repeatLabel')}</span><span className="ds-v">{repeat ?? '—'}</span></div>
+        </div>
+      </div>
+    </div>
   )
 }
 

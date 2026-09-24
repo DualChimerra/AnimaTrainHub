@@ -20,7 +20,7 @@ describe('regularization exclusion chips', () => {
     const textContainer = text.parentElement
     const chip = text.closest('button')
 
-    expect(chip).toHaveClass('h-6', 'max-w-full', 'overflow-hidden', 'whitespace-nowrap')
+    expect(chip).toHaveClass('ds-chip', 'max-w-full', 'overflow-hidden', 'whitespace-nowrap')
     expect(textContainer).toHaveClass('min-w-0', 'truncate', 'text-left')
     expect(textContainer).toHaveAttribute('title', longTag)
   })

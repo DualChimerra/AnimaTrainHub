@@ -618,3 +618,9 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-te-grid{display:grid;grid-template-columns:270px minmax(0,1fr) 320px;grid-template-rows:minmax(0,1fr);gap:14px;flex:1;min-height:0;padding-top:2px}
 @media (max-width:1100px){.ds-te-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:none}.ds-te-grid > .ds-card{min-height:420px}}
 .ds-ctl[aria-disabled="true"], .ds-kebab:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ===== reg set (mockup Reg / RegImages) ===== */
+.ds-reg-status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.ds-reg-images{display:grid;grid-template-columns:minmax(0,1fr) 320px;flex:1;min-height:0}
+@media (max-width:1100px){.ds-reg-status{grid-template-columns:repeat(2,minmax(0,1fr))}.ds-reg-images{grid-template-columns:minmax(0,1fr)}}
+.ds-reg-detail > *{flex:none}

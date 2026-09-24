@@ -16,11 +16,13 @@ const DotsIcon = (
 /** The mockup's ⋯ button (.kebab) with a small action menu. Closes on an
  *  outside click, Escape, or after picking an item. Clicks never bubble to a
  *  surrounding clickable card or row. */
-export default function KebabMenu({ label, items, className = '' }: {
+export default function KebabMenu({ label, items, className = '', trigger = 'kebab' }: {
   /** aria-label for the trigger, e.g. "Действия проекта". */
   label: string
   items: KebabItem[]
   className?: string
+  /** 'icon': the bordered 32px .iconbtn of a page head instead of the bare ⋯. */
+  trigger?: 'kebab' | 'icon'
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLSpanElement | null>(null)
@@ -43,7 +45,7 @@ export default function KebabMenu({ label, items, className = '' }: {
     <span ref={rootRef} className={`relative inline-flex ${className}`} onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        className="ds-kebab hover:bg-sunken hover:text-fg-primary transition-colors"
+        className={trigger === 'icon' ? 'ds-iconbtn hover:text-fg-primary transition-colors' : 'ds-kebab hover:bg-sunken hover:text-fg-primary transition-colors'}
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
