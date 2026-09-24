@@ -7,11 +7,12 @@ import { useEventStream, type StudioEvent } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { useRuntimeModeOptional } from '../lib/RuntimeMode'
 import { useSettingsDrawer } from '../lib/SettingsDrawer'
+import { splitOptional } from '../lib/labels'
 import CommandPalette from './CommandPalette'
 import SystemStats from './SystemStats'
 
 const SearchIcon = (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" />
   </svg>
 )
@@ -29,14 +30,13 @@ function RuntimeModeBadge() {
   if (!info) return null
   return (
     <button
+      type="button"
       onClick={() => drawer.open({ section: 'runtime-mode' })}
       title={t('runtimeMode.current')}
-      className="flex items-center gap-1.5 h-8 px-2.5 rounded-md text-xs font-medium text-fg-secondary bg-surface border border-dim shadow-xs cursor-pointer hover:border-bold hover:text-fg-primary transition-colors shrink-0"
+      className="ds-tb-chip shrink-0"
     >
-      <span className={`w-[6px] h-[6px] rounded-full shrink-0 ${
-        mode === 'colab' ? 'bg-accent' : 'bg-[var(--palette-emerald-600)]'
-      }`} />
-      <span>{t(`runtimeMode.${mode}.name`)}</span>
+      <span className={`ds-dot ${mode === 'colab' ? 'ds-dot-run' : 'ds-dot-ok'}`} />
+      {t(`runtimeMode.${mode}.name`)}
     </button>
   )
 }
@@ -108,18 +108,20 @@ function useBreadcrumbs(): Crumb[] {
       const versionLabel = ctx?.activeVersion?.label ?? `v${parts[vIdx + 1]}`
       const vid = parts[vIdx + 1]
       crumbs.push({ label: versionLabel, mono: true })
+      // Step crumbs read exactly like the sidebar steps (short form).
       const stepLabels: Record<string, string> = {
-        curate: t('breadcrumb.curate'),
-        edit: t('breadcrumb.tagEdit'),
-        reg: t('breadcrumb.reg'),
-        train: t('breadcrumb.train'),
+        curate: splitOptional(t('nav.curate')).short,
+        preprocess: splitOptional(t('nav.preprocess')).short,
+        edit: splitOptional(t('nav.tagEdit')).short,
+        reg: splitOptional(t('nav.reg')).short,
+        train: splitOptional(t('nav.train')).short,
       }
       const step = parts[vIdx + 2]
       if (step && stepLabels[step]) {
         crumbs.push({ label: stepLabels[step], to: `/projects/${projectId}/v/${vid}/${step}` })
       }
     } else if (parts[2] === 'download') {
-      crumbs.push({ label: t('breadcrumb.download'), to: `/projects/${projectId}/download` })
+      crumbs.push({ label: t('nav.download'), to: `/projects/${projectId}/download` })
     }
     return crumbs
   }
@@ -225,103 +227,83 @@ export default function Topbar({
 
   return (
     <>
-      <header
-        className="flex items-center gap-2.5 border-b border-subtle bg-canvas shrink-0 px-3 sm:px-4"
-        style={{ height: 'var(--topbar-h)' }}
-      >
+      <header className="ds-topbar" style={{ height: 'var(--topbar-h)' }}>
         {mobile && (
           <button
+            type="button"
             onClick={onOpenNav}
             aria-label={t('nav.menu')}
-            className="w-10 h-10 -ml-1 shrink-0 flex items-center justify-center rounded-md text-fg-secondary hover:bg-overlay"
+            className="ds-tb-icon shrink-0"
           >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M3 6h18M3 12h18M3 18h18" />
             </svg>
           </button>
         )}
-        <div className="flex items-center gap-2 flex-1 min-w-0 overflow-hidden">
+        <div className="ds-crumbs flex-1 overflow-hidden">
           {(mobile ? crumbs.slice(-1) : crumbs).map((b, i, shown) => {
             const isLast = i === shown.length - 1
-            const cls =
-              `text-sm ${b.mono ? 'font-mono' : ''} ` +
-              `truncate ${mobile ? 'max-w-full' : 'max-w-[280px]'} px-1.5 py-1 rounded-md ` +
-              (isLast
-                ? 'text-fg-primary font-medium'
-                : 'text-fg-tertiary hover:text-fg-primary hover:bg-overlay transition-colors')
+            const cls = [b.mono ? 'ds-mono' : '', 'truncate', mobile ? 'max-w-full' : 'max-w-[280px]'].filter(Boolean).join(' ')
             return (
-              <span key={i} className={`flex items-center gap-1.5 ${mobile ? 'min-w-0' : i === 0 || isLast ? 'shrink-0' : 'min-w-0'}`}>
-                {i > 0 && (
-                  <svg className="text-fg-disabled shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden><path d="M15 4 9 20" /></svg>
-                )}
-                {!isLast && b.to ? (
-                  <Link to={b.to} className={cls}>{b.label}</Link>
-                ) : (
-                  <span className={cls}>{b.label}</span>
-                )}
+              <span key={i} className={`flex items-center gap-[7px] ${mobile ? 'min-w-0' : i === 0 || isLast ? 'shrink-0' : 'min-w-0'}`}>
+                {i > 0 && <span className="ds-crumb-sep" aria-hidden>/</span>}
+                {isLast
+                  ? <b className={cls}>{b.label}</b>
+                  : b.to
+                    ? <Link to={b.to} className={cls + ' hover:text-fg-primary transition-colors'}>{b.label}</Link>
+                    : <span className={cls}>{b.label}</span>}
               </span>
             )
           })}
         </div>
 
-        <SystemStats />
+        <div className="ds-tb-right">
+          <SystemStats />
 
-        {runningTask && mobile && (
-          <button
-            onClick={() => navigate(`/queue/${runningTask.id}`)}
-            className="flex items-center gap-1.5 h-9 px-2.5 rounded-md border border-dim bg-surface shadow-xs cursor-pointer shrink-0"
-            title={`${t('topbar.trainingLabel')} · ${taskLabel}${progressSuffix}`}
-            aria-label={`${t('topbar.trainingLabel')} · ${taskLabel}`}
-          >
-            <span className="w-[6px] h-[6px] rounded-full bg-accent animate-pulse shrink-0" />
-            <span className="text-xs font-mono text-fg-secondary whitespace-nowrap">
-              {progress && 'pct' in progress ? `${(progress as { pct: number }).pct}%` : t('topbar.trainingLabel')}
-            </span>
-          </button>
-        )}
-
-        {runningTask && !mobile && (
-          <button
-            onClick={() => navigate(`/queue/${runningTask.id}`)}
-            className="flex items-center gap-2 h-8 px-3 rounded-md border border-dim bg-surface shadow-xs cursor-pointer hover:border-bold transition-colors shrink-0 max-w-[340px]"
-            title={t('topbar.taskId', { id: runningTask.id })}
-          >
-            <span className="w-[6px] h-[6px] rounded-full bg-accent animate-pulse shrink-0" />
-            <span className="text-xs font-medium text-fg-primary whitespace-nowrap">{t('topbar.trainingLabel')}</span>
-            <span className="text-xs font-mono text-fg-tertiary overflow-hidden text-ellipsis whitespace-nowrap">
-              {taskLabel}
-            </span>
-            {progressSuffix && (
-              <span className="text-xs font-mono text-fg-tertiary shrink-0">
-                {progressSuffix.replace(/^ · /, '')}
+          {runningTask && (
+            <button
+              type="button"
+              onClick={() => navigate(`/queue/${runningTask.id}`)}
+              className="ds-tb-chip shrink-0 max-w-[340px]"
+              title={`${t('topbar.trainingLabel')} · ${taskLabel}${progressSuffix}`}
+              aria-label={`${t('topbar.trainingLabel')} · ${taskLabel}`}
+            >
+              <span className="ds-dot ds-dot-run" />
+              <span className="truncate">
+                #{runningTask.id}
+                {progress && 'pct' in progress
+                  ? ` · ${(progress as { current: number }).current.toLocaleString()} / ${(progress as { total: number }).total.toLocaleString()}`
+                  : ''}
               </span>
-            )}
-          </button>
-        )}
+            </button>
+          )}
 
-        {!runningTask && pendingCount > 0 && (
+          {!runningTask && pendingCount > 0 && (
+            <button
+              type="button"
+              onClick={() => navigate('/queue')}
+              className="ds-tb-chip shrink-0"
+            >
+              {QueueIcon}
+              <span>{t('topbar.pendingCount', { n: pendingCount })}</span>
+            </button>
+          )}
+
+          {/* 本 fork：公告栏铃铛随 in-app updater/announcements 移除 */}
+
+          {!mobile && <RuntimeModeBadge />}
+
           <button
-            onClick={() => navigate('/queue')}
-            className="flex items-center gap-1.5 h-8 px-2.5 rounded-md text-xs font-medium text-accent bg-accent-soft border border-[var(--accent-line)] cursor-pointer hover:bg-[var(--accent-veil)] transition-colors shrink-0"
+            type="button"
+            ref={searchBtnRef}
+            onClick={() => setPaletteOpen(true)}
+            title={t('topbar.search')}
+            aria-label={t('topbar.searchAriaLabel')}
+            className="ds-tb-icon shrink-0"
           >
-            {QueueIcon}
-            <span>{t('topbar.pendingCount', { n: pendingCount })}</span>
+            {SearchIcon}
           </button>
-        )}
-
-        {/* 本 fork：公告栏铃铛随 in-app updater/announcements 移除 */}
-
-        {!mobile && <RuntimeModeBadge />}
-
-        <button
-          ref={searchBtnRef}
-          onClick={() => setPaletteOpen(true)}
-          title={t('topbar.search')}
-          aria-label={t('topbar.searchAriaLabel')}
-          className={`flex items-center justify-center text-fg-secondary bg-surface border border-dim shadow-xs rounded-md cursor-pointer ${mobile ? 'w-9 h-9' : 'w-8 h-8'} hover:border-bold hover:text-fg-primary transition-colors shrink-0`}
-        >
-          {SearchIcon}
-        </button>
+        </div>
       </header>
 
       <CommandPalette

@@ -2,28 +2,17 @@ import { useEffect, useState } from 'react'
 import { api, type SystemStats as SystemStatsData } from '../api/client'
 import { useEventStream } from '../lib/useEventStream'
 
-function barColor(pct: number): string {
-  if (pct > 90) return 'var(--err)'
-  if (pct > 70) return 'var(--warn)'
-  return 'var(--ok)'
-}
-
-/** redesign 原型 SystemStats：一个 sunken pill，CPU/GPU/MEM 各为
- *  caption 标签 + 36px 迷你进度条 + 百分比；VRAM 用文本 used/totalG。
- *  (prototype shell.jsx → SystemStats) */
-function MeterItem({ label, pct, tooltip }: { label: string; pct: number; tooltip: string }) {
+/** Topbar system load, as in the mockup: GPU · VRAM · CPU · RAM, each a label,
+ *  a value and a 20px bar, separated by full-height hairlines. A bar turns
+ *  amber above 90%. */
+function MeterItem({ label, value, pct, tooltip }: { label: string; value: string; pct: number; tooltip: string }) {
   const clamped = Math.min(100, Math.max(0, pct))
   return (
-    <div className="flex items-center gap-1.5" title={tooltip}>
-      <span className="text-2xs font-medium text-fg-tertiary">{label}</span>
-      <div className="w-8 h-1 rounded-full bg-[rgb(9_9_11/0.08)] overflow-hidden shrink-0">
-        <div
-          className="h-full rounded-full transition-[width] duration-500 ease-out"
-          style={{ width: `${clamped}%`, background: barColor(clamped) }}
-        />
-      </div>
-      <span className="text-2xs font-medium text-fg-secondary tabular-nums w-[28px]">{Math.round(clamped)}%</span>
-    </div>
+    <span title={tooltip}>
+      <i className="ds-lbl">{label}</i>
+      <b>{value}</b>
+      <span className="ds-bar"><i className={clamped > 90 ? 'ds-hot' : undefined} style={{ width: `${clamped}%` }} /></span>
+    </span>
   )
 }
 
@@ -68,35 +57,35 @@ export default function SystemStats() {
   const gpuLabel = gpu0 ? `${gpu0.name}${gpuTempText}${gpuExtra}` : ''
 
   return (
-    <div className="hidden md:flex items-center gap-3.5 shrink-0 h-8 px-3 rounded-md bg-surface border border-dim shadow-xs">
-      <MeterItem
-        label="CPU"
-        pct={stats.cpu_pct}
-        tooltip={`CPU usage ${stats.cpu_pct.toFixed(1)}%`}
-      />
+    <div className="ds-sysload hidden md:flex shrink-0">
       {gpu0 && (
         <MeterItem
           label="GPU"
+          value={`${Math.round(gpu0.util_pct)}%`}
           pct={gpu0.util_pct}
           tooltip={`GPU utilization · ${gpuLabel}`}
         />
       )}
+      {gpu0 && (
+        <MeterItem
+          label="VRAM"
+          value={`${gpu0.vram_used_gb.toFixed(1)} / ${Math.round(gpu0.vram_total_gb)}`}
+          pct={vramPct}
+          tooltip={`VRAM ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%) · ${gpuLabel}`}
+        />
+      )}
       <MeterItem
-        label="MEM"
+        label="CPU"
+        value={`${Math.round(stats.cpu_pct)}%`}
+        pct={stats.cpu_pct}
+        tooltip={`CPU usage ${stats.cpu_pct.toFixed(1)}%`}
+      />
+      <MeterItem
+        label="RAM"
+        value={`${Math.round(stats.ram_used_gb)} / ${Math.round(stats.ram_total_gb)}`}
         pct={ramPct}
         tooltip={`RAM ${stats.ram_used_gb.toFixed(1)} / ${stats.ram_total_gb.toFixed(1)} GB (${ramPct.toFixed(0)}%)`}
       />
-      {gpu0 && (
-        <div
-          className="flex items-center gap-1.5"
-          title={`VRAM ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%) · ${gpuLabel}`}
-        >
-          <span className="text-2xs font-medium text-fg-tertiary">VRAM</span>
-          <span className="text-2xs font-medium text-fg-secondary tabular-nums">
-            {gpu0.vram_used_gb.toFixed(1)}/{Math.round(gpu0.vram_total_gb)}G
-          </span>
-        </div>
-      )}
     </div>
   )
 }

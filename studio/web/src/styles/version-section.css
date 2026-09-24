@@ -78,14 +78,14 @@
 }
 .vs-zip-banner-title {
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 .vs-zip-banner-body {
   color: var(--fg-secondary);
   line-height: 1.5;
 }
 .vs-zip-banner-body a {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   text-decoration: underline;
 }
 .vs-zip-banner-actions {
@@ -193,7 +193,7 @@
   font-weight: 500;
 }
 .vs-ver-tag .vs-target {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 .vs-ver-tag .vs-dim {
   color: var(--fg-tertiary);
@@ -342,7 +342,7 @@
 }
 .vs-pill-stable { background: var(--ok-soft);     color: var(--ok); }
 .vs-pill-dev    { background: var(--warn-soft);   color: var(--warn); }
-.vs-pill-here   { background: var(--accent-soft); color: var(--accent); }
+.vs-pill-here   { background: var(--accent-soft); color: var(--accent-text, var(--accent)); }
 .vs-pill-info   { background: var(--info-soft);   color: var(--info); }
 
 /* 折叠包装：master 卡底"上一版本可切回"默认仅小字提示，点开才显示
@@ -465,7 +465,7 @@
   padding: 0;
   font: inherit;
 }
-.vs-meta-foot .vs-lnk:hover { color: var(--accent); }
+.vs-meta-foot .vs-lnk:hover { color: var(--accent-text, var(--accent)); }
 .vs-meta-foot .vs-warn-line { color: var(--warn); }
 
 /* ==================== 失败 banner（卡内顶部） ==================== */
@@ -586,8 +586,8 @@
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
-.vs-commit.selected .vs-msg { color: var(--accent); font-weight: 500; }
-.vs-commit.selected .vs-sha { color: var(--accent); }
+.vs-commit.selected .vs-msg { color: var(--accent-text, var(--accent)); font-weight: 500; }
+.vs-commit.selected .vs-sha { color: var(--accent-text, var(--accent)); }
 .vs-commit .vs-switch-hint {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -596,13 +596,13 @@
   transition: opacity 100ms;
 }
 .vs-commit.clickable:hover .vs-switch-hint { opacity: 1; }
-.vs-commit.selected .vs-switch-hint { opacity: 1; color: var(--accent); }
+.vs-commit.selected .vs-switch-hint { opacity: 1; color: var(--accent-text, var(--accent)); }
 .vs-commit .vs-head-pill {
   font-family: var(--font-mono);
   font-size: 9.5px;
   padding: 1px 6px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   border-radius: 999px;
   letter-spacing: 0.04em;
 }
@@ -618,7 +618,7 @@
   border: 0;
   width: 100%;
 }
-.vs-commits-load-more:hover { color: var(--accent); }
+.vs-commits-load-more:hover { color: var(--accent-text, var(--accent)); }
 
 /* selected commit action bar（替代 chan-foot）。
  * actions 永远固定在右侧（flex-shrink:0）；info 长内容截断 ellipsis，
@@ -635,7 +635,7 @@
 }
 .vs-selection-foot .vs-info {
   font-size: 12px;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   display: flex;
   align-items: center;
   gap: 8px;
@@ -676,7 +676,7 @@
 .vs-preview-head .vs-to {
   font-family: var(--font-mono);
   font-size: 18px;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-weight: 600;
 }
 .vs-preview-head .vs-badge {
@@ -686,7 +686,7 @@
   padding: 2px 8px;
   border-radius: 999px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   letter-spacing: 0.04em;
 }
 

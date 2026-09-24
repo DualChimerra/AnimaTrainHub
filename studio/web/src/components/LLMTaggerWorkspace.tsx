@@ -701,7 +701,7 @@ function Step({ children }: { children: React.ReactNode }) {
   return (
     <span style={{
       fontFamily: 'var(--font-mono)', fontSize: 'var(--t-2xs)',
-      color: 'var(--accent)', background: 'var(--accent-soft)',
+      color: 'var(--accent-text, var(--accent))', background: 'var(--accent-soft)',
       borderRadius: 999, padding: '2px 7px', letterSpacing: '0.04em',
     }}>
       {children}

@@ -379,7 +379,7 @@ function PositionToggle({
   // 不抢「添加」主按钮的颜色。
   const activeStyle = {
     background: 'var(--bg-canvas)',
-    color: 'var(--accent)',
+    color: 'var(--accent-text, var(--accent))',
     boxShadow:
       'inset 0 0 0 1px color-mix(in oklch, var(--accent) 30%, var(--border-default))',
   }

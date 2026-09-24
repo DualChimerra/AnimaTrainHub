@@ -219,7 +219,7 @@ export default function QueueDetailPage() {
         <div className="flex items-center gap-2.5">
           <Link to="/queue" className="btn btn-ghost btn-sm no-underline"
           >{t('queueDetail.backToQueue')}</Link>
-          <span className="caption" style={{ color: 'var(--accent)' }}>Task #{taskId}</span>
+          <span className="caption" style={{ color: 'var(--accent-text, var(--accent))' }}>Task #{taskId}</span>
         </div>
         <div className="flex items-center gap-2.5 flex-wrap">
           <h1 className="m-0 text-2xl font-bold tracking-[-0.02em] leading-[1.1] m-break">

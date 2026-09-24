@@ -34,7 +34,7 @@
   background: var(--bg-overlay);
 }
 .info-btn-trigger[aria-expanded="true"] {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: var(--accent-soft);
 }
 

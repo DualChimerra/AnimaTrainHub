@@ -790,7 +790,7 @@ function GrpCard({
           <span
             className="font-mono text-2xs uppercase tracking-wider rounded-full px-2 py-0.5 border"
             style={{
-              color: 'var(--accent)',
+              color: 'var(--accent-text, var(--accent))',
               background: 'var(--accent-soft)',
               borderColor: 'rgba(237,107,58,0.42)',
             }}
@@ -1234,7 +1234,7 @@ export function ExcludeTags({
       meta={
         <>
           {t('reg.excludeMetaPrefix')}{' '}
-          <b style={{ color: 'var(--accent)' }}>{excludedCount}</b>
+          <b style={{ color: 'var(--accent-text, var(--accent))' }}>{excludedCount}</b>
           {modeHint && <span className="ml-1">· {modeHint}</span>}
         </>
       }

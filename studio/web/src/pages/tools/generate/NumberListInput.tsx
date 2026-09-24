@@ -91,7 +91,7 @@ export default function NumberListInput({
                 padding: '2px 4px 2px 8px',
                 borderRadius: 999,
                 background: 'var(--accent-soft)',
-                color: 'var(--accent)',
+                color: 'var(--accent-text, var(--accent))',
                 border: '1px solid transparent',
               }}
             >
