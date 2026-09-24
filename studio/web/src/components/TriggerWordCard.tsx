@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, type TriggerDetectResult, type Version } from '../api/client'
+import FieldLabel from './ds/FieldLabel'
 import { useToast } from './Toast'
 
 /** Version trigger word, edited on the Train page.
@@ -80,11 +81,10 @@ export default function TriggerWordCard({
     >
       <div className="ds-field-txt">
         <div className="ds-field-name">
-          <span className="ds-label">{t('trigger.title')}</span>
+          <FieldLabel label={t('trigger.title')} tip={t('trigger.hint')} />
           <span className="ds-key">trigger_word</span>
           {dopEnabled && <span className="ds-tag ds-gate">{t('trigger.gateDop')}</span>}
         </div>
-        <div className="ds-field-desc">{t('trigger.hint')}</div>
         {detected && detected.candidates.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
             <span className="ds-kpi-meta">{t('trigger.candidates', { n: detected.total })}</span>

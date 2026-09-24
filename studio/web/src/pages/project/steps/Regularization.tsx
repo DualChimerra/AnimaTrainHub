@@ -16,6 +16,7 @@ import {
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
 import StepShell from '../../../components/StepShell'
+import FieldLabel from '../../../components/ds/FieldLabel'
 import KebabMenu from '../../../components/ds/KebabMenu'
 import { TranslatedTag } from '../../../components/tagDisplay/TranslatedTag'
 import { TagSuggestList } from '../../../components/tagSuggest/TagSuggestList'
@@ -723,7 +724,7 @@ function SubGroup({ name, keyName, meta }: { name: string; keyName?: string; met
   )
 }
 
-// One setting row: name + parameter key + explanation, control on the right.
+// One setting row: name + parameter key (explanation on hover), control on the right.
 function Row({ label, keyName, desc, children }: {
   label: string
   keyName?: string
@@ -733,8 +734,7 @@ function Row({ label, keyName, desc, children }: {
   return (
     <div className="ds-field">
       <div className="ds-field-txt">
-        <div className="ds-field-name"><span className="ds-label">{label}</span>{keyName && <span className="ds-key">{keyName}</span>}</div>
-        {desc && <div className="ds-field-desc">{desc}</div>}
+        <div className="ds-field-name"><FieldLabel label={label} tip={desc} />{keyName && <span className="ds-key">{keyName}</span>}</div>
       </div>
       <div className="ds-field-ctl">{children}</div>
     </div>

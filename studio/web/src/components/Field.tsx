@@ -4,6 +4,7 @@ import type { SchemaProperty } from '../api/client'
 import { useProjectCtx } from '../context/ProjectContext'
 import { controlKind, schemaEnumLabel, schemaFieldLabel } from '../lib/schema'
 import { useAutoGrowTextarea } from '../lib/useAutoGrowTextarea'
+import FieldLabel from './ds/FieldLabel'
 import PathPicker from './PathPicker'
 import ResumeFieldPicker from './ResumeFieldPicker'
 
@@ -44,8 +45,8 @@ function formatWas(v: unknown): string {
 }
 
 /** One setting row as in the mockup (.field): name, parameter key and badges,
- *  the explanation under them, and the control on the right. Multi-line
- *  controls take the full width under the text instead (stack). */
+ *  and the control on the right. The explanation opens on hover over the name.
+ *  Multi-line controls take the full width under the text instead (stack). */
 function FieldShell({
   name, label, hintNode, helpNode, changedFrom, stack, children, below,
 }: {
@@ -65,11 +66,10 @@ function FieldShell({
       <div className="ds-field-txt">
         <div className="ds-field-name">
           {changedFrom && <span className="ds-changed-dot" aria-hidden="true" />}
-          <span className="ds-label">{label}</span>
+          <FieldLabel label={label} tip={helpNode} />
           <span className="ds-key">{name}</span>
           {hintNode}
         </div>
-        {helpNode}
       </div>
       <div className="ds-field-ctl">
         {children}
@@ -94,14 +94,16 @@ export default function Field({
   const { t } = useTranslation()
   const kind = controlKind(prop)
   const label = schemaFieldLabel(name, t)
-  const help = descriptionOverride ?? prop.description
+  const rawHelp = descriptionOverride ?? prop.description
+  // A description that only repeats the name adds nothing to the hover tip.
+  const help = rawHelp && rawHelp.trim().toLowerCase() !== label.trim().toLowerCase() ? rawHelp : undefined
   // Recommended value lives in the locale files (schema.recommend.<field>) and is
-  // shown under the description. It is advice, not a constraint: nothing reads it
+  // shown in the hover tip after the description. It is advice, not a constraint: nothing reads it
   // back, so a field without one simply renders as before.
   const recommend = t(`schema.recommend.${name}`, { defaultValue: '' })
   const helpNode = (help || recommend) ? (
     <>
-      {help && <div className="ds-field-desc">{help}</div>}
+      {help && <div>{help}</div>}
       {recommend && (
         <div className="ds-field-rec">
           <span style={{ opacity: 0.75 }}>{t('field.recommended')}: </span>{recommend}

@@ -240,6 +240,10 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-field-name .ds-key{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
 .ds-field-desc{font-size:11.5px;color:var(--ink-3);margin-top:4px;line-height:1.5;max-width:66ch}
 .ds-field-rec{font-size:11px;color:var(--green-text);margin-top:4px}
+.ds-label.ds-has-tip{cursor:help;text-decoration:underline dotted var(--ink-4);text-underline-offset:3px;text-decoration-thickness:1px;outline:none;border-radius:3px}
+.ds-label.ds-has-tip:focus-visible{box-shadow:0 0 0 2px var(--green-600)}
+.ds-tipbox{position:fixed;z-index:1000;max-width:360px;padding:9px 11px;background:var(--panel);border:1px solid var(--line-2);border-radius:10px;box-shadow:0 12px 32px -12px rgba(20,22,20,.28);font-size:11.5px;line-height:1.5;color:var(--ink-2);pointer-events:none;white-space:pre-line}
+.ds-tipbox .ds-field-rec{margin-top:6px}
 .ds-field-ctl{width:224px;flex:none;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
 .ds-ctl-note{font-size:10.5px;color:var(--ink-3);font-family:var(--mono)}
 .ds-ctl-note a{color:var(--green-text);text-decoration:underline;text-underline-offset:2px}
