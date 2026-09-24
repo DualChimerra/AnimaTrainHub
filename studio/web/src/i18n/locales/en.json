@@ -220,10 +220,16 @@
     "restoreEntry": "{{n}} files · {{size}}",
     "confirmRestore": "Restore will overwrite all captions (including unsaved changes). Continue?",
     "restoreDone": "Restored (written {{n}}, removed {{m}})",
-    "confirmDeletePoint": "Delete restore point {{id}}? This cannot be undone."
+    "confirmDeletePoint": "Delete restore point {{id}}? This cannot be undone.",
+    "unsaved_one": "Unsaved: edits in {{count}} image",
+    "unsaved_other": "Unsaved: edits in {{count}} images",
+    "allSaved": "All edits are written to disk",
+    "discard": "Discard",
+    "confirmDiscard": "Discard unsaved edits in {{n}} image(s)? Captions go back to what is on disk.",
+    "saveWrite": "Save and write .txt"
   },
   "tagStats": {
-    "title": "Tag Distribution",
+    "title": "Tag statistics",
     "selected": "Selected {{n}}",
     "tagCount": "{{n}} tags",
     "headerTag": "Tag",
@@ -234,7 +240,19 @@
     "pleaseSelectFirst": "Select images on the left to see their tag distribution and batch-edit.",
     "pickTagTitle": "Select all images with \"{{tag}}\"",
     "removeTitle": "Remove \"{{tag}}\" from selected",
-    "replaceTitle": "Replace \"{{tag}}\""
+    "replaceTitle": "Replace \"{{tag}}\"",
+    "unique": "{{n}} unique",
+    "inSelected": "in {{n}} selected",
+    "filterPlaceholder": "Filter tags…",
+    "sortLabel": "Sort",
+    "sortCountDesc": "Most",
+    "sortCountAsc": "Least",
+    "sortNameAsc": "A → Z",
+    "sortNameDesc": "Z → A",
+    "removeBtn": "Remove tag",
+    "replaceBtn": "Replace",
+    "pickFirst": "Pick a tag in the list first",
+    "replaceWith": "New tag, Enter to replace"
   },
   "bulkAction": {
     "selectedTotal": "{{n}} / {{total}} selected",
@@ -663,14 +681,17 @@
   },
   "tagEditor": {
     "naturalPlaceholder": "Natural language caption...",
-    "modeChip": "chip",
+    "modeChip": "Tags",
     "modeText": "Text",
     "tagCount": "{{n}} tags",
     "empty": "No tags yet",
-    "addPlaceholder": "Add a tag, then press Enter / comma",
+    "addPlaceholder": "+ tag",
     "textPlaceholder": "Comma / newline separated, auto-sync on blur",
     "sync": "Sync",
-    "deleteTag": "Delete {{tag}}"
+    "deleteTag": "Delete {{tag}}",
+    "modeLabel": "Caption view",
+    "captionCount_one": "Caption · {{count}} tag",
+    "captionCount_other": "Caption · {{count}} tags"
   },
   "llmMessages": {
     "roleHintSystem": "Instructional · usually written once",
@@ -2221,9 +2242,9 @@
     "exportBundleAtLeastOne": "Select at least one item to export"
   },
   "tagEdit": {
-    "title": "Tag edit",
-    "subtitle": "Batch edit tags · stage locally · write on save",
-    "taggedBadge": "{{tagged}}/{{total}} tagged",
+    "title": "Tags & editing",
+    "subtitle": "Batch-edit the train set captions. Written to disk on Save.",
+    "taggedBadge": "{{tagged}} / {{total}} tagged",
     "downloadZip": "Download dataset",
     "zipping": "Packing…",
     "saveThenDownload": "Save tags before downloading",
@@ -2247,7 +2268,15 @@
     "unsavedConfirmTitle": "Unsaved tag edits",
     "unsavedConfirmMessage": "You have unsaved tag changes on {{n}} image(s). Navigating away will discard them. Leave anyway?",
     "unsavedConfirmDiscard": "Discard and leave",
-    "unsavedConfirmStay": "Stay on this page"
+    "unsavedConfirmStay": "Stay on this page",
+    "next": "Next: reg set",
+    "imagesTitle": "Images",
+    "imagesSub": "{{n}} in train",
+    "withTag": "{{n}} tagged «{{tag}}»",
+    "folderLabel": "Folder",
+    "allFolders": "All folders · {{n}}",
+    "noActive": "No image",
+    "noActiveHint": "Pick an image in the grid"
   },
   "download": {
     "tagEmpty": "Tag cannot be empty",

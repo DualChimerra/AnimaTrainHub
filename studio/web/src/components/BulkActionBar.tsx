@@ -16,6 +16,9 @@ interface Props {
   tagSuggestions?: string[]
   /** 用来给"未选时"的 hint 显示总数。 */
   totalCount: number
+  /** 'bar': one-line green strip under the image grid (mockup TagEdit);
+   *  remove / replace then live in the tag statistics card. */
+  variant?: 'panel' | 'bar'
 }
 
 /** 批量操作面板 — V2「行式」布局。
@@ -38,6 +41,7 @@ export default function BulkActionBar({
   onClearSelection,
   tagSuggestions = [],
   totalCount,
+  variant = 'panel',
 }: Props) {
   const { t } = useTranslation()
   const { toast } = useToast()
@@ -145,6 +149,51 @@ export default function BulkActionBar({
 
   const noneSelected = selectedKeys.length === 0
   const opDisabled = noneSelected
+
+  if (variant === 'bar') {
+    return (
+      <div className="ds-bulkbar" style={{ flexWrap: 'wrap', rowGap: 6 }}>
+        <span className="ds-cbox ds-on" style={{ borderColor: 'var(--green-600)', background: 'var(--green-600)' }} aria-hidden="true">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round"><path d="m5 13 4 4L19 7" /></svg>
+        </span>
+        <span style={{ fontWeight: 500, whiteSpace: 'nowrap' }}>{t('bulkAction.selectedTotal', { n: selectedKeys.length, total: totalCount })}</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6, flex: '1 1 260px', minWidth: 0 }}>
+          <TagsField
+            value={addInput}
+            onChange={setAddInput}
+            placeholder={t('bulkAction.tagPlaceholder')}
+            ariaLabel={t('bulkAction.addAria')}
+            suggestions={tagSuggestions}
+            className="ds-inp ds-mono"
+            style={{ height: 26 }}
+            dropUp
+          />
+          <span className="ds-seg" style={{ padding: 2, flex: 'none' }} role="group">
+            {(['front', 'back'] as const).map((p) => (
+              <button key={p} type="button" className={`ds-seg-item${position === p ? ' ds-is-active' : ''}`} style={{ height: 20, padding: '0 8px', fontSize: 11 }} aria-pressed={position === p} onClick={() => setPosition(p)}>
+                {t(p === 'front' ? 'bulkAction.posFront' : 'bulkAction.posBack')}
+              </button>
+            ))}
+          </span>
+          <button type="button" className="ds-btn-primary" style={{ height: 26, flex: 'none' }} onClick={() => void apply('add')} disabled={opDisabled}
+            title={t(position === 'front' ? 'bulkAction.addFrontHint' : 'bulkAction.addBackHint')}>
+            {t('bulkAction.add')}
+          </button>
+        </span>
+        <button type="button" className="ds-ctl ds-ghost" style={{ height: 26, color: 'var(--green-text)' }} onClick={() => void apply('dedupe')} disabled={opDisabled} title={t('bulkAction.dedupeHint')}>
+          {t('bulkAction.dedupe')}
+        </button>
+        {selectedKeys.length < totalCount && (
+          <button type="button" className="ds-ctl ds-ghost" style={{ height: 26, color: 'var(--green-text)' }} onClick={onSelectAll} title={t('bulkAction.selectAllImagesHint')}>
+            {t('bulkAction.selectAllImages')}
+          </button>
+        )}
+        <button type="button" className="ds-ctl ds-ghost" style={{ height: 26, color: 'var(--green-text)' }} onClick={onClearSelection}>
+          {t('common.deselect')}
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="px-2.5 py-2 flex flex-col gap-2 text-xs shrink-0 border-b border-subtle">
@@ -421,9 +470,13 @@ interface TagsFieldProps {
   placeholder: string
   suggestions: string[]
   ariaLabel?: string
+  className?: string
+  style?: React.CSSProperties
+  /** Open the suggestion list above the field (bar at the bottom of a card). */
+  dropUp?: boolean
 }
 
-function TagsField({ value, onChange, placeholder, suggestions, ariaLabel }: TagsFieldProps) {
+function TagsField({ value, onChange, placeholder, suggestions, ariaLabel, className = 'input input-mono', style = { fontSize: 'var(--t-xs)' }, dropUp }: TagsFieldProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -456,12 +509,12 @@ function TagsField({ value, onChange, placeholder, suggestions, ariaLabel }: Tag
         onFocus={() => setOpen(true)}
         placeholder={placeholder}
         aria-label={ariaLabel}
-        className="input input-mono w-full"
-        style={{ fontSize: 'var(--t-xs)' }}
+        className={className + ' w-full'}
+        style={style}
       />
       {open && matches.length > 0 && (
         <ul
-          className="absolute left-0 top-full mt-0.5 z-30 bg-elevated border border-subtle rounded-lg shadow-lg max-h-[180px] overflow-y-auto min-w-[200px] list-none p-1 m-0"
+          className={(dropUp ? 'absolute left-0 bottom-full mb-0.5' : 'absolute left-0 top-full mt-0.5') + ' z-30 bg-elevated border border-subtle rounded-lg shadow-lg max-h-[180px] overflow-y-auto min-w-[200px] list-none p-1 m-0'}
           role="listbox"
         >
           {matches.map((s) => (

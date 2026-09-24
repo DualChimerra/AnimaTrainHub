@@ -613,3 +613,8 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 /* disabled controls (the mockup never shows one; the app needs them) */
 .ds-btn-primary:disabled, .ds-btn-dark:disabled, .ds-btn-danger:disabled, .ds-ctl:disabled,
 .ds-seg-item:disabled, .ds-chip:disabled, .ds-chip-add:disabled, .ds-searchgroup > button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ===== tag edit (mockup TagEdit) ===== */
+.ds-te-grid{display:grid;grid-template-columns:270px minmax(0,1fr) 320px;grid-template-rows:minmax(0,1fr);gap:14px;flex:1;min-height:0;padding-top:2px}
+@media (max-width:1100px){.ds-te-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:none}.ds-te-grid > .ds-card{min-height:420px}}
+.ds-ctl[aria-disabled="true"], .ds-kebab:disabled { opacity: .45; cursor: not-allowed; }

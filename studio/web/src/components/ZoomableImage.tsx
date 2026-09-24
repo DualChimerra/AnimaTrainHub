@@ -18,6 +18,8 @@ export default function ZoomableImage({
   className,
   style,
   onError,
+  onNaturalSize,
+  readout = true,
 }: {
   src: string
   alt?: string
@@ -25,6 +27,10 @@ export default function ZoomableImage({
   style?: React.CSSProperties
   /** img 加载失败回调（调用方切换占位 UI 用）。 */
   onError?: () => void
+  /** Called with the natural pixel size once the image has loaded. */
+  onNaturalSize?: (w: number, h: number) => void
+  /** Zoom readout strip under the viewport; off for small previews. */
+  readout?: boolean
 }) {
   const { t } = useTranslation()
   const [nat, setNat] = useState<{ w: number; h: number } | null>(null)
@@ -52,10 +58,12 @@ export default function ZoomableImage({
           src={src}
           alt={alt}
           draggable={false}
-          onLoad={(e) => setNat({
-            w: e.currentTarget.naturalWidth,
-            h: e.currentTarget.naturalHeight,
-          })}
+          onLoad={(e) => {
+            const w = e.currentTarget.naturalWidth
+            const h = e.currentTarget.naturalHeight
+            setNat({ w, h })
+            onNaturalSize?.(w, h)
+          }}
           onError={onError}
           style={{
             position: 'absolute',
@@ -70,6 +78,7 @@ export default function ZoomableImage({
       </div>
 
       {/* readout 细条（与涂抹 / 裁剪页统一版式） */}
+      {readout && (
       <div className="shrink-0 flex items-center gap-2 text-[11px] font-mono text-fg-tertiary px-1">
         <span>{zp.zoomPct}%</span>
         <button
@@ -85,7 +94,7 @@ export default function ZoomableImage({
         <span className="flex-1" />
         {nat && <span>{nat.w}×{nat.h}</span>}
         <span className="text-fg-disabled">{t('common.zoomHint')}</span>
-      </div>
+      </div>)}
     </div>
   )
 }
