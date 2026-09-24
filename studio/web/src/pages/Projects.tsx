@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
-import { api, type BundleImportResult, type ProjectSummary } from '../api/client'
+import { api, type BundleImportResult, type ProjectSummary, type Task } from '../api/client'
 import PageHeader from '../components/PageHeader'
 import PathPicker from '../components/PathPicker'
 import UploadProgressBar from '../components/UploadProgressBar'
@@ -10,10 +10,22 @@ import { useDialog } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import { useEventStream } from '../lib/useEventStream'
 import { useUploadProgress } from '../lib/useUploadProgress'
+import { useMonitorProgress } from '../lib/useMonitorProgress'
+import { buildTrainingForecast, latestProjectFinish } from '../lib/queueEstimates'
+
+type ProjectSort = 'queue' | 'finish' | 'updated' | 'created' | 'title'
+
+function formatProjectTime(ts: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  }).format(new Date(ts * 1000))
+}
 
 export default function ProjectsPage() {
   const { t } = useTranslation()
   const [items, setItems] = useState<ProjectSummary[]>([])
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [sort, setSort] = useState<ProjectSort>('queue')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -28,8 +40,12 @@ export default function ProjectsPage() {
 
   const refresh = async () => {
     try {
-      const list = await api.listProjects()
+      const [list, queue] = await Promise.all([
+        api.listProjects(),
+        api.listQueue().catch(() => [] as Task[]),
+      ])
       setItems(list)
+      setTasks(queue)
       setError(null)
     } catch (e) {
       setError(String(e))
@@ -41,8 +57,50 @@ export default function ProjectsPage() {
   useEffect(() => { void refresh() }, [])
 
   useEventStream((evt) => {
-    if (evt.type === 'project_state_changed') void refresh()
+    if (evt.type === 'project_state_changed' || evt.type === 'task_state_changed') void refresh()
   })
+
+  const runningTaskId = tasks.find((task) => task.status === 'running')?.id ?? null
+  const { state: monitor } = useMonitorProgress(runningTaskId)
+  const forecast = useMemo(() => buildTrainingForecast(tasks, monitor), [tasks, monitor])
+  const forecastByProject = useMemo(() => {
+    const map = new Map<number, { order: number; finishesAt: number | null; status: Task['status'] }>()
+    forecast.forEach(({ task, finishesAt }, order) => {
+      if (task.project_id != null && !map.has(task.project_id)) {
+        map.set(task.project_id, { order, finishesAt, status: task.status })
+      }
+    })
+    return map
+  }, [forecast])
+  const sortedItems = useMemo(() => [...items].sort((a, b) => {
+    const aq = forecastByProject.get(a.id)
+    const bq = forecastByProject.get(b.id)
+    if (sort === 'queue') {
+      if (aq && bq) return aq.order - bq.order
+      if (aq) return -1
+      if (bq) return 1
+      return b.updated_at - a.updated_at
+    }
+    if (sort === 'finish') {
+      if (aq || bq) {
+        if (!aq) return 1
+        if (!bq) return -1
+        if (aq.finishesAt != null && bq.finishesAt != null) return aq.finishesAt - bq.finishesAt
+        if (aq.finishesAt != null) return -1
+        if (bq.finishesAt != null) return 1
+        return aq.order - bq.order
+      }
+      const af = latestProjectFinish(tasks, a.id)
+      const bf = latestProjectFinish(tasks, b.id)
+      if (af != null && bf != null) return bf - af
+      if (af != null) return -1
+      if (bf != null) return 1
+      return b.updated_at - a.updated_at
+    }
+    if (sort === 'created') return b.created_at - a.created_at
+    if (sort === 'title') return a.title.localeCompare(b.title)
+    return b.updated_at - a.updated_at
+  }), [items, tasks, forecastByProject, sort])
 
   const handleCreate = async (form: NewProjectForm) => {
     setBusy(true)
@@ -162,6 +220,26 @@ export default function ProjectsPage() {
           <div className="mb-4 px-3.5 py-2.5 rounded-md bg-err-soft border border-err text-err text-sm font-mono">{error}</div>
         )}
 
+        {!loading && items.length > 0 && (
+          <div className="mb-4 flex items-center justify-end gap-2">
+            <label htmlFor="project-sort" className="text-xs text-fg-tertiary">
+              {t('projects.sortLabel')}
+            </label>
+            <select
+              id="project-sort"
+              className="input text-sm min-w-[220px]"
+              value={sort}
+              onChange={(event) => setSort(event.target.value as ProjectSort)}
+            >
+              <option value="queue">{t('projects.sort_queue')}</option>
+              <option value="finish">{t('projects.sort_finish')}</option>
+              <option value="updated">{t('projects.sort_updated')}</option>
+              <option value="created">{t('projects.sort_created')}</option>
+              <option value="title">{t('projects.sort_title')}</option>
+            </select>
+          </div>
+        )}
+
         {loading ? (
           <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
             {[1, 2, 3].map(i => (
@@ -178,12 +256,13 @@ export default function ProjectsPage() {
           </div>
         ) : (
           <div className="grid gap-4 auto-rows-fr" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
-            {items.map((p) => (
+            {sortedItems.map((p) => (
               <ProjectCard
                 key={p.id}
                 project={p}
                 onClick={() => openProject(p)}
                 onDelete={(e) => handleDelete(p, e)}
+                queueInfo={forecastByProject.get(p.id)}
               />
             ))}
           </div>
@@ -298,10 +377,12 @@ function ProjectCard({
   project: p,
   onClick,
   onDelete,
+  queueInfo,
 }: {
   project: ProjectSummary
   onClick: () => void
   onDelete: (e: React.MouseEvent) => void
+  queueInfo?: { order: number; finishesAt: number | null; status: Task['status'] }
 }) {
   const { t } = useTranslation()
 
@@ -327,6 +408,21 @@ function ProjectCard({
         <p className="m-0 text-sm text-fg-secondary overflow-hidden line-clamp-2">
           {p.note}
         </p>
+      )}
+
+      {queueInfo && (
+        <div className="rounded-md bg-accent-soft border border-accent/30 px-2.5 py-2 text-xs flex items-center justify-between gap-2">
+          <span className="font-medium text-accent">
+            {queueInfo.status === 'running'
+              ? t('projects.trainingNow')
+              : t('projects.queuePosition', { position: queueInfo.order + 1 })}
+          </span>
+          <span className="font-mono text-fg-secondary">
+            {queueInfo.finishesAt
+              ? `≈ ${formatProjectTime(queueInfo.finishesAt)}`
+              : t('projects.finishUnknown')}
+          </span>
+        </div>
       )}
 
       <div className="flex gap-4 text-sm text-fg-secondary mt-auto items-center">

@@ -1,14 +1,18 @@
 """Baseline timestep 采样器：包装 training.timestep_sampling.sample_t。
 
 非自适应；record / maybe_refresh 是 no-op。
-覆盖 7 种 mode：logit_normal / uniform / logit_normal_low / mode /
-mixed_uniform_low / mixed_uniform_logit / style_friendly。
+覆盖 8 种 mode：logit_normal / uniform / logit_normal_low / mode /
+mixed_uniform_low / mixed_uniform_logit / style_friendly / dual_peak。
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import torch
 
+from dual_peak_sampling import DualPeakConfig
+from training.timestep_samplers.dual_peak import config_from_args
 from training.timestep_sampling import sample_t
 
 
@@ -23,6 +27,7 @@ class BaselineTimestepSampler:
         timestep_schedule_shift: float = 1.0,
         style_snr_mean: float = -6.0,
         style_snr_sigma: float = 2.0,
+        dual_peak_config: DualPeakConfig | None = None,
     ):
         self.mode = mode
         self.shift = shift
@@ -30,6 +35,10 @@ class BaselineTimestepSampler:
         self.timestep_schedule_shift = timestep_schedule_shift
         self.style_snr_mean = style_snr_mean
         self.style_snr_sigma = style_snr_sigma
+        self.dual_peak_config = (
+            (dual_peak_config or DualPeakConfig())
+            if (mode or "logit_normal").lower() == "dual_peak" else None
+        )
 
     def sample(self, bs: int, device, *, token_counts=None) -> torch.Tensor:
         return sample_t(
@@ -41,6 +50,7 @@ class BaselineTimestepSampler:
             timestep_schedule_shift=self.timestep_schedule_shift,
             style_snr_mean=self.style_snr_mean,
             style_snr_sigma=self.style_snr_sigma,
+            dual_peak_config=self.dual_peak_config,
         )
 
     def record(self, t: torch.Tensor, raw_mse: torch.Tensor) -> None:
@@ -58,6 +68,7 @@ class BaselineTimestepSampler:
             "timestep_schedule_shift": self.timestep_schedule_shift,
             "style_snr_mean": self.style_snr_mean,
             "style_snr_sigma": self.style_snr_sigma,
+            **({"dual_peak": asdict(self.dual_peak_config)} if self.dual_peak_config is not None else {}),
         }
 
     # ─── pause/resume（ADR 0006 Addendum 1）：无状态采样器是真的无状态，no-op ───
@@ -79,6 +90,7 @@ def build(args, total_steps) -> BaselineTimestepSampler:
         # 显式 None 检查而非 `or`：mean 的合法值里有 0.0，sigma 没有但保持同一写法
         style_snr_mean=_float_or(getattr(args, "style_snr_mean", None), -6.0),
         style_snr_sigma=_float_or(getattr(args, "style_snr_sigma", None), 2.0),
+        dual_peak_config=config_from_args(args),
     )
 
 

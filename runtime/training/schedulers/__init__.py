@@ -14,14 +14,22 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from training.schedulers import cosine, cosine_with_restart, cosine_with_warmup
+from training.schedulers import (
+    constant_then_cosine,
+    cosine,
+    cosine_cycles,
+    cosine_with_restart,
+    cosine_with_warmup,
+)
 
 __all__ = ["BUILDERS", "build_scheduler", "validate_schema_consistency"]
 
 
 # "none" 不在 BUILDERS —— build_scheduler 显式判一下返回 None。
 BUILDERS: dict[str, Callable] = {
+    "constant_then_cosine": constant_then_cosine.build,
     "cosine": cosine.build,
+    "cosine_cycles": cosine_cycles.build,
     "cosine_with_restart": cosine_with_restart.build,
     "cosine_with_warmup": cosine_with_warmup.build,
 }

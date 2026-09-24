@@ -39,7 +39,9 @@ def test_schema_is_complete() -> None:
         "transformer_path", "data_dir", "lora_type", "lora_rank", "epochs",
         "tlora_min_rank", "tlora_alpha_rank_scale", "tlora_use_ortho",
         "optimizer_type", "prodigy_d_coef", "prodigy_safeguard_warmup",
-        "lr_scheduler_warmup_steps",
+        "lr_scheduler_warmup_steps", "lr_scheduler_cycle_count",
+        "lr_scheduler_cycle_max_lrs", "lr_scheduler_cycle_min_lrs",
+        "lr_scheduler_decay_start_ratio", "lr_scheduler_decay_min_lr",
         "lion_beta1", "lion_beta2",
         "came_beta1", "came_beta2", "came_beta3",
         "came_eps1", "came_eps2", "came_clip_threshold",
@@ -64,6 +66,8 @@ def test_schema_is_complete() -> None:
     scheduler_annotation = fields["lr_scheduler"].annotation
     scheduler_options = getattr(scheduler_annotation, "__args__", ())
     assert "cosine_with_warmup" in scheduler_options
+    assert "cosine_cycles" in scheduler_options
+    assert "constant_then_cosine" in scheduler_options
     # optimizer_type Literal 包含 Lion / PPSF
     optimizer_annotation = fields["optimizer_type"].annotation
     # Literal 的 __args__ 包含所有合法值
@@ -110,6 +114,8 @@ def test_schema_carries_ui_metadata(client: TestClient) -> None:
     assert "automagic" not in props["learning_rate"]["disable_when"]
     assert props["lr_scheduler"]["disable_when"] == "optimizer_type==automagic||optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree||optimizer_type==soap_sf"
     assert props["lr_scheduler_warmup_steps"]["show_when"] == "lr_scheduler==cosine_with_warmup"
+    assert props["lr_scheduler_cycle_count"]["show_when"] == "lr_scheduler==cosine_cycles"
+    assert props["lr_scheduler_decay_start_ratio"]["show_when"] == "lr_scheduler==constant_then_cosine"
     assert props["automagic_min_lr"]["show_when"] == "optimizer_type==automagic"
     assert props["automagic_max_lr"]["show_when"] == "optimizer_type==automagic"
     assert props["automagic_variant"]["show_when"] == "optimizer_type==automagic"
@@ -127,6 +133,41 @@ def test_schema_carries_ui_metadata(client: TestClient) -> None:
 def test_extra_fields_are_silently_ignored() -> None:
     cfg = TrainingConfig.model_validate({"learning_ratee": 1e-4})
     assert not hasattr(cfg, "learning_ratee")
+
+
+def test_cosine_cycles_validates_per_peak_lr_lists() -> None:
+    cfg = TrainingConfig.model_validate({
+        "lr_scheduler": "cosine_cycles",
+        "learning_rate": 1e-4,
+        "lr_scheduler_cycle_count": 3,
+        "lr_scheduler_cycle_max_lrs": [1e-4, 8e-5, 6e-5],
+        "lr_scheduler_cycle_min_lrs": [5e-5, 4e-5, 0.0],
+    })
+    assert cfg.lr_scheduler_cycle_count == 3
+
+    with pytest.raises(Exception, match="exactly 3 values"):
+        TrainingConfig.model_validate({
+            "lr_scheduler": "cosine_cycles",
+            "lr_scheduler_cycle_count": 3,
+            "lr_scheduler_cycle_max_lrs": [1e-4, 8e-5],
+        })
+
+    with pytest.raises(Exception, match="cannot exceed max LR"):
+        TrainingConfig.model_validate({
+            "lr_scheduler": "cosine_cycles",
+            "lr_scheduler_cycle_count": 1,
+            "lr_scheduler_cycle_max_lrs": [1e-5],
+            "lr_scheduler_cycle_min_lrs": [2e-5],
+        })
+
+
+def test_constant_then_cosine_min_cannot_exceed_base_lr() -> None:
+    with pytest.raises(Exception, match="cannot exceed learning_rate"):
+        TrainingConfig.model_validate({
+            "lr_scheduler": "constant_then_cosine",
+            "learning_rate": 1e-4,
+            "lr_scheduler_decay_min_lr": 2e-4,
+        })
 
 
 def test_ppsf_rejects_non_none_scheduler() -> None:

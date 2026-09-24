@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import torch
 
+from dual_peak_sampling import DualPeakConfig, sample_timesteps
+
 from training.families.anima import ANIMA_SPEC as _ANIMA_SPEC
 
 
@@ -23,10 +25,13 @@ def sample_t(
     timestep_schedule_shift: float = 1.0,
     style_snr_mean: float = -6.0,
     style_snr_sigma: float = 2.0,
+    dual_peak_config: DualPeakConfig | None = None,
 ) -> torch.Tensor:
     """采样 Flow Matching 时间步 t ∈ (0, 1)。
 
     mode:
+      dual_peak          — Portable custom style mixture; independent peak positions,
+                           widths and weights. Ignores shift; see dual_peak_config.
       logit_normal       — SD3/Anima 默认，偏向中间 t；shift>1 推向高噪声端
       uniform            — 均匀采样，对细节端和结构端覆盖更均衡
       logit_normal_low   — logit-normal 反向 shift，偏向低噪声/细节端
@@ -46,6 +51,11 @@ def sample_t(
                      的 sigmoid 后 u 值，前者作用于最终 t
     """
     mode = (mode or "logit_normal").lower()
+
+    if mode == "dual_peak":
+        # Like style_friendly, positions are explicit: ignore timestep_shift.
+        t = sample_timesteps(bs, device, dual_peak_config or DualPeakConfig())
+        return _apply_timestep_schedule_shift(t, timestep_schedule_shift)
 
     if mode == "style_friendly":
         t = sample_t_style_friendly(bs, device, mean=style_snr_mean, sigma=style_snr_sigma)
