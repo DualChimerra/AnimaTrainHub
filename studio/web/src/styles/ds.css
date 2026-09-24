@@ -579,3 +579,10 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 /* the mockup reset left-aligned every button; keep that for the rows that
    render as <button> (next step, settings) */
 .ds-nav-item, .ds-step, .ds-verpill { text-align: left; }
+
+/* project overview: main table + 400px side column, 4 KPIs */
+.ds-ov-main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 14px; align-items: start; }
+.ds-ov-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1180px) { .ds-ov-main { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 900px) { .ds-ov-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ds-tbl td.ds-num { white-space: nowrap; }

@@ -54,7 +54,9 @@ export default function KebabMenu({ label, items, className = '' }: {
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full mt-1 z-50 min-w-[180px] py-1 rounded-[10px] border border-dim bg-elevated shadow-lg"
+          className="absolute right-0 top-full mt-1 z-50 py-1 rounded-[10px] border border-dim bg-elevated shadow-lg"
+          // inline: the mockup's `.ds-card div { min-width: 0 }` outranks a utility class
+          style={{ minWidth: 180 }}
         >
           {items.map((it) => (
             <button
@@ -63,7 +65,7 @@ export default function KebabMenu({ label, items, className = '' }: {
               role="menuitem"
               disabled={it.disabled}
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(false); it.onSelect() }}
-              className={`block w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-sunken disabled:opacity-40 disabled:cursor-default ${it.tone === 'err' ? 'text-err' : 'text-fg-primary'}`}
+              className={`block w-full text-left whitespace-nowrap px-3 py-1.5 text-[12.5px] hover:bg-sunken disabled:opacity-40 disabled:cursor-default ${it.tone === 'err' ? 'text-err' : 'text-fg-primary'}`}
             >
               {it.label}
             </button>
