@@ -200,7 +200,9 @@
     "dupScan": "Duplicate scan",
     "tag": "Tagging job",
     "regBuild": "Booru build",
-    "regPrior": "AI prior generation"
+    "regPrior": "AI prior generation",
+    "expand": "expand",
+    "collapse": "collapse"
   },
   "pathPicker": {
     "title": "Select path",
@@ -2331,7 +2333,7 @@
     "upscaleAll": "Upscale all {{n}}",
     "tools": {
       "overview": "Overview",
-      "dedupe": "Dedupe review",
+      "dedupe": "Duplicates",
       "upscale": "Upscale",
       "crop": "Crop",
       "inpaint": "Inpaint"
@@ -2514,7 +2516,8 @@
       "title": "Train",
       "subtitle": "Pick preset → Edit config → Queue training"
     },
-    "eyebrowStep": "STEP {{n}} · VERSION {{label}}"
+    "eyebrowStep": "STEP {{n}} · VERSION {{label}}",
+    "stepN": "STEP {{n}}"
   },
   "curate": {
     "downloadTime": "Added time",
@@ -3595,5 +3598,54 @@
     "logUpload": "file upload",
     "logToggle": "log",
     "logEmpty": "The log is empty"
+  },
+  "ppFrame": {
+    "eyebrow": "STEP 2 · OPTIONAL",
+    "title": "Preprocess tools",
+    "subtitle": "Upscale / crop / inpaint / duplicates — they work on the version's train set",
+    "next": "Next: tags",
+    "restoreAll": "Restore processed",
+    "restoreAllTitle": "Bring every processed image back to its dataset original",
+    "restoredN": "Restored: {{n}}",
+    "logLabel": "Preprocess log",
+    "sumUpscale": "{{n}} / {{total}} processed",
+    "sumCrop": "ARB buckets · {{n}} aspect ratios",
+    "sumInpaint": "masks: {{n}} images",
+    "sumDedupe": "removed as duplicates: {{n}}",
+    "fieldModel": "Upscaler model",
+    "fieldDevice": "Device",
+    "fieldTarget": "Target size",
+    "fieldTile": "Tile",
+    "modelReadySize": "downloaded · {{mb}} MB",
+    "modelMissing": "not downloaded",
+    "targetCustom": "Custom",
+    "targetOff": "Off",
+    "targetHintRecommended": "{{edge}} px — the recommended size",
+    "targetHintOff": "Off: every image goes through the 4× model",
+    "targetOffWarn": "\"Off\" runs every image through the 4× model — that is expensive on disk.",
+    "diskProcessed": "{{n}} processed images on disk",
+    "runUpscale": "Run upscale · {{n}}",
+    "runSelected": "Upscale selected · {{n}}",
+    "clearN": "Clear · {{n}}",
+    "jobBadge": "job #{{id}} · {{n}} / {{total}}",
+    "previewProcessed": "✓ processed",
+    "previewPending": "⊘ not processed",
+    "dupHow": "How to match",
+    "dupHowStrict": "Exact copies only: whole-image hashes are compared",
+    "dupHowBoth": "Copies + frame variants and crops: catches re-encodes, resizes and trims",
+    "dupNote": "Removing only flags images — files stay put. Flagged ones show on the Overview tab under Removed and can be brought back.",
+    "dupApply_one": "Remove {{count}} duplicate",
+    "dupApply_other": "Remove {{count}} duplicates",
+    "dupAllGroups": "All groups",
+    "dupExact": "Exact",
+    "dupSimilar": "Similar",
+    "dupChecked": "checked {{n}} of {{total}} · {{sel}} files to remove",
+    "dupEmpty": "Pick a mode on the left and press Scan duplicates — groups show up here.",
+    "dupGroup": "group {{n}}",
+    "dupSimilarity": "similarity {{n}}%",
+    "dupFiles_one": "{{count}} file · keep one",
+    "dupFiles_other": "{{count}} files · keep one",
+    "dupKeepBest": "Keep best",
+    "dupKeep": "keep"
   }
 }

@@ -11,7 +11,7 @@ import {
 import { useDialog } from '../../../components/Dialog'
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
-import PreprocessToolsBar from '../../../components/preprocess/PreprocessToolsBar'
+import PreprocessToolsBar, { PreprocessCard, PreprocessHeadTools } from '../../../components/preprocess/PreprocessToolsBar'
 import StepShell from '../../../components/StepShell'
 import { useToast } from '../../../components/Toast'
 import { useEventStream } from '../../../lib/useEventStream'
@@ -232,97 +232,88 @@ export default function PreprocessOverviewPage() {
   return (
     <StepShell
       idx={2}
-      eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
-      title={t('steps.preprocess.title')}
-      subtitle={t('preprocessOverview.subtitle')}
+      eyebrow={t('ppFrame.eyebrow')}
+      title={t('ppFrame.title')}
+      subtitle={t('ppFrame.subtitle')}
+      actions={<PreprocessHeadTools projectId={project.id} versionId={vid} />}
       belowHeader={<PreprocessToolsBar current="overview" projectId={project.id} versionId={vid} />}
     >
-      <div className="flex flex-col h-full gap-3 min-h-0">
-        <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden">
-          <header className="flex items-center gap-2 shrink-0 px-3 py-2 border-b border-subtle text-sm flex-wrap">
-            <div className="flex items-center gap-1">
-              {tabDefs.map((td) => (
-                <button
-                  key={td.id}
-                  onClick={() => setTab(td.id)}
-                  className={`px-2.5 py-1 rounded-md text-sm font-medium ${
-                    tab === td.id
-                      ? 'bg-overlay text-fg-primary'
-                      : 'text-fg-secondary hover:bg-overlay/50'
-                  }`}
-                >
-                  {td.label}
-                  <span className="ml-1 text-fg-tertiary text-xs">{td.count}</span>
-                </button>
-              ))}
-            </div>
-            {sel.size > 0 && (
-              <span className="text-accent text-xs">
-                {t('preprocessOverview.selectedCount', { n: sel.size })}
-              </span>
-            )}
-            <span className="flex-1" />
+      <PreprocessCard current="overview" projectId={project.id} versionId={vid}>
+        <div style={{ padding: '12px 17px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          {tabDefs.map((td) => (
             <button
-              onClick={() => setSel(new Set(selectableNames))}
-              disabled={selectableNames.length === 0}
-              className="btn btn-ghost btn-sm"
-            >{t('common.selectAll')}</button>
+              key={td.id}
+              type="button"
+              onClick={() => setTab(td.id)}
+              className={`ds-chip${tab === td.id ? ' ds-is-active' : ''}`}
+              style={{ paddingRight: 6 }}
+              aria-pressed={tab === td.id}
+            >
+              {td.label} <b>{td.count}</b>
+            </button>
+          ))}
+          {sel.size > 0 && (
+            <span className="ds-muted" style={{ fontSize: 12, color: 'var(--green-text)' }}>
+              {t('preprocessOverview.selectedCount', { n: sel.size })}
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          {sel.size > 0 ? (
+            <button type="button" className="ds-ctl ds-ghost" style={{ height: 28 }} onClick={() => { setSel(new Set()); setSelAnchor(null) }}>{t('common.deselect')}</button>
+          ) : (
+            <button type="button" className="ds-ctl ds-ghost" style={{ height: 28 }} onClick={() => setSel(new Set(selectableNames))} disabled={selectableNames.length === 0}>{t('common.selectAll')}</button>
+          )}
+          <button
+            type="button"
+            onClick={() => void restoreNames(Array.from(sel))}
+            disabled={sel.size === 0}
+            className="ds-btn-danger"
+            style={{ height: 28 }}
+            title={t('preprocessOverview.restoreSelectedTitle')}
+          >{t('preprocessOverview.restoreSelected', { n: sel.size })}</button>
+          {tab === 'all' && (
             <button
-              onClick={() => { setSel(new Set()); setSelAnchor(null) }}
-              disabled={sel.size === 0}
-              className="btn btn-ghost btn-sm"
-            >{t('common.deselect')}</button>
-            <button
-              onClick={() => void restoreNames(Array.from(sel))}
-              disabled={sel.size === 0}
-              className="btn btn-sm bg-err-soft text-err"
-              title={t('preprocessOverview.restoreSelectedTitle')}
-            >{t('preprocessOverview.restoreSelected', { n: sel.size })}</button>
-            {tab === 'all' && (
-              <button
-                onClick={() => void resetAll()}
-                disabled={processed.length === 0}
-                className="btn btn-sm btn-secondary"
-                title={t('preprocessOverview.resetAllTitle')}
-              >↶ {t('preprocessOverview.resetAll')}</button>
-            )}
-          </header>
+              type="button"
+              onClick={() => void resetAll()}
+              disabled={processed.length === 0}
+              className="ds-ctl"
+              style={{ height: 28 }}
+              title={t('preprocessOverview.resetAllTitle')}
+            >↶ {t('preprocessOverview.resetAll')}</button>
+          )}
+        </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto p-3">
-            {loading && (
-              <p className="text-fg-tertiary text-sm">{t('common.loading')}</p>
-            )}
-            {!loading && items.length === 0 && (
-              <p className="text-fg-tertiary text-sm">{emptyHint}</p>
-            )}
-            {items.length > 0 && (
-              <ImageGrid
-                items={items}
-                selected={sel}
-                onSelect={(name, e) => {
-                  // all tab 里只有 processed 项可选；未处理 cell 点击直接 noop
-                  // （保留 activate 单击放大）
-                  if (tab === 'all' && !processedNames.has(name)) return
-                  const r = applySelection(sel, name, e, selectableNames, selAnchor)
-                  setSel(r.next)
-                  setSelAnchor(r.anchor)
-                }}
-                onActivate={(name) => {
-                  const i = visibleNames.indexOf(name)
-                  if (i >= 0) setPreviewIdx(i)
-                }}
-                onPreview={(name) => {
-                  const i = visibleNames.indexOf(name)
-                  if (i >= 0) setPreviewIdx(i)
-                }}
-                clickMode="activate"
-                ariaLabel={`preprocess-overview-grid-${tab}`}
-                emptyHint={emptyHint}
-              />
-            )}
-          </div>
-        </section>
-      </div>
+        <div style={{ flex: 1, minHeight: 0, padding: '14px 17px' }}>
+          {loading && <p className="ds-muted" style={{ fontSize: 12.5, margin: 0 }}>{t('common.loading')}</p>}
+          {!loading && items.length === 0 && <p className="ds-muted" style={{ fontSize: 12.5, margin: 0 }}>{emptyHint}</p>}
+          {items.length > 0 && (
+            <ImageGrid
+              items={items}
+              selected={sel}
+              onSelect={(name, e) => {
+                // on the "all" tab only processed images can be picked; a click
+                // on an untouched one does nothing (single click still previews)
+                if (tab === 'all' && !processedNames.has(name)) return
+                const r = applySelection(sel, name, e, selectableNames, selAnchor)
+                setSel(r.next)
+                setSelAnchor(r.anchor)
+              }}
+              onActivate={(name) => {
+                const i = visibleNames.indexOf(name)
+                if (i >= 0) setPreviewIdx(i)
+              }}
+              onPreview={(name) => {
+                const i = visibleNames.indexOf(name)
+                if (i >= 0) setPreviewIdx(i)
+              }}
+              clickMode="activate"
+              columnsClass="grid-cols-[repeat(auto-fill,minmax(92px,1fr))]"
+              ariaLabel={`preprocess-overview-grid-${tab}`}
+              emptyHint={emptyHint}
+            />
+          )}
+        </div>
+      </PreprocessCard>
 
       {previewItem && (
         <ImagePreviewModal

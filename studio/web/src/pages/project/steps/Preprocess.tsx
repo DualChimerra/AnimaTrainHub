@@ -11,10 +11,9 @@ import {
 import { parseFolderMeta } from '../../../lib/folderMeta'
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
-import PreprocessToolsBar from '../../../components/preprocess/PreprocessToolsBar'
+import PreprocessToolsBar, { PreprocessCard, PreprocessHeadTools } from '../../../components/preprocess/PreprocessToolsBar'
 import StepShell from '../../../components/StepShell'
-import BarHistogram from '../../../components/BarHistogram'
-import { PX_BINS, pxBinFor, computePixelHist, type PxBinId } from '../../../lib/pixelBins'
+import { PX_BINS, pxBinFor, type PxBinId } from '../../../lib/pixelBins'
 import { useToast } from '../../../components/Toast'
 import { useEventStream } from '../../../lib/useEventStream'
 
@@ -271,6 +270,7 @@ export default function PreprocessPage() {
         ) + `&_=${r.mtime}`,
         // ADR 0010: processed entry 显示 action 角标（继承自老 schema 透传）
         meta: r.status === 'processed' ? (r.processed?.action ?? undefined) : undefined,
+        badge: r.status === 'processed' ? (r.processed?.scale ? `${r.processed.scale}× ✓` : '✓') : undefined,
       })),
     [visibleRows, project.id, vid],
   )
@@ -375,47 +375,35 @@ export default function PreprocessPage() {
   const upscaleTotal = folderScopedNames ? folderScopedNames.length : rows.length
   const upscaleBusy = busy || isLive
 
+  const processedCount = rows.filter((r) => r.status === 'processed').length
+  const processedBytes = rows.reduce((s, r) => s + (r.status === 'processed' ? r.size : 0), 0)
+  const onFilter = (f: FilterMode) => {
+    setFilter(f)
+    setSel(new Set())
+    setSelAnchor(null)
+    setPreviewIdx(null)
+  }
+  const onFolder = (f: string) => {
+    setFolderFilter(f)
+    setSel(new Set())
+    setSelAnchor(null)
+    setPreviewIdx(null)
+  }
+  const nonEmptyBins = PX_BINS.filter((b) => (binCounts.get(b.id) ?? 0) > 0)
+
   return (
     <StepShell
       idx={2}
       mobilePageScroll
-      eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
-      title={t('steps.preprocess.title')}
-      subtitle={t('steps.preprocess.subtitle')}
-      actions={
-        <>
-          {/* 放大全部 = ghost；放大选中 = primary + icon（选中项才启用），放最右 */}
-          <button
-            type="button"
-            onClick={() =>
-              void (folderScopedNames
-                ? startPreprocess('selected', folderScopedNames)
-                : startPreprocess('all'))
-            }
-            disabled={upscaleBusy || !modelReady || upscaleTotal === 0}
-            className="btn btn-ghost btn-sm"
-          >
-            {t('preprocess.upscaleAll', { n: upscaleTotal })}
-          </button>
-          <button
-            type="button"
-            onClick={() => void startPreprocess('selected', selectedTargets.names)}
-            disabled={upscaleBusy || !modelReady || selectedTargets.count === 0}
-            className="btn btn-primary btn-sm"
-            title={selectedTargets.count === 0 ? t('preprocess.upscaleSelectedHint') : ''}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            <span>{t('preprocess.upscaleSelected', { n: selectedTargets.count })}</span>
-          </button>
-        </>
-      }
+      eyebrow={t('ppFrame.eyebrow')}
+      title={t('ppFrame.title')}
+      subtitle={t('ppFrame.subtitle')}
+      actions={<PreprocessHeadTools projectId={project.id} versionId={vid} />}
       belowHeader={<PreprocessToolsBar current="upscale" projectId={project.id} versionId={vid} />}
       logSources={[
         job && {
           key: 'preprocess',
-          label: t('logDrawer.preprocess'),
+          label: t('ppFrame.logLabel'),
           status: job.status,
           lines: logs,
           startedAt: job.started_at,
@@ -424,76 +412,79 @@ export default function PreprocessPage() {
         },
       ]}
     >
-      <div className="flex flex-col h-full gap-3 min-h-0 m-h-auto">
-        <div className="grid gap-3 flex-1 min-h-0 m-grid-1" style={{ gridTemplateColumns: '1fr 260px' }}>
-          {/* 左栏 */}
-          <div className="flex flex-col gap-2 min-h-0 min-w-0">
-            <OperationPanel
-              tileSize={tileSize}
-              setTileSize={setTileSize}
-              device={device}
-              setDevice={setDevice}
-              targetEdge={targetEdge}
-              setTargetEdge={setTargetEdge}
-              customEdge={customEdge}
-              setCustomEdge={setCustomEdge}
-              modelReady={modelReady}
-              downloadingModel={downloadingModel}
-              onDownloadModel={() => void downloadModel()}
-              upscaler={upscaler}
-              allUpscalers={allUpscalers}
-              selectedModel={selectedModel}
-              onSelectedModelChange={(label) => void changeSelectedModel(label)}
-              busy={busy || isLive}
-            />
-
-            <ImagesPanel
-              summary={summary}
-              filter={filter}
-              setFilter={(f) => {
-                setFilter(f)
-                setSel(new Set())
-                setSelAnchor(null)
-                setPreviewIdx(null)
-              }}
-              binCounts={binCounts}
-              folders={folders}
-              folderFilter={folderFilter}
-              setFolderFilter={(f) => {
-                setFolderFilter(f)
-                setSel(new Set())
-                setSelAnchor(null)
-                setPreviewIdx(null)
-              }}
-              items={gridItems}
-              selected={sel}
-              onSelect={(name, e) => {
-                const r = applySelection(sel, name, e, visibleNames, selAnchor)
-                setSel(r.next)
-                setSelAnchor(r.anchor)
-              }}
-              onPreview={(name) => {
-                const i = visibleNames.indexOf(name)
-                if (i >= 0) setPreviewIdx(i)
-              }}
-              onSelectAll={() => setSel(new Set(visibleNames))}
-              onClear={() => {
-                setSel(new Set())
-                setSelAnchor(null)
-              }}
-            />
-          </div>
-
-          {/* 右栏统计 */}
-          <PreprocessSidebar
-            upscaler={upscaler}
-            selectedModel={selectedModel}
+      <PreprocessCard current="upscale" projectId={project.id} versionId={vid}>
+        <div className="ds-pp-split">
+          <OperationPanel
             tileSize={tileSize}
-            images={files?.images ?? []}
+            setTileSize={setTileSize}
+            device={device}
+            setDevice={setDevice}
             targetEdge={targetEdge}
+            setTargetEdge={setTargetEdge}
+            customEdge={customEdge}
+            setCustomEdge={setCustomEdge}
+            modelReady={modelReady}
+            downloadingModel={downloadingModel}
+            onDownloadModel={() => void downloadModel()}
+            upscaler={upscaler}
+            allUpscalers={allUpscalers}
+            selectedModel={selectedModel}
+            onSelectedModelChange={(label) => void changeSelectedModel(label)}
+            busy={upscaleBusy}
+            processedCount={processedCount}
+            processedBytes={processedBytes}
+            runLabel={t('ppFrame.runUpscale', { n: upscaleTotal })}
+            onRun={() => void (folderScopedNames ? startPreprocess('selected', folderScopedNames) : startPreprocess('all'))}
+            runDisabled={upscaleBusy || !modelReady || upscaleTotal === 0}
+            selectedCount={selectedTargets.count}
+            onRunSelected={() => void startPreprocess('selected', selectedTargets.names)}
           />
+
+          <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
+            <div style={{ padding: '12px 17px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <FilterChip active={filter === 'all'} onClick={() => onFilter('all')} label={t('preprocess.filterAll')} n={summary.image_count} />
+              {nonEmptyBins.map((b) => (
+                <FilterChip key={b.id} active={filter === b.id} onClick={() => onFilter(b.id)} label={b.label} n={binCounts.get(b.id) ?? 0} />
+              ))}
+              {folders.length > 1 && (
+                <select className="ds-inp" style={{ width: 'auto', height: 27 }} value={folderFilter} onChange={(e) => onFolder(e.target.value)} aria-label={t('preprocess.folderFilter')}>
+                  <option value="all">{t('preprocess.folderAll')}</option>
+                  {folders.map((f) => <option key={f} value={f}>{f}</option>)}
+                </select>
+              )}
+              <span style={{ flex: 1 }} />
+              {isLive && job && (
+                <>
+                  <span className="ds-badge ds-ok"><span className="ds-dot ds-dot-run" />{t('ppFrame.jobBadge', { id: job.id, n: processedCount, total: rows.length })}</span>
+                  <span className="ds-meter" style={{ width: 120 }}><i style={{ width: `${rows.length ? Math.round((processedCount / rows.length) * 100) : 0}%` }} /></span>
+                </>
+              )}
+              {sel.size > 0 ? (
+                <button type="button" className="ds-ctl ds-ghost" style={{ height: 27 }} onClick={() => { setSel(new Set()); setSelAnchor(null) }}>{t('ppFrame.clearN', { n: sel.size })}</button>
+              ) : (
+                <button type="button" className="ds-ctl ds-ghost" style={{ height: 27 }} onClick={() => setSel(new Set(visibleNames))} disabled={gridItems.length === 0}>{t('common.selectAll')}</button>
+              )}
+            </div>
+            <div style={{ padding: '14px 17px', flex: 1, minHeight: 0 }}>
+              <ImageGrid
+                items={gridItems}
+                selected={sel}
+                onSelect={(name, e) => {
+                  const r = applySelection(sel, name, e, visibleNames, selAnchor)
+                  setSel(r.next)
+                  setSelAnchor(r.anchor)
+                }}
+                onActivate={(name) => { const i = visibleNames.indexOf(name); if (i >= 0) setPreviewIdx(i) }}
+                onPreview={(name) => { const i = visibleNames.indexOf(name); if (i >= 0) setPreviewIdx(i) }}
+                clickMode="activate"
+                columnsClass="grid-cols-[repeat(auto-fill,minmax(92px,1fr))]"
+                ariaLabel="preprocess-grid"
+                emptyHint={t('preprocess.emptyForBin')}
+              />
+            </div>
+          </div>
         </div>
-      </div>
+      </PreprocessCard>
 
       {previewIdx !== null && visibleRows[previewIdx] && (
         <ImagePreviewModal
@@ -503,7 +494,7 @@ export default function PreprocessPage() {
             visibleRows[previewIdx].folder, 1600,
           ) + `&_=${visibleRows[previewIdx].mtime}`}
           caption={`${visibleRows[previewIdx].name} · ${
-            visibleRows[previewIdx].status === 'processed' ? '✓ Processed' : '⊘ Not processed'
+            visibleRows[previewIdx].status === 'processed' ? t('ppFrame.previewProcessed') : t('ppFrame.previewPending')
           }`}
           index={previewIdx}
           total={visibleRows.length}
@@ -518,8 +509,16 @@ export default function PreprocessPage() {
   )
 }
 
+function FilterChip({ active, onClick, label, n }: { active: boolean; onClick: () => void; label: string; n: number }) {
+  return (
+    <button type="button" className={`ds-chip${active ? ' ds-is-active' : ''}`} style={{ paddingRight: 6 }} onClick={onClick} aria-pressed={active}>
+      {label} <b>{n.toLocaleString()}</b>
+    </button>
+  )
+}
+
 // ---------------------------------------------------------------------------
-// 操作 panel
+// settings column
 // ---------------------------------------------------------------------------
 
 interface OperationPanelProps {
@@ -539,416 +538,134 @@ interface OperationPanelProps {
   selectedModel: string
   onSelectedModelChange: (label: string) => void
   busy: boolean
+  processedCount: number
+  processedBytes: number
+  runLabel: string
+  onRun: () => void
+  runDisabled: boolean
+  selectedCount: number
+  onRunSelected: () => void
 }
 
 function OperationPanel({
-  tileSize,
-  setTileSize,
-  device,
-  setDevice,
-  targetEdge,
-  setTargetEdge,
-  customEdge,
-  setCustomEdge,
-  modelReady,
-  downloadingModel,
-  onDownloadModel,
-  upscaler,
-  allUpscalers,
-  selectedModel,
-  onSelectedModelChange,
-  busy,
+  tileSize, setTileSize, device, setDevice, targetEdge, setTargetEdge, customEdge, setCustomEdge,
+  modelReady, downloadingModel, onDownloadModel, upscaler, allUpscalers, selectedModel, onSelectedModelChange,
+  busy, processedCount, processedBytes, runLabel, onRun, runDisabled, selectedCount, onRunSelected,
 }: OperationPanelProps) {
   const { t } = useTranslation()
+  const estVramMB = Math.round((tileSize * tileSize * 16 * 2 * 7) / (1024 * 1024))
 
   const DEVICE_OPTIONS: { value: Device; label: string }[] = [
     { value: 'auto', label: t('preprocess.deviceAuto') },
     { value: 'cuda', label: 'CUDA' },
     { value: 'cpu', label: 'CPU' },
   ]
-
-  type TargetPreset = { label: string; edge: number | null }
-  const TARGET_PRESETS: TargetPreset[] = [
-    { label: '768²',  edge: 768 },
-    { label: `1024²${t('preprocess.targetRecommended')}`, edge: 1024 },
-    { label: '1536²', edge: 1536 },
-    { label: '2048²', edge: 2048 },
-    { label: t('preprocess.targetCustomLabel'), edge: 0 },
-    { label: t('preprocess.targetOffLabel'),    edge: null },
+  const TARGETS: Array<{ key: string; label: string; edge: number | null }> = [
+    { key: '768', label: '768', edge: 768 },
+    { key: '1024', label: '1024', edge: 1024 },
+    { key: '1536', label: '1536', edge: 1536 },
+    { key: '2048', label: '2048', edge: 2048 },
+    { key: 'custom', label: t('ppFrame.targetCustom'), edge: 0 },
+    { key: 'off', label: t('ppFrame.targetOff'), edge: null },
   ]
 
-  const selectValue =
-    targetEdge === null ? 'off' : targetEdge === 0 ? 'custom' : String(targetEdge)
-  const handlePresetChange = (v: string) => {
-    if (v === 'off') setTargetEdge(null)
-    else if (v === 'custom') setTargetEdge(0)
-    else setTargetEdge(Number(v))
-  }
-
   const targetHint = targetEdge === null
-    ? t('preprocess.targetHintOff')
+    ? t('ppFrame.targetHintOff')
     : targetEdge === 0
       ? t('preprocess.targetHintCustom', { edge: customEdge })
-      : t('preprocess.targetHintEdge', { edge: targetEdge, mpx: (targetEdge * targetEdge / 1e6).toFixed(2) })
+      : targetEdge === DEFAULT_TARGET_EDGE
+        ? t('ppFrame.targetHintRecommended', { edge: targetEdge })
+        : t('preprocess.targetHintEdge', { edge: targetEdge, mpx: (targetEdge * targetEdge / 1e6).toFixed(2) })
+
+  const fmtMB = (b: number) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(2)} ${t('overview.unitGB')}` : `${Math.round(b / 1024 ** 2)} ${t('overview.unitMB')}`)
+  const modelNote = upscaler?.kind === 'custom'
+    ? t('preprocess.customModelLocal')
+    : upscaler?.exists
+      ? t('ppFrame.modelReadySize', { mb: upscaler.size_mb ?? '?' })
+      : t('ppFrame.modelMissing')
 
   return (
-    <section className="flex flex-col gap-1.5 rounded-md border border-subtle bg-surface px-3 py-2.5 shrink-0">
-      <h3 className="caption flex items-center gap-1.5">
-        <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
-        {t('preprocess.panelTitle')}
-      </h3>
-
+    <div className="ds-pp-side">
       {!modelReady && (
-        <div className="flex items-center gap-2 text-sm px-2 py-1.5 rounded-sm bg-warn-soft border border-warn">
-          <span className="text-warn font-medium">{t('preprocess.needDownload')}</span>
-          <span className="text-fg-secondary text-xs flex-1 truncate">
+        <div className="ds-note ds-warn" style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 11.5 }}>
+          <span>
+            <b>{t('preprocess.needDownload')}</b>{' '}
             {upscaler?.kind === 'custom'
               ? t('preprocess.customModelLocal')
               : `${upscaler?.hf_repo ?? upscaler?.ms_repo ?? '—'} · ~${upscaler?.size_mb ?? 64} MB`}
           </span>
-          <button
-            onClick={onDownloadModel}
-            disabled={downloadingModel || upscaler?.kind === 'custom'}
-            className="btn btn-primary btn-sm"
-          >
+          <button type="button" className="ds-btn-primary" style={{ height: 28, alignSelf: 'flex-start' }} onClick={onDownloadModel} disabled={downloadingModel || upscaler?.kind === 'custom'}>
             {downloadingModel ? t('preprocess.modelDownloading') : t('preprocess.downloadModel', { model: selectedModel })}
           </button>
         </div>
       )}
 
-      {/* 目标分辨率行 */}
-      <div className="flex items-center gap-2 text-sm flex-wrap">
-        <label className="flex items-center gap-1.5">
-          <span className="text-fg-tertiary">{t('preprocess.targetRes')}</span>
-          <select
-            value={selectValue}
-            onChange={(e) => handlePresetChange(e.target.value)}
-            disabled={busy}
-            className="input text-sm"
-            style={{ width: 'auto', padding: '2px 6px' }}
-          >
-            {TARGET_PRESETS.map((p) => (
-              <option
-                key={p.edge === null ? 'off' : p.edge === 0 ? 'custom' : p.edge}
-                value={p.edge === null ? 'off' : p.edge === 0 ? 'custom' : String(p.edge)}
-              >{p.label}</option>
-            ))}
-          </select>
-          {targetEdge === 0 && (
-            <input
-              type="number"
-              min={256}
-              max={4096}
-              step={64}
-              value={customEdge}
-              onChange={(e) => setCustomEdge(e.target.value)}
-              disabled={busy}
-              className="input input-mono text-sm"
-              style={{ width: 80, padding: '2px 6px' }}
-              placeholder={t('preprocess.edgePlaceholder')}
-            />
-          )}
-          <span className="text-fg-tertiary text-xs">{targetHint}</span>
-        </label>
+      <div>
+        <div className="ds-cap" style={{ marginBottom: 8 }}>{t('ppFrame.fieldModel')}</div>
+        <select className="ds-inp ds-mono" value={selectedModel} onChange={(e) => onSelectedModelChange(e.target.value)} disabled={busy}>
+          {allUpscalers.map((v) => (
+            <option key={v.label} value={v.label}>
+              {v.label}{!v.exists ? t('preprocess.notDownloaded') : ''}{v.kind === 'custom' ? t('preprocess.customModel') : ''}
+            </option>
+          ))}
+          {allUpscalers.length === 0 && <option value={selectedModel}>{selectedModel}</option>}
+        </select>
+        <div className="ds-ctl-note" style={{ marginTop: 6 }}>{modelNote}</div>
       </div>
 
-      <div className="flex items-center gap-2 text-sm flex-wrap">
-        <label className="flex items-center gap-1.5">
-          <span className="text-fg-tertiary">{t('preprocess.modelLabel')}</span>
-          <select
-            value={selectedModel}
-            onChange={(e) => onSelectedModelChange(e.target.value)}
-            disabled={busy}
-            className="input text-sm mono"
-            style={{ width: 'auto', padding: '2px 6px' }}
-          >
-            {allUpscalers.map((v) => (
-              <option key={v.label} value={v.label}>
-                {v.label}
-                {!v.exists ? t('preprocess.notDownloaded') : ''}
-                {v.kind === 'custom' ? t('preprocess.customModel') : ''}
-              </option>
-            ))}
-            {allUpscalers.length === 0 && (
-              <option value={selectedModel}>{selectedModel}</option>
-            )}
-          </select>
-        </label>
-
-        <span className="text-dim">·</span>
-
-        <label className="flex items-center gap-1.5">
-          <span className="text-fg-tertiary">tile</span>
-          <select
-            value={tileSize}
-            onChange={(e) => setTileSize(Number(e.target.value))}
-            disabled={busy}
-            className="input text-sm"
-            style={{ width: 'auto', padding: '2px 6px' }}
-          >
-            {TILE_OPTIONS.map((n) => (
-              <option key={n} value={n}>{n}px</option>
-            ))}
-          </select>
-        </label>
-
-        <span className="text-dim">·</span>
-
-        <label className="flex items-center gap-1.5">
-          <span className="text-fg-tertiary">{t('preprocess.deviceLabel')}</span>
-          <select
-            value={device}
-            onChange={(e) => setDevice(e.target.value as Device)}
-            disabled={busy}
-            className="input text-sm"
-            style={{ width: 'auto', padding: '2px 6px' }}
-          >
-            {DEVICE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </label>
-
+      <div>
+        <div className="ds-cap" style={{ marginBottom: 8 }}>{t('ppFrame.fieldDevice')}</div>
+        <select className="ds-inp" value={device} onChange={(e) => setDevice(e.target.value as Device)} disabled={busy}>
+          {DEVICE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
       </div>
 
-    </section>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// 单 grid + 状态徽章 + filter chips（ADR 0004）
-// ---------------------------------------------------------------------------
-
-function ImagesPanel({
-  summary,
-  filter,
-  setFilter,
-  binCounts,
-  folders,
-  folderFilter,
-  setFolderFilter,
-  items,
-  selected,
-  onSelect,
-  onPreview,
-  onSelectAll,
-  onClear,
-}: {
-  summary: Status['summary']
-  filter: FilterMode
-  setFilter: (f: FilterMode) => void
-  binCounts: Map<PxBinId, number>
-  folders: string[]
-  folderFilter: string
-  setFolderFilter: (f: string) => void
-  items: { name: string; thumbUrl: string; meta?: string }[]
-  selected: Set<string>
-  onSelect: (name: string, e: React.MouseEvent) => void
-  onPreview: (name: string) => void
-  onSelectAll: () => void
-  onClear: () => void
-}) {
-  const { t } = useTranslation()
-  // Pixel-bin chips replace the old 全部 / 未处理 / 已处理 filter.
-  // 「未处理 / 已处理」was a workspace concept that doesn't apply to upscale —
-  // unlike crop, upscale has no session state to remember; the meaningful
-  // axis users want to filter by is resolution (which images need upscaling
-  // and which are already large enough). Pixel bins double as a visual link
-  // to the sidebar histogram so users see the same buckets on both sides.
-  const chip = (key: FilterMode, label: string, count: number) => (
-    <button
-      onClick={() => setFilter(key)}
-      className={
-        'px-2 py-0.5 rounded-full text-xs transition-colors ' +
-        (filter === key
-          ? 'bg-accent-soft text-accent font-semibold'
-          : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
-      }
-    >
-      {label} {count}
-    </button>
-  )
-  // Only show bin chips that have at least one image — keeps the chip row
-  // tight on small datasets (a 10-image set isn't going to occupy all 6 bins).
-  const nonEmptyBins = PX_BINS.filter((b) => (binCounts.get(b.id) ?? 0) > 0)
-
-  return (
-    <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden m-pane">
-      <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm flex-wrap">
-        <h3 className="font-semibold">{t('preprocess.imagesTitle')}</h3>
-        <span className="text-fg-tertiary">{t('preprocess.totalCount', { n: summary.image_count })}</span>
-        {selected.size > 0 && (
-          <span className="text-accent">{t('preprocess.selectedCount', { n: selected.size })}</span>
-        )}
-        <span className="mx-1 text-dim">·</span>
-        <div className="flex items-center gap-1 flex-wrap">
-          {chip('all', t('preprocess.filterAll'), summary.image_count)}
-          {nonEmptyBins.map((b) =>
-            chip(b.id, b.label, binCounts.get(b.id) ?? 0),
-          )}
+      <div>
+        <div className="ds-cap" style={{ marginBottom: 8 }}>{t('ppFrame.fieldTarget')}</div>
+        <div className="ds-seg" style={{ display: 'flex', flexWrap: 'wrap' }} role="group" aria-label={t('ppFrame.fieldTarget')}>
+          {TARGETS.map((p) => {
+            const on = p.edge === null ? targetEdge === null : p.edge === 0 ? targetEdge === 0 : targetEdge === p.edge
+            return (
+              <button key={p.key} type="button" className={`ds-seg-item${on ? ' ds-is-active' : ''}`} style={{ flex: 1, padding: '0 6px' }} aria-pressed={on} disabled={busy} onClick={() => setTargetEdge(p.edge)}>
+                {p.label}
+              </button>
+            )
+          })}
         </div>
-        {folders.length > 0 && (
-          <>
-            <span className="mx-1 text-dim">·</span>
-            <label className="flex items-center gap-1 text-xs text-fg-tertiary">
-              {t('preprocess.folderFilter')}
-              <select
-                value={folderFilter}
-                onChange={(e) => setFolderFilter(e.target.value)}
-                className="input text-xs"
-                style={{ width: 'auto', padding: '1px 6px' }}
-              >
-                <option value="all">{t('preprocess.folderAll')}</option>
-                {folders.map((f) => (
-                  <option key={f} value={f}>{f}</option>
-                ))}
-              </select>
-            </label>
-          </>
+        {targetEdge === 0 && (
+          <span className="ds-stepper" style={{ width: 120, marginTop: 8 }}>
+            <input type="number" min={256} max={4096} step={64} value={customEdge} onChange={(e) => setCustomEdge(e.target.value)} disabled={busy} placeholder={t('preprocess.edgePlaceholder')} aria-label={t('ppFrame.targetCustom')} />
+          </span>
         )}
-        <span className="flex-1" />
-        <button
-          onClick={onSelectAll}
-          disabled={items.length === 0}
-          className="btn btn-ghost btn-sm"
-        >{t('common.selectAll')}</button>
-        <button
-          onClick={onClear}
-          disabled={selected.size === 0}
-          className="btn btn-ghost btn-sm"
-        >{t('common.deselect')}</button>
-      </header>
-      <div className="flex-1 min-h-0 overflow-y-auto p-2">
-        <ImageGrid
-          items={items}
-          selected={selected}
-          onSelect={onSelect}
-          onActivate={onPreview}
-          onPreview={onPreview}
-          clickMode="activate"
-          ariaLabel="preprocess-grid"
-          emptyHint={t('preprocess.emptyForBin')}
-        />
+        <div className="ds-ctl-note" style={{ marginTop: 6 }}>{targetHint}</div>
+        {targetEdge === null && <div className="ds-note ds-warn" style={{ marginTop: 10, fontSize: 11.5 }}>{t('ppFrame.targetOffWarn')}</div>}
       </div>
-    </section>
-  )
-}
 
-// ---------------------------------------------------------------------------
-// 右栏侧边栏
-// ---------------------------------------------------------------------------
-
-function PreprocessSidebar({
-  upscaler,
-  selectedModel,
-  tileSize,
-  images,
-  targetEdge,
-}: {
-  upscaler: UpscalerVariant | null
-  selectedModel: string
-  tileSize: number
-  images: import('../../../api/client').TrainImage[]
-  targetEdge: number | null
-}) {
-  const { t } = useTranslation()
-  const estVramMB = Math.round((tileSize * tileSize * 16 * 2 * 7) / (1024 * 1024))
-
-  // ADR 0010: 直方图基于 train 集全图；状态从 entry 字段差异隐含推断。
-  const pixelHist = useMemo(
-    () => computePixelHist(images.filter((i) => !i.duplicate_removed)),
-    [images],
-  )
-
-  // ADR 0010: backend `_is_processed` 推断（扩展名变 / _cN / size diff）
-  const processedImages = useMemo(
-    () => images.filter((i) => i.processed && !i.duplicate_removed),
-    [images],
-  )
-
-  const processedBytes = useMemo(
-    () => processedImages.reduce((s, it) => s + (it.size ?? 0), 0),
-    [processedImages],
-  )
-  const avgBytes = processedImages.length > 0 ? processedBytes / processedImages.length : 0
-  const fmtBytes = (b: number) =>
-    b >= 1024 * 1024 * 1024
-      ? `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`
-      : b >= 1024 * 1024
-        ? `${(b / 1024 / 1024).toFixed(1)} MB`
-        : `${(b / 1024).toFixed(0)} KB`
-
-  return (
-    <div className="flex flex-col gap-3 min-w-0">
-      {/* 像素分布 — 用户最直接关心的"图够不够大"信息，置顶；按总像素面积
-          分桶映射到常见 LoRA 训练分辨率，跟 grid 上的 chip 一一对应。 */}
-      {pixelHist.length > 0 && (
-        <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-          <h3 className="caption flex items-center gap-1.5">
-            <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
-            {t('preprocess.sidebarPxDist')}
-          </h3>
-          <div className="mt-1.5">
-            <BarHistogram bins={pixelHist.map((b) => ({ key: b.id, label: b.label, n: b.n }))} />
-          </div>
+      <div>
+        <div className="ds-cap" style={{ marginBottom: 8 }}>{t('ppFrame.fieldTile')}</div>
+        <div className="ds-seg" style={{ display: 'flex' }} role="group" aria-label={t('ppFrame.fieldTile')}>
+          {TILE_OPTIONS.map((n) => (
+            <button key={n} type="button" className={`ds-seg-item${tileSize === n ? ' ds-is-active' : ''}`} style={{ flex: 1, padding: '0 4px' }} aria-pressed={tileSize === n} disabled={busy} onClick={() => setTileSize(n)}>
+              {n}
+            </button>
+          ))}
         </div>
-      )}
-
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-ok" />
-          {t('preprocess.sidebarDisk')}
-        </h3>
-        <StatRow
-          label={t('preprocess.diskTotal')}
-          value={processedImages.length > 0 ? fmtBytes(processedBytes) : '—'}
-          accent={processedBytes > 5 * 1024 ** 3 ? 'warn' : undefined}
-        />
-        {processedImages.length > 0 && (
-          <StatRow label={t('preprocess.diskAvg')} value={fmtBytes(avgBytes)} />
+        <div className="ds-kv" style={{ marginTop: 6 }}><span className="ds-k">{t('preprocess.vramEst')}</span><span className="ds-v">~{estVramMB} {t('overview.unitMB')}</span></div>
+        {processedCount > 0 && (
+          <div className="ds-kv"><span className="ds-k">{t('ppFrame.diskProcessed', { n: processedCount })}</span><span className="ds-v">{fmtMB(processedBytes)}</span></div>
         )}
-        <p className="text-[11px] text-fg-tertiary mt-1.5 leading-snug">
-          {targetEdge === null ? t('preprocess.diskNoteOff') : t('preprocess.diskNoteSmart')}
-        </p>
       </div>
 
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent opacity-60" />
-          {t('preprocess.sidebarDevice')}
-        </h3>
-        <StatRow
-          label={selectedModel}
-          value={upscaler?.exists ? t('preprocess.modelReady') : t('preprocess.modelNotDownloaded')}
-          accent={upscaler?.exists ? 'ok' : 'warn'}
-        />
-        <StatRow label={t('preprocess.vramEst')} value={`~${estVramMB} MB`} />
-        <p className="text-[11px] text-fg-tertiary mt-1.5 leading-snug">
-          {t('preprocess.vramNote')}
-        </p>
+      <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {selectedCount > 0 && (
+          <button type="button" className="ds-ctl" style={{ justifyContent: 'center', height: 34 }} onClick={onRunSelected} disabled={busy || !modelReady}>
+            {t('ppFrame.runSelected', { n: selectedCount })}
+          </button>
+        )}
+        <button type="button" className="ds-btn-primary" style={{ justifyContent: 'center', height: 34 }} onClick={onRun} disabled={runDisabled}>
+          {runLabel}
+        </button>
       </div>
-    </div>
-  )
-}
-
-function StatRow({
-  label,
-  value,
-  accent,
-}: {
-  label: string
-  value: string | number
-  accent?: 'ok' | 'warn' | 'err'
-}) {
-  const cls =
-    accent === 'ok' ? 'text-ok' :
-    accent === 'warn' ? 'text-warn' :
-    accent === 'err' ? 'text-err' :
-    'text-fg-primary'
-  return (
-    <div className="flex justify-between items-baseline mt-1.5 text-xs">
-      <span className="text-fg-tertiary">{label}</span>
-      <span className={`font-mono font-medium ${cls}`}>{value}</span>
     </div>
   )
 }

@@ -597,3 +597,19 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-cur-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .ds-cur-grid { height: min(58vh, 600px); }
 @media (max-width: 1000px) { .ds-cur-main { grid-template-columns: minmax(0, 1fr); } .ds-cur-grid { height: 420px; } }
+
+/* preprocess: four tool cards, then settings column + images in the tool card */
+.ds-pp-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.ds-pp-split { display: grid; grid-template-columns: 310px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 0; }
+.ds-pp-side { border-right: 1px solid var(--line); padding: 15px 17px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; min-height: 0; }
+@media (max-width: 1100px) { .ds-pp-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) {
+  .ds-pp-split { grid-template-columns: minmax(0, 1fr); }
+  .ds-pp-side { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+.ds-pp-toolbar { padding: 10px 17px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.ds-pp-body { flex: 1; min-height: 0; padding: 14px 17px; display: flex; flex-direction: column; }
+
+/* disabled controls (the mockup never shows one; the app needs them) */
+.ds-btn-primary:disabled, .ds-btn-dark:disabled, .ds-btn-danger:disabled, .ds-ctl:disabled,
+.ds-seg-item:disabled, .ds-chip:disabled, .ds-chip-add:disabled, .ds-searchgroup > button:disabled { opacity: .45; cursor: not-allowed; }

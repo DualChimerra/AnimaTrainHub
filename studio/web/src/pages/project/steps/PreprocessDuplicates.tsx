@@ -14,7 +14,7 @@ import DuplicateReviewPanel, {
 import { useDialog } from '../../../components/Dialog'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
 import StepShell from '../../../components/StepShell'
-import PreprocessToolsBar from '../../../components/preprocess/PreprocessToolsBar'
+import PreprocessToolsBar, { PreprocessCard, PreprocessHeadTools } from '../../../components/preprocess/PreprocessToolsBar'
 import { useToast } from '../../../components/Toast'
 import { useEventStream } from '../../../lib/useEventStream'
 
@@ -153,30 +153,10 @@ export default function PreprocessDuplicatesPage() {
   return (
     <StepShell
       idx={2}
-      eyebrow={`Step 2 · ${project.title} / ${activeVersion?.label ?? '—'}`}
-      title={t('steps.preprocess.title')}
-      subtitle={t('duplicates.subtitle')}
-      actions={
-        <>
-          {/* 扫描重复 = ghost；确认去除 = primary（主操作），放最右 */}
-          <button
-            type="button"
-            onClick={() => void scan()}
-            disabled={busy}
-            className="btn btn-ghost btn-sm"
-          >
-            {busy ? t('duplicates.scanning') : t('duplicates.scanBtn')}
-          </button>
-          <button
-            type="button"
-            onClick={() => void apply()}
-            disabled={busy || selected.size === 0}
-            className="btn btn-primary btn-sm"
-          >
-            {t('duplicates.applyBtn', { n: selected.size })}
-          </button>
-        </>
-      }
+      eyebrow={t('ppFrame.eyebrow')}
+      title={t('ppFrame.title')}
+      subtitle={t('ppFrame.subtitle')}
+      actions={<PreprocessHeadTools projectId={project.id} versionId={vid} />}
       belowHeader={<PreprocessToolsBar current="dedupe" projectId={project.id} versionId={vid} />}
       logSources={[
         scanLogVisible && logs.length > 0 && {
@@ -195,31 +175,28 @@ export default function PreprocessDuplicatesPage() {
         },
       ]}
     >
-      <div className="flex flex-col h-full gap-3 min-h-0">
-        <div className="grid gap-3 flex-1 min-h-0" style={{ gridTemplateColumns: '1fr 260px' }}>
-          <div className="flex flex-col gap-2 min-h-0 min-w-0">
-            <DuplicateOperationPanel
-              options={options}
-              busy={busy}
-              onOptionsChange={setOptions}
-            />
-            <DuplicateReviewPanel
-              projectId={project.id}
-              versionId={vid}
-              result={result}
-              selected={selected}
-              busy={busy}
-              onSelect={setSelected}
-              onPreview={openPreview}
-            />
-          </div>
-          <DuplicateStatsSidebar
+      <PreprocessCard current="dedupe" projectId={project.id} versionId={vid}>
+        <div className="ds-pp-split">
+          <DuplicateOperationPanel
+            options={options}
+            busy={busy}
+            onOptionsChange={setOptions}
             result={result}
             selectedCount={selected.size}
-            sourceTotal={project.download_image_count}
+            onScan={() => void scan()}
+            onApply={() => void apply()}
+          />
+          <DuplicateReviewPanel
+            projectId={project.id}
+            versionId={vid}
+            result={result}
+            selected={selected}
+            busy={busy}
+            onSelect={setSelected}
+            onPreview={openPreview}
           />
         </div>
-      </div>
+      </PreprocessCard>
 
       {previewIdx !== null && previewNames[previewIdx] && (() => {
         const rel = previewNames[previewIdx]
@@ -245,8 +222,8 @@ export default function PreprocessDuplicatesPage() {
   )
 }
 
-// 灵敏度三档：宽松/标准/严格。只对「差分 + 裁剪」判定生效（驱动后端 variant_score
-// + crop_score），严格重复模式下 gate 掉。
+// Three sensitivity levels; they only drive the variant / crop checks
+// (backend variant_score + crop_score), so strict-duplicate mode locks them.
 const SENSITIVITY_OPTIONS = [
   { id: 'loose', key: 'sensitivityLoose' },
   { id: 'standard', key: 'sensitivityStandard' },
@@ -257,127 +234,68 @@ interface DuplicateOperationPanelProps {
   options: DuplicateScanOptions
   busy: boolean
   onOptionsChange: (next: DuplicateScanOptions) => void
+  result: DuplicateScanResult | null
+  selectedCount: number
+  onScan: () => void
+  onApply: () => void
 }
 
-function DuplicateOperationPanel({
-  options,
-  busy,
-  onOptionsChange,
-}: DuplicateOperationPanelProps) {
+/** Left settings column of the duplicates tool (mockup PreprocessDupes):
+ *  how to match, sensitivity, the scan numbers, then scan / remove. */
+function DuplicateOperationPanel({ options, busy, onOptionsChange, result, selectedCount, onScan, onApply }: DuplicateOperationPanelProps) {
   const { t } = useTranslation()
   const patch = <K extends keyof DuplicateScanOptions>(key: K, value: DuplicateScanOptions[K]) => {
     onOptionsChange({ ...options, [key]: value })
   }
-  // 灵敏度只影响「差分/裁剪」判定；严格重复模式只看全图哈希，故 gate 掉。
   const sensitivityLocked = options.match_scope !== 'both'
+  const total = result?.total_images ?? 0
 
   return (
-    <section className="flex flex-col gap-1.5 rounded-md border border-subtle bg-surface px-3 py-2.5 shrink-0">
-      <h3 className="caption flex items-center gap-1.5">
-        <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-warn" />
-        {t('duplicates.panelTitle')}
-      </h3>
+    <div className="ds-pp-side">
+      <div>
+        <div className="ds-cap" style={{ marginBottom: 8 }}>{t('ppFrame.dupHow')}</div>
+        <div className="ds-seg" style={{ display: 'flex' }} role="group" aria-label={t('duplicates.scope')}>
+          {(['strict', 'both'] as const).map((id) => (
+            <button key={id} type="button" className={`ds-seg-item${options.match_scope === id ? ' ds-is-active' : ''}`} style={{ flex: 1 }} aria-pressed={options.match_scope === id} disabled={busy} onClick={() => patch('match_scope', id)}>
+              {id === 'strict' ? t('duplicates.scopeStrict') : t('duplicates.scopeBoth')}
+            </button>
+          ))}
+        </div>
+        <div className="ds-ctl-note" style={{ marginTop: 6 }}>{options.match_scope === 'strict' ? t('ppFrame.dupHowStrict') : t('ppFrame.dupHowBoth')}</div>
+      </div>
 
-      <div className="flex items-center gap-2 text-sm flex-wrap">
-        <label className="flex items-center gap-1.5">
-          <span className="text-fg-tertiary">{t('duplicates.scope')}</span>
-          <select
-            className="input text-sm"
-            style={{ width: 'auto', padding: '2px 6px' }}
-            value={options.match_scope}
-            onChange={(e) => patch('match_scope', e.target.value as DuplicateScanOptions['match_scope'])}
-            disabled={busy}
-          >
-            <option value="strict">{t('duplicates.scopeStrict')}</option>
-            <option value="both">{t('duplicates.scopeBoth')}</option>
-          </select>
-        </label>
-        <span className="text-dim">·</span>
-        <div
-          className={'flex items-center gap-1.5' + (sensitivityLocked ? ' opacity-50' : '')}
-          title={sensitivityLocked ? t('duplicates.sensitivityLockedHint') : undefined}
-        >
-          <span className="text-fg-tertiary">{t('duplicates.sensitivity')}</span>
-          <div className="seg">
-            {SENSITIVITY_OPTIONS.map(({ id, key }) => {
-              const active = options.sensitivity === id
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  disabled={busy || sensitivityLocked}
-                  onClick={() => patch('sensitivity', id)}
-                  className={'seg-item min-h-[24px] ' + (active ? 'is-active' : '')}
-                >
-                  {t(`duplicates.${key}`)}
-                </button>
-              )
-            })}
-          </div>
+      <div title={sensitivityLocked ? t('duplicates.sensitivityLockedHint') : undefined} style={sensitivityLocked ? { opacity: 0.5 } : undefined}>
+        <div className="ds-cap" style={{ marginBottom: 8 }}>{t('duplicates.sensitivity')}</div>
+        <div className="ds-seg" style={{ display: 'flex' }} role="group" aria-label={t('duplicates.sensitivity')}>
+          {SENSITIVITY_OPTIONS.map(({ id, key }) => (
+            <button key={id} type="button" className={`ds-seg-item${options.sensitivity === id ? ' ds-is-active' : ''}`} style={{ flex: 1 }} aria-pressed={options.sensitivity === id} disabled={busy || sensitivityLocked} onClick={() => patch('sensitivity', id)}>
+              {t(`duplicates.${key}`)}
+            </button>
+          ))}
         </div>
       </div>
-    </section>
-  )
-}
 
-function DuplicateStatsSidebar({
-  result,
-  selectedCount,
-  sourceTotal,
-}: {
-  result: DuplicateScanResult | null
-  selectedCount: number
-  sourceTotal?: number | null
-}) {
-  const { t } = useTranslation()
-  const total = result?.total_images ?? sourceTotal ?? 0
-  const candidateCount = result?.candidate_count ?? 0
-  const remaining = Math.max(0, total - selectedCount)
-  return (
-    <aside className="flex flex-col gap-3 min-w-0">
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-warn" />
-          {t('duplicates.statsTitle')}
-        </h3>
-        <StatRow label={t('duplicates.statsTotal')} value={total} />
-        <StatRow label={t('duplicates.statsGroups')} value={result?.group_count ?? 0} accent={(result?.group_count ?? 0) > 0 ? 'warn' : undefined} />
-        <StatRow label={t('duplicates.statsCandidates')} value={candidateCount} accent={candidateCount > 0 ? 'warn' : undefined} />
-        <StatRow label={t('duplicates.statsCrops')} value={result?.crop_relation_count ?? 0} accent={(result?.crop_relation_count ?? 0) > 0 ? 'warn' : undefined} />
-        <StatRow label={t('duplicates.statsSelected')} value={selectedCount} accent={selectedCount > 0 ? 'err' : undefined} />
-        <StatRow label={t('duplicates.statsAfter')} value={remaining} accent="ok" />
+      <div>
+        <div className="ds-cap" style={{ marginBottom: 6 }}>{t('duplicates.statsTitle')}</div>
+        <div className="ds-kv"><span className="ds-k">{t('duplicates.statsGroups')}</span><span className="ds-v">{result?.group_count ?? '—'}</span></div>
+        <div className="ds-kv"><span className="ds-k">{t('duplicates.statsCandidates')}</span><span className="ds-v">{result?.candidate_count ?? '—'}</span></div>
+        <div className="ds-kv"><span className="ds-k">{t('duplicates.statsCrops')}</span><span className="ds-v">{result?.crop_relation_count ?? '—'}</span></div>
+        <div className="ds-kv"><span className="ds-k">{t('duplicates.statsSelected')}</span><span className="ds-v">{selectedCount}</span></div>
+        <div className="ds-kv"><span className="ds-k">{t('duplicates.statsAfter')}</span><span className="ds-v ds-acc">{result ? Math.max(0, total - selectedCount) : '—'}</span></div>
+        <div className="ds-kv"><span className="ds-k">{t('duplicates.statsCompared')}</span><span className="ds-v">{result?.stats.compared_pairs ?? '—'}</span></div>
+        <div className="ds-kv"><span className="ds-k">{t('duplicates.statsElapsed')}</span><span className="ds-v">{result ? `${result.elapsed_seconds}s` : '—'}</span></div>
       </div>
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
-          {t('duplicates.statsScan')}
-        </h3>
-        <StatRow label={t('duplicates.statsReadable')} value={result?.readable_images ?? 0} />
-        <StatRow label={t('duplicates.statsCompared')} value={result?.stats.compared_pairs ?? 0} />
-        <StatRow label={t('duplicates.statsElapsed')} value={result ? `${result.elapsed_seconds}s` : '—'} />
-      </div>
-    </aside>
-  )
-}
 
-function StatRow({
-  label,
-  value,
-  accent,
-}: {
-  label: string
-  value: string | number
-  accent?: 'ok' | 'warn' | 'err'
-}) {
-  const cls =
-    accent === 'ok' ? 'text-ok' :
-    accent === 'warn' ? 'text-warn' :
-    accent === 'err' ? 'text-err' :
-    'text-fg-primary'
-  return (
-    <div className="flex justify-between items-baseline mt-1.5 text-xs gap-2">
-      <span className="text-fg-tertiary">{label}</span>
-      <span className={`font-mono font-medium ${cls}`}>{value}</span>
+      <div className="ds-note ds-info" style={{ fontSize: 11.5 }}>{t('ppFrame.dupNote')}</div>
+
+      <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <button type="button" className="ds-ctl" style={{ justifyContent: 'center', height: 34 }} onClick={onScan} disabled={busy}>
+          {busy ? t('duplicates.scanning') : t('duplicates.scanBtn')}
+        </button>
+        <button type="button" className="ds-btn-primary" style={{ justifyContent: 'center', height: 34 }} onClick={onApply} disabled={busy || selectedCount === 0}>
+          {t('ppFrame.dupApply', { count: selectedCount })}
+        </button>
+      </div>
     </div>
   )
 }
