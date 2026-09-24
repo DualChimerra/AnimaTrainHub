@@ -592,3 +592,8 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-ds-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 @media (max-width: 1000px) { .ds-ds-top { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 700px) { .ds-ds-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* curate page: pool and train set side by side */
+.ds-cur-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.ds-cur-grid { height: min(58vh, 600px); }
+@media (max-width: 1000px) { .ds-cur-main { grid-template-columns: minmax(0, 1fr); } .ds-cur-grid { height: 420px; } }

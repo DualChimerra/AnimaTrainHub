@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useOutletContext } from 'react-router-dom'
+import { Link, useOutletContext } from 'react-router-dom'
 import {
   api,
   type CurationItem,
@@ -12,9 +12,10 @@ import {
 } from '../../../api/client'
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
-import StepShell from '../../../components/StepShell'
+import PageHead from '../../../components/ds/PageHead'
 import { useDialog } from '../../../components/Dialog'
 import { useToast } from '../../../components/Toast'
+import { parseFolderMeta } from '../../../lib/folderMeta'
 import { useEventStream } from '../../../lib/useEventStream'
 
 // ---------- 排序 ----------
@@ -95,8 +96,6 @@ type Focus =
 
 const FOLDER_PATTERN = /^([0-9]+_)?[A-Za-z][A-Za-z0-9_-]*$/
 
-const SCROLL_BOX = 'flex-1 min-h-0 overflow-y-auto pr-1'
-
 export default function CurationPage() {
   const { t } = useTranslation()
   const { project, activeVersion, reload } = useOutletContext<Ctx>()
@@ -160,7 +159,6 @@ export default function CurationPage() {
     }
   }, [altHeld])
 
-  const [newFolder, setNewFolder] = useState<string>('')
   const [renaming, setRenaming] = useState<{ target: string; value: string } | null>(null)
   const [preview, setPreview] = useState<Preview | null>(null)
 
@@ -464,24 +462,6 @@ export default function CurationPage() {
     await removeRightFiles(rightFolder, Array.from(rightSel), { clearSelection: true, confirm: true })
   }
 
-  const doCreateFolder = async () => {
-    const name = newFolder.trim()
-    if (!name) return
-    if (!FOLDER_PATTERN.test(name)) return toast(t('curate.invalidFolder'), 'error')
-    setBusy(true)
-    try {
-      await api.folderOp(project.id, activeVersion.id, { op: 'create', name })
-      setNewFolder('')
-      switchRightFolder(name)
-      await refresh()
-      await reload()
-    } catch (e) {
-      toast(String(e), 'error')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const doRenameFolder = async () => {
     if (!renaming) return
     const target = renaming.target
@@ -597,210 +577,266 @@ export default function CurationPage() {
     if (await removeRightFiles(folder, [name])) advancePreviewAfterAction(name)
   }
 
-  return (
-    <StepShell
-      idx={2}
-      mobilePageScroll
-      eyebrow={`Step 1 · ${project.title} / ${activeVersion?.label ?? '—'}`}
-      title={t('steps.curate.title')}
-      subtitle={t('steps.curate.subtitle')}
-      actions={
-        <>
-          <label className="flex items-center gap-1.5 text-sm text-fg-secondary whitespace-nowrap shrink-0">
-            {t('curate.sortLabel')}
-            <select
-              value={sortMode}
-              onChange={(e) => setSortMode(e.target.value as SortMode)}
-              className="input px-2 py-0.5 text-sm"
-              title={t('curate.sortTitle')}
-            >
-              {SORT_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </label>
-          {/* 数据集切换（对齐队列页数据任务/GPU 任务切换，放最右）：前置切换
-              icon（行为）+ 目标数据集名（宾语），读作「切到 X」；当前数据集看
-              右栏面板标题。 */}
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={() => switchBucket(bucket === 'validation' ? 'train' : 'validation')}
-            aria-pressed={bucket === 'validation'}
-            data-testid="curate-bucket-toggle"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M17 1l4 4-4 4" />
-              <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-              <path d="M7 23l-4-4 4-4" />
-              <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-            </svg>
-            <span>{bucket === 'validation' ? t('curate.bucketTrain') : t('curate.bucketValidation')}</span>
-          </button>
-        </>
-      }
-    >
-    <div className="flex flex-col h-full gap-3 m-h-auto">
+  // Train → validation: the copies leave the train set (with their edits)
+  // and the originals go to the held-out set.
+  const doMoveToValidation = async () => {
+    if (isVal || !rightFolder || rightSel.size === 0 || busy) return
+    const files = Array.from(rightSel)
+    if (!(await dialog.confirm(
+      t('curate.confirmMoveToVal', { n: files.length, folder: rightFolder }),
+      { tone: 'warn', okText: t('curate.moveToValOk') },
+    ))) return
+    setBusy(true)
+    try {
+      await api.removeFromTrain(project.id, activeVersion.id, { folder: rightFolder, files })
+      const origins = files.map((n) => rightOriginByName.get(n) ?? n)
+      const r = await api.copyToValidation(project.id, activeVersion.id, { files: origins })
+      toast(t('curate.movedToValN', { n: r.copied.length }), 'success')
+      setRightSel(new Set())
+      setView(null)
+      setValView(null)
+      await fetchTrain()
+      await reload()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 items-stretch flex-1 min-h-0 m-grid-1 m-page-scroll">
-        <PanelCard
-          accent="emerald"
-          title={t('curate.downloadPanelTitle')}
-          subtitle={t('curate.downloadSubtitle', { unused: currentLeft.length, total: downloadTotal, sel: leftSel.size })}
-          actions={
-            <>
-              <BtnSecondary
-                onClick={() => setLeftSel(new Set(leftSortedNames))}
-                disabled={busy || leftSortedNames.length === 0}
-              >
-                {t('curate.selectAll')}
-              </BtnSecondary>
-              <BtnSecondary
-                onClick={() => setLeftSel(new Set())}
-                disabled={busy || leftSel.size === 0}
-              >
-                {t('curate.deselect')}
-              </BtnSecondary>
-              {isVal ? (
-                <BtnPrimary
-                  onClick={doCopy}
-                  disabled={busy || leftSel.size === 0}
-                  title={t('curate.copyToValTitle')}
+  const doNewFolder = async () => {
+    const name = (await dialog.prompt(t('curate.newFolderPrompt'), { defaultValue: '' }))?.trim()
+    if (!name) return
+    if (!FOLDER_PATTERN.test(name)) { toast(t('curate.invalidFolder'), 'error'); return }
+    setBusy(true)
+    try {
+      await api.folderOp(project.id, activeVersion.id, { op: 'create', name })
+      switchRightFolder(name)
+      await refresh()
+      await reload()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const trainTotal = view?.train_total ?? activeVersion.stats?.train_image_count ?? 0
+  const valTotal = valView?.val_total ?? activeVersion.stats?.validation_image_count ?? 0
+  const effective = folderNames.reduce(
+    (s, f) => s + parseFolderMeta(f).repeat * (view?.right[f]?.length ?? 0), 0,
+  )
+  const valPct = downloadTotal > 0 ? ((valTotal / downloadTotal) * 100).toFixed(1) : null
+
+  return (
+    <div className="fade-in" style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+      <PageHead
+        accent
+        eyebrow={t('steps.eyebrowStep', { n: 1, label: activeVersion.label })}
+        title={t('steps.curate.title')}
+        subtitle={t('curate.subtitleLong')}
+        tools={
+          <>
+            <div className="ds-seg" role="group" aria-label={t('curate.bucketLabel')} data-testid="curate-bucket-toggle">
+              <button type="button" className={`ds-seg-item${!isVal ? ' ds-is-active' : ''}`} aria-pressed={!isVal} onClick={() => switchBucket('train')}>{t('curate.bucketTrain')}</button>
+              <button type="button" className={`ds-seg-item${isVal ? ' ds-is-active' : ''}`} aria-pressed={isVal} onClick={() => switchBucket('validation')}>{t('curate.bucketValShort')}</button>
+            </div>
+            <Link className="ds-btn-primary" to={`/projects/${project.id}/v/${activeVersion.id}/preprocess`}>{t('curate.next')}</Link>
+          </>
+        }
+      />
+
+      <div className="ds-scroll ds-tight" style={{ flex: '1 0 auto' }}>
+        <div className="ds-kpis ds-tight ds-ov-kpis">
+          <div className="ds-card ds-kpi">
+            <div className="ds-kpi-top"><span className="ds-kpi-icon">{Icon.image}</span><span style={{ marginLeft: 'auto' }}><span className="ds-kpi-meta">{t('curate.kpiUnused', { n: currentLeft.length.toLocaleString() })}</span></span></div>
+            <div className="ds-kpi-val" style={{ marginTop: 14 }}>{downloadTotal.toLocaleString()}</div>
+            <div className="ds-kpi-label">{t('curate.kpiTotal')}</div>
+          </div>
+          <div className="ds-card ds-kpi">
+            <div className="ds-kpi-top"><span className="ds-kpi-icon">{Icon.stack}</span><span style={{ marginLeft: 'auto' }}><span className="ds-kpi-meta">{t('curate.kpiGroups', { count: folderNames.length })}</span></span></div>
+            <div className="ds-kpi-val" style={{ marginTop: 14 }}>{trainTotal.toLocaleString()}</div>
+            <div className="ds-kpi-label">{t('curate.kpiTrain')}</div>
+          </div>
+          <div className="ds-card ds-kpi">
+            <div className="ds-kpi-top"><span className="ds-kpi-icon">{Icon.shield}</span><span style={{ marginLeft: 'auto' }}>{valPct != null && <span className="ds-kpi-meta">{t('curate.kpiValPct', { pct: valPct })}</span>}</span></div>
+            <div className="ds-kpi-val" style={{ marginTop: 14 }}>{valTotal.toLocaleString()}</div>
+            <div className="ds-kpi-label">{t('curate.kpiVal')}</div>
+          </div>
+          <div className="ds-card ds-kpi">
+            <div className="ds-kpi-top"><span className="ds-kpi-icon">{Icon.repeat}</span><span style={{ marginLeft: 'auto' }}><span className="ds-kpi-meta">{t('curate.kpiEffectiveMeta')}</span></span></div>
+            <div className="ds-kpi-val" style={{ marginTop: 14 }}>{view ? effective.toLocaleString() : '—'}</div>
+            <div className="ds-kpi-label">{t('curate.kpiEffective')}</div>
+          </div>
+        </div>
+
+        <div className="ds-cur-main">
+          {/* left: the dataset pool */}
+          <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div className="ds-card-head ds-pad">
+              <div>
+                <div className="ds-card-title">{t('curate.downloadPanelTitle')}</div>
+                <div className="ds-card-sub">{t('curate.downloadSubtitle', { unused: currentLeft.length, total: downloadTotal, sel: leftSel.size })}</div>
+              </div>
+              <div className="ds-card-tools">
+                <select
+                  className="ds-inp"
+                  style={{ width: 150, height: 30 }}
+                  value={sortMode}
+                  onChange={(e) => setSortMode(e.target.value as SortMode)}
+                  title={t('curate.sortTitle')}
+                  aria-label={t('curate.sortLabel')}
                 >
-                  {t('curate.copyToValBtn', { n: leftSel.size })}
-                </BtnPrimary>
+                  {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+                {leftSel.size > 0 ? (
+                  <button type="button" className="ds-ctl ds-ghost" onClick={() => setLeftSel(new Set())} disabled={busy}>{t('curate.deselect')}</button>
+                ) : (
+                  <button type="button" className="ds-ctl ds-ghost" onClick={() => setLeftSel(new Set(leftSortedNames))} disabled={busy || leftSortedNames.length === 0}>{t('curate.selectAll')}</button>
+                )}
+              </div>
+            </div>
+            <div className="ds-card-body" style={{ paddingTop: 2, flex: 1, minHeight: 0 }}>
+              <div className="ds-cur-grid">
+                <ImageGrid
+                  items={leftItems}
+                  selected={leftSel}
+                  activeName={preview?.side === 'left' ? preview.name : undefined}
+                  onSelect={handleLeftClick}
+                  onHover={onLeftHover}
+                  onPreview={openLeftPreview}
+                  onActivate={openLeftPreview}
+                  clickMode="activate"
+                  columnsClass="grid-cols-[repeat(auto-fill,minmax(84px,1fr))]"
+                  ariaLabel="download-grid"
+                  emptyHint={t('curate.downloadEmptyHint')}
+                />
+              </div>
+            </div>
+            <div className="ds-cardfoot">
+              {isVal ? (
+                <button type="button" className="ds-btn-primary" style={{ height: 34 }} onClick={doCopy} disabled={busy || leftSel.size === 0} title={t('curate.copyToValTitle')}>
+                  {t('curate.addNToVal', { n: leftSel.size })}
+                </button>
               ) : (
-                <BtnPrimary
+                <button
+                  type="button"
+                  className="ds-btn-primary"
+                  style={{ height: 34 }}
                   onClick={doCopy}
                   disabled={busy || leftSel.size === 0 || !rightFolder}
                   title={rightFolder ? t('curate.copyToTitle', { folder: rightFolder }) : t('curate.noFolderTitle')}
                 >
-                  {t('curate.copyToBtn', { n: leftSel.size, folder: rightFolder || '?' })}
-                </BtnPrimary>
+                  {t('curate.addNTo', { n: leftSel.size, folder: rightFolder || '?' })}
+                </button>
               )}
-            </>
-          }
-        >
-          <div className={SCROLL_BOX}>
-            <ImageGrid
-              items={leftItems}
-              selected={leftSel}
-              activeName={preview?.side === 'left' ? preview.name : undefined}
-              onSelect={handleLeftClick}
-              onHover={onLeftHover}
-              onPreview={openLeftPreview}
-              onActivate={openLeftPreview}
-              clickMode="activate"
-              ariaLabel="download-grid"
-              emptyHint={t('curate.downloadEmptyHint')}
-            />
+              <span className="ds-cardfoot-act" />
+            </div>
           </div>
-        </PanelCard>
 
-        <PanelCard
-          accent="cyan"
-          title={isVal ? t('curate.valPanelTitle') : t('curate.trainPanelTitle')}
-          subtitle={
-            isVal
-              ? t('curate.valSubtitle', { total: valView?.val_total ?? 0, sel: rightSel.size })
-              : t('curate.trainSubtitle', { total: view?.train_total ?? 0, folders: folderNames.length, sel: rightSel.size })
-          }
-          actions={
-            <>
-              {!isVal && (
-                <>
-                  <input
-                    value={newFolder}
-                    onChange={(e) => setNewFolder(e.target.value)}
-                    placeholder={t('curate.newFolderPlaceholder')}
-                    className="input input-mono px-2 py-0.5 text-sm"
-                    style={{ width: 144 }}
-                  />
-                  <BtnSecondary onClick={doCreateFolder} disabled={busy || !newFolder.trim()}>
-                    {t('curate.createFolderBtn')}
-                  </BtnSecondary>
-                </>
-              )}
-              <BtnSecondary
-                onClick={() => setRightSel(new Set(rightSortedNames))}
-                disabled={busy || rightSortedNames.length === 0}
-              >
-                {t('curate.selectAll')}
-              </BtnSecondary>
-              <BtnSecondary
-                onClick={() => setRightSel(new Set())}
-                disabled={busy || rightSel.size === 0}
-              >
-                {t('curate.deselect')}
-              </BtnSecondary>
-              <BtnDanger onClick={doRemove} disabled={busy || rightSel.size === 0 || (!isVal && !rightFolder)}>
-                {t('curate.removeNBtn', { n: rightSel.size })}
-              </BtnDanger>
-            </>
-          }
-        >
-          {isVal ? (
-            <p className="text-xs text-fg-tertiary">{t('curate.valHint')}</p>
-          ) : (
-            <>
-              <FolderSummary
-                folders={folderNames}
-                counts={Object.fromEntries(folderNames.map((f) => [f, view?.right[f]?.length ?? 0]))}
-                activeFolder={rightFolder}
-                busy={busy}
-                onSwitch={switchRightFolder}
-                onRename={(name) => setRenaming({ target: name, value: name })}
-                onDelete={doDeleteFolder}
-              />
-
-              {renaming && (
-                <div className="flex items-center gap-2 my-3 text-sm">
-                  <span className="text-fg-secondary">{t('curate.renameLabel', { name: renaming.target })}</span>
-                  <input
-                    autoFocus
-                    value={renaming.value}
-                    onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') doRenameFolder()
-                      if (e.key === 'Escape') setRenaming(null)
-                    }}
-                    className="input input-mono px-2 py-0.5"
-                    style={{ width: 176 }}
-                  />
-                  <BtnPrimary onClick={doRenameFolder} disabled={busy}>
-                    {t('curate.renameOk')}
-                  </BtnPrimary>
-                  <button onClick={() => setRenaming(null)} className="btn btn-ghost btn-sm">
-                    {t('common.cancel')}
-                  </button>
+          {/* right: the version's train (or validation) set */}
+          <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div className="ds-card-head ds-pad">
+              <div>
+                <div className="ds-card-title">{isVal ? t('curate.valPanelTitle') : t('curate.trainPanelTitle')}</div>
+                <div className="ds-card-sub">
+                  {isVal
+                    ? t('curate.valSubtitle', { total: valView?.val_total ?? 0, sel: rightSel.size })
+                    : t('curate.trainSubtitle', { total: view?.train_total ?? 0, folders: folderNames.length, sel: rightSel.size })}
                 </div>
-              )}
-            </>
-          )}
+              </div>
+              <div className="ds-card-tools">
+                {rightSel.size > 0 ? (
+                  <button type="button" className="ds-ctl ds-ghost" onClick={() => setRightSel(new Set())} disabled={busy}>{t('curate.deselect')}</button>
+                ) : (
+                  <button type="button" className="ds-ctl ds-ghost" onClick={() => setRightSel(new Set(rightSortedNames))} disabled={busy || rightSortedNames.length === 0}>{t('curate.selectAll')}</button>
+                )}
+                {!isVal && (
+                  <button type="button" className="ds-ctl ds-ghost" onClick={() => rightFolder && setRenaming({ target: rightFolder, value: rightFolder })} disabled={busy || !rightFolder}>
+                    {t('common.rename')}
+                  </button>
+                )}
+              </div>
+            </div>
 
-          <div className={`${SCROLL_BOX} mt-3`}>
-            <ImageGrid
-              items={rightItems}
-              selected={rightSel}
-              activeName={preview?.side === 'right' ? preview.name : undefined}
-              onSelect={handleRightClick}
-              onHover={onRightHover}
-              onPreview={openRightPreview}
-              onActivate={openRightPreview}
-              clickMode="activate"
-              ariaLabel={isVal ? 'validation-grid' : 'train-grid'}
-              emptyHint={
-                rightLoading
-                  ? t('curate.loading')
-                  : isVal
-                    ? t('curate.valEmpty')
-                    : rightFolder
-                      ? t('curate.trainEmptyFolder', { folder: rightFolder })
-                      : t('curate.trainNoFolder')
-              }
-            />
+            {isVal ? (
+              <div style={{ padding: '0 17px 10px' }}><div className="ds-note" style={{ fontSize: 11.5 }}>{t('curate.valHint')}</div></div>
+            ) : (
+              <div style={{ padding: '0 17px 10px', display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
+                {folderNames.length === 0 && <span className="ds-muted" style={{ fontSize: 12 }}>{t('curate.noTrainFolders')}</span>}
+                {folderNames.map((f) => {
+                  const active = f === rightFolder
+                  return (
+                    <span key={f} className={`ds-chip${active ? ' ds-is-active' : ''}`}>
+                      <button type="button" onClick={() => switchRightFolder(f)} title={active ? t('curate.folderActiveTitle') : t('curate.folderSwitchTitle')} style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                        {f} <b>{(view?.right[f]?.length ?? 0).toLocaleString()}</b>
+                      </button>
+                      <button type="button" className="ds-chip-x" aria-label={`${t('curate.deleteFolderOkText')} ${f}`} title={t('curate.deleteFolderOkText')} onClick={() => void doDeleteFolder(f)} disabled={busy}>{Icon.x}</button>
+                    </span>
+                  )
+                })}
+                <button type="button" className="ds-chip-add" onClick={() => void doNewFolder()} disabled={busy}>{t('curate.newFolderPlaceholder')}</button>
+              </div>
+            )}
+
+            {renaming && !isVal && (
+              <div style={{ padding: '0 17px 10px', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+                <span className="ds-muted">{t('curate.renameLabel', { name: renaming.target })}</span>
+                <input
+                  autoFocus
+                  className="ds-inp ds-mono"
+                  style={{ width: 190, height: 30 }}
+                  value={renaming.value}
+                  onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void doRenameFolder()
+                    if (e.key === 'Escape') setRenaming(null)
+                  }}
+                />
+                <button type="button" className="ds-btn-primary" style={{ height: 30 }} onClick={() => void doRenameFolder()} disabled={busy}>{t('curate.renameOk')}</button>
+                <button type="button" className="ds-ctl ds-ghost" style={{ height: 30 }} onClick={() => setRenaming(null)}>{t('common.cancel')}</button>
+              </div>
+            )}
+
+            <div className="ds-card-body" style={{ paddingTop: 0, flex: 1, minHeight: 0 }}>
+              <div className="ds-cur-grid">
+                <ImageGrid
+                  items={rightItems}
+                  selected={rightSel}
+                  activeName={preview?.side === 'right' ? preview.name : undefined}
+                  onSelect={handleRightClick}
+                  onHover={onRightHover}
+                  onPreview={openRightPreview}
+                  onActivate={openRightPreview}
+                  clickMode="activate"
+                  columnsClass="grid-cols-[repeat(auto-fill,minmax(84px,1fr))]"
+                  ariaLabel={isVal ? 'validation-grid' : 'train-grid'}
+                  emptyHint={
+                    rightLoading
+                      ? t('curate.loading')
+                      : isVal
+                        ? t('curate.valEmpty')
+                        : rightFolder
+                          ? t('curate.trainEmptyFolder', { folder: rightFolder })
+                          : t('curate.trainNoFolder')
+                  }
+                />
+              </div>
+            </div>
+            <div className="ds-cardfoot">
+              <button type="button" className="ds-ctl" style={{ height: 34 }} onClick={doRemove} disabled={busy || rightSel.size === 0 || (!isVal && !rightFolder)}>
+                {rightSel.size > 0 ? t('curate.removeFromSetN', { n: rightSel.size }) : t('curate.removeFromSet')}
+              </button>
+              <span className="ds-cardfoot-act">
+                {!isVal && (
+                  <button type="button" className="ds-ctl" style={{ height: 34 }} onClick={() => void doMoveToValidation()} disabled={busy || rightSel.size === 0 || !rightFolder} title={t('curate.moveToValTitle')}>
+                    {t('curate.moveToVal')}
+                  </button>
+                )}
+              </span>
+            </div>
           </div>
-        </PanelCard>
+        </div>
       </div>
 
       {altHeld && focus && <AltHoverPreview focus={focus} isVal={isVal} />}
@@ -818,79 +854,21 @@ export default function CurationPage() {
           onNext={() => stepPreview(1)}
           onAccept={preview.side === 'left' ? copyPreviewImage : undefined}
           onDelete={preview.side === 'right' ? removePreviewImage : undefined}
-          shortcutHint={
-            preview.side === 'left'
-              ? t('curate.previewHintLeft')
-              : t('curate.previewHintRight')
-          }
+          shortcutHint={preview.side === 'left' ? t('curate.previewHintLeft') : t('curate.previewHintRight')}
         />
       )}
     </div>
-    </StepShell>
   )
 }
 
 // ---------------------------------------------------------------------------
-// 子组件
-// ---------------------------------------------------------------------------
 
-function FolderSummary({
-  folders, counts, activeFolder, busy, onSwitch, onRename, onDelete,
-}: {
-  folders: string[]
-  counts: Record<string, number>
-  activeFolder: string
-  busy: boolean
-  onSwitch: (name: string) => void
-  onRename: (name: string) => void
-  onDelete: (name: string) => void
-}) {
-  const { t } = useTranslation()
-  if (folders.length === 0) {
-    return <p className="text-sm text-fg-tertiary">{t('curate.noTrainFolders')}</p>
-  }
-  const total = folders.reduce((s, f) => s + (counts[f] ?? 0), 0)
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 text-sm">
-      {folders.map((f) => {
-        const isActive = f === activeFolder
-        return (
-          <span
-            key={f}
-            className={`group inline-flex items-center transition-colors rounded-md ${
-              isActive ? 'border border-accent bg-accent-soft' : 'border border-dim bg-surface'
-            }`}
-          >
-            <button
-              onClick={() => onSwitch(f)}
-              title={isActive ? t('curate.folderActiveTitle') : t('curate.folderSwitchTitle')}
-              className={`px-2 py-0.5 font-mono ${isActive ? 'text-accent' : 'text-fg-secondary'}`}
-            >
-              {f}
-              <span className="text-fg-tertiary"> ({counts[f] ?? 0})</span>
-            </button>
-            <button
-              onClick={() => onRename(f)}
-              disabled={busy}
-              title={t('common.rename')}
-              className="opacity-0 group-hover:opacity-100 px-1 py-0.5 text-xs text-fg-tertiary"
-            >
-              ✎
-            </button>
-            <button
-              onClick={() => onDelete(f)}
-              disabled={busy}
-              title={t('common.delete')}
-              className="opacity-0 group-hover:opacity-100 px-1 py-0.5 text-xs text-fg-tertiary"
-            >
-              ×
-            </button>
-          </span>
-        )
-      })}
-      <span className="text-fg-tertiary ml-2">{t('curate.folderTotal', { total })}</span>
-    </div>
-  )
+const Icon = {
+  image: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5" /><path d="m3 15 4.5-4.5 4 4L15 11l6 5.5" /></svg>,
+  stack: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 13 9 5 9-5" /></svg>,
+  shield: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3Z" /></svg>,
+  repeat: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M17 2l4 4-4 4" /><path d="M3 11V9a3 3 0 0 1 3-3h15" /><path d="M7 22l-4-4 4-4" /><path d="M21 13v2a3 3 0 0 1-3 3H3" /></svg>,
+  x: <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>,
 }
 
 function AltHoverPreview({ focus, isVal }: { focus: Focus; isVal: boolean }) {
@@ -901,58 +879,15 @@ function AltHoverPreview({ focus, isVal }: { focus: Focus; isVal: boolean }) {
       ? t('curate.bucketValidation')
       : t('curate.sourceLabelTrain', { folder: focus.folder })
   return (
-    <div
-      aria-hidden
-      className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center p-6"
-    >
-      <div className="relative flex flex-col overflow-hidden rounded-lg border border-bold max-w-[95vw] max-h-[95vh] bg-black/90 shadow-xl">
+    <div aria-hidden className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center p-6">
+      <div className="relative flex flex-col overflow-hidden rounded-[14px] max-w-[95vw] max-h-[95vh] bg-black/90 shadow-xl">
         <img src={focus.url} alt={focus.name} className="max-w-[95vw] max-h-[88vh] object-contain" />
         <div className="flex items-center gap-2 shrink-0 px-3 py-1.5 border-t border-white/[0.08]">
-          <span className={`shrink-0 ${focus.side === 'left' ? 'badge badge-ok' : 'badge badge-info'}`}>
-            {sourceLabel}
-          </span>
-          <code className="mono truncate flex-1 min-w-0 text-fg-inverse text-sm">{focus.name}</code>
+          <span className={`ds-badge ${focus.side === 'left' ? 'ds-ok' : 'ds-info'}`}>{sourceLabel}</span>
+          <code className="ds-mono truncate flex-1 min-w-0 text-white text-sm">{focus.name}</code>
           <span className="text-xs shrink-0 text-white/40">{t('curate.altHoverClose')}</span>
         </div>
       </div>
     </div>
   )
-}
-
-function PanelCard({
-  accent, title, subtitle, actions, children,
-}: {
-  /** 'cyan' = 当前版本 train set 面板 → accent-veil 边框（原型 Panel accent）。 */
-  accent: 'emerald' | 'cyan'
-  title: string
-  subtitle: string
-  actions: React.ReactNode
-  children: React.ReactNode
-}) {
-  return (
-    <section
-      className="card flex flex-col min-h-0 overflow-hidden m-pane"
-      style={accent === 'cyan' ? { borderColor: 'var(--accent-veil)' } : undefined}
-    >
-      <header className="flex flex-wrap items-center gap-1.5 px-3.5 py-2.5 border-b border-subtle text-sm shrink-0">
-        <h3 className="font-semibold">{title}</h3>
-        <span className="text-xs text-fg-tertiary">{subtitle}</span>
-        <span className="flex-1" />
-        {actions}
-      </header>
-      <div className="flex-1 min-h-0 flex flex-col p-3">{children}</div>
-    </section>
-  )
-}
-
-function BtnPrimary({ children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return <button {...rest} className="btn btn-primary btn-sm">{children}</button>
-}
-
-function BtnSecondary({ children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return <button {...rest} className="btn btn-secondary btn-sm">{children}</button>
-}
-
-function BtnDanger({ children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return <button {...rest} className="btn btn-sm bg-err-soft text-err border-err">{children}</button>
 }

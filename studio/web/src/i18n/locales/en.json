@@ -2513,7 +2513,8 @@
     "train": {
       "title": "Train",
       "subtitle": "Pick preset → Edit config → Queue training"
-    }
+    },
+    "eyebrowStep": "STEP {{n}} · VERSION {{label}}"
   },
   "curate": {
     "downloadTime": "Added time",
@@ -2564,7 +2565,30 @@
     "valPanelTitle": "Validation set — held-out",
     "valSubtitle": "{{total}} images · {{sel}} selected",
     "valHint": "Held-out validation set: these images are not trained on; they are the reference for post-training CLIP-I / DINO-I generalization metrics. Enable validation eval in the training config for it to take effect; when a split ratio is set, it tops up on top of your manual picks.",
-    "valEmpty": "No validation images yet — add some from the dataset on the left"
+    "valEmpty": "No validation images yet — add some from the dataset on the left",
+    "subtitleLong": "Dataset → train set. Copies only; the dataset is left untouched.",
+    "next": "Next: preprocess",
+    "bucketLabel": "Where to add",
+    "bucketValShort": "Validation",
+    "kpiTotal": "Images in the dataset",
+    "kpiUnused": "{{n}} unused",
+    "kpiTrain": "In the version's train set",
+    "kpiGroups_one": "{{count}} group",
+    "kpiGroups_other": "{{count}} groups",
+    "kpiVal": "Held out for validation",
+    "kpiValPct": "{{pct}}% of the dataset",
+    "kpiEffective": "Effective samples / epoch",
+    "kpiEffectiveMeta": "repeats included",
+    "addNTo": "Add {{n}} to {{folder}}",
+    "addNToVal": "Add {{n}} to validation",
+    "newFolderPrompt": "New group name (e.g. 5_concept)",
+    "removeFromSet": "Remove from set",
+    "removeFromSetN": "Remove from set · {{n}}",
+    "moveToVal": "To validation",
+    "moveToValTitle": "Move the selected images from train to the held-out validation set",
+    "moveToValOk": "Move",
+    "confirmMoveToVal": "Move {{n}} images from {{folder}} to validation?\nThe train copies are deleted together with their preprocessing and tag edits; validation gets the originals from the dataset.",
+    "movedToValN": "Moved to validation: {{n}}"
   },
   "duplicates": {
     "title": "Duplicate / Variant Review",
