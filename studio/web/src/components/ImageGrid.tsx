@@ -9,6 +9,8 @@ export interface ImageGridItem {
   meta?: string
   /** 常显小角标，cell 右下角（可选）。例如 "已处理"，用于在合并视图里区分状态。 */
   badge?: string
+  /** Always-visible caption along the bottom edge (e.g. "1024×1408"). */
+  caption?: string
 }
 
 interface Props {
@@ -113,7 +115,7 @@ export default function ImageGrid({
         style={{ height: '100%' }}
         totalCount={items.length}
         overscan={OVERSCAN_PX}
-        listClassName={`grid ${columnsClass} gap-1`}
+        listClassName={`grid ${columnsClass} gap-[8px]`}
         itemContent={(index) => {
           const it = items[index]
           const isSel = selected.has(it.name)
@@ -183,10 +185,13 @@ const Cell = memo(function Cell({
     // mount 时抓住元素：unmount 时 React 已把 ref 置 null，cleanup 里直接读
     // imgRef.current 拿不到节点。脱离 DOM 的 <img> 改 src 同样会 abort 请求。
     const img = imgRef.current
+    // StrictMode (dev) runs mount → cleanup → mount: the cleanup below has
+    // already blanked src, and React will not set an unchanged prop again.
+    if (img && img.getAttribute('src') !== item.thumbUrl) img.src = item.thumbUrl
     return () => {
       if (img && !img.complete) img.src = ''
     }
-  }, [])
+  }, [item.thumbUrl])
   const handleCellClick = (e: React.MouseEvent) => {
     if (clickMode === 'activate' && onActivate && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       onActivate(item.name)
@@ -220,13 +225,7 @@ const Cell = memo(function Cell({
       onClick={handleCellClick}
       title={item.meta ? `${item.name}\n${item.meta}` : item.name}
       style={bg ? { background: bg } : undefined}
-      className={
-        'group relative aspect-square overflow-hidden rounded border cursor-pointer select-none ' +
-        (borderHighlight
-          ? 'border-accent ring-2 ring-accent-soft'
-          : 'border-subtle hover:border-dim') +
-        ' bg-sunken'
-      }
+      className={'ds-thumb group aspect-square cursor-pointer select-none' + (borderHighlight ? ' ds-sel' : '')}
     >
       {/* 虚拟化场景不能用 loading="lazy"：cell 进入 DOM（包括 overscan 区）
        * 时浏览器不主动 load，要等真正进入视口才 fetch，overscan 的预热效果
@@ -244,7 +243,7 @@ const Cell = memo(function Cell({
         {...{ fetchpriority: 'low' }}
         onLoad={handleImgLoad}
         className={
-          'w-full h-full object-cover pointer-events-none transition-opacity duration-150 ' +
+          'absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-150 ' +
           (loaded ? 'opacity-100' : 'opacity-0')
         }
       />
@@ -252,14 +251,11 @@ const Cell = memo(function Cell({
         type="button"
         onClick={handleSelectionClick}
         aria-label={`${selected ? t('common.deselect') : t('common.select')} ${item.name}`}
-        className={
-          'absolute top-1 left-1 w-5 h-5 rounded-sm flex items-center justify-center text-[12px] font-bold transition-opacity ' +
-          (selected
-            ? 'bg-accent text-accent-fg opacity-100'
-            : 'bg-black/50 border border-subtle text-transparent opacity-0 group-hover:opacity-100')
-        }
+        className={'ds-mark flex transition-opacity ' + (selected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100')}
       >
-        ✓
+        <span className={'ds-cbox' + (selected ? ' ds-on' : '')}>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round"><path d="m5 13 4 4L19 7" /></svg>
+        </span>
       </button>
       {/* 放大镜：悬停时出现，点击触发 modal 全屏预览（不影响选择状态） */}
       {onPreview && (
@@ -270,16 +266,17 @@ const Cell = memo(function Cell({
             onPreview(item.name)
           }}
           aria-label={`${t('common.preview')} ${item.name}`}
-          className="absolute top-1 right-1 w-5 h-5 rounded-sm bg-black/60 text-white text-[11px] opacity-0 group-hover:opacity-100 hover:bg-black/80"
+          className={
+            'absolute w-5 h-5 rounded-[5px] bg-black/60 text-white text-[11px] opacity-0 group-hover:opacity-100 hover:bg-black/80 ' +
+            // the pin owns the top-right corner when there is one
+            (item.badge ? 'right-1.5 ' + (item.caption ? 'bottom-6' : 'bottom-1.5') : 'top-1.5 right-1.5')
+          }
         >
           ⤢
         </button>
       )}
-      {item.badge && (
-        <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded-sm bg-accent text-accent-fg text-[10px] font-medium pointer-events-none">
-          {item.badge}
-        </div>
-      )}
+      {item.badge && <span className="ds-pin pointer-events-none">{item.badge}</span>}
+      {item.caption && <span className="ds-cap pointer-events-none">{item.caption}</span>}
     </div>
   )
 })

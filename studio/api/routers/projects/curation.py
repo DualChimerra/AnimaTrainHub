@@ -118,9 +118,11 @@ def list_files(pid: int, bucket: str = "download") -> dict[str, Any]:
     if pdir.exists():
         for f in sorted(pdir.iterdir()):
             if f.is_file() and f.suffix.lower() in datasets.IMAGE_EXTS:
+                st = f.stat()
                 items.append({
                     "name": f.name,
-                    "size": f.stat().st_size,
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
                     "has_meta": f.with_suffix(".booru.txt").exists(),
                 })
     return {"items": items, "count": len(items)}

@@ -1008,6 +1008,8 @@ export interface Job {
 export interface DownloadFile {
   name: string
   size: number
+  /** File mtime (unix seconds); absent from servers older than the 2026 redesign. */
+  mtime?: number
   has_meta: boolean
 }
 
