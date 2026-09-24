@@ -47,15 +47,16 @@ export default function ConfigYamlPanel({
   return (
     <div className={className ?? 'flex flex-col min-h-0'}>
       <div className="flex items-center gap-2 mb-2 shrink-0">
-        <span className="font-mono text-xs font-semibold text-fg-secondary truncate">{fileLabel}</span>
-        <span className="text-xs text-fg-tertiary shrink-0">
-          {t('schema.fieldCount', { n: fieldCount })}
+        <span className="ds-mono truncate" style={{ fontSize: 11.5, fontWeight: 600 }}>{fileLabel}</span>
+        <span className="ds-kpi-meta shrink-0">
+          {t('schema.fieldCount', { n: fieldCount, count: fieldCount })}
         </span>
-        {hint && <span className="text-xs text-warn truncate">{hint}</span>}
+        {hint && <span className="truncate" style={{ fontSize: 11, color: 'var(--amber-text)' }}>{hint}</span>}
         <span className="flex-1" />
         <button
           type="button"
-          className="btn btn-ghost btn-sm text-xs shrink-0"
+          className="ds-ctl ds-ghost shrink-0"
+          style={{ height: 26 }}
           onClick={() => {
             navigator.clipboard.writeText(yamlText)
               .then(() => toast(t('presets.copied'), 'success'))
@@ -63,7 +64,7 @@ export default function ConfigYamlPanel({
           }}
         >{t('common.copy')}</button>
       </div>
-      <pre className="flex-1 min-h-0 m-0 p-3 bg-sunken rounded-sm font-mono text-xs text-fg-secondary leading-[1.7] whitespace-pre overflow-auto">
+      <pre className="ds-console flex-1 min-h-0 m-0 whitespace-pre overflow-auto" style={{ lineHeight: 1.7 }}>
         {yamlText}
       </pre>
     </div>

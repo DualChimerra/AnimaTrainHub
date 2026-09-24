@@ -70,21 +70,49 @@ export default function TriggerWordCard({
   const missing = dopEnabled && !saved.trim()
   const inCaptions = detected?.candidates.find((c) => c.word.toLowerCase() === value.trim().toLowerCase())
 
+  // A field row like the schema ones; under DOP it is the gated row the mockup
+  // draws with a green rule, since DOP cannot run without it.
   return (
-    <section
-      className={`rounded-md border px-3.5 py-3 flex flex-col gap-2 shrink-0 ${
-        missing ? 'border-warn bg-warn-soft' : 'border-subtle bg-surface'
-      }`}
+    <div
+      className="ds-field"
       data-testid="trigger-word-card"
+      style={dopEnabled ? { background: 'var(--area)', borderLeft: '2px solid var(--green-600)', paddingLeft: 26 } : undefined}
     >
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-sm font-semibold text-fg-primary">{t('trigger.title')}</span>
-        {dopEnabled && <span className="badge badge-accent">DOP</span>}
+      <div className="ds-field-txt">
+        <div className="ds-field-name">
+          <span className="ds-label">{t('trigger.title')}</span>
+          <span className="ds-key">trigger_word</span>
+          {dopEnabled && <span className="ds-tag ds-gate">{t('trigger.gateDop')}</span>}
+        </div>
+        <div className="ds-field-desc">{t('trigger.hint')}</div>
+        {detected && detected.candidates.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+            <span className="ds-kpi-meta">{t('trigger.candidates', { n: detected.total })}</span>
+            {detected.candidates.map((c) => (
+              <button
+                key={c.word}
+                type="button"
+                onClick={() => setValue(c.word)}
+                className={`ds-chip ds-mono${c.word === value.trim() ? ' ds-is-active' : ''}`}
+                style={{ height: 24, paddingRight: 9, fontSize: 11 }}
+                title={t('trigger.coverage', { pct: Math.round(c.coverage * 100) })}
+              >
+                {c.word} <b>{Math.round(c.coverage * 100)}%</b>
+              </button>
+            ))}
+          </div>
+        )}
+        {detected && detected.total > 0 && detected.candidates.length === 0 && (
+          <div className="ds-field-desc">{t('trigger.noneFound')}</div>
+        )}
+        {detected && value.trim() && !inCaptions && detected.total > 0 && (
+          <div className="ds-field-desc" style={{ color: 'var(--amber-text)' }}>{t('trigger.notInCaptions')}</div>
+        )}
+        {missing && <div className="ds-field-desc" style={{ color: 'var(--amber-text)' }}>{t('trigger.dopNeedsTrigger')}</div>}
       </div>
-      <p className="m-0 text-xs text-fg-tertiary">{t('trigger.hint')}</p>
-      <div className="flex items-center gap-2 flex-wrap">
+      <div className="ds-field-ctl">
         <input
-          className="input input-mono flex-1 min-w-[160px]"
+          className="ds-inp ds-mono"
           value={value}
           placeholder={t('trigger.placeholder')}
           onChange={(e) => setValue(e.target.value)}
@@ -93,45 +121,18 @@ export default function TriggerWordCard({
           autoCapitalize="off"
           autoCorrect="off"
           aria-label={t('trigger.title')}
+          style={missing ? { borderColor: 'var(--amber-line)' } : undefined}
         />
-        <button
-          type="button" className="btn btn-secondary btn-sm"
-          onClick={() => void detect(true)} disabled={detecting}
-        >
-          {detecting ? t('trigger.detecting') : t('trigger.detect')}
-        </button>
-        <button
-          type="button" className="btn btn-primary btn-sm"
-          onClick={() => void save()} disabled={!dirty || busy}
-        >
-          {busy ? t('common.saving') : t('common.save')}
-        </button>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {inCaptions && <span className="ds-badge ds-ok">{t('trigger.inCaptionsPct', { pct: Math.round(inCaptions.coverage * 100) })}</span>}
+          <button type="button" className="ds-ctl ds-ghost" style={{ height: 24 }} onClick={() => void detect(true)} disabled={detecting}>
+            {detecting ? t('trigger.detecting') : t('trigger.detect')}
+          </button>
+          <button type="button" className="ds-btn-primary" style={{ height: 24 }} onClick={() => void save()} disabled={!dirty || busy}>
+            {busy ? t('common.saving') : t('common.save')}
+          </button>
+        </span>
       </div>
-
-      {detected && detected.candidates.length > 0 && (
-        <div className="flex items-center gap-1.5 flex-wrap text-xs">
-          <span className="text-fg-tertiary">{t('trigger.candidates', { n: detected.total })}</span>
-          {detected.candidates.map((c) => (
-            <button
-              key={c.word} type="button"
-              onClick={() => setValue(c.word)}
-              className={`px-2 py-0.5 rounded-md font-mono border transition-colors ${
-                c.word === value.trim() ? 'border-accent bg-accent-soft text-fg-primary' : 'border-subtle bg-canvas text-fg-secondary hover:border-bold'
-              }`}
-              title={t('trigger.coverage', { pct: Math.round(c.coverage * 100) })}
-            >
-              {c.word} <span className="text-fg-tertiary">{Math.round(c.coverage * 100)}%</span>
-            </button>
-          ))}
-        </div>
-      )}
-      {detected && detected.total > 0 && detected.candidates.length === 0 && (
-        <p className="m-0 text-xs text-fg-tertiary">{t('trigger.noneFound')}</p>
-      )}
-      {detected && value.trim() && !inCaptions && detected.total > 0 && (
-        <p className="m-0 text-xs text-warn">{t('trigger.notInCaptions')}</p>
-      )}
-      {missing && <p className="m-0 text-xs text-warn">{t('trigger.dopNeedsTrigger')}</p>}
-    </section>
+    </div>
   )
 }

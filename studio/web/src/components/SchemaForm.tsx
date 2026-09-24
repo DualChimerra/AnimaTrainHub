@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { SchemaResponse, ConfigData } from '../api/client'
 import { evalShowWhen, schemaAltDescription, schemaDisableHint, schemaDescription, schemaGroupLabel } from '../lib/schema'
@@ -22,6 +22,16 @@ interface Props {
   fieldSuffixes?: Record<string, React.ReactNode>
   /** false（默认）= 简单模式，隐藏 advanced=true 的字段。 */
   advancedMode?: boolean
+  /** Render only these schema groups (a tab of the Train page). */
+  groupKeys?: string[]
+  /** Extra per-field filter (changed only / non-default / locked). */
+  fieldFilter?: (name: string) => boolean
+  /** Values before this session's edits; fields that differ get marked. */
+  baseline?: ConfigData | null
+  /** Rows rendered right after a field (e.g. the trigger word after DOP). */
+  afterField?: Record<string, ReactNode>
+  /** Shown when the filters leave nothing to render. */
+  emptyHint?: string
 }
 
 /** 计算当前 advancedMode 下哪些 group 至少有一个可见字段（用于侧栏锚点导航）。
@@ -44,25 +54,19 @@ export function visibleSchemaGroups(
 }
 
 /**
- * 按 schema.groups 分区渲染表单；分组可折叠。
- * show_when 用 evalShowWhen 做条件显示，依赖当前 values。
+ * 按 schema.groups 分区渲染表单：每组一条小标题（名称 · 键 · 字段数），下面是
+ * 字段行（mockup .subgroup / .field）。show_when 用 evalShowWhen 做条件显示，
+ * 依赖当前 values。
  */
 export default function SchemaForm({
   schema, values, onChange, disabledFields, disabledHints, autoHints, fieldSuffixes, advancedMode = false,
+  groupKeys, fieldFilter, baseline, afterField, emptyHint,
 }: Props) {
   const { t } = useTranslation()
   const disabledSet = new Set(disabledFields ?? [])
   const dHints = disabledHints ?? {}
   const aHints = autoHints ?? {}
   const suffixes = fieldSuffixes ?? {}
-  // 用 schema.groups[].default_collapsed 决定初始折叠状态；用户手动改后保留状态。
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
-    const out: Record<string, boolean> = {}
-    for (const g of schema.groups) {
-      if (g.default_collapsed) out[g.key] = true
-    }
-    return out
-  })
   const props = schema.schema.properties
   const shouldDisableField = (prop: typeof props[string]) =>
     !!prop.disable_when && evalShowWhen(prop.disable_when, values)
@@ -156,93 +160,92 @@ export default function SchemaForm({
     if (!buckets.has(g)) buckets.set(g, [])
     buckets.get(g)!.push(name)
   }
+  const groupSet = groupKeys ? new Set(groupKeys) : null
+
+  let rendered = 0
+  const sections = schema.groups.map(({ key, label }) => {
+    if (groupSet && !groupSet.has(key)) return null
+    const groupLabel = schemaGroupLabel(key, label, t)
+    const fields = (buckets.get(key) ?? []).filter((name) =>
+      evalShowWhen(props[name].show_when, values) && (!fieldFilter || fieldFilter(name))
+    )
+    if (fields.length === 0) return null
+    rendered += fields.length
+    return (
+      <section key={key} id={`schema-group-${key}`} className="scroll-mt-4">
+        <div className="ds-subgroup">
+          <span className="ds-sg-name">{groupLabel}</span>
+          <span className="ds-sg-key">{key}</span>
+          <span style={{ flex: 1 }} />
+          <span className="ds-kpi-meta">{t('schema.fieldCount', { n: fields.length, count: fields.length })}</span>
+        </div>
+        {fields.map((name) => {
+          const prop = props[name]
+          // disable_when（schema 驱动条件 disable，如 Prodigy → lr_scheduler）
+          // 优先级低于全局 disabledFields（项目预填）。
+          const conditionallyDisabled = shouldDisableField(prop)
+          const isDisabled =
+            disabledSet.has(name) || conditionallyDisabled
+          const hint = disabledSet.has(name)
+            ? dHints[name]
+            : conditionallyDisabled
+              ? schemaDisableHint(name, prop.disable_hint, t)
+              : aHints[name]
+          const descriptionOverride =
+            prop.alt_description_when &&
+            evalShowWhen(prop.alt_description_when, values)
+              ? schemaAltDescription(name, prop.alt_description, t)
+              : schemaDescription(name, prop.description, t)
+          // option_show_when：按当前 values 过滤下拉选项（多模型 P4-2）。
+          // 当前已选中的值即使被门控也保留——表单如实反映 config，
+          // 越族值由后端校验报错，不在 UI 里凭空消失。
+          const gates = prop.option_show_when
+          const enumOptions = gates
+            ? (prop.enum ?? []).filter(
+                (opt) =>
+                  evalShowWhen(gates[String(opt)], values) ||
+                  String(opt) === String(values[name] ?? '')
+              )
+            : undefined
+          // option_disable_when：命中的选项灰显不可选（D4：不隐藏，
+          // 用户能看见为什么不可选——title 显示 disable_hint）。
+          const dGates = prop.option_disable_when
+          const disabledEnumOptions = dGates
+            ? Object.keys(dGates).filter((opt) =>
+                evalShowWhen(dGates[opt], values)
+              )
+            : undefined
+          const changed = baseline && name in baseline && !sameValue(baseline[name], values[name])
+          return (
+            <div key={name}>
+              <Field
+                name={name}
+                prop={prop}
+                value={values[name]}
+                onChange={(v) => setField(name, v)}
+                disabled={isDisabled}
+                hint={hint}
+                descriptionOverride={descriptionOverride}
+                suffix={suffixes[name]}
+                enumOptions={enumOptions}
+                disabledEnumOptions={disabledEnumOptions}
+                disabledOptionHint={schemaDisableHint(name, prop.disable_hint, t)}
+                changedFrom={changed ? { value: baseline![name] } : undefined}
+              />
+              {afterField?.[name]}
+            </div>
+          )
+        })}
+      </section>
+    )
+  })
 
   return (
-    <div className="space-y-3">
-      {schema.groups.map(({ key, label }) => {
-        const groupLabel = schemaGroupLabel(key, label, t)
-        const fields = buckets.get(key) ?? []
-        if (fields.length === 0) return null
-        const isCollapsed = collapsed[key]
-        return (
-          <section
-            key={key}
-            id={`schema-group-${key}`}
-            className="card scroll-mt-4"
-          >
-            <button
-              type="button"
-              onClick={() =>
-                setCollapsed({ ...collapsed, [key]: !isCollapsed })
-              }
-              className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-fg-primary bg-transparent border-none cursor-pointer"
-            >
-              <span>{groupLabel}</span>
-              <span className="text-fg-tertiary text-xs">
-                {t('schema.fieldCount', { n: fields.length })} {isCollapsed ? '▸' : '▾'}
-              </span>
-            </button>
-            {!isCollapsed && (
-              <div className="px-4 pb-3 space-y-1">
-                {fields.map((name) => {
-                  const prop = props[name]
-                  if (!evalShowWhen(prop.show_when, values)) return null
-                  // disable_when（schema 驱动条件 disable，如 Prodigy → lr_scheduler）
-                  // 优先级低于全局 disabledFields（项目预填）。
-                  const conditionallyDisabled = shouldDisableField(prop)
-                  const isDisabled =
-                    disabledSet.has(name) || conditionallyDisabled
-                  const hint = disabledSet.has(name)
-                    ? dHints[name]
-                    : conditionallyDisabled
-                      ? schemaDisableHint(name, prop.disable_hint, t)
-                      : aHints[name]
-                  const descriptionOverride =
-                    prop.alt_description_when &&
-                    evalShowWhen(prop.alt_description_when, values)
-                      ? schemaAltDescription(name, prop.alt_description, t)
-                      : schemaDescription(name, prop.description, t)
-                  // option_show_when：按当前 values 过滤下拉选项（多模型 P4-2）。
-                  // 当前已选中的值即使被门控也保留——表单如实反映 config，
-                  // 越族值由后端校验报错，不在 UI 里凭空消失。
-                  const gates = prop.option_show_when
-                  const enumOptions = gates
-                    ? (prop.enum ?? []).filter(
-                        (opt) =>
-                          evalShowWhen(gates[String(opt)], values) ||
-                          String(opt) === String(values[name] ?? '')
-                      )
-                    : undefined
-                  // option_disable_when：命中的选项灰显不可选（D4：不隐藏，
-                  // 用户能看见为什么不可选——title 显示 disable_hint）。
-                  const dGates = prop.option_disable_when
-                  const disabledEnumOptions = dGates
-                    ? Object.keys(dGates).filter((opt) =>
-                        evalShowWhen(dGates[opt], values)
-                      )
-                    : undefined
-                  return (
-                    <Field
-                      key={name}
-                      name={name}
-                      prop={prop}
-                      value={values[name]}
-                      onChange={(v) => setField(name, v)}
-                      disabled={isDisabled}
-                      hint={hint}
-                      descriptionOverride={descriptionOverride}
-                      suffix={suffixes[name]}
-                      enumOptions={enumOptions}
-                      disabledEnumOptions={disabledEnumOptions}
-                      disabledOptionHint={schemaDisableHint(name, prop.disable_hint, t)}
-                    />
-                  )
-                })}
-              </div>
-            )}
-          </section>
-        )
-      })}
+    <div>
+      {sections}
+      {rendered === 0 && emptyHint && (
+        <div className="ds-empty" style={{ margin: 17 }}>{emptyHint}</div>
+      )}
       {pendingImpact && (
         <RuleImpactDialog
           trigger={pendingImpact.trigger}
@@ -258,4 +261,12 @@ export default function SchemaForm({
       )}
     </div>
   )
+}
+
+/** Value equality for config fields (numbers, strings, lists, objects). */
+export function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (a == null && b == null) return true
+  if (typeof a === 'object' || typeof b === 'object') return JSON.stringify(a) === JSON.stringify(b)
+  return false
 }

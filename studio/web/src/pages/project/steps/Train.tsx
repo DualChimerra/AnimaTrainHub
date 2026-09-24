@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
@@ -10,6 +11,8 @@ import {
   type ProjectDetail,
   type RegStatus,
   type SchemaResponse,
+  type SystemStats as SystemStatsData,
+  type Task,
   type TrainEstimate,
   type Version,
   type VersionConfigResponse,
@@ -19,10 +22,13 @@ import { useLocalStorageState } from '../../../lib/useLocalStorageState'
 import ConfigSkeleton from '../../../components/ConfigSkeleton'
 import ConfigYamlPanel from '../../../components/ConfigYamlPanel'
 import { useDialog } from '../../../components/Dialog'
-import SaveIndicator from '../../../components/SaveIndicator'
-import SchemaForm, { visibleSchemaGroups } from '../../../components/SchemaForm'
-import SchemaSectionIndex from '../../../components/SchemaSectionIndex'
+import SchemaForm, { sameValue } from '../../../components/SchemaForm'
 import StepShell from '../../../components/StepShell'
+import JobLogBar from '../../../components/ds/JobLogBar'
+import KebabMenu from '../../../components/ds/KebabMenu'
+import { evalShowWhen, schemaFieldLabel, schemaGroupLabel } from '../../../lib/schema'
+import { useEventStream } from '../../../lib/useEventStream'
+import { useMonitorProgress } from '../../../lib/useMonitorProgress'
 import type { SaveStatus } from '../../../lib/SettingsData'
 import { useToast } from '../../../components/Toast'
 import { useSettingsDrawer } from '../../../lib/SettingsDrawer'
@@ -50,7 +56,7 @@ interface Ctx {
 }
 
 export default function TrainPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { project, activeVersion, reload } = useOutletContext<Ctx>()
   const { toast } = useToast()
   const { confirm, prompt } = useDialog()
@@ -110,6 +116,35 @@ export default function TrainPage() {
   /** header 自动保存指示（与 Settings 页同款 SaveIndicator）。 */
   const [saveStatus, setSaveStatus] = useState<SaveStatus>({ state: 'idle' })
 
+  /** Config as loaded for this version: the form marks fields that differ
+   *  from it, and the recent-changes list reverts back to it. */
+  const [baseline, setBaseline] = useState<ConfigData | null>(null)
+  const [changes, setChanges] = useState<ChangeEntry[]>([])
+  const [tab, setTab] = useLocalStorageState<TrainTabId>('train.formTab', 'model')
+  const [fieldFilter, setFieldFilter] = useState<FieldFilterMode>('all')
+
+  /** Fold an edit into the session change log: one row per field, keeping its
+   *  first "from"; a field edited back to where it started drops out. */
+  const recordChanges = useCallback((prev: ConfigData | null, next: ConfigData) => {
+    if (!prev) return
+    const at = Date.now()
+    const edits: ChangeEntry[] = []
+    for (const k of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+      if (!sameValue(prev[k], next[k])) edits.push({ field: k, from: prev[k], to: next[k], at })
+    }
+    if (edits.length === 0) return
+    setChanges((cur) => {
+      const map = new Map(cur.map((e) => [e.field, e]))
+      for (const e of edits) {
+        const old = map.get(e.field)
+        if (!old) map.set(e.field, e)
+        else if (sameValue(old.from, e.to)) map.delete(e.field)
+        else map.set(e.field, { ...old, to: e.to, at })
+      }
+      return Array.from(map.values()).sort((a, b) => b.at - a.at)
+    })
+  }, [])
+
   /** SchemaForm.onChange 入口：拦截 model_family 变化走切换动作（P4-3）。
    * 切族不是裸字段编辑——弹结构化确认对话框（后端重算路径 + 重置族风味
    * 字段），用户取消则保持旧值不动。其余字段变更原样透传 setConfigSync。 */
@@ -121,8 +156,21 @@ export default function TrainPage() {
       setFamilySwitchTarget(nextFamily)
       return
     }
+    recordChanges(prev, v)
     setConfigSync(v)
-  }, [setConfigSync])
+  }, [setConfigSync, recordChanges])
+
+  /** Edits that bypass the family check (family switch result, path reset). */
+  const applyEdit = useCallback((v: ConfigData) => {
+    recordChanges(configRef.current, v)
+    setConfigSync(v)
+  }, [setConfigSync, recordChanges])
+
+  const revertChange = useCallback((e: ChangeEntry) => {
+    const cur = configRef.current
+    if (!cur) return
+    onFormChange({ ...cur, [e.field]: e.from })
+  }, [onFormChange])
 
   const vid = activeVersion?.id ?? null
 
@@ -137,6 +185,8 @@ export default function TrainPage() {
       const r = await api.getVersionConfig(project.id, vid)
       setConfigResp(r)
       setConfigSync(r.config)
+      setBaseline(r.config)
+      setChanges([])
       savedJsonRef.current = JSON.stringify(r.config)
       // 老 config 兼容（InfoNoise 互斥被后端自动关掉等）由后端写进 r.defaulted_fields，
       // 顶部 banner 渲染。dropped_fields 兜底 schema 演进时丢弃的旧字段。
@@ -163,6 +213,8 @@ export default function TrainPage() {
     if (!vid) return
     api.getRegStatus(project.id, vid).then(setReg).catch(() => setReg(null))
   }, [project.id, vid])
+
+  const stats = useTrainStats(project.id, activeVersion, reg, config)
 
 
   // auto_sync_paths ON（默认 / 多数用户）：4 个模型路径字段 disabled，fork 时
@@ -218,7 +270,8 @@ export default function TrainPage() {
           <button
             type="button"
             onClick={() => setForm({ ...formValues, [f]: dv })}
-            className="btn btn-ghost btn-sm shrink-0"
+            className="ds-ctl ds-ghost"
+            style={{ height: 24 }}
             title={t('train.resetToGlobalDefaultTitle')}
           >
             {t('train.resetToGlobalDefault')}
@@ -303,15 +356,8 @@ export default function TrainPage() {
     [presets, pickerSearch],
   )
 
-  // 右侧 SchemaSectionIndex 的 IntersectionObserver root + 跳转目标
-  const schemaScrollRef = useRef<HTMLDivElement | null>(null)
-  // 右侧训练集分布预览抽屉的展开/收起（持久化）。收起时把横向空间让给表单。
-  const [previewOpen, setPreviewOpen] = useLocalStorageState('train.previewOpen', true)
+  // Preview card view (data / YAML), remembered across visits.
   const [previewTab, setPreviewTab] = useLocalStorageState<'stats' | 'config'>('train.previewTab', 'stats')
-  const visibleGroups = useMemo(
-    () => (schema ? visibleSchemaGroups(schema, advancedMode) : []),
-    [schema, advancedMode],
-  )
 
   // popover 关闭：点外面 / Esc
   useEffect(() => {
@@ -502,7 +548,7 @@ export default function TrainPage() {
       if (scheduledAt != null) {
         toast(t('train.scheduledNav', {
           id: task.id,
-          time: new Date(scheduledAt * 1000).toLocaleString('zh-CN', { hour12: false }),
+          time: new Date(scheduledAt * 1000).toLocaleString(i18n.language, { hour12: false }),
         }), 'success')
       } else {
         toast(t('train.enqueuedNav', { id: task.id }), 'success')
@@ -534,293 +580,313 @@ export default function TrainPage() {
     void onEnqueue(ts)
   }
 
+  // ── form tabs, filters and the config map ───────────────────────────────
+  const props = schema?.schema.properties ?? {}
+  const disabledSet = new Set(disabledFields)
+  const isLocked = (name: string) => {
+    const p = props[name]
+    return disabledSet.has(name) || (!!p?.disable_when && !!config && evalShowWhen(p.disable_when, config))
+  }
+  const isChanged = (name: string) => !!baseline && !!config && name in baseline && !sameValue(baseline[name], config[name])
+  const isNonDefault = (name: string) => !!config && props[name] != null && !sameValue(props[name].default, config[name])
+  /** Fields of a group as the form would show them right now. */
+  const groupFields = (key: string): string[] =>
+    Object.entries(props)
+      .filter(([, p]) => !p.hidden && (!p.advanced || advancedMode) && (p.group ?? 'misc') === key
+        && (!config || evalShowWhen(p.show_when, config)))
+      .map(([n]) => n)
+  const tabGroups = (id: TrainTabId): string[] => {
+    const own = TRAIN_TABS.find((x) => x.id === id)!.groups as readonly string[]
+    if (id !== 'system') return [...own]
+    // groups a newer schema adds land on the last tab
+    const known = new Set(TRAIN_TABS.flatMap((x) => x.groups as readonly string[]))
+    return [...own, ...(schema?.groups ?? []).map((g) => g.key).filter((k) => !known.has(k))]
+  }
+  const tabOf = (groupKey: string): TrainTabId =>
+    TRAIN_TABS.find((x) => (x.groups as readonly string[]).includes(groupKey))?.id ?? 'system'
+  const tabFieldNames = (id: TrainTabId) => tabGroups(id).flatMap(groupFields)
+  const currentFields = tabFieldNames(tab)
+  const filterFn = fieldFilter === 'changed' ? isChanged
+    : fieldFilter === 'nondefault' ? isNonDefault
+      : fieldFilter === 'locked' ? isLocked
+        : undefined
+  const totalFields = TRAIN_TABS.reduce((s, x) => s + tabFieldNames(x.id).length, 0)
+
+  const resetTab = async () => {
+    const cur = configRef.current
+    if (!cur || !schema) return
+    const keep = new Set([...GLOBAL_MODEL_FIELDS, ...(configResp?.project_specific_fields ?? [])])
+    const next: ConfigData = { ...cur }
+    let n = 0
+    for (const name of currentFields) {
+      if (keep.has(name) || isLocked(name)) continue
+      const def = props[name]?.default
+      if (def === undefined || sameValue(def, cur[name])) continue
+      next[name] = def
+      n++
+    }
+    if (n === 0) {
+      toast(t('train.resetTabNothing'), 'success')
+      return
+    }
+    const ok = await confirm(t('train.resetTabConfirm', { count: n, tab: t(`train.tab_${tab}`) }), { tone: 'warn', okText: t('train.resetTabOk') })
+    if (!ok) return
+    onFormChange(next)
+  }
+
+  const openGroup = (key: string) => {
+    setTab(tabOf(key))
+    setFieldFilter('all')
+    requestAnimationFrame(() => {
+      document.getElementById(`schema-group-${key}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    })
+  }
+
+  const modelName = (() => {
+    const p = String(config?.transformer_path ?? '')
+    const base = p.split(/[\\/]/).pop() ?? ''
+    return base.replace(/\.(safetensors|ckpt|pt|bin|gguf)$/i, '') || String(config?.model_family ?? '—')
+  })()
+  const subtitle = config
+    ? [modelName, `${String(config.lora_type ?? 'lora')} r${String(config.lora_rank ?? '—')}`, t('train.nParams', { count: totalFields })].join(' · ')
+    : t('steps.train.subtitle')
+
+  const triggerUnderDop = !!config?.dop_enabled && groupFields('loss').includes('dop_enabled')
+  const triggerRow = config ? (
+    <TriggerWordCard
+      projectId={project.id}
+      version={activeVersion}
+      dopEnabled={Boolean(config.dop_enabled)}
+      onSaved={reload}
+    />
+  ) : null
+
+  const saveBadge = saveStatus.state === 'saving'
+    ? <span className="ds-badge ds-mute">{t('train.saving')}</span>
+    : saveStatus.state === 'saved'
+      ? <span className="ds-badge ds-ok">{t('train.savedAt', { time: new Date(saveStatus.at).toLocaleTimeString(i18n.language, { hour: '2-digit', minute: '2-digit' }) })}</span>
+      : saveStatus.state === 'error'
+        ? <span className="ds-badge ds-err" title={saveStatus.error}>{t('train.saveError')}</span>
+        : null
+
   return (
     <StepShell
       idx={6}
       mobilePageScroll
-      eyebrow={`Step 5 · ${project.title} / ${activeVersion?.label ?? '—'}`}
+      eyebrow={t('steps.eyebrowStep', { n: 5, label: activeVersion.label })}
       title={t('steps.train.title')}
-      subtitle={t('steps.train.subtitle')}
+      subtitle={subtitle}
       actions={
         <>
-          {/* 0.17 P-B — 定时训练：延迟 N 小时 / 指定时间，建成 scheduled task。
-              样式对齐项目页「导入项目」（btn-ghost btn-sm）。 */}
+          {/* 0.17 P-B — 定时训练：延迟 N 小时 / 指定时间，建成 scheduled task。 */}
           <button
+            type="button"
             onClick={() => setScheduleOpen(true)}
             disabled={busy || !configResp?.has_config}
-            className="btn btn-ghost btn-sm"
+            className="ds-ctl"
             title={t('train.scheduleHint')}
             data-testid="train-schedule-btn"
           >
             {t('train.scheduleBtn')}
           </button>
-          {/* 样式对齐项目页「新建项目」（btn-primary btn-sm + icon + 文字） */}
           <button
+            type="button"
             onClick={() => void onEnqueue()}
             disabled={busy || !configResp?.has_config}
-            className="btn btn-primary btn-sm"
+            className="ds-btn-primary"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            <span>{t('train.startTrainBtn')}</span>
+            {t('train.startTrainBtn')}
           </button>
           {scheduleOpen && (
-            <div
-              role="dialog"
-              aria-modal="true"
-              className="fixed inset-0 z-40 flex items-center justify-center bg-zinc-950/40 backdrop-blur-[2px]"
-              onMouseDown={(e) => { if (e.target === e.currentTarget) setScheduleOpen(false) }}
-              data-testid="train-schedule-modal"
-            >
-              <div className="bg-elevated border border-subtle rounded-2xl w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl">
-                <h2 className="m-0 text-lg font-semibold text-fg-primary">
-                  {t('train.scheduleBtn')}
-                </h2>
-                <div className="flex flex-col gap-1.5">
-                  <span className="caption">
-                    {t('train.scheduleDelaySection')}
-                  </span>
-                  <div className="flex gap-1.5">
-                    {[1, 2, 4, 8].map((h) => (
-                      <button
-                        key={h}
-                        onClick={() => void onEnqueue(Date.now() / 1000 + h * 3600)}
-                        disabled={busy}
-                        className="btn btn-secondary btn-sm flex-1"
-                        data-testid={`train-schedule-delay-${h}h`}
-                      >
-                        +{h}h
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <span className="caption">
-                    {t('train.scheduleAbsoluteSection')}
-                  </span>
-                  <input
-                    type="datetime-local"
-                    className="input"
-                    value={scheduleTime}
-                    min={toLocalInputValue(new Date())}
-                    onChange={(e) => setScheduleTime(e.target.value)}
-                    data-testid="train-schedule-time"
-                  />
-                </div>
-                <div className="flex gap-2 justify-end mt-1">
-                  <button
-                    onClick={() => setScheduleOpen(false)}
-                    className="btn btn-secondary"
-                  >
-                    {t('common.cancel')}
-                  </button>
-                  <button
-                    onClick={onScheduleAbsolute}
-                    disabled={busy || !scheduleTime}
-                    className="btn btn-primary"
-                    data-testid="train-schedule-confirm"
-                  >
-                    {t('train.scheduleConfirm')}
-                  </button>
-                </div>
-              </div>
-            </div>
+            <ScheduleDialog
+              busy={busy}
+              scheduleTime={scheduleTime}
+              minTime={toLocalInputValue(new Date())}
+              onTimeChange={setScheduleTime}
+              onDelay={(h) => void onEnqueue(Date.now() / 1000 + h * 3600)}
+              onConfirm={onScheduleAbsolute}
+              onClose={() => setScheduleOpen(false)}
+            />
           )}
         </>
       }
+      footer={<TrainLogBar project={project} vid={vid} />}
     >
-      <div className="flex flex-col h-full gap-3 m-h-auto">
-
-        {/* 两栏布局：左（预设 + config 编辑） / 右（估算面板） */}
-        <div className="flex flex-col md:flex-row gap-3 flex-1 min-h-0 overflow-y-auto md:overflow-visible m-page-scroll">
-
-          {/* 左栏：配置表单（flex-[3] 与右预览 flex-[1] 还原老 grid 3:1 比例） */}
-          <div className="flex flex-col gap-3 min-h-0 min-w-0 md:overflow-y-auto flex-[3] m-page-scroll">
-
-          {/* 预设 picker：dropdown 入口。0.8.2 起承认 version yaml 是 first-class
-              「项目专属配置」，不再显示「绑定哪个预设」+「已自定义」标签 —— 这套
-              判定逻辑骗人（全局模型 4 字段 fork 时被注入绝对路径，跟全局预设
-              相对路径 diff 永远存在）。预设变成纯"模板起点"概念。 */}
-          <section className="flex items-center gap-2.5 shrink-0 relative m-wrap">
-            <button
-              ref={pickerAnchorRef}
-              onClick={() => { setPickerOpen((v) => !v); setPickerSearch('') }}
-              disabled={busy}
-              className={[
-                'flex items-center gap-3 min-w-[300px] pl-3.5 pr-3 py-2.5 m-full',
-                'rounded-md border transition-[border-color,background] duration-100',
-                pickerOpen
-                  ? 'border-accent bg-accent-soft'
-                  : 'border-dim bg-surface shadow-sm hover:border-bold',
-                busy ? 'cursor-default' : 'cursor-pointer',
-              ].join(' ')}
-              title={configResp?.has_config
-                ? t('train.pickerTitleConfigured')
-                : t('train.pickerTitleEmpty')}
+      <div className="ds-train-scroll">
+        {/* config bar: which config this version trains with, save state, swap */}
+        <div className="ds-cfgbar" style={{ position: 'relative' }}>
+          <span className="ds-sect-icon" style={{ width: 34, height: 34, borderRadius: 10, background: 'var(--green-soft)', color: 'var(--green-text)' }}>{TrainIcon.sliders}</span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span className="ds-cfg-name">
+              {configResp?.has_config
+                ? t('train.scopedConfigLabel', { title: project.title, label: activeVersion.label })
+                : t('train.notConfiguredLabel')}
+            </span>
+            <span className="ds-cfg-sub">{configResp?.has_config ? t('train.cfgSub') : t('train.noConfigHint')}</span>
+          </span>
+          {saveBadge}
+          <button
+            ref={pickerAnchorRef}
+            type="button"
+            className="ds-ctl"
+            style={{ height: 34 }}
+            onClick={() => { setPickerOpen((v) => !v); setPickerSearch('') }}
+            disabled={busy}
+            aria-expanded={pickerOpen}
+            title={configResp?.has_config ? t('train.pickerTitleConfigured') : t('train.pickerTitleEmpty')}
+          >
+            {configResp?.has_config ? t('train.changeConfig') : t('train.pickConfig')}
+          </button>
+          <KebabMenu
+            label={t('train.configActions')}
+            trigger="icon"
+            items={[
+              { label: t('train.saveAsPreset'), onSelect: () => void onSaveAsPreset(), disabled: busy || !configResp?.has_config },
+              { label: t('train.newPresetAction'), onSelect: () => void startCreatePreset(), disabled: busy },
+            ]}
+          />
+          {pickerOpen && (
+            <div
+              ref={pickerPopRef}
+              role="dialog"
+              aria-label={t('train.presetLabel')}
+              className="ds-card"
+              style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 14, width: 480, maxWidth: 'calc(100% - 28px)', maxHeight: 480, display: 'flex', flexDirection: 'column', zIndex: 50, boxShadow: '0 18px 40px -18px rgba(20,22,20,.35)' }}
             >
-              <span className="caption">
-                {t('train.configChip')}
-              </span>
-              <span className={[
-                'text-md font-semibold flex-1 text-left truncate',
-                configResp?.has_config ? 'text-fg-primary' : 'text-fg-tertiary',
-              ].join(' ')}>
-                {configResp?.has_config
-                  ? t('train.scopedConfigLabel', { title: project.title, label: activeVersion.label })
-                  : t('train.notConfiguredLabel')}
-              </span>
-              <span className="text-fg-tertiary text-md">▾</span>
-            </button>
-            <button
-              onClick={() => void onSaveAsPreset()}
-              disabled={busy || !configResp?.has_config}
-              className="btn btn-ghost btn-sm"
-              title={t('train.saveAsPresetTitle')}
-            >
-              {t('train.saveAsPreset')}
-            </button>
-            {/* 自动保存指示（Settings / Presets 页同款）：600ms debounce 落盘后显示时间 */}
-            <SaveIndicator status={saveStatus} />
-
-            {/* popover */}
-            {pickerOpen && (
-              <div
-                ref={pickerPopRef}
-                role="dialog"
-                aria-label={t('train.presetLabel')}
-                className="absolute top-[calc(100%+6px)] left-0 w-[480px] max-h-[480px] m-full overflow-hidden rounded-lg border border-subtle bg-surface shadow-lg flex flex-col z-50"
-              >
-                {/* search */}
-                <div className="p-2.5 border-b border-subtle flex items-center gap-2">
-                  <span className="relative flex-1 inline-flex items-center">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                      strokeWidth="2" strokeLinecap="round"
-                      className="absolute left-2 text-fg-tertiary pointer-events-none">
-                      <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
-                    </svg>
-                    <input
-                      autoFocus
-                      className="input w-full pl-7 text-sm"
-                      placeholder={t('train.filterPresets')}
-                      value={pickerSearch}
-                      onChange={(e) => setPickerSearch(e.target.value)}
-                    />
-                  </span>
-                </div>
-
-                {/* grid */}
-                <div className="flex-1 min-h-0 overflow-y-auto p-2.5">
-                  <div className="grid grid-cols-2 gap-2 m-grid-1">
-                    {/* + 新建预设 永远第一格（跟 Presets 页面一致）。pickerSearch
-                        非空时藏起来 —— 用户在搜旧的，新建是另一条意图。 */}
-                    {!pickerSearch && (
-                      <button
-                        onClick={() => void startCreatePreset()}
-                        disabled={busy}
-                        className={[
-                          'rounded-sm px-2.5 py-2 text-left border border-dashed transition-colors',
-                          'border-subtle text-accent hover:border-accent hover:bg-accent-soft',
-                          busy ? 'cursor-default' : 'cursor-pointer',
-                          'bg-transparent text-sm font-semibold',
-                        ].join(' ')}
-                      >
-                        {t('train.newPreset')}
-                      </button>
-                    )}
-                    {filteredPresets.map((p) => {
-                      // 0.8.2 起预设跟 version 脱钩，picker 卡片不再有
-                      // "active = 当前绑定" 概念，全部一视同仁地作为可用模板。
-                      return (
-                        <button
-                          key={p.name}
-                          onClick={() => { setPickerOpen(false); void onForkPreset(p.name) }}
-                          disabled={busy}
-                          className={[
-                            'rounded-sm px-2.5 py-2 text-left border transition-colors',
-                            'border-subtle bg-sunken hover:border-bold',
-                            busy ? 'cursor-default' : 'cursor-pointer',
-                          ].join(' ')}
-                        >
-                          <div className="text-sm font-mono font-semibold truncate text-fg-primary">{p.name}</div>
-                          <div className="text-xs text-fg-tertiary mt-0.5">
-                            {t('train.readPresetParams')}
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </div>
-                  {presets.length > 0 && filteredPresets.length === 0 && (
-                    <div className="text-fg-tertiary text-sm text-center py-4">
-                      {t('train.noMatch', { search: pickerSearch })}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </section>
-
-            {configResp === null || !schema ? (
-              <ConfigSkeleton label={t('train.loadingConfig')} />
-            ) : !configResp.has_config ? (
-              <div className="flex-1 flex items-center justify-center text-fg-tertiary text-sm rounded-md border border-dashed border-dim">
-                {t('train.noConfigHint')}
-              </div>
-            ) : config ? (
-              <section ref={schemaScrollRef} className="flex-1 min-h-0 overflow-y-auto pr-1 m-page-scroll">
-                <div className="flex justify-end mb-2">
-                  <div className="seg">
-                    <button
-                      type="button"
-                      onClick={() => !advancedMode || toggleAdvancedMode()}
-                      className={`seg-item ${!advancedMode ? 'is-active' : ''}`}
-                    >
-                      {t('train.simpleMode')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => advancedMode || toggleAdvancedMode()}
-                      className={`seg-item ${advancedMode ? 'is-active' : ''}`}
-                    >
-                      {t('train.advancedMode')}
-                    </button>
-                  </div>
-                </div>
-                <div className="mb-3">
-                  <TriggerWordCard
-                    projectId={project.id}
-                    version={activeVersion}
-                    dopEnabled={Boolean(config.dop_enabled)}
-                    onSaved={reload}
+              <div style={{ padding: 10, borderBottom: '1px solid var(--line)' }}>
+                <span className="ds-search">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+                  <input
+                    autoFocus
+                    className="ds-inp"
+                    placeholder={t('train.filterPresets')}
+                    value={pickerSearch}
+                    onChange={(e) => setPickerSearch(e.target.value)}
                   />
-                </div>
-                {(droppedFields.length > 0 || defaultedFields.length > 0) && (
-                  <div className="mb-3 rounded-md border border-warn bg-warn-soft px-3.5 py-2.5 text-xs text-warn space-y-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold">{t('presets.compatNoticeTitle')}</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const cur = configRef.current
-                          if (!cur) return
-                          void persistConfig(cur, true)
-                            .then(() => toast(t('presets.cleanLegacyDone'), 'success'))
-                            .catch((e) => toast(t('train.saveFailed', { error: e }), 'error'))
-                        }}
-                        className="btn btn-secondary btn-xs shrink-0 text-warn"
-                        title={t('presets.cleanLegacyTitle')}
-                      >
-                        {t('presets.cleanLegacyBtn')}
-                      </button>
-                    </div>
-                    {droppedFields.length > 0 && (
-                      <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
-                    )}
-                    {defaultedFields.length > 0 && (
-                      <div>{t('presets.defaultedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{defaultedFields.join(', ')}</code></div>
-                    )}
+                </span>
+              </div>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, alignContent: 'start' }}>
+                {/* + 新建预设 永远第一格（跟 Presets 页面一致）。pickerSearch
+                    非空时藏起来 —— 用户在搜旧的，新建是另一条意图。 */}
+                {!pickerSearch && (
+                  <button
+                    type="button"
+                    onClick={() => void startCreatePreset()}
+                    disabled={busy}
+                    className="ds-optcard"
+                    style={{ borderStyle: 'dashed', boxShadow: 'none', color: 'var(--green-text)', fontWeight: 600, fontSize: 12.5 }}
+                  >
+                    {t('train.newPreset')}
+                  </button>
+                )}
+                {filteredPresets.map((p) => (
+                  <button
+                    key={p.name}
+                    type="button"
+                    onClick={() => { setPickerOpen(false); void onForkPreset(p.name) }}
+                    disabled={busy}
+                    className="ds-optcard"
+                    style={{ flexDirection: 'column', gap: 3 }}
+                  >
+                    <span className="ds-mono" style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' }}>{p.name}</span>
+                    <span className="ds-kpi-meta">{t('train.readPresetParams')}</span>
+                  </button>
+                ))}
+                {presets.length > 0 && filteredPresets.length === 0 && (
+                  <div className="ds-muted" style={{ gridColumn: '1 / -1', textAlign: 'center', padding: 16, fontSize: 12.5 }}>
+                    {t('train.noMatch', { search: pickerSearch })}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {(droppedFields.length > 0 || defaultedFields.length > 0) && (
+          <div className="ds-note ds-warn" style={{ alignItems: 'center' }}>
+            <span style={{ flex: 1 }}>
+              <b style={{ fontWeight: 600 }}>{t('presets.compatNoticeTitle')}</b>
+              {droppedFields.length > 0 && (
+                <span style={{ display: 'block' }}>{t('presets.droppedFieldsBody')} <span className="ds-mono" style={{ fontSize: 11 }}>{droppedFields.join(', ')}</span></span>
+              )}
+              {defaultedFields.length > 0 && (
+                <span style={{ display: 'block' }}>{t('presets.defaultedFieldsBody')} <span className="ds-mono" style={{ fontSize: 11 }}>{defaultedFields.join(', ')}</span></span>
+              )}
+            </span>
+            <button
+              type="button"
+              className="ds-ctl"
+              style={{ height: 26, flex: 'none' }}
+              title={t('presets.cleanLegacyTitle')}
+              onClick={() => {
+                const cur = configRef.current
+                if (!cur) return
+                void persistConfig(cur, true)
+                  .then(() => toast(t('presets.cleanLegacyDone'), 'success'))
+                  .catch((e) => toast(t('train.saveFailed', { error: e }), 'error'))
+              }}
+            >
+              {t('presets.cleanLegacyBtn')}
+            </button>
+          </div>
+        )}
+
+        <TrainKpis stats={stats} />
+        <StepBudget stats={stats} activeVersion={activeVersion} />
+
+        {configResp === null || !schema ? (
+          <ConfigSkeleton label={t('train.loadingConfig')} />
+        ) : !configResp.has_config || !config ? (
+          <div className="ds-empty">
+            <span style={{ fontWeight: 500, color: 'var(--ink-2)' }}>{t('train.notConfiguredLabel')}</span>
+            <span style={{ fontSize: 11.5 }}>{t('train.noConfigHint')}</span>
+            <button type="button" className="ds-btn-primary" style={{ marginTop: 6 }} onClick={() => setPickerOpen(true)} disabled={busy}>{t('train.pickConfig')}</button>
+          </div>
+        ) : (
+          <>
+            <div className="ds-formsplit">
+              <div className="ds-card" style={{ minWidth: 0 }}>
+                <div className="ds-tabs" role="tablist">
+                  {TRAIN_TABS.map((x) => (
+                    <button
+                      key={x.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={tab === x.id}
+                      className={`ds-tab${tab === x.id ? ' ds-is-active' : ''}`}
+                      onClick={() => setTab(x.id)}
+                    >
+                      {t(`train.tab_${x.id}`)}<span className="ds-badge ds-mute">{tabFieldNames(x.id).length}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="ds-pane-head" style={{ flexWrap: 'wrap' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="ds-card-title">{t(`train.tab_${tab}`)}</div>
+                    <div className="ds-card-sub">
+                      {t('train.schemaGroups')}{' '}
+                      {tabGroups(tab).filter((g) => groupFields(g).length > 0).map((g, i) => (
+                        <span key={g}>{i > 0 && ' · '}<span className="ds-mono">{g}</span></span>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div className="ds-seg" role="group" aria-label={t('train.fieldModeLabel')}>
+                      <button type="button" className={`ds-seg-item${!advancedMode ? ' ds-is-active' : ''}`} onClick={() => { if (advancedMode) toggleAdvancedMode() }} aria-pressed={!advancedMode}>{t('train.simpleMode')}</button>
+                      <button type="button" className={`ds-seg-item${advancedMode ? ' ds-is-active' : ''}`} onClick={() => { if (!advancedMode) toggleAdvancedMode() }} aria-pressed={advancedMode}>{t('train.advancedMode')}</button>
+                    </div>
+                    <select className="ds-inp" style={{ width: 190 }} value={fieldFilter} onChange={(e) => setFieldFilter(e.target.value as FieldFilterMode)} aria-label={t('train.filterLabel')}>
+                      <option value="all">{t('train.filterAll', { n: currentFields.length })}</option>
+                      <option value="changed">{t('train.filterChanged', { n: currentFields.filter(isChanged).length })}</option>
+                      <option value="nondefault">{t('train.filterNonDefault', { n: currentFields.filter(isNonDefault).length })}</option>
+                      <option value="locked">{t('train.filterLocked', { n: currentFields.filter(isLocked).length })}</option>
+                    </select>
+                    <button type="button" className="ds-iconbtn" onClick={() => void resetTab()} aria-label={t('train.resetTab')} title={t('train.resetTab')}>{TrainIcon.reset}</button>
+                  </div>
+                </div>
+                {/* Trigger word: under DOP (gated row) when DOP is on and its field is
+                    shown; otherwise at the top of the data tab, next to captions. */}
+                {tab === 'data' && !triggerUnderDop && triggerRow}
                 <SchemaForm
                   schema={schema}
                   values={config}
@@ -828,101 +894,173 @@ export default function TrainPage() {
                   disabledFields={disabledFields}
                   disabledHints={disabledHints}
                   autoHints={autoHints}
-                  fieldSuffixes={makeResetSuffixes(config, setConfigSync)}
+                  fieldSuffixes={makeResetSuffixes(config, applyEdit)}
                   advancedMode={advancedMode}
+                  groupKeys={tabGroups(tab)}
+                  fieldFilter={filterFn}
+                  baseline={baseline}
+                  emptyHint={t('train.filterEmpty')}
+                  afterField={triggerUnderDop ? { dop_enabled: triggerRow } : undefined}
                 />
-                {familySwitchTarget && config && (
+                {familySwitchTarget && (
                   <FamilySwitchDialog
                     target={familySwitchTarget}
                     config={config}
                     onApply={(switched) => {
-                      setConfigSync(switched)
+                      applyEdit(switched)
                       setFamilySwitchTarget(null)
                     }}
                     onCancel={() => setFamilySwitchTarget(null)}
                   />
                 )}
-              </section>
-            ) : (
-              <ConfigSkeleton label={t('train.loadingConfig')} />
-            )}
-          </div>
+              </div>
 
-        {/* 中栏：章节锚点导航（固定窄列，始终可见） */}
-        {configResp?.has_config && config && visibleGroups.length > 0 && (
-          <div className="hidden md:block shrink-0 w-[168px] overflow-y-auto">
-            <SchemaSectionIndex
-              groups={visibleGroups}
-              scrollContainer={schemaScrollRef}
-            />
-          </div>
-        )}
-
-        {/* 把手：单竖线 + 顶部圆圈 ›/‹ —— 分隔预览抽屉 */}
-        <div className="relative w-3 shrink-0 self-stretch hidden md:flex justify-center">
-          <div className="w-px bg-subtle" />
-          <button
-            type="button"
-            onClick={() => setPreviewOpen((v) => !v)}
-            title={previewOpen ? t('train.collapsePreview') : t('train.expandPreview')}
-            aria-label={previewOpen ? t('train.collapsePreview') : t('train.expandPreview')}
-            className="absolute top-1 left-1/2 -translate-x-1/2 w-6 h-6 rounded-full border border-subtle bg-surface text-fg-tertiary hover:text-accent hover:border-accent flex items-center justify-center text-xs leading-none shadow-sm"
-          >
-            {previewOpen ? '›' : '‹'}
-          </button>
-        </div>
-
-        {/* 右栏：预览抽屉（可收回），双 tab：数据分布 / YAML 预览。数据分布保持
-            与左表单 flex-[3] 的 3:1 老比例；YAML tab 加宽到 3:2（yaml 行长，1/4
-            宽不断折行看不清）。收起时整列不渲染、空间归表单。YAML 预览 = 按
-            show_when 裁剪后的 yaml，实时跟随表单，与落盘 config.yaml 同内容。 */}
-        {previewOpen && (
-          <div className={`${previewTab === 'config' ? 'flex-[2]' : 'flex-[1]'} min-w-0 flex flex-col min-h-0 m-page-scroll`}>
-            {/* tab 条靠右：切 YAML tab 时抽屉加宽、左缘会移动，右对齐锚在固定的
-                右缘上，切换时开关自身不跟着跳。 */}
-            <div className="shrink-0 mb-2 flex justify-end">
-              <div className="seg">
-                <button
-                  type="button"
-                  onClick={() => setPreviewTab('stats')}
-                  className={`seg-item ${previewTab === 'stats' ? 'is-active' : ''}`}
-                >
-                  {t('train.previewTabStats')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPreviewTab('config')}
-                  className={`seg-item ${previewTab === 'config' ? 'is-active' : ''}`}
-                >
-                  {t('train.previewTabYaml')}
-                </button>
+              <div className="ds-card ds-train-preview">
+                <div className="ds-card-head ds-pad">
+                  <div><div className="ds-card-title">{t('train.previewTitle')}</div><div className="ds-card-sub">{t('train.previewSub')}</div></div>
+                  <div className="ds-card-tools">
+                    <div className="ds-seg" role="group">
+                      <button type="button" className={`ds-seg-item${previewTab === 'stats' ? ' ds-is-active' : ''}`} onClick={() => setPreviewTab('stats')} aria-pressed={previewTab === 'stats'}>{t('train.previewTabStats')}</button>
+                      <button type="button" className={`ds-seg-item${previewTab === 'config' ? ' ds-is-active' : ''}`} onClick={() => setPreviewTab('config')} aria-pressed={previewTab === 'config'}>{t('train.previewTabYaml')}</button>
+                    </div>
+                  </div>
+                </div>
+                {previewTab === 'stats' ? (
+                  <PreviewData stats={stats} projectId={project.id} vid={vid} maskedLoss={config.masked_loss === true} />
+                ) : (
+                  <div style={{ padding: '2px 17px 16px', display: 'flex', flexDirection: 'column', minHeight: 420, maxHeight: 'calc(100vh - 220px)' }}>
+                    <ConfigYamlPanel config={config} fileLabel="config.yaml" className="flex-1 flex flex-col min-h-0" />
+                  </div>
+                )}
               </div>
             </div>
-            {previewTab === 'stats' ? (
-              <div className="flex-1 min-h-0 overflow-y-auto m-page-scroll">
-                <DatasetStatsPanel
-                  projectId={project.id}
-                  activeVersion={activeVersion}
-                  reg={reg}
-                  config={config}
-                />
-              </div>
-            ) : config ? (
-              <ConfigYamlPanel
-                config={config}
-                fileLabel="config.yaml"
-                className="flex-1 flex flex-col min-h-0 train-yaml-panel"
-              />
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-fg-tertiary text-sm rounded-md border border-dashed border-dim">
-                {t('train.noConfigHint')}
-              </div>
-            )}
-          </div>
+
+            <ConfigMap
+              schema={schema}
+              groupFields={groupFields}
+              isChanged={isChanged}
+              isNonDefault={isNonDefault}
+              isLocked={isLocked}
+              openKey={tab}
+              tabOf={tabOf}
+              onOpen={openGroup}
+            />
+
+            <RecentChanges
+              changes={changes}
+              schema={schema}
+              onRevert={revertChange}
+            />
+          </>
         )}
       </div>
-    </div>
     </StepShell>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Pieces of the page (mockup Train / TrainModel / TrainData / TrainOptim /
+// TrainSystem / TrainOutput)
+// ---------------------------------------------------------------------------
+
+type TrainTabId = 'model' | 'data' | 'optim' | 'system'
+type FieldFilterMode = 'all' | 'changed' | 'nondefault' | 'locked'
+
+/** Which schema groups each tab of the form shows. */
+const TRAIN_TABS = [
+  { id: 'model', groups: ['model', 'lora'] },
+  { id: 'data', groups: ['dataset', 'caption'] },
+  { id: 'optim', groups: ['training', 'timestep_sampling', 'loss', 'noise_augmentation'] },
+  { id: 'system', groups: ['system', 'output', 'sample', 'eval_validation', 'monitor'] },
+] as const satisfies ReadonlyArray<{ id: TrainTabId; groups: readonly string[] }>
+
+interface ChangeEntry {
+  field: string
+  from: unknown
+  to: unknown
+  at: number
+}
+
+const TrainIcon = {
+  sliders: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
+  ),
+  reset: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg>
+  ),
+  samples: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>
+  ),
+  steps: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M4 18h4v-4h4v-4h4V6h4" /></svg>
+  ),
+  vram: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><rect x="3" y="7" width="18" height="10" rx="2" /><path d="M7 7V4M11 7V4M15 7V4M19 20v-3M5 20v-3" /></svg>
+  ),
+  gpu: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M3 12h4l3-7 4 14 3-7h4" /></svg>
+  ),
+}
+
+// Donut / legend colours of the epoch composition (train folders, then reg).
+const COMPOSITION_COLORS = ['#a3db52', '#cfe3ad', '#e3ecd4', '#bcd98e', '#8fc43f', '#dbe8c4']
+const REG_COLOR = '#d4d5d1'
+
+function formatNum(n: number, lang: string): string {
+  return new Intl.NumberFormat(lang).format(n)
+}
+
+/** Scheduling dialog: a delay of 1–8 hours or an exact time. */
+function ScheduleDialog({ busy, scheduleTime, minTime, onTimeChange, onDelay, onConfirm, onClose }: {
+  busy: boolean
+  scheduleTime: string
+  minTime: string
+  onTimeChange: (v: string) => void
+  onDelay: (hours: number) => void
+  onConfirm: () => void
+  onClose: () => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-40 flex items-center justify-center"
+      style={{ background: 'rgba(20,22,20,.18)' }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
+      data-testid="train-schedule-modal"
+    >
+      <div className="ds-card" style={{ width: '90%', maxWidth: 440, padding: 20, display: 'flex', flexDirection: 'column', gap: 16, boxShadow: '0 24px 60px -24px rgba(20,22,20,.4)' }}>
+        <div className="ds-card-title" style={{ fontSize: 16 }}>{t('train.scheduleBtn')}</div>
+        <div>
+          <div className="ds-cap" style={{ marginBottom: 8 }}>{t('train.scheduleDelaySection')}</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[1, 2, 4, 8].map((h) => (
+              <button key={h} type="button" onClick={() => onDelay(h)} disabled={busy} className="ds-ctl" style={{ flex: 1 }} data-testid={`train-schedule-delay-${h}h`}>
+                +{h}h
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="ds-cap" style={{ marginBottom: 8 }}>{t('train.scheduleAbsoluteSection')}</div>
+          <input
+            type="datetime-local"
+            className="ds-inp"
+            value={scheduleTime}
+            min={minTime}
+            onChange={(e) => onTimeChange(e.target.value)}
+            data-testid="train-schedule-time"
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button type="button" onClick={onClose} className="ds-ctl ds-ghost">{t('common.cancel')}</button>
+          <button type="button" onClick={onConfirm} disabled={busy || !scheduleTime} className="ds-btn-primary" data-testid="train-schedule-confirm">
+            {t('train.scheduleConfirm')}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -954,42 +1092,43 @@ function aggregateRegFolders(files: string[]): Array<{ name: string; image_count
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-/** 训练集 + 正则集分布右栏面板。
- *
- * 显示每个 repeat 文件夹（Kohya 风格 N_label）的 raw 图数 + 有效图数（repeat × imgs），
- * train / reg 分两块汇总，最后给出有效图数总和——这是 anima_train 单 epoch 的实际样本数。
- */
-function DatasetStatsPanel({
-  projectId,
-  activeVersion,
-  reg,
-  config,
-}: {
-  projectId: number
-  activeVersion: Version | null
+interface TrainStats {
+  trainFolders: Array<{ name: string; image_count: number }>
+  regFolders: Array<{ name: string; image_count: number }>
+  resoCount: number
+  trainEffective: number
+  regEffective: number
+  shownEffective: number
+  bs: number
+  ga: number
+  epochs: number
+  maxSteps: number
+  navitOn: boolean
+  navitEst: BucketDistribution['navit'] | null
+  stepsPerEpoch: number | null
+  naturalTotal: number | null
+  finalTotal: number | null
+  maxStepsTruncates: boolean
+  dist: BucketDistribution | null
+  estimate: TrainEstimate | null
   reg: RegStatus | null
-  config: ConfigData | null
-}) {
-  const { t } = useTranslation()
-  const trainFolders = activeVersion?.stats?.train_folders ?? []
+}
+
+/** Dataset numbers the trainer will see: effective samples (repeats ×
+ *  resolutions, train + reg), steps per epoch and in total, plus the backend's
+ *  bucket distribution and runtime estimate. */
+function useTrainStats(projectId: number, activeVersion: Version | null, reg: RegStatus | null, config: ConfigData | null): TrainStats {
+  const trainFolders = useMemo(() => activeVersion?.stats?.train_folders ?? [], [activeVersion])
   const regFolders = useMemo(
     () => (reg && reg.exists ? aggregateRegFolders(reg.files) : []),
     [reg]
   )
-
   const resoCount = configResolutions(config).length
-  const trainEffective = trainFolders.reduce(
-    (s, f) => s + folderEffective(f.name, f.image_count, resoCount),
-    0,
-  )
-  const regEffective = regFolders.reduce(
-    (s, f) => s + folderEffective(f.name, f.image_count, resoCount),
-    0,
-  )
+  const trainEffective = trainFolders.reduce((s, f) => s + folderEffective(f.name, f.image_count, resoCount), 0)
+  const regEffective = regFolders.reduce((s, f) => s + folderEffective(f.name, f.image_count, resoCount), 0)
   const totalEffective = trainEffective + regEffective
 
   // 桶分布 + NaViT 打包预估（后端用真 BucketManager / NavitPackBatchSampler 算）。
-  // fetch 在本层做（而非 BucketPreview 内部）：navit 模式下步数公式也吃这份数据。
   const vid = activeVersion?.id ?? 0
   const navitOn = config?.navit_packing === true
   const [dist, setDist] = useState<BucketDistribution | null>(null)
@@ -1023,6 +1162,7 @@ function DatasetStatsPanel({
   // Runtime estimate (VRAM verdict + measured it/s). Rides the same signature as
   // the distribution so it refreshes when the config that feeds it changes.
   const [estimate, setEstimate] = useState<TrainEstimate | null>(null)
+  const estSig = JSON.stringify([distSig, config?.blocks_to_swap, config?.batch_size, config?.lora_rank, config?.mixed_precision])
   useEffect(() => {
     if (!projectId || !vid) return
     let cancelled = false
@@ -1030,7 +1170,7 @@ function DatasetStatsPanel({
       .then((d) => { if (!cancelled) setEstimate(d) })
       .catch(() => { if (!cancelled) setEstimate(null) })
     return () => { cancelled = true }
-  }, [projectId, vid, distSig])
+  }, [projectId, vid, estSig])
 
   // 单 epoch 优化器步数估算（与 sd-scripts max_train_steps 同语义）。
   // - 常规路径：样本 ÷ (batch × ga)。不算 AR bucketing 损失（每桶最后一 batch
@@ -1038,7 +1178,6 @@ function DatasetStatsPanel({
   // - navit_packing：batch_size 不参与分批（NavitPackBatchSampler 按 token 预算
   //   拼包，一步 = 一包）——steps/epoch = ceil(包数 ÷ ga)，包数来自后端真打包模拟；
   //   模拟结果没到手前不显示估算（宁缺毋假）。
-  // schema 字段：batch_size / grad_accum / epochs / max_steps（max_steps=0 表示不限）。
   const bs = Number(config?.batch_size) || 1
   const ga = Number(config?.grad_accum) || 1
   const epochs = Number(config?.epochs) || 0
@@ -1055,167 +1194,330 @@ function DatasetStatsPanel({
     : ((authoritativeSamples ?? totalEffective) > 0
         ? Math.ceil((authoritativeSamples ?? totalEffective) / (bs * ga))
         : null)
-  const naturalTotal = stepsPerEpoch !== null && epochs > 0
-    ? stepsPerEpoch * epochs
-    : null
-  const finalTotal = naturalTotal !== null && maxSteps > 0
-    ? Math.min(maxSteps, naturalTotal)
-    : naturalTotal
-  const maxStepsTruncates =
-    maxSteps > 0 && naturalTotal !== null && maxSteps < naturalTotal
+  const naturalTotal = stepsPerEpoch !== null && epochs > 0 ? stepsPerEpoch * epochs : null
+  const finalTotal = naturalTotal !== null && maxSteps > 0 ? Math.min(maxSteps, naturalTotal) : naturalTotal
+  const maxStepsTruncates = maxSteps > 0 && naturalTotal !== null && maxSteps < naturalTotal
   // navit 下有效样本以真打包模拟为准（native 收拢多分辨率 fan-out、含 reg），
   // 前端 folderEffective 的 resoCount fan-out 在该模式下会虚算
   const shownEffective = navitEst && navitEst.samples > 0
     ? navitEst.samples
     : (authoritativeSamples ?? totalEffective)
 
-  return (
-    <div className="flex flex-col gap-3 min-w-0">
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <div className="flex items-center gap-1.5 mb-2.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
-          <span className="caption">{t('train.statsTitle')}</span>
-        </div>
-
-        <FolderSection
-          title="train/"
-          folders={trainFolders}
-          effective={trainEffective}
-          resoCount={resoCount}
-          empty={t('train.noTrainImages')}
-        />
-
-        <div className="h-2" />
-
-        <FolderSection
-          title="reg/"
-          folders={regFolders}
-          effective={regEffective}
-          resoCount={resoCount}
-          empty={reg && !reg.exists ? t('train.regNotBuilt') : t('train.noRegImages')}
-        />
-
-        {/* 总计 + 步数估算（不含 AR bucketing 误差；navit 走真打包模拟） */}
-        <div className="mt-2.5 pt-2 border-t border-subtle flex flex-col gap-1 text-xs">
-          <Row label={t('train.effectiveSamples')} value={String(shownEffective)} bold />
-          {navitOn ? (
-            navitEst && navitEst.packs_per_epoch > 0 ? (
-              <>
-                <Row
-                  label={t('train.navitPackLine')}
-                  value={`≈ ${navitEst.packs_per_epoch}`}
-                  dim
-                />
-                {ga > 1 && stepsPerEpoch !== null && (
-                  <Row
-                    label={t('train.navitGaLine', { ga })}
-                    value={`≈ ${stepsPerEpoch} steps/epoch`}
-                    dim
-                  />
-                )}
-              </>
-            ) : (
-              <Row label={t('train.navitEstimating')} value="…" dim />
-            )
-          ) : (
-            stepsPerEpoch !== null && (
-              <Row
-                label={`÷ batch × ga (${bs} × ${ga})`}
-                value={`≈ ${stepsPerEpoch} steps/epoch`}
-                dim
-              />
-            )
-          )}
-          {naturalTotal !== null && (
-            <Row
-              label={`× epochs (${epochs})`}
-              value={`≈ ${naturalTotal} steps`}
-              dim
-            />
-          )}
-          {finalTotal !== null && (
-            <Row
-              label={maxStepsTruncates ? t('train.maxStepsLabel', { n: maxSteps }) : t('train.totalSteps')}
-              value={`≈ ${finalTotal}`}
-              bold
-            />
-          )}
-          {/* Estimated wall time, from this project's last measured it/s. Absent
-              before the first run — a made-up number would be worse than none. */}
-          {estimate?.speed && finalTotal !== null && (
-            <Row
-              label={t('train.estDuration')}
-              value={`≈ ${formatDuration(finalTotal / estimate.speed.it_per_s)}`}
-              dim
-            />
-          )}
-          {estimate?.speed && finalTotal === null && (
-            <Row label={t('train.estSpeed')} value={`${estimate.speed.it_per_s.toFixed(2)} it/s`} dim />
-          )}
-        </div>
-      </div>
-
-      {estimate?.memory && (
-        <MemoryFitPanel memory={estimate.memory} />
-      )}
-
-      <BucketPreview dist={dist} />
-
-      <MaskedLossHint
-        projectId={projectId}
-        vid={activeVersion?.id ?? 0}
-        maskedLoss={config?.masked_loss === true}
-      />
-    </div>
-  )
+  return {
+    trainFolders, regFolders, resoCount, trainEffective, regEffective, shownEffective,
+    bs, ga, epochs, maxSteps, navitOn, navitEst, stepsPerEpoch, naturalTotal, finalTotal,
+    maxStepsTruncates, dist, estimate, reg,
+  }
 }
 
 /** Seconds → a short human duration. Deliberately coarse: an estimate that
  *  prints "2h 14m 07s" pretends to a precision it does not have. */
-function formatDuration(seconds: number): string {
+function formatDuration(seconds: number, t: TFunction): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return '—'
   const h = Math.floor(seconds / 3600)
   const m = Math.round((seconds % 3600) / 60)
-  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`
-  if (m > 0) return `${m}m`
-  return `${Math.round(seconds)}s`
+  if (h > 0) return m > 0 ? t('train.durHM', { h, m }) : t('train.durH', { h })
+  if (m > 0) return t('train.durM', { m })
+  return t('train.durS', { s: Math.round(seconds) })
+}
+
+function gib(bytes: number | null): number | null {
+  return bytes == null ? null : bytes / 1024 ** 3
 }
 
 function formatGiB(bytes: number | null): string {
-  if (bytes == null) return '—'
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  const v = gib(bytes)
+  return v == null ? '—' : `${v.toFixed(1)} GB`
 }
 
-/** "Will it fit" panel, driven by the very same preflight arithmetic that
- *  aborts the run — so the panel can never promise what the guard refuses.
- *  Only rendered when the backend could actually reach a verdict. */
-function MemoryFitPanel({ memory }: { memory: NonNullable<TrainEstimate['memory']> }) {
-  const { t } = useTranslation()
-  const ok = memory.ok
+/** Live GPU / CPU load for the fourth KPI (same feed as the top bar). */
+function useSystemLoad(): SystemStatsData | null {
+  const [stats, setStats] = useState<SystemStatsData | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    api.systemStats().then((s) => { if (!cancelled) setStats(s) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+  useEventStream((evt) => {
+    if (evt.type !== 'system_stats_updated') return
+    const payload = evt.payload as SystemStatsData | undefined
+    if (payload) setStats(payload)
+  })
+  return stats
+}
+
+function TrainKpis({ stats }: { stats: TrainStats }) {
+  const { t, i18n } = useTranslation()
+  const sys = useSystemLoad()
+  const lang = i18n.language
+  const { shownEffective, trainEffective, regEffective, stepsPerEpoch, finalTotal, estimate } = stats
+  const mem = estimate?.memory ?? null
+  const vNeed = gib(mem?.vram_need_bytes ?? null)
+  const vFree = gib(mem?.free_vram_bytes ?? null)
+  const gpu = sys?.gpu && sys.gpu.length > 0 ? sys.gpu[0] : null
+  const trainShare = shownEffective > 0 ? Math.min(100, (trainEffective / Math.max(1, trainEffective + regEffective)) * 100) : 0
   return (
-    <div className={`rounded-md border px-3 py-2.5 ${ok ? 'border-subtle bg-surface' : 'border-warn bg-warn-soft'}`}>
-      <div className="flex items-center gap-1.5 mb-2">
-        <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${ok ? 'bg-ok' : 'bg-warn'}`} />
-        <span className="caption uppercase tracking-[0.06em] text-xs">
-          {ok ? t('train.memoryFits') : t('train.memoryTight')}
-        </span>
+    <div className="ds-kpis ds-tight ds-train-kpis">
+      <div className="ds-card ds-kpi">
+        <div className="ds-kpi-top">
+          <span className="ds-kpi-icon">{TrainIcon.samples}</span>
+          <span style={{ marginLeft: 'auto' }} className="ds-kpi-meta">
+            {regEffective > 0 ? t('train.kpiSamplesSplit', { train: formatNum(trainEffective, lang), reg: formatNum(regEffective, lang) }) : t('train.kpiSamplesTrainOnly')}
+          </span>
+        </div>
+        <div className="ds-kpi-val" style={{ marginTop: 16 }}>{shownEffective > 0 ? formatNum(shownEffective, lang) : '—'}</div>
+        <div className="ds-kpi-label">{t('train.kpiSamples')}</div>
+        <span className="ds-meter" style={{ marginTop: 9 }}><i style={{ width: `${trainShare}%` }} /></span>
       </div>
-      <div className="flex flex-col gap-1 text-xs">
-        <Row label={t('train.vramNeeded')} value={formatGiB(memory.vram_need_bytes)} dim />
-        <Row label={t('train.vramFree')} value={formatGiB(memory.free_vram_bytes)} dim />
-        <Row label={t('train.ramNeeded')} value={formatGiB(memory.ram_need_bytes)} dim />
-        <Row
-          label={t('train.blocksSwapped')}
-          value={`${memory.blocks_to_swap} / ${memory.total_blocks}`}
-          dim
-        />
-        {!ok && memory.recommended_blocks_to_swap != null && (
-          <Row
-            label={t('train.blocksRecommended')}
-            value={String(memory.recommended_blocks_to_swap)}
-            bold
-          />
+
+      <div className="ds-card ds-kpi">
+        <div className="ds-kpi-top">
+          <span className="ds-kpi-icon">{TrainIcon.steps}</span>
+          <span style={{ marginLeft: 'auto' }} className="ds-kpi-meta">
+            {stepsPerEpoch != null ? t('train.kpiStepsPerEpoch', { n: formatNum(stepsPerEpoch, lang) }) : ''}
+          </span>
+        </div>
+        <div className="ds-kpi-val" style={{ marginTop: 16 }}>
+          {finalTotal != null ? formatNum(finalTotal, lang) : '—'}<small>{t('train.stepsUnit')}</small>
+        </div>
+        <div className="ds-kpi-label">
+          {estimate?.speed && finalTotal != null
+            ? t('train.kpiStepsTime', { time: formatDuration(finalTotal / estimate.speed.it_per_s, t), speed: estimate.speed.it_per_s.toFixed(2) })
+            : t('train.kpiStepsNoSpeed')}
+        </div>
+      </div>
+
+      <div className="ds-card ds-kpi">
+        <div className="ds-kpi-top">
+          <span className="ds-kpi-icon">{TrainIcon.vram}</span>
+          {mem && (
+            <span style={{ marginLeft: 'auto' }}>
+              <span className={`ds-badge ${mem.ok ? 'ds-ok' : 'ds-warn'}`}>{mem.ok ? t('train.memoryFits') : t('train.memoryTight')}</span>
+            </span>
+          )}
+        </div>
+        <div className="ds-kpi-val" style={{ marginTop: 16 }}>
+          {vNeed != null ? vNeed.toFixed(1) : '—'}{vFree != null && <small>/ {vFree.toFixed(1)} GB</small>}
+        </div>
+        <div className="ds-kpi-label">
+          {mem ? t('train.kpiVram', { swap: mem.blocks_to_swap, total: mem.total_blocks }) : t('train.kpiVramNone')}
+        </div>
+        {vNeed != null && vFree != null && vFree > 0 && (
+          <span className="ds-meter" style={{ marginTop: 9 }}><i className={mem?.ok ? undefined : 'ds-warn'} style={{ width: `${Math.min(100, (vNeed / vFree) * 100)}%` }} /></span>
         )}
+      </div>
+
+      <div className="ds-card ds-kpi">
+        <div className="ds-kpi-top">
+          <span className="ds-kpi-icon">{TrainIcon.gpu}</span>
+          <span style={{ marginLeft: 'auto' }} className="ds-kpi-meta">
+            {sys ? [t('train.kpiCpu', { n: Math.round(sys.cpu_pct) }), gpu?.temp_c != null ? `${gpu.temp_c} °C` : null].filter(Boolean).join(' · ') : ''}
+          </span>
+        </div>
+        <div className="ds-kpi-val" style={{ marginTop: 16 }}>
+          {gpu ? Math.round(gpu.util_pct) : sys ? Math.round(sys.cpu_pct) : '—'}<small>{gpu ? t('train.pctGpu') : t('train.pctCpu')}</small>
+        </div>
+        <div className="ds-kpi-label" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {gpu ? t('train.kpiLoadGpu', { name: gpu.name }) : t('train.kpiLoad')}
+        </div>
+        {(gpu || sys) && (
+          <span className="ds-meter" style={{ marginTop: 9 }}><i style={{ width: `${Math.min(100, gpu ? gpu.util_pct : sys!.cpu_pct)}%` }} /></span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** "Step budget": from files on disk to optimiser steps, the way the trainer
+ *  counts them. */
+function StepBudget({ stats, activeVersion }: { stats: TrainStats; activeVersion: Version }) {
+  const { t, i18n } = useTranslation()
+  const lang = i18n.language
+  const trainImages = stats.trainFolders.reduce((s, f) => s + f.image_count, 0)
+  const tagged = activeVersion.stats?.tagged_image_count ?? null
+  const regImages = stats.regFolders.reduce((s, f) => s + f.image_count, 0)
+  const repeats = Array.from(new Set(stats.trainFolders.map((f) => parseFolderMeta(f.name).repeat))).sort((a, b) => b - a)
+  const rows: Array<{ label: string; n: number | null; drop: React.ReactNode; tone?: 'hatch' | 'green' | 'soft'; dropTone?: 'red' | 'amber' | 'mute' }> = [
+    { label: t('train.budgetFiles'), n: trainImages, drop: null, tone: 'hatch' },
+  ]
+  if (tagged != null) {
+    const missing = Math.max(0, trainImages - tagged)
+    rows.push({
+      label: t('train.budgetCaptioned'),
+      n: tagged,
+      drop: missing > 0 ? t('train.budgetUncaptioned', { n: missing }) : t('train.budgetAllCaptioned'),
+      dropTone: missing > 0 ? 'red' : 'mute',
+    })
+  }
+  if (regImages > 0) {
+    rows.push({ label: t('train.budgetReg'), n: regImages, drop: t('train.budgetRegNote'), dropTone: 'mute' })
+  }
+  rows.push({
+    label: t('train.budgetSamples'),
+    n: stats.shownEffective || null,
+    drop: stats.navitOn
+      ? t('train.budgetNavitSamples')
+      : [repeats.length ? repeats.map((r) => `×${r}`).join(' · ') + ' ' + t('train.budgetByFolders') : null,
+        stats.resoCount > 1 ? t('train.budgetResos', { n: stats.resoCount }) : null,
+        regImages > 0 ? t('train.budgetPlusReg') : null].filter(Boolean).join(' · '),
+    tone: 'soft',
+    dropTone: 'mute',
+  })
+  rows.push({
+    label: t('train.budgetSteps'),
+    n: stats.stepsPerEpoch,
+    drop: stats.navitOn
+      ? (stats.navitEst ? t('train.budgetNavitSteps', { packs: formatNum(stats.navitEst.packs_per_epoch, lang), ga: stats.ga }) : t('train.navitEstimating'))
+      : t('train.budgetStepsNote', { bs: stats.bs, ga: stats.ga, epochs: stats.epochs, total: stats.finalTotal != null ? formatNum(stats.finalTotal, lang) : '—' })
+        + (stats.maxStepsTruncates ? ` · ${t('train.maxStepsLabel', { n: stats.maxSteps })}` : ''),
+    tone: 'green',
+    dropTone: 'mute',
+  })
+  const max = Math.max(1, ...rows.map((r) => r.n ?? 0))
+  return (
+    <div className="ds-card">
+      <div className="ds-card-head">
+        <div><div className="ds-card-title">{t('train.budgetTitle')}</div><div className="ds-card-sub">{t('train.budgetSub')}</div></div>
+      </div>
+      <div style={{ padding: '12px 17px 16px' }}>
+        {rows.map((r) => (
+          <div key={r.label} className="ds-frow">
+            <span className="ds-frow-label" style={{ width: 186 }}>{r.label}</span>
+            <span className="ds-frow-pct">{r.n != null && trainImages > 0 ? `${Math.round((r.n / trainImages) * 100)}%` : ''}</span>
+            <span className="ds-frow-n">{r.n != null ? formatNum(r.n, lang) : '—'}</span>
+            <span className="ds-frow-track">
+              <span
+                className={`ds-bar${r.tone === 'hatch' ? ' ds-hatch' : r.tone === 'green' ? ' ds-green' : ''}`}
+                style={{ width: `${Math.max(1, ((r.n ?? 0) / max) * 62)}%`, ...(r.tone === 'soft' ? { background: 'var(--green-line)' } : null) }}
+              />
+              {r.drop && <span className={`ds-drop ds-${r.dropTone ?? 'mute'}`}>{r.drop}</span>}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Right card, "Data" view: epoch composition, step counts, memory, buckets. */
+function PreviewData({ stats, projectId, vid, maskedLoss }: { stats: TrainStats; projectId: number; vid: number; maskedLoss: boolean }) {
+  const { t, i18n } = useTranslation()
+  const lang = i18n.language
+  const segments = [
+    ...stats.trainFolders.map((f, i) => ({
+      key: `t-${f.name}`, label: f.name, color: COMPOSITION_COLORS[i % COMPOSITION_COLORS.length],
+      value: folderEffective(f.name, f.image_count, stats.resoCount),
+    })),
+    ...stats.regFolders.map((f) => ({
+      key: `r-${f.name}`, label: `reg / ${f.name}`, color: REG_COLOR,
+      value: folderEffective(f.name, f.image_count, stats.resoCount),
+    })),
+  ].filter((s) => s.value > 0)
+  const sum = segments.reduce((s, x) => s + x.value, 0)
+  const trainImages = stats.trainFolders.reduce((s, f) => s + f.image_count, 0)
+  let offset = 25
+  const mem = stats.estimate?.memory ?? null
+  const vNeed = gib(mem?.vram_need_bytes ?? null)
+  const vFree = gib(mem?.free_vram_bytes ?? null)
+
+  return (
+    <div style={{ padding: '2px 17px 16px', display: 'flex', flexDirection: 'column', gap: 15 }}>
+      <div>
+        <div className="ds-cap" style={{ marginBottom: 10 }}>{t('train.compositionTitle', { n: formatNum(stats.shownEffective, lang) })}</div>
+        {segments.length === 0 ? (
+          <div className="ds-muted" style={{ fontSize: 12 }}>{t('train.noTrainImages')}</div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <svg width="96" height="96" viewBox="0 0 42 42" aria-hidden="true" style={{ flex: 'none' }}>
+              <circle cx="21" cy="21" r="15.9155" fill="none" stroke="var(--sunken)" strokeWidth="5" />
+              {segments.map((s) => {
+                const pct = (s.value / sum) * 100
+                const el = (
+                  <circle key={s.key} cx="21" cy="21" r="15.9155" fill="none" stroke={s.color} strokeWidth="5"
+                    strokeDasharray={`${pct} ${100 - pct}`} strokeDashoffset={offset} />
+                )
+                offset -= pct
+                return el
+              })}
+              <text x="21" y="20.6" textAnchor="middle" fontSize="7" fontWeight="600" fill="var(--ink)">{trainImages}</text>
+              <text x="21" y="25.4" textAnchor="middle" fontSize="3.4" fill="var(--ink-3)">{t('train.trainImagesShort')}</text>
+            </svg>
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {segments.map((s) => (
+                <div key={s.key} className="ds-kv">
+                  <span className="ds-k ds-legend" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><s style={{ background: s.color }} />{s.label}</span>
+                  <span className="ds-v">{formatNum(s.value, lang)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 13, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div><div className="ds-cap">{t('train.statStepsEpoch')}</div><div className="ds-stat-v">{stats.stepsPerEpoch != null ? formatNum(stats.stepsPerEpoch, lang) : '—'}</div></div>
+        <div><div className="ds-cap">{stats.maxStepsTruncates ? t('train.maxStepsLabel', { n: stats.maxSteps }) : t('train.totalSteps')}</div><div className="ds-stat-v" style={{ color: 'var(--green-text)' }}>{stats.finalTotal != null ? formatNum(stats.finalTotal, lang) : '—'}</div></div>
+        <div><div className="ds-cap">{t('train.statEpochs')}</div><div className="ds-stat-v">{stats.epochs || '—'}</div></div>
+        <div><div className="ds-cap">{t('train.estDuration')}</div><div className="ds-stat-v">{stats.estimate?.speed && stats.finalTotal != null ? `≈ ${formatDuration(stats.finalTotal / stats.estimate.speed.it_per_s, t)}` : '—'}</div></div>
+      </div>
+
+      {mem && (
+        <div style={{ borderTop: '1px solid var(--line)', paddingTop: 13 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 9 }}>
+            <span className="ds-cap" style={{ flex: 1 }}>{t('train.memoryTitle')}</span>
+            <span className={`ds-badge ${mem.ok ? 'ds-ok' : 'ds-warn'}`}>{mem.ok ? t('train.memoryFits') : t('train.memoryTight')}</span>
+          </div>
+          {vNeed != null && vFree != null && vFree > 0 && (
+            <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: 'var(--sunken)' }}>
+              <span style={{ width: `${Math.min(100, (vNeed / vFree) * 100)}%`, background: mem.ok ? 'var(--green-600)' : '#d3a53a' }} title={t('train.vramNeeded')} />
+            </div>
+          )}
+          <div className="ds-kv" style={{ marginTop: 8 }}><span className="ds-k">{t('train.vramNeeded')}</span><span className="ds-v">{formatGiB(mem.vram_need_bytes)}</span></div>
+          <div className="ds-kv"><span className="ds-k">{t('train.vramFree')}</span><span className="ds-v">{formatGiB(mem.free_vram_bytes)}</span></div>
+          <div className="ds-kv"><span className="ds-k">{t('train.ramNeeded')}</span><span className="ds-v">{formatGiB(mem.ram_need_bytes)}{mem.avail_ram_bytes != null ? ` / ${formatGiB(mem.avail_ram_bytes)}` : ''}</span></div>
+          <div className="ds-kv"><span className="ds-k">{t('train.blocksSwapped')}</span><span className="ds-v">{mem.blocks_to_swap} / {mem.total_blocks}</span></div>
+          {!mem.ok && mem.recommended_blocks_to_swap != null && (
+            <div className="ds-kv"><span className="ds-k">{t('train.blocksRecommended')}</span><span className="ds-v ds-acc">{mem.recommended_blocks_to_swap}</span></div>
+          )}
+        </div>
+      )}
+
+      <BucketBars dist={stats.dist} />
+
+      <MaskedLossHint projectId={projectId} vid={vid} maskedLoss={maskedLoss} />
+    </div>
+  )
+}
+
+/** Resolution buckets as bars (top six, the rest folded into "…"). With
+ *  NaViT-native there are no buckets, so the native size histogram is shown. */
+function BucketBars({ dist }: { dist: BucketDistribution | null }) {
+  const { t } = useTranslation()
+  if (!dist) return null
+  const native = !!dist.navit?.native
+  const all = native
+    ? dist.navit!.sizes
+    : dist.groups.flatMap((g) => g.buckets)
+  if (all.length === 0) return null
+  const sorted = [...all].sort((a, b) => b.count - a.count)
+  const top = sorted.slice(0, 6)
+  const restCount = sorted.slice(6).reduce((s, x) => s + x.count, 0)
+  const max = Math.max(1, ...top.map((b) => b.count), restCount)
+  const label = (b: { w: number; h: number }) => (b.w === b.h ? `${b.w}²` : `${b.w}×${b.h}`)
+  return (
+    <div style={{ borderTop: '1px solid var(--line)', paddingTop: 13 }}>
+      <div className="ds-cap" style={{ marginBottom: 10 }}>{native ? t('train.navitDistTitle') : t('train.bucketDistTitle')}</div>
+      <div className="ds-barset">
+        {top.map((b) => <i key={`${b.w}x${b.h}`} style={{ height: `${(b.count / max) * 100}%` }} title={`${b.w}×${b.h} · ${b.count}`} />)}
+        {restCount > 0 && <i className="ds-mute" style={{ height: `${(restCount / max) * 100}%` }} title={t('train.bucketRest', { n: restCount })} />}
+      </div>
+      <div className="ds-axis">
+        {top.map((b) => <span key={`${b.w}x${b.h}`}>{label(b)}</span>)}
+        {restCount > 0 && <span>…</span>}
+      </div>
+      <div className="ds-kpi-meta" style={{ marginTop: 8 }}>
+        {native ? t('train.navitDistHint') : dist.navit ? t('train.navitBucketHint') : t('train.bucketDistHint')}
+        {native && dist.navit!.downscaled > 0 && <> {t('train.navitDistDownscaled', { n: dist.navit!.downscaled })}</>}
       </div>
     </div>
   )
@@ -1246,178 +1548,195 @@ function MaskedLossHint({
   }, [projectId, vid])
 
   if (maskCount === 0 || maskedLoss) return null
-  return (
-    <div className="rounded-md border border-subtle bg-surface px-3 py-2.5 text-xs text-fg-secondary leading-relaxed">
-      {t('train.maskedLossHint', { n: maskCount })}
-    </div>
-  )
+  return <div className="ds-note ds-info" style={{ fontSize: 11.5 }}>{t('train.maskedLossHint', { n: maskCount })}</div>
 }
 
-/** 训练集实际分布面板（数据由 DatasetStatsPanel 统一 fetch）。
- *  - 常规 / navit 非 native：ARB 桶分布（后端用真 BucketManager 算）。trainer 用
- *    drop_last=False —— 桶不满只出短 batch、不丢图，所以这里不做丢图警告。
- *  - navit-native：训练绕过 ARB 桶（每图原生尺寸 floor-16px），显示原生尺寸
- *    直方图（真打包模拟返回），不再展示实际不存在的桶。 */
-function BucketPreview({ dist }: { dist: BucketDistribution | null }) {
-  const { t } = useTranslation()
-  if (!dist) return null
-
-  if (dist.navit?.native) {
-    const sizes = dist.navit.sizes
-    if (sizes.length === 0) return null
-    const top = sizes.slice(0, 10)
-    const rest = sizes.slice(10)
-    const restCount = rest.reduce((s, x) => s + x.count, 0)
-    return (
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <div className="flex items-center gap-1.5 mb-2.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
-          <span className="caption">{t('train.navitDistTitle')}</span>
-        </div>
-        <div className="flex flex-col gap-0.5">
-          {top.map((b) => (
-            <div
-              key={`${b.w}x${b.h}`}
-              className="flex items-baseline gap-1.5 text-xs font-mono pl-1"
-            >
-              <span className="text-fg-tertiary">{b.w}×{b.h}</span>
-              <span className="flex-1 border-b border-dotted border-subtle self-end mb-1" />
-              <span className="text-fg-primary">{b.count}</span>
-            </div>
-          ))}
-          {rest.length > 0 && (
-            <div className="text-xs font-mono text-fg-tertiary pl-1">
-              {t('train.navitDistMore', { kinds: rest.length, n: restCount })}
-            </div>
-          )}
-        </div>
-        <div className="text-[10px] text-fg-tertiary mt-2">
-          {t('train.navitDistHint')}
-          {dist.navit.downscaled > 0 && (
-            <> {t('train.navitDistDownscaled', { n: dist.navit.downscaled })}</>
-          )}
-        </div>
-      </div>
-    )
-  }
-
-  if (dist.groups.length === 0) return null
-
-  return (
-    <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-      <div className="flex items-center gap-1.5 mb-2.5">
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
-        <span className="caption">{t('train.bucketDistTitle')}</span>
-      </div>
-      <div className="flex flex-col gap-2">
-        {dist.groups.map((g) => (
-          <div key={g.reso}>
-            <div className="text-xs font-mono text-fg-secondary mb-1">{g.reso}px</div>
-            <div className="flex flex-col gap-0.5">
-              {g.buckets.map((b) => (
-                <div
-                  key={`${b.w}x${b.h}`}
-                  className="flex items-baseline gap-1.5 text-xs font-mono pl-1"
-                >
-                  <span className="text-fg-tertiary">{b.w}×{b.h}</span>
-                  <span className="flex-1 border-b border-dotted border-subtle self-end mb-1" />
-                  <span className="text-fg-primary">{b.count}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="text-[10px] text-fg-tertiary mt-2">
-        {dist.navit ? t('train.navitBucketHint') : t('train.bucketDistHint')}
-      </div>
-    </div>
-  )
-}
-
-function FolderSection({
-  title,
-  folders,
-  effective,
-  resoCount,
-  empty,
-}: {
-  title: string
-  folders: Array<{ name: string; image_count: number }>
-  effective: number
-  resoCount: number
-  empty: string
+/** "Config map": every schema group with its field counts and state; a click
+ *  opens the tab that holds it. */
+function ConfigMap({ schema, groupFields, isChanged, isNonDefault, isLocked, openKey, tabOf, onOpen }: {
+  schema: SchemaResponse
+  groupFields: (key: string) => string[]
+  isChanged: (name: string) => boolean
+  isNonDefault: (name: string) => boolean
+  isLocked: (name: string) => boolean
+  openKey: TrainTabId
+  tabOf: (key: string) => TrainTabId
+  onOpen: (key: string) => void
 }) {
   const { t } = useTranslation()
+  const rows = schema.groups
+    .map((g) => {
+      const fields = groupFields(g.key)
+      return {
+        key: g.key,
+        label: schemaGroupLabel(g.key, g.label, t),
+        n: fields.length,
+        changed: fields.filter(isChanged).length,
+        nonDefault: fields.filter(isNonDefault).length,
+        locked: fields.filter(isLocked).length,
+      }
+    })
+    .filter((r) => r.n > 0)
+  const total = rows.reduce((s, r) => s + r.n, 0)
   return (
-    <div>
-      <div className="flex items-baseline justify-between text-xs mb-1">
-        <span className="font-mono text-fg-secondary font-medium">{title}</span>
-        {folders.length > 0 && (
-          <span className="font-mono text-fg-tertiary">∑ {effective}</span>
-        )}
+    <div className="ds-card">
+      <div className="ds-card-head ds-pad">
+        <div><div className="ds-card-title">{t('train.mapTitle')}</div><div className="ds-card-sub">{t('train.mapSub', { groups: rows.length, fields: total })}</div></div>
       </div>
-      {folders.length === 0 ? (
-        <div className="text-xs text-fg-tertiary pl-1">{empty}</div>
-      ) : (
-        <div className="flex flex-col gap-0.5">
-          {folders.map((f) => {
-            const { reso, repeat, label } = parseFolderMeta(f.name)
-            const folderResos = reso ? 1 : resoCount
-            const eff = repeat * f.image_count * folderResos
-            const resoTag = reso ? `${reso}px` : null
+      <table className="ds-tbl">
+        <thead>
+          <tr>
+            <th>{t('train.mapSection')}</th>
+            <th>{t('train.mapFields')}</th>
+            <th>{t('train.mapChanged')}</th>
+            <th>{t('train.mapNonDefault')}</th>
+            <th>{t('train.mapStatus')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const open = tabOf(r.key) === openKey
             return (
-              <div
-                key={f.name}
-                className="flex items-baseline gap-1.5 text-xs font-mono text-fg-secondary pl-1"
-                title={folderResos > 1
-                  ? t('train.folderTipReso', { name: f.name, repeat, imgs: f.image_count, resos: folderResos, total: eff })
-                  : t('train.folderTip', { name: f.name, repeat, imgs: f.image_count, total: eff })}
-              >
-                <span className="text-fg-tertiary">{label}</span>
-                {resoTag && <span className="text-[10px] text-accent">{resoTag}</span>}
-                <span className="flex-1 border-b border-dotted border-subtle self-end mb-1" />
-                <span>
-                  <span className="text-accent">{repeat}</span>
-                  <span className="text-fg-tertiary"> × </span>
-                  <span className="text-fg-primary">{f.image_count}</span>
-                  {folderResos > 1 && (
-                    <>
-                      <span className="text-fg-tertiary"> × </span>
-                      <span className="text-accent">{folderResos}</span>
-                    </>
-                  )}
-                  <span className="text-fg-tertiary"> = </span>
-                  <span className="text-fg-primary font-semibold">{eff}</span>
-                </span>
-              </div>
+              <tr key={r.key} onClick={() => onOpen(r.key)} style={{ cursor: 'pointer', background: open ? 'var(--green-soft)' : undefined }}>
+                <td>
+                  <span className="ds-cell-main">
+                    <span className="ds-sect-icon" style={open ? { background: '#fff' } : undefined}>{TrainIcon.sliders}</span>
+                    <span style={{ fontWeight: open ? 600 : undefined }}>{r.label}<span className="ds-cell-key">{r.key}</span></span>
+                  </span>
+                </td>
+                <td className="ds-num">{r.n}</td>
+                <td className={`ds-num${r.changed ? '' : ' ds-muted'}`}>{r.changed || '—'}</td>
+                <td className={`ds-num${r.nonDefault ? '' : ' ds-muted'}`}>{r.nonDefault || '—'}</td>
+                <td>
+                  {r.locked === r.n
+                    ? <span className="ds-badge ds-err">{t('train.mapLocked')}</span>
+                    : r.locked > 0
+                      ? <span className="ds-badge ds-warn">{t('train.mapSomeLocked', { n: r.locked })}</span>
+                      : open
+                        ? <span className="ds-badge ds-ok">{t('train.mapOpen')}</span>
+                        : <span className="ds-badge ds-ok">{t('train.mapActive')}</span>}
+                </td>
+              </tr>
             )
           })}
-        </div>
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function formatVal(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—'
+  if (Array.isArray(v)) return v.join(', ')
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+/** Edits of this session, newest first, each with a one-click revert. */
+function RecentChanges({ changes, schema, onRevert }: {
+  changes: ChangeEntry[]
+  schema: SchemaResponse
+  onRevert: (e: ChangeEntry) => void
+}) {
+  const { t, i18n } = useTranslation()
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 30000)
+    return () => window.clearInterval(id)
+  }, [])
+  const rel = new Intl.RelativeTimeFormat(i18n.language, { numeric: 'auto' })
+  const ago = (at: number) => {
+    const s = Math.round((Date.now() - at) / 1000)
+    if (s < 60) return rel.format(0, 'minute')
+    if (s < 3600) return rel.format(-Math.floor(s / 60), 'minute')
+    return rel.format(-Math.floor(s / 3600), 'hour')
+  }
+  const groupLabel = (field: string) => {
+    const g = schema.schema.properties[field]?.group ?? 'misc'
+    const def = schema.groups.find((x) => x.key === g)
+    return schemaGroupLabel(g, def?.label ?? g, t)
+  }
+  return (
+    <div className="ds-card">
+      <div className="ds-card-head ds-pad">
+        <div><div className="ds-card-title">{t('train.recentTitle')}</div><div className="ds-card-sub">{t('train.recentSub')}</div></div>
+      </div>
+      {changes.length === 0 ? (
+        <div className="ds-muted" style={{ padding: '0 17px 16px', fontSize: 12.5 }}>{t('train.recentEmpty')}</div>
+      ) : (
+        <table className="ds-tbl">
+          <thead>
+            <tr><th>{t('train.recentField')}</th><th>{t('train.mapSection')}</th><th>{t('train.recentWhen')}</th><th>{t('train.recentValue')}</th><th style={{ width: 40 }} /></tr>
+          </thead>
+          <tbody>
+            {changes.slice(0, 12).map((e) => (
+              <tr key={e.field}>
+                <td><span>{schemaFieldLabel(e.field, t)}<span className="ds-cell-key">{e.field}</span></span></td>
+                <td className="ds-muted">{groupLabel(e.field)}</td>
+                <td className="ds-muted">{ago(e.at)}</td>
+                <td>
+                  <span className="ds-diff">
+                    <span className="ds-from">{formatVal(e.from)}</span><span className="ds-muted">→</span><span className="ds-to">{formatVal(e.to)}</span>
+                  </span>
+                </td>
+                <td>
+                  <button type="button" className="ds-kebab" onClick={() => onRevert(e)} aria-label={t('train.recentRevert')} title={t('train.recentRevert')}>{TrainIcon.reset}</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   )
 }
 
-function Row({
-  label,
-  value,
-  bold,
-  dim,
-}: {
-  label: string
-  value: string
-  bold?: boolean
-  dim?: boolean
-}) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-      <span style={{ color: dim ? 'var(--fg-tertiary)' : 'var(--fg-secondary)' }}>{label}</span>
-      <span style={{
-        fontFamily: 'var(--font-mono)',
-        color: bold ? 'var(--accent)' : dim ? 'var(--fg-tertiary)' : 'var(--fg-primary)',
-        fontWeight: bold ? 700 : 500,
-      }}>{value}</span>
-    </div>
-  )
+/** Bottom strip: the version's latest training run (live epoch / loss while
+ *  it runs), with its log tail. Hidden until the version has a run. */
+function TrainLogBar({ project, vid }: { project: ProjectDetail; vid: number }) {
+  const { t } = useTranslation()
+  const [task, setTask] = useState<Task | null>(null)
+  const [log, setLog] = useState<string[]>([])
+  const load = useCallback(() => {
+    let cancelled = false
+    void api.listQueue()
+      .then((items) => {
+        if (cancelled) return
+        const mine = items
+          .filter((tk) => tk.project_id === project.id && tk.version_id === vid && (tk.task_type ?? 'train') === 'train')
+          .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
+        setTask(mine[0] ?? null)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [project.id, vid])
+  useEffect(() => load(), [load])
+  useEventStream((evt) => {
+    if (evt.type === 'task_state_changed' || evt.type === 'train_loop_started') load()
+  })
+  const running = task?.status === 'running'
+  const { state: monitor } = useMonitorProgress(running ? task!.id : null)
+  const taskId = task?.id ?? null
+  useEffect(() => {
+    if (taskId == null) { setLog([]); return }
+    let cancelled = false
+    const pull = () => {
+      api.getLog(taskId).then((r) => { if (!cancelled) setLog(r.content ? r.content.split('\n').slice(-400) : []) }).catch(() => {})
+    }
+    pull()
+    if (!running) return () => { cancelled = true }
+    const id = window.setInterval(pull, 10000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [taskId, running])
+  if (!task) return null
+  const lastLoss = monitor?.losses?.length ? monitor.losses[monitor.losses.length - 1].loss : null
+  const detail = running
+    ? [
+        `#${task.id} train`,
+        monitor?.epoch != null && monitor.total_epochs ? t('train.logbarEpoch', { e: monitor.epoch, total: monitor.total_epochs }) : null,
+        lastLoss != null ? `loss ${lastLoss.toFixed(4)}` : null,
+      ].filter(Boolean).join(' · ')
+    : `#${task.id} train · ${t(`train.runStatus_${task.status}`, { defaultValue: task.status })}`
+  const pct = running && monitor?.step != null && monitor.total_steps ? (monitor.step / monitor.total_steps) * 100 : null
+  return <JobLogBar title={t('train.logbarTitle')} running={running} detail={detail} pct={pct} log={log} />
 }

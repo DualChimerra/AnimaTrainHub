@@ -186,6 +186,12 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
 }
 
+/** Human label of a schema field: schema.labels.<field> when the locale has
+ *  one, else the key in title case ("lora_rank" → "Lora Rank"). */
+export function schemaFieldLabel(name: string, t: TFunction): string {
+  return t(`schema.labels.${name}`, { defaultValue: fieldLabel(name) })
+}
+
 export function schemaGroupLabel(key: string, fallback: string, t: TFunction): string {
   const labelKey = SCHEMA_GROUP_LABEL_KEYS[key]
   return labelKey ? t(labelKey) : fallback
