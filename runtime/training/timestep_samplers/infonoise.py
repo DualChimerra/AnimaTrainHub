@@ -38,6 +38,9 @@ from typing import Optional
 import numpy as np
 import torch
 
+from dual_peak_sampling import DualPeakConfig
+from training.timestep_samplers.dual_peak import config_from_args
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +66,7 @@ class InfoNoiseScheduler:
         baseline_timestep_schedule_shift: float = 1.0,
         baseline_style_snr_mean: float = -6.0,
         baseline_style_snr_sigma: float = 2.0,
+        baseline_dual_peak_config: DualPeakConfig | None = None,
     ):
         if not 0.0 < p_onset < 1.0:
             raise ValueError(f"p_onset 必须 ∈ (0,1)，得到 {p_onset}")
@@ -81,6 +85,7 @@ class InfoNoiseScheduler:
         self.baseline_timestep_schedule_shift = baseline_timestep_schedule_shift
         self.baseline_style_snr_mean = baseline_style_snr_mean
         self.baseline_style_snr_sigma = baseline_style_snr_sigma
+        self.baseline_dual_peak_config = baseline_dual_peak_config
         self._internal_step = 0
 
         sigma_min = t_min / (1.0 - t_min)
@@ -125,6 +130,7 @@ class InfoNoiseScheduler:
             timestep_schedule_shift=self.baseline_timestep_schedule_shift,
             style_snr_mean=self.baseline_style_snr_mean,
             style_snr_sigma=self.baseline_style_snr_sigma,
+            dual_peak_config=self.baseline_dual_peak_config,
         )
 
     def record(self, t: torch.Tensor, raw_mse: torch.Tensor):
@@ -312,6 +318,7 @@ def build(args, total_steps: Optional[int]) -> InfoNoiseScheduler:
         gate_pivot_c=float(getattr(args, "infonoise_gate_pivot_c", 0.15) or 0.0),
         baseline_shift=float(getattr(args, "timestep_shift", 3.0) or 3.0),
         baseline_mode=str(getattr(args, "timestep_sampling", "logit_normal") or "logit_normal"),
+        baseline_dual_peak_config=config_from_args(args),
         baseline_mix_low_prob=float(getattr(args, "timestep_mix_low_prob", 0.0) or 0.0),
         baseline_timestep_schedule_shift=float(getattr(args, "timestep_schedule_shift", 1.0) or 1.0),
         # style_friendly 作为热身 baseline 时也要拿到用户设的窗口（0.0 是合法 mean）

@@ -418,7 +418,14 @@ class TrainingConfig(BaseModel):
             disable_hint="此优化器自动管理学习率",
         ),
     )
-    lr_scheduler: Literal["none", "cosine", "cosine_with_restart", "cosine_with_warmup"] = Field(
+    lr_scheduler: Literal[
+        "none",
+        "cosine",
+        "cosine_with_restart",
+        "cosine_with_warmup",
+        "cosine_cycles",
+        "constant_then_cosine",
+    ] = Field(
         "none",
         description="学习率调度（none = 常数；Prodigy / PPSF / Automagic / SOAP-SF 固定为 none）",
         json_schema_extra=_meta(
@@ -441,12 +448,51 @@ class TrainingConfig(BaseModel):
     lr_scheduler_eta_min: float = Field(
         1e-6, ge=0.0,
         description="学习率衰减下限：cosine 调度到此值后不再下降；通常远小于初始 lr（如初始 1e-4 配 1e-6）",
-        json_schema_extra=_meta("training", show_when="lr_scheduler!=none", advanced=True),
+        json_schema_extra=_meta(
+            "training",
+            show_when="lr_scheduler==cosine||lr_scheduler==cosine_with_restart||lr_scheduler==cosine_with_warmup",
+            advanced=True,
+        ),
     )
     lr_scheduler_warmup_steps: int = Field(
         100, ge=0,
         description="cosine_with_warmup 预热步数",
         json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_warmup", advanced=True),
+    )
+    lr_scheduler_cycle_count: int = Field(
+        3, ge=1, le=100,
+        description="cosine_cycles 的峰数；总训练步数会被等分为这么多个周期",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_cycles"),
+    )
+    lr_scheduler_cycle_max_lr: Optional[float] = Field(
+        None, gt=0.0,
+        description="所有周期共用的最高 LR；留空时使用 learning_rate",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_cycles"),
+    )
+    lr_scheduler_cycle_min_lr: float = Field(
+        0.0, ge=0.0,
+        description="所有周期共用的最低 LR；逐周期列表中的值会覆盖它",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_cycles"),
+    )
+    lr_scheduler_cycle_max_lrs: list[float] = Field(
+        default_factory=list,
+        description="Каждому пику свой максимум LR через запятую; пусто = общий максимум. Число значений должно совпадать с числом пиков",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_cycles", advanced=True),
+    )
+    lr_scheduler_cycle_min_lrs: list[float] = Field(
+        default_factory=list,
+        description="Каждому пику свой минимум LR через запятую; пусто = общий минимум. Число значений должно совпадать с числом пиков",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_cycles", advanced=True),
+    )
+    lr_scheduler_decay_start_ratio: float = Field(
+        2.0 / 3.0, ge=0.0, lt=1.0,
+        description="constant_then_cosine: доля обучения, после которой начинается плавное снижение; 0.6667 = последняя треть",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==constant_then_cosine"),
+    )
+    lr_scheduler_decay_min_lr: float = Field(
+        0.0, ge=0.0,
+        description="constant_then_cosine: LR в самом конце обучения",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==constant_then_cosine"),
     )
     optimizer_type: Literal["adamw", "adamw8bit", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree", "soap", "soap_sf"] = Field(
         "adamw",
@@ -713,6 +759,7 @@ class TrainingConfig(BaseModel):
         "mixed_uniform_logit",
         "krea2_shift",
         "style_friendly",
+        "dual_peak",
     ] = Field(
         "logit_normal",
         description="采样分布。logit_normal 偏中段（SD3/Anima 默认）；krea2_shift 按每图 token 数动态 shift；uniform 等概率；mode 单峰偏移；mixed_* 混合 uniform 与偏置端（比例由 timestep_mix_low_prob 控制）；style_friendly 直接在 log-SNR 轴正态采样、把训练集中到风格成形的高噪声窗口（arXiv 2411.14793，风格 LoRA 专用，忽略 timestep_shift）",
@@ -732,7 +779,7 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta(
             "timestep_sampling",
             # style_friendly 的偏移完全由 style_snr_mean 给定，两者叠加会双重偏移
-            show_when="timestep_sampling!=uniform&&timestep_sampling!=style_friendly",
+            show_when="timestep_sampling!=uniform&&timestep_sampling!=style_friendly&&timestep_sampling!=dual_peak",
             alt_description="InfoNoise 开启时作为热身阶段的 baseline shift，正式阶段由自适应 CDF 接管；Leap 启用时 leap 路径恒用 U(0,1)，本字段仅作用于 (1-leap_ratio) 比例的标准 step",
             alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
@@ -743,7 +790,7 @@ class TrainingConfig(BaseModel):
         description="mixed_* 模式下走偏置端的样本比例：0 = 全 uniform；典型 0.15-0.30",
         json_schema_extra=_meta(
             "timestep_sampling",
-            show_when="timestep_sampling!=uniform",
+            show_when="timestep_sampling!=uniform&&timestep_sampling!=dual_peak",
             alt_description="InfoNoise 开启 + mixed_* baseline 时，热身阶段混合比例，正式阶段由自适应 CDF 接管；Leap 启用时 leap 路径恒用 U(0,1)，本字段仅作用于 (1-leap_ratio) 比例的标准 step",
             alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
@@ -780,6 +827,76 @@ class TrainingConfig(BaseModel):
             "timestep_sampling",
             show_when="timestep_sampling==style_friendly",
             advanced=True,
+        ),
+    )
+    dual_peak_peak1_position: float = Field(
+        0.525, gt=0.0, lt=1.0, allow_inf_nan=False,
+        description="First component peak in flow t: 0.525 = timestep 525/1000. The mixture maximum can move.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_peak1_width: float = Field(
+        0.55, gt=0.0, le=2.8, allow_inf_nan=False,
+        description="First peak width (log-SNR standard deviation). Larger = wider, lower peak at the same weight.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_peak1_weight: float = Field(
+        0.15, ge=0.0, le=1.0, allow_inf_nan=False,
+        description="First peak relative weight. All four weights are normalized together; zero disables this component.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_peak2_position: float = Field(
+        0.85, gt=0.0, lt=1.0, allow_inf_nan=False,
+        description="Second component peak in flow t: 0.85 = timestep 850/1000. Defaults put the mixture maximum near 870.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_peak2_width: float = Field(
+        1.2, gt=0.0, le=2.8, allow_inf_nan=False,
+        description="Second peak width (log-SNR standard deviation). Independent of the first peak.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_peak2_weight: float = Field(
+        0.35, ge=0.0, le=1.0, allow_inf_nan=False,
+        description="Second peak relative weight. Normalized with the other three weights.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_background_mean: float = Field(
+        -3.2, ge=-12.0, le=6.0, allow_inf_nan=False,
+        description="Broad Style-Friendly component log-SNR mean. Lower moves it toward high noise. This covers the whole interval, not only the right tail.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_background_width: float = Field(
+        2.2, gt=0.0, le=6.0, allow_inf_nan=False,
+        description="Broad Style-Friendly component log-SNR standard deviation.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_background_weight: float = Field(
+        0.45, ge=0.0, le=1.0, allow_inf_nan=False,
+        description="Broad background relative weight. Zero removes the broad component.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
+        ),
+    )
+    dual_peak_uniform_weight: float = Field(
+        0.05, ge=0.0, le=1.0, allow_inf_nan=False,
+        description="Uniform coverage relative weight. Default 0.05, normalized with other weights.",
+        json_schema_extra=_meta(
+            "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
     )
     timestep_shift_resolution_aware: bool = Field(
@@ -1207,6 +1324,52 @@ class TrainingConfig(BaseModel):
                         f"{v['field']}={v['actual']!r} 在当前配置下不可用:{v['hint']}"
                     )
             raise ValueError("A cross-field constraint is not satisfied — " + "; ".join(lines))
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dual_peak_weights(self) -> "TrainingConfig":
+        if self.timestep_sampling == "dual_peak" and (
+            self.dual_peak_peak1_weight + self.dual_peak_peak2_weight
+            + self.dual_peak_background_weight + self.dual_peak_uniform_weight
+        ) <= 0.0:
+            raise ValueError("dual_peak: at least one mixture weight must be positive")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_custom_lr_schedulers(self) -> "TrainingConfig":
+        if self.lr_scheduler == "cosine_cycles":
+            count = self.lr_scheduler_cycle_count
+            for name, values in (
+                ("lr_scheduler_cycle_max_lrs", self.lr_scheduler_cycle_max_lrs),
+                ("lr_scheduler_cycle_min_lrs", self.lr_scheduler_cycle_min_lrs),
+            ):
+                if values and len(values) != count:
+                    raise ValueError(
+                        f"{name} must be empty or contain exactly {count} values"
+                    )
+
+            common_max = self.lr_scheduler_cycle_max_lr or self.learning_rate
+            max_lrs = self.lr_scheduler_cycle_max_lrs or [common_max] * count
+            min_lrs = self.lr_scheduler_cycle_min_lrs or [self.lr_scheduler_cycle_min_lr] * count
+            for index, (min_lr, max_lr) in enumerate(zip(min_lrs, max_lrs), start=1):
+                if min_lr < 0.0 or max_lr <= 0.0:
+                    raise ValueError(
+                        f"cosine_cycles cycle {index}: min LR must be >= 0 and max LR > 0"
+                    )
+                if min_lr > max_lr:
+                    raise ValueError(
+                        f"cosine_cycles cycle {index}: min LR ({min_lr}) "
+                        f"cannot exceed max LR ({max_lr})"
+                    )
+
+        if (
+            self.lr_scheduler == "constant_then_cosine"
+            and self.lr_scheduler_decay_min_lr > self.learning_rate
+        ):
+            raise ValueError(
+                "lr_scheduler_decay_min_lr cannot exceed learning_rate for "
+                "constant_then_cosine"
+            )
         return self
 
     @model_validator(mode="after")

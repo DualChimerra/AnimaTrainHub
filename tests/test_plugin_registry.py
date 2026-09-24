@@ -103,7 +103,13 @@ def test_adamw8bit_validate_rejects_missing_bitsandbytes(monkeypatch) -> None:
 
 def test_scheduler_builders_dict_excludes_none() -> None:
     from training.schedulers import BUILDERS, SCHEMA_ONLY_OPTIONS
-    assert set(BUILDERS) == {"cosine", "cosine_with_restart", "cosine_with_warmup"}
+    assert set(BUILDERS) == {
+        "constant_then_cosine",
+        "cosine",
+        "cosine_cycles",
+        "cosine_with_restart",
+        "cosine_with_warmup",
+    }
     assert SCHEMA_ONLY_OPTIONS == {"none"}
 
 
@@ -253,6 +259,61 @@ def test_cosine_with_warmup_clamps_negative_eta_min() -> None:
         assert optimizer.param_groups[0]["lr"] >= 0.0
         optimizer.step()
         scheduler.step()
+
+
+def test_cosine_cycles_supports_per_peak_min_and_max_lr() -> None:
+    torch = pytest.importorskip("torch")
+    from training.schedulers import build_scheduler
+
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.SGD([param], lr=1e-3)
+    args = argparse.Namespace(
+        lr_scheduler="cosine_cycles",
+        lr_scheduler_cycle_count=3,
+        lr_scheduler_cycle_max_lr=None,
+        lr_scheduler_cycle_min_lr=0.0,
+        lr_scheduler_cycle_max_lrs=[1e-3, 8e-4, 6e-4],
+        lr_scheduler_cycle_min_lrs=[5e-4, 4e-4, 1e-5],
+    )
+    scheduler = build_scheduler(args, optimizer, total_steps=12)
+
+    lrs = [optimizer.param_groups[0]["lr"]]
+    for _ in range(12):
+        optimizer.step()
+        scheduler.step()
+        lrs.append(optimizer.param_groups[0]["lr"])
+
+    assert lrs[0] == pytest.approx(1e-3)
+    assert lrs[4] == pytest.approx(8e-4)
+    assert lrs[8] == pytest.approx(6e-4)
+    assert lrs[12] == pytest.approx(1e-5)
+    assert min(lrs[0:4]) >= 5e-4
+    assert min(lrs[4:8]) >= 4e-4
+
+
+def test_constant_then_cosine_stays_flat_then_decays() -> None:
+    torch = pytest.importorskip("torch")
+    from training.schedulers import build_scheduler
+
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.SGD([param], lr=1e-3)
+    args = argparse.Namespace(
+        lr_scheduler="constant_then_cosine",
+        lr_scheduler_decay_start_ratio=2.0 / 3.0,
+        lr_scheduler_decay_min_lr=1e-5,
+    )
+    scheduler = build_scheduler(args, optimizer, total_steps=12)
+
+    lrs = [optimizer.param_groups[0]["lr"]]
+    for _ in range(12):
+        optimizer.step()
+        scheduler.step()
+        lrs.append(optimizer.param_groups[0]["lr"])
+
+    assert lrs[:9] == pytest.approx([1e-3] * 9)
+    assert lrs[9] < 1e-3
+    assert lrs[9] > lrs[10] > lrs[11] > lrs[12]
+    assert lrs[12] == pytest.approx(1e-5)
 
 
 def test_ppsf_zero_prodigy_steps_disables_freeze(monkeypatch) -> None:

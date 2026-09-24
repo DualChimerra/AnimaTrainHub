@@ -298,6 +298,34 @@ describe('Field string-list input (sample_prompts 换行)', () => {
   })
 })
 
+const floatListProp: SchemaProperty = {
+  type: 'array',
+  items: { type: 'number' },
+  default: [],
+  group: 'training',
+  description: '',
+}
+
+describe('Field float-list input', () => {
+  it('parses decimal and scientific-notation learning rates', async () => {
+    const onChange = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <Field
+        name="lr_scheduler_cycle_max_lrs"
+        prop={floatListProp}
+        value={[]}
+        onChange={onChange}
+      />,
+    )
+
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    await user.type(input, '1e-4, 8e-5, 0.00006')
+    fireEvent.blur(input)
+    expect(onChange).toHaveBeenLastCalledWith([1e-4, 8e-5, 6e-5])
+  })
+})
+
 describe('Field code input', () => {
   it('renders object values as formatted JSON and commits parsed objects on blur', () => {
     const onChange = vi.fn()

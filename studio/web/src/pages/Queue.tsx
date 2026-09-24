@@ -11,6 +11,7 @@ import { useDialog } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import { useEventStream } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
+import { buildTrainingForecast } from '../lib/queueEstimates'
 
 /** 备注输入上限 —— 与后端 _MAX_NOTE_LEN 对齐（超了后端截断，这里先拦住）。 */
 const MAX_NOTE_LEN = 500
@@ -60,6 +61,12 @@ function fmtDurationShort(ms: number): string {
   if (ms < 60e3) return `${Math.round(ms / 1e3)}s`
   if (ms < 3600e3) return `${Math.round(ms / 60e3)}m`
   return `${(ms / 3600e3).toFixed(1)}h`
+}
+
+function fmtFinishTime(ts: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  }).format(new Date(ts * 1000))
 }
 
 export default function QueuePage() {
@@ -173,6 +180,15 @@ export default function QueuePage() {
   // monitor 进度走 useMonitorProgress hook (PR #37 增量协议)：runningTaskId
   // 切换时 hook 自动清状态 + 重拉 /api/state 冷启动；不需要本组件再写清理逻辑。
   const { state: monitor } = useMonitorProgress(runningTaskId)
+
+  const queueForecast = useMemo(
+    () => buildTrainingForecast(tasks, monitor),
+    [tasks, monitor],
+  )
+  const waitingCount = queueForecast.filter(({ task }) => task.status === 'pending').length
+  const queueFinish = queueForecast.length
+    ? queueForecast[queueForecast.length - 1].finishesAt
+    : null
 
   const sorted = useMemo(() => [...tasks].sort((a, b) => b.id - a.id), [tasks])
 
@@ -398,6 +414,48 @@ export default function QueuePage() {
       }
     >
       <div className="flex flex-col gap-2.5 flex-1 min-h-0 overflow-y-auto m-page-scroll">
+        {loaded && queueForecast.length > 0 && (
+          <section
+            className="card p-4 border border-accent/40 bg-accent-soft"
+            data-testid="queue-summary"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="text-xs font-medium uppercase tracking-wide text-fg-tertiary">
+                  {t('queue.summaryTitle')}
+                </div>
+                <div className="mt-1 text-2xl font-semibold text-fg-primary">
+                  {t('queue.summaryCount', { count: queueForecast.length })}
+                </div>
+                <div className="mt-1 text-xs text-fg-secondary">
+                  {t('queue.summaryBreakdown', {
+                    running: queueForecast.length - waitingCount,
+                    waiting: waitingCount,
+                  })}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs text-fg-tertiary">{t('queue.summaryFinish')}</div>
+                <div className="mt-1 font-mono text-sm font-semibold text-accent">
+                  {queueFinish ? `≈ ${fmtFinishTime(queueFinish)}` : t('queue.summaryUnknown')}
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 pt-3 border-t border-subtle flex flex-wrap gap-2">
+              {queueForecast.map(({ task, finishesAt }) => (
+                <Link
+                  key={task.id}
+                  to={`/queue/${task.id}`}
+                  className="no-underline rounded-md border border-subtle bg-surface px-2.5 py-1.5 text-xs text-fg-secondary hover:border-accent"
+                  title={finishesAt ? `${t('queue.summaryTaskFinish')}: ${fmtFinishTime(finishesAt)}` : t('queue.summaryUnknown')}
+                >
+                  <span className="font-medium text-fg-primary">{task.name}</span>
+                  {task.status === 'running' && <span className="ml-1.5 text-accent">{t('status.running')}</span>}
+                </Link>
+              ))}
+            </div>
+          </section>
+        )}
         {/* ADR §4.1 队列挂起 banner — 仅 held=true 时显示，sticky 顶部。 */}
         {holdState?.held && (
           <div

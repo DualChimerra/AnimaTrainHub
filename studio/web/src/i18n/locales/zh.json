@@ -310,7 +310,9 @@
         "none": "常数",
         "cosine": "Cosine",
         "cosineWithRestart": "Cosine 重启",
-        "cosineWithWarmup": "Cosine 预热"
+        "cosineWithWarmup": "Cosine 预热",
+        "cosineCycles": "自定义 Cosine 周期",
+        "constantThenCosine": "常数后 Cosine 衰减"
       },
       "optimizerType": {
         "adamw": "AdamW",
@@ -326,7 +328,8 @@
         "uniform": "Uniform",
         "logitNormalLow": "Logit Normal Low",
         "mode": "Mode",
-        "styleFriendly": "Style-Friendly SNR（风格档）"
+        "styleFriendly": "Style-Friendly SNR（风格档）",
+        "dualPeak": "Dual Peak — 自定义双峰"
       },
       "lossWeighting": {
         "none": "无",
@@ -382,6 +385,16 @@
       "infonoise_enabled": "需先把 noise_enhancement / loss_weighting / loss_type / schedule_shift 全部置默认才能启用（schema 互斥）"
     },
     "descriptions": {
+      "dual_peak_peak1_position": "第一个分量峰的位置：0.525 = 525/1000。混合后的峰可能略有偏移。",
+      "dual_peak_peak1_width": "第一个峰的宽度（log-SNR 标准差）。权重不变时越大越宽、越低。",
+      "dual_peak_peak1_weight": "第一个峰的相对权重。四个权重自动归一化；0 关闭此分量。",
+      "dual_peak_peak2_position": "第二个分量峰的位置：0.85 = 850/1000。默认混合曲线峰值约为 870。",
+      "dual_peak_peak2_width": "第二个峰的宽度（log-SNR 标准差），独立于第一个峰。",
+      "dual_peak_peak2_weight": "第二个峰的相对权重，与其他三个权重一起归一化。",
+      "dual_peak_background_mean": "宽背景分量的 log-SNR 均值。越小越偏高噪声，覆盖整个区间而不只是右侧尾部。",
+      "dual_peak_background_width": "宽背景分量的 log-SNR 标准差，默认 2.2。",
+      "dual_peak_background_weight": "宽背景的相对权重。0 关闭；混合峰的位置和高度也会改变。",
+      "dual_peak_uniform_weight": "全区间均匀覆盖的相对权重，默认 0.05，与其他权重归一化。",
       "model_family": "模型族。决定训练走哪套模型实现；其余字段按族能力自动显隐。切换将重算模型路径并重置族相关默认值",
       "transformer_path": "主扩散模型权重（.safetensors）",
       "vae_path": "VAE 权重（.safetensors）",
@@ -424,6 +437,13 @@
       "lr_scheduler_t_mult": "cosine_with_restart 每次重启后周期相对上轮的倍数（>1 周期递增）",
       "lr_scheduler_eta_min": "学习率衰减下限：cosine 调度到此值后不再下降；通常远小于初始 lr（如初始 1e-4 配 1e-6）",
       "lr_scheduler_warmup_steps": "cosine_with_warmup 预热步数",
+      "lr_scheduler_cycle_count": "等长 Cosine 峰的数量，默认 3。",
+      "lr_scheduler_cycle_max_lr": "所有峰共用的最高 LR；留空时使用 learning_rate。",
+      "lr_scheduler_cycle_min_lr": "所有峰共用的最低 LR；逐峰列表会覆盖此值。",
+      "lr_scheduler_cycle_max_lrs": "每个峰的最高 LR，逗号分隔；数量必须与峰数一致。",
+      "lr_scheduler_cycle_min_lrs": "每个峰的最低 LR，逗号分隔；数量必须与峰数一致。",
+      "lr_scheduler_decay_start_ratio": "最终 Cosine 衰减开始时的训练比例；0.6667 表示最后三分之一。",
+      "lr_scheduler_decay_min_lr": "最终 Cosine 衰减结束时的 LR。",
       "optimizer_type": "优化器。adamw 标准基线；automagic 自适应每参数 lr（推荐 lr=1e-6）；came 置信度引导 + 分解二阶矩（state 显存低于 AdamW，lr 同 AdamW 量级）；lion 显存约 AdamW 一半（推荐 lr=AdamW lr / 3）；prodigy / prodigy_plus_schedulefree 自适应估 lr（lr 填 1.0）",
       "prodigy_d_coef": "Prodigy 估出的 d 整体缩放系数；越大有效 lr 越大。欠拟合时调高（2.0+），过拟合 / 小数据集时调低（0.5）",
       "prodigy_safeguard_warmup": "Prodigy warmup 期间防止 d 被初期高梯度推高；默认开启更稳",
@@ -458,7 +478,7 @@
       "noise_offset": "DC 偏置强度（0-0.2，0=关闭）。让噪声 mean 偏离 0，让模型有机会学习生成极端亮度场景（pure black / pure white / 强对比）。典型范围 0.05-0.1；0.05 以下噪声场跟 baseline 几乎一样，超过 0.1 起点 loss 会显著偏高",
       "pyramid_noise_iters": "金字塔噪声层数（0-6，0=关闭）。每层在 spatial // 2^(k+1) 尺度注入。实际效果强度由 pyramid_noise_discount 决定 —— iters 单独决定覆盖的频段范围，discount 低时层数多少差异很小",
       "pyramid_noise_discount": "每层相对衰减系数（0.1-0.9）。控制低频强度的核心参数：本实现把整体噪声 std 归一化到 1，所以 discount 决定低频占比。0.1-0.4 归一化后噪声接近标准高斯，等价于关闭；0.5-0.7 显著改变低频结构",
-      "timestep_sampling": "采样分布。logit_normal 偏中段（SD3/Anima 默认）；uniform 等概率；mode 单峰偏移；mixed_* 混合 uniform 与偏置端（比例由 timestep_mix_low_prob 控制）",
+      "timestep_sampling": "采样分布。dual_peak 为可调双峰加宽背景；style_friendly 偏高噪声风格窗口；logit_normal 是 Anima 默认；uniform 等概率。dual_peak 忽略 timestep_shift，但 schedule shift 和分辨率修正仍会移动曲线。",
       "timestep_shift": "logit-normal / mode 内部的分布偏移：>1 偏向高噪声端（粗结构），<1 偏向低噪声端（细节）",
       "timestep_mix_low_prob": "mixed_* 模式下走偏置端的样本比例：0 = 全 uniform；典型 0.15-0.30",
       "schedule_shift": "采样后对 t 做的额外 σ schedule 偏移：1.0 = 无偏移；越大整体偏向高噪声端。与 timestep_shift 区别：作用于最终 t 而非 logit-normal 内部",
@@ -593,6 +613,11 @@
     "sort_updated": "最近活跃",
     "sort_created": "最新创建",
     "sort_title": "按名称",
+    "sort_queue": "队列中的优先",
+    "sort_finish": "按训练结束时间",
+    "trainingNow": "正在训练",
+    "queuePosition": "队列第 {{position}} 位",
+    "finishUnknown": "正在估算",
     "archivedToggle": "已归档（{{n}}）",
     "archivedToggleHint": "切换：只显示已归档项目",
     "archiveProjectTitle": "归档项目（可恢复）",
@@ -610,6 +635,12 @@
     "evaluatingHint": "训练已结束，正在用验证集对各 checkpoint 算指标（出图 + CLIP / DINO），完成后这里消失。明细看任务详情的「评估」tab。"
   },
   "queue": {
+    "summaryTitle": "当前训练队列",
+    "summaryCount": "{{count}} 个任务",
+    "summaryBreakdown": "运行中：{{running}} · 等待：{{waiting}}",
+    "summaryFinish": "队列预计结束",
+    "summaryTaskFinish": "预计结束",
+    "summaryUnknown": "正在估算",
     "title": "GPU 任务队列",
     "description": "训练 / 正则 AI / 测试出图 · 同一时刻仅运行一个，完成后自动启动下一个",
     "titleJobs": "数据任务队列",

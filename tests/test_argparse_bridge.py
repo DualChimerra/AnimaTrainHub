@@ -328,6 +328,19 @@ def test_training_config_cli_cosine_with_warmup() -> None:
     assert ns.lr_scheduler_eta_min == 1e-7
 
 
+def test_training_config_cli_cosine_cycles_float_lists() -> None:
+    parser = bridge.build_parser(TrainingConfig)
+    ns = parser.parse_args([
+        "--lr-scheduler", "cosine_cycles",
+        "--lr-scheduler-cycle-count", "3",
+        "--lr-scheduler-cycle-max-lrs", "1e-4", "8e-5", "6e-5",
+        "--lr-scheduler-cycle-min-lrs", "5e-5", "4e-5", "0",
+    ])
+    assert ns.lr_scheduler == "cosine_cycles"
+    assert ns.lr_scheduler_cycle_max_lrs == [1e-4, 8e-5, 6e-5]
+    assert ns.lr_scheduler_cycle_min_lrs == [5e-5, 4e-5, 0.0]
+
+
 def test_training_config_yaml_round_trip() -> None:
     """走完 CLI → YAML 合并这一条路径，确认 yaml_dict 字段都能被读进 args。"""
     args = bridge.namespace_from_config(

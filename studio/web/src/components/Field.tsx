@@ -208,6 +208,21 @@ export default function Field({
     )
   }
 
+  // float-list (e.g. per-cycle learning rates) -------------------------
+  if (kind === 'float-list') {
+    return (
+      <FloatListField
+        label={label}
+        helpNode={helpNode}
+        value={value}
+        defaultValue={prop.default}
+        onChange={onChange}
+        disabled={disabled}
+        hintNode={hintNode}
+      />
+    )
+  }
+
   // code ----------------------------------------------------------------
   if (kind === 'code') {
     return (
@@ -456,6 +471,65 @@ function IntListField({
         ref={inputRef}
         type="text"
         inputMode="numeric"
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            commit()
+          }
+        }}
+        disabled={disabled}
+        className="input input-mono" style={fieldStyle(disabled)}
+        placeholder={placeholder}
+      />
+      {helpNode}
+    </div>
+  )
+}
+
+/** Decimal-number list. Scientific notation is accepted, which is important
+ * for LR values such as 1e-4 and 5e-5. */
+function FloatListField({
+  label, helpNode, value, defaultValue, onChange, disabled = false, hintNode,
+}: IntListFieldProps) {
+  const fmt = (v: unknown) =>
+    Array.isArray(v) ? (v as number[]).join(', ') : v === null || v === undefined ? '' : String(v)
+  const [raw, setRaw] = useState<string>(() => fmt(value))
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const placeholder = fmt(defaultValue)
+
+  useEffect(() => {
+    if (document.activeElement !== inputRef.current) setRaw(fmt(value))
+  }, [value])
+
+  const commit = () => {
+    const nums = raw
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .map((s) => Number(s))
+      .filter((n) => Number.isFinite(n))
+    if (nums.length === 0) {
+      const fallback = Array.isArray(defaultValue) ? defaultValue : []
+      onChange(fallback)
+      setRaw(fmt(fallback))
+      return
+    }
+    onChange(nums)
+    setRaw(nums.join(', '))
+  }
+
+  return (
+    <div className="py-1.5">
+      <div className="text-sm font-medium text-fg-primary mb-1.5">
+        {label}{hintNode}
+      </div>
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="decimal"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
         onBlur={commit}

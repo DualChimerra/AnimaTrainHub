@@ -14,6 +14,7 @@ export type ControlKind =
   | 'code'
   | 'string-list'
   | 'int-list'
+  | 'float-list'
 
 /**
  * 推断字段的控件类型。优先用 schema 里 control 自定义元字段，否则按
@@ -47,7 +48,9 @@ export function controlKind(prop: SchemaProperty): ControlKind {
   if (type === 'number') return 'float'
   if (type === 'array') {
     const itemType = prop.items?.type
-    return itemType === 'integer' || itemType === 'number' ? 'int-list' : 'string-list'
+    if (itemType === 'integer') return 'int-list'
+    if (itemType === 'number') return 'float-list'
+    return 'string-list'
   }
   return 'string'
 }
@@ -125,6 +128,8 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     cosine: 'schema.enums.lrScheduler.cosine',
     cosine_with_restart: 'schema.enums.lrScheduler.cosineWithRestart',
     cosine_with_warmup: 'schema.enums.lrScheduler.cosineWithWarmup',
+    cosine_cycles: 'schema.enums.lrScheduler.cosineCycles',
+    constant_then_cosine: 'schema.enums.lrScheduler.constantThenCosine',
   },
   optimizer_type: {
     adamw: 'schema.enums.optimizerType.adamw',
@@ -141,6 +146,7 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     logit_normal_low: 'schema.enums.timestepSampling.logitNormalLow',
     mode: 'schema.enums.timestepSampling.mode',
     style_friendly: 'schema.enums.timestepSampling.styleFriendly',
+    dual_peak: 'schema.enums.timestepSampling.dualPeak',
   },
   loss_weighting: {
     none: 'schema.enums.lossWeighting.none',
