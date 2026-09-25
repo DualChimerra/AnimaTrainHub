@@ -672,3 +672,23 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-note.ds-err{background:var(--red-soft);color:var(--red-text);box-shadow:inset 0 0 0 1px var(--red-line)}
 .ds-soup-grid{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:14px;align-items:start}
 @media (max-width:1100px){.ds-soup-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* settings drawer */
+.ds-drawer{width:min(560px,100vw)}
+.ds-set-grid{display:grid;grid-template-columns:186px minmax(0,1fr);flex:1;min-height:0}
+.ds-set-rail{border-right:1px solid var(--line);padding:14px 10px;overflow-y:auto}
+@media (max-width:640px){.ds-set-grid{grid-template-columns:minmax(0,1fr)}.ds-set-rail{display:none}}
+.ds-set-sect{border-bottom:1px solid var(--line);scroll-margin-top:8px}
+.ds-set-head{display:flex;align-items:center;gap:8px;padding:15px 18px 0}
+.ds-set-body{display:flex;flex-direction:column;gap:14px;padding:11px 18px 16px;font-size:12.5px}
+.ds-set-body>.ds-field{padding:0;border-bottom:0}
+.ds-set-body .ds-field-ctl{align-items:flex-start}
+
+/* settings drawer: compact controls, model catalog rows */
+.ds-ctl.ds-sm,.ds-btn-primary.ds-sm{height:26px;padding:0 10px;font-size:12px}
+.ds-model-group{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--card);display:flex;flex-direction:column;gap:6px}
+.ds-model-group-title{font-size:12.5px;font-weight:600}
+.ds-model-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;padding:5px 8px;border-radius:8px;border:1px solid transparent}
+.ds-model-row.ds-is-on{background:var(--green-soft);border-color:var(--green-line)}
+.ds-model-row input[type=radio]{accent-color:var(--green-600)}
+.ds-model-row > code.w-32{width:auto;flex:1 1 64px;min-width:0}

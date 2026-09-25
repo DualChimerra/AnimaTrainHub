@@ -18,12 +18,11 @@ import {
   type TunnelState,
 } from '../../api/client'
 import { useDialog } from '../../components/Dialog'
-import { InfoButton } from '../../components/InfoButton'
 import {
   AddLocalModelButton,
   LocalModelRows,
 } from '../../components/LocalModelSources'
-import PageHeader from '../../components/PageHeader'
+import FieldLabel from '../../components/ds/FieldLabel'
 import { useToast } from '../../components/Toast'
 import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
 import { useSettingsData } from '../../lib/SettingsData'
@@ -241,7 +240,7 @@ function withSecretsDefaults(value: Secrets): Secrets {
   return merged as unknown as Secrets
 }
 
-const textInputClass = 'w-full px-2 py-1 outline-none rounded-sm bg-sunken border border-subtle text-sm text-fg-primary focus:border-accent'
+const textInputClass = 'ds-inp'
 
 const MODEL_DESCRIPTION_KEYS: Record<string, string> = {
   anima_main: 'settings.modelDescriptions.animaMain',
@@ -250,6 +249,12 @@ const MODEL_DESCRIPTION_KEYS: Record<string, string> = {
   t5_tokenizer: 'settings.modelDescriptions.t5Tokenizer',
   wd14: 'settings.modelDescriptions.wd14',
   cltagger: 'settings.modelDescriptions.cltagger',
+}
+
+// Catalog names come from the backend in Chinese for the main models.
+const MODEL_NAME_KEYS: Record<string, string> = {
+  anima_main: 'settings.modelNames.animaMain',
+  krea2_main: 'settings.modelNames.krea2Main',
 }
 
 function translatedCatalogText(keys: Record<string, string>, id: string, fallback: string | undefined, t: TFunction): string {
@@ -369,42 +374,38 @@ export default function SettingsPage() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <PageHeader
-        title={t('settings.title')}
-        sticky
-        actions={
-          <>
-            <button
-              onClick={save}
-              disabled={!dirty || saving}
-              className={dirty ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
-            >
-              {saving ? t('common.saving') : t('common.save')}
-            </button>
-            {drawer.isOpen && (
-              <button
-                onClick={() => void drawer.close()}
-                title={t('settings.drawerClose')}
-                aria-label={t('settings.drawerClose')}
-                className="btn btn-ghost btn-sm w-8 px-0"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <path d="M6 6l12 12M18 6l-12 12" />
-                </svg>
-              </button>
-            )}
-          </>
-        }
-      />
+      <div style={{ height: 52, flex: 'none', display: 'flex', alignItems: 'center', gap: 10, padding: '0 18px', borderBottom: '1px solid var(--line)' }}>
+        <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-.02em' }}>{t('settings.title')}</span>
+        <span className={`ds-badge ${dirty ? 'ds-warn' : 'ds-ok'}`} style={{ marginLeft: 'auto' }}>
+          {saving ? t('common.saving') : dirty ? t('settings.unsavedBadge') : t('settings.savedBadge')}
+        </span>
+        {drawer.isOpen && (
+          <button
+            type="button"
+            onClick={() => void drawer.close()}
+            title={t('settings.drawerClose')}
+            aria-label={t('settings.drawerClose')}
+            className="ds-kebab"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        )}
+      </div>
 
-      <div ref={scrollContainerRef} className="px-6 pt-5 pb-12 flex-1 overflow-y-auto">
-      {/* 原型抽屉是 single-column、无 PAGE INDEX —— 内容收成一列；SectionIndex 仍挂
-          着（隐藏）以保留其 IntersectionObserver 依赖，避免未用变量。 */}
-      <div className="max-w-[860px]">
-      <div className="flex flex-col gap-8 min-w-0">
+      <div className="ds-set-grid">
+        <div className="ds-set-rail">
+          <div className="ds-cap" style={{ margin: '0 0 9px 9px' }}>{t('settings.sectionsCap')}</div>
+          <SectionIndex sections={TRAINING_SECTIONS} scrollContainer={scrollContainerRef} />
+          <div className="ds-note ds-info" style={{ marginTop: 14, fontSize: 11 }}>
+            <span>{t('settings.railNote')}</span>
+          </div>
+        </div>
+
+      <div ref={scrollContainerRef} style={{ overflowY: 'auto', minHeight: 0 }}>
+      <div className="flex flex-col min-w-0">
 
       {error && (
-        <div className="p-3 rounded-md bg-err-soft border border-err text-err text-sm font-mono">
+        <div className="ds-note ds-err ds-mono" style={{ margin: '12px 18px 0' }}>
           {error}
         </div>
       )}
@@ -517,10 +518,21 @@ export default function SettingsPage() {
       />
 
     </div>
+      </div>
+      </div>
 
-    <div className="hidden"><SectionIndex sections={TRAINING_SECTIONS} scrollContainer={scrollContainerRef} /></div>
-    </div>
-    </div>
+      <div style={{ borderTop: '1px solid var(--line)', padding: '11px 18px', display: 'flex', alignItems: 'center', gap: 9, flex: 'none' }}>
+        <span className="ds-kpi-meta">{dirty ? t('settings.footerDirty') : t('settings.footerSaved')}</span>
+        <span style={{ marginLeft: 'auto' }} />
+        {dirty && (
+          <button type="button" className="ds-btn-primary" onClick={save} disabled={saving}>
+            {saving ? t('common.saving') : t('common.save')}
+          </button>
+        )}
+        {drawer.isOpen && (
+          <button type="button" className="ds-btn-dark" onClick={() => void drawer.close()}>{t('settings.done')}</button>
+        )}
+      </div>
     </div>
   )
 }
@@ -557,28 +569,38 @@ function RuntimeModeSection() {
 
   return (
     <SettingsSection id="runtime-mode" title={t('runtimeMode.current')}>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="ds-optcards">
         {info.modes.map((m) => (
           <button
             key={m}
             type="button"
             disabled={busy || info.locked}
             onClick={() => void apply(m)}
-            className={mode === m ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+            className={`ds-optcard${mode === m ? ' ds-is-on' : ''}`}
+            aria-pressed={mode === m}
           >
-            {t(`runtimeMode.${m}.name`)}
+            <span className="ds-optcard-ico">
+              {m === 'local'
+                ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></svg>
+                : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 0 0 4.5 12 3.5 3.5 0 0 0 6 19z" /></svg>}
+            </span>
+            <span className="ds-optcard-txt">
+              <span className="ds-optcard-name">
+                {t(`runtimeMode.${m}.name`)}
+                {mode === m && <span className="ds-badge ds-ok">{t('settings.modeActive')}</span>}
+              </span>
+              <span className="ds-optcard-desc">{t(`runtimeMode.${m}.summary`)}</span>
+            </span>
+            <span className={`ds-radio${mode === m ? ' ds-on' : ''}`} />
           </button>
         ))}
       </div>
-      <p className="m-0 text-xs text-fg-tertiary">
-        {t(`runtimeMode.${mode}.summary`)}
-      </p>
       {info.locked && (
         <p className="m-0 text-xs text-warn">
           {t('runtimeMode.lockedBy', { env: 'ALS_RUNTIME_MODE' })}
         </p>
       )}
-      <div className="text-xs text-fg-tertiary font-mono break-all">
+      <div className="ds-ctl-note" style={{ wordBreak: 'break-all' }}>
         studio_data: {info.environment.studio_data}
       </div>
     </SettingsSection>
@@ -678,31 +700,31 @@ function RemoteAccessSection() {
 
       {/* provider */}
       <div className="flex flex-col gap-2">
-        <span className="caption">{t('remote.providerLabel')}</span>
+        <span className="ds-cap">{t('remote.providerLabel')}</span>
         <div className="flex flex-col gap-1.5">
           {TUNNEL_PROVIDERS.map((p) => {
             const active = provider === p
             return (
               <label
                 key={p}
-                className={`flex items-start gap-2.5 rounded-md border px-3 py-2.5 cursor-pointer transition-colors ${
-                  active ? 'border-selected bg-selected-soft' : 'border-subtle hover:border-dim'
-                } ${state.running ? 'opacity-70 cursor-not-allowed' : ''}`}
+                className={`ds-optcard${active ? ' ds-is-on' : ''}`}
+                style={{ cursor: state.running ? 'not-allowed' : 'pointer', opacity: state.running ? 0.7 : 1 }}
               >
                 <input
-                  type="radio" name="tunnel-provider" className="mt-0.5"
+                  type="radio" name="tunnel-provider" className="sr-only"
                   checked={active} disabled={busy || state.running}
                   onChange={() => void run(() => api.configureTunnel({ provider: p }))}
                 />
-                <span className="flex flex-col gap-0.5 min-w-0">
-                  <span className="text-sm font-medium text-fg-primary flex items-center gap-2 flex-wrap">
+                <span className="ds-optcard-txt">
+                  <span className="ds-optcard-name" style={{ flexWrap: 'wrap' }}>
                     {t(`remote.provider.${p}.name`)}
-                    <span className={`badge ${p === 'cloudflare' ? 'badge-neutral' : 'badge-ok'}`}>
+                    <span className={`ds-badge ${p === 'cloudflare' ? 'ds-mute' : 'ds-ok'}`}>
                       {p === 'cloudflare' ? t('remote.addressChanges') : t('remote.addressPermanent')}
                     </span>
                   </span>
-                  <span className="text-xs text-fg-tertiary">{t(`remote.provider.${p}.hint`)}</span>
+                  <span className="ds-optcard-desc">{t(`remote.provider.${p}.hint`)}</span>
                 </span>
+                <span className={`ds-radio${active ? ' ds-on' : ''}`} />
               </label>
             )
           })}
@@ -723,7 +745,7 @@ function RemoteAccessSection() {
       )}
 
       {provider === 'ngrok' && (
-        <div className="flex flex-col gap-2 rounded-md border border-subtle bg-sunken p-3">
+        <div className="ds-note ds-mute" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-fg-secondary">
               {t('remote.ngrokToken')}{' '}
@@ -732,7 +754,7 @@ function RemoteAccessSection() {
               </a>
             </span>
             <input
-              className="input input-mono" type="password" autoComplete="off"
+              className="ds-inp ds-mono" type="password" autoComplete="off"
               placeholder={state.has_ngrok_token ? t('remote.ngrokTokenSaved') : t('remote.ngrokTokenPlaceholder')}
               value={token} onChange={(e) => setToken(e.target.value)} disabled={state.running}
             />
@@ -745,7 +767,7 @@ function RemoteAccessSection() {
               </a>
             </span>
             <input
-              className="input input-mono" placeholder="calm-otter-123.ngrok-free.app"
+              className="ds-inp ds-mono" placeholder="calm-otter-123.ngrok-free.app"
               value={domain} onChange={(e) => setDomain(e.target.value)} disabled={state.running}
               autoCapitalize="off" autoCorrect="off" spellCheck={false}
             />
@@ -753,7 +775,7 @@ function RemoteAccessSection() {
           <p className="m-0 text-xs text-fg-tertiary">{t('remote.ngrokHint')}</p>
           <div>
             <button
-              type="button" className="btn btn-secondary btn-sm"
+              type="button" className="ds-ctl ds-sm"
               disabled={busy || state.running || (!token.trim() && domain.trim() === (state.ngrok_domain ?? ''))}
               onClick={() => void saveNgrok()}
             >
@@ -768,7 +790,7 @@ function RemoteAccessSection() {
           <p className="m-0 text-xs text-warn">{t(provider === 'ngrok' ? 'remote.ngrokNotInstalled' : 'remote.notInstalled')}</p>
           <div>
             <button
-              type="button" className="btn btn-secondary btn-sm" disabled={busy || !info?.can_install}
+              type="button" className="ds-ctl ds-sm" disabled={busy || !info?.can_install}
               onClick={() => void run(() => api.installTunnel(provider))}
             >
               {busy ? t('remote.installing') : t(provider === 'ngrok' ? 'remote.installNgrok' : 'remote.install')}
@@ -781,19 +803,17 @@ function RemoteAccessSection() {
       )}
 
       {/* autostart */}
-      <label className="flex items-start gap-2.5 cursor-pointer">
-        <input
-          type="checkbox" className="mt-0.5" checked={state.autostart} disabled={busy}
-          onChange={(e) => void run(() => api.configureTunnel({ autostart: e.target.checked }))}
-          data-testid="tunnel-autostart"
-        />
-        <span className="flex flex-col gap-0.5">
-          <span className="text-sm text-fg-primary">{t('remote.autostart')}</span>
-          <span className="text-xs text-fg-tertiary">
-            {state.permanent ? t('remote.autostartHintPermanent') : t('remote.autostartHintQuick')}
-          </span>
-        </span>
-      </label>
+      <div className="ds-field">
+        <div className="ds-field-txt">
+          <div className="ds-field-name">
+            <FieldLabel
+              label={t('remote.autostart')}
+              tip={state.permanent ? t('remote.autostartHintPermanent') : t('remote.autostartHintQuick')}
+            />
+          </div>
+        </div>
+        <Bool value={state.autostart} disabled={busy} onChange={(v) => void run(() => api.configureTunnel({ autostart: v }))} />
+      </div>
 
       {/* link / start / stop */}
       {state.running && state.url ? (
@@ -802,7 +822,7 @@ function RemoteAccessSection() {
             <code className="flex-1 min-w-[200px] text-xs font-mono break-all p-2.5 rounded-md bg-sunken border border-subtle">
               {state.url}
             </code>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => void copy()}>
+            <button type="button" className="ds-ctl ds-sm" onClick={() => void copy()}>
               {copied ? t('remote.copied') : t('remote.copy')}
             </button>
           </div>
@@ -810,12 +830,12 @@ function RemoteAccessSection() {
           <p className="m-0 text-xs text-warn">{t('remote.shareWarning')}</p>
           <div className="flex flex-wrap gap-2">
             <button
-              type="button" className="btn btn-secondary btn-sm" disabled={busy}
+              type="button" className="ds-ctl ds-sm" disabled={busy}
               onClick={() => void run(api.stopTunnel)}
             >
               {t('remote.stop')}
             </button>
-            <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void rotate()}>
+            <button type="button" className="ds-ctl ds-ghost ds-sm" disabled={busy} onClick={() => void rotate()}>
               {t('remote.rotate')}
             </button>
           </div>
@@ -824,7 +844,7 @@ function RemoteAccessSection() {
         <>
           <div>
             <button
-              type="button" className="btn btn-primary btn-sm"
+              type="button" className="ds-btn-primary ds-sm"
               disabled={busy || !installed || !ngrokReady}
               onClick={() => void run(api.startTunnel)}
             >
@@ -858,17 +878,14 @@ function AppearanceSection() {
   return (
     <SettingsSection id="appearance" title={t('settings.appearance')}>
       <SettingsField label={t('settings.language')} desc={t('settings.languageDesc')}>
-        <div className="flex flex-wrap gap-1.5">
+        <div className="ds-seg" style={{ alignSelf: 'flex-start' }}>
           {LANGUAGES.map((option) => (
             <button
               key={option.code}
               type="button"
               onClick={() => applyLang(option.code)}
-              className={`px-3 py-1.5 rounded-md border text-sm transition-colors ${
-                lang === option.code
-                  ? 'border-selected bg-selected-soft text-accent font-medium'
-                  : 'border-subtle bg-surface text-fg-secondary hover:border-dim'
-              }`}
+              aria-pressed={lang === option.code}
+              className={`ds-seg-item${lang === option.code ? ' ds-is-active' : ''}`}
             >
               {option.label}
             </button>
@@ -888,18 +905,13 @@ function SettingsSection({
   headerExtras?: React.ReactNode  // 可选 slot：渲染在 h2 右侧（紧贴），给 ⓘ tooltip 之类用
   children: React.ReactNode
 }) {
-  const titleEl = <h2 className="text-sm font-semibold text-fg-primary">{title}</h2>
   return (
-    <section id={id} className="card p-5 flex flex-col gap-4 scroll-mt-24">
-      {headerExtras ? (
-        <div className="flex items-center gap-2 mb-0.5">
-          {titleEl}
-          {headerExtras}
-        </div>
-      ) : (
-        <div className="mb-0.5">{titleEl}</div>
-      )}
-      {children}
+    <section id={id} className="ds-set-sect">
+      <div className="ds-set-head">
+        <h2 className="ds-cap" style={{ margin: 0 }}>{title}</h2>
+        {headerExtras}
+      </div>
+      <div className="ds-set-body">{children}</div>
     </section>
   )
 }
@@ -962,24 +974,19 @@ function SectionIndex({
   }
 
   return (
-    <aside className="hidden lg:block">
-      <nav className="sticky top-4 flex flex-col gap-0.5">
-        <div className="caption mb-2 px-2">{t('settings.pageIndex')}</div>
-        {sections.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => onJump(s.id)}
-            className={`text-left text-xs px-2 h-7 rounded-md transition-colors ${
-              active === s.id
-                ? 'text-fg-primary font-medium bg-overlay'
-                : 'text-fg-tertiary hover:text-fg-primary hover:bg-overlay'
-            }`}
-          >
-            {t(s.labelKey)}
-          </button>
-        ))}
-      </nav>
-    </aside>
+    <nav className="ds-railnav" aria-label={t('settings.sectionsCap')}>
+      {sections.map((s) => (
+        <a
+          key={s.id}
+          href={`#${s.id}`}
+          onClick={(e) => { e.preventDefault(); onJump(s.id) }}
+          className={active === s.id ? 'ds-is-active' : undefined}
+          aria-current={active === s.id ? 'true' : undefined}
+        >
+          {t(s.labelKey)}
+        </a>
+      ))}
+    </nav>
   )
 }
 
@@ -991,29 +998,33 @@ function SettingsField({ label, desc, helpTooltip, children }: {
   helpTooltip?: React.ReactNode
   children: React.ReactNode
 }) {
+  // Descriptions open on hover over the name (same as the training config).
+  const tip = desc || helpTooltip
+    ? <>{desc && <p style={{ margin: 0 }}>{desc}</p>}{helpTooltip}</>
+    : undefined
   return (
-    <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-3 items-start">
-      <div className="flex flex-col gap-0.5 pt-1.5">
-        <div className="flex items-center gap-2 min-w-0">
-          <label className="text-sm font-medium text-fg-primary leading-5">{label}</label>
-          {helpTooltip && <InfoButton>{helpTooltip}</InfoButton>}
-        </div>
-        {desc && <p className="text-xs text-fg-tertiary m-0 leading-snug">{desc}</p>}
+    <div className="ds-field ds-stack">
+      <div className="ds-field-txt">
+        <div className="ds-field-name"><FieldLabel label={label} tip={tip} /></div>
       </div>
-      <div className="min-w-0">{children}</div>
+      <div className="ds-field-ctl">{children}</div>
     </div>
   )
 }
 
-function Bool({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+function Bool({ value, onChange, disabled }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
-    <input
-      type="checkbox"
-      checked={value}
-      onChange={(e) => onChange(e.target.checked)}
-      className="w-4 h-4"
-      style={{ accentColor: 'var(--accent)' }}
-    />
+    <button
+      type="button"
+      role="switch"
+      aria-checked={value}
+      disabled={disabled}
+      onClick={() => onChange(!value)}
+      className={`ds-switch${value ? ' ds-on' : ''}`}
+      style={{ flex: 'none' }}
+    >
+      <i />
+    </button>
   )
 }
 
@@ -1369,14 +1380,16 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             type="text"
             value={rootDraft}
             onChange={(e) => setRootDraft(e.target.value)}
-            className={`${textInputClass} flex-1`}                                  />
-          <button onClick={saveRoot} disabled={!rootDirty || savingRoot} className="btn btn-primary btn-sm"
+            className={`${textInputClass} ds-mono flex-1`}
+          />
+          <button onClick={saveRoot} disabled={!rootDirty || savingRoot} className="ds-btn-primary ds-sm"
             title={rootDirty ? t('settings.savePathConfig') : t('settings.notModified')}>
             {savingRoot ? t('common.saving') : t('settings.savePath')}
           </button>
           <button onClick={() => setRootDraft(serverRoot ?? (catalog?.models_root ?? ''))} disabled={!rootDirty || savingRoot}
-            className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm"
-            style={{ opacity: !rootDirty ? 0.3 : 1 }}
+            className="ds-iconbtn"
+            aria-label={t('common.reset')}
+            title={t('common.reset')}
           >↻</button>
         </div>
       </SettingsField>
@@ -1385,15 +1398,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
         label={t('settings.autoSyncPathsLabel')}
         helpTooltip={<p>{t('settings.autoSyncPathsHelp')}</p>}
       >
-        <label className="flex items-center gap-2 pt-1.5">
-          <input
-            type="checkbox"
-            checked={autoSyncPaths}
-            onChange={(e) => void saveAutoSync(e.target.checked)}
-            disabled={savingAutoSync}
-            style={{ height: 16, width: 16 }}
-          />
-        </label>
+        <Bool value={autoSyncPaths} disabled={savingAutoSync} onChange={(v) => void saveAutoSync(v)} />
       </SettingsField>
 
       {error && <div className="text-err text-xs font-mono">{error}</div>}
@@ -1403,7 +1408,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
         <div className="flex flex-col gap-2">
           {/* Anima 主模型 */}
           <ModelGroupCard
-            title={catalog.anima_main.name}
+            title={translatedCatalogText(MODEL_NAME_KEYS, 'anima_main', catalog.anima_main.name, t)}
             helpTooltip={
               <>
                 <p><Trans i18nKey="settings.repoHelp" values={{ desc: translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_main', catalog.anima_main.description, t), repo: catalog.anima_main.repo }} components={{ code: <code /> }} /></p>
@@ -1418,9 +1423,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                 const isSel = v.variant === selectedAnima
                 const canSelect = v.exists && dl?.status !== 'running'
                 return (
-                  <li key={v.variant} className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
-                    isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
-                  }`}>
+                  <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
                     <input type="radio" name="anima_variant" checked={isSel} disabled={!canSelect}
                       onChange={() => void pickAnima(v.variant)}
                       className="shrink-0"
@@ -1461,9 +1464,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             helpTooltip={<p>{t('settings.vaeHelp')}</p>}
           >
             <ul className="list-none m-0 p-0 flex flex-col gap-1">
-              <li className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
-                selectedVae === '' ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
-              }`}>
+              <li className={`model-row ds-model-row${selectedVae === '' ? ' ds-is-on' : ''}`}>
                 <input type="radio" name="vae_source" checked={selectedVae === ''}
                   onChange={() => void pickVae('')}
                   className="shrink-0"
@@ -1493,7 +1494,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
           {/* Krea 2 主模型（0.20 第二模型族；VAE 与 Anima 共享 qwen_image_vae） */}
           {catalog.krea2_main && (
             <ModelGroupCard
-              title={catalog.krea2_main.name}
+              title={translatedCatalogText(MODEL_NAME_KEYS, 'krea2_main', catalog.krea2_main.name, t)}
               helpTooltip={<p>{t('settings.krea2MainHelp')}</p>}
             >
               <ul className="list-none m-0 p-0 flex flex-col gap-1">
@@ -1503,9 +1504,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                   const isSel = v.variant === selectedKrea2
                   const canSelect = v.exists && dl?.status !== 'running'
                   return (
-                    <li key={v.variant} className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
-                      isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
-                    }`}>
+                    <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
                       <input type="radio" name="krea2_variant" checked={isSel} disabled={!canSelect}
                         onChange={() => void pickKrea2(v.variant)}
                         className="shrink-0"
@@ -1514,7 +1513,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                       />
                       <code className="font-mono text-fg-primary w-32 shrink-0 truncate" title={v.variant}>{v.variant}</code>
                       {v.purpose && (
-                        <span className={`badge badge-${v.purpose === 'training' ? 'accent' : 'neutral'} text-[10px]`}>
+                        <span className={`ds-badge ${v.purpose === 'training' ? 'ds-ok' : 'ds-mute'}`}>
                           {v.purpose === 'training' ? t('settings.purposeTraining') : t('settings.purposeInference')}
                         </span>
                       )}
@@ -1556,9 +1555,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                   const isSel = teKey === selectedKrea2Te
                   const canSelect = allExist && dl?.status !== 'running'
                   return (
-                    <li key={teKey} className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
-                      isSel ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
-                    }`}>
+                    <li key={teKey} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
                       <input type="radio" name="krea2_te" checked={isSel} disabled={!canSelect}
                         onChange={() => void pickKrea2Te(teKey)}
                         className="shrink-0"
@@ -1599,9 +1596,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                 const allExist = m.files.every((f) => f.exists)
                 const totalSize = m.files.reduce((sum, f) => sum + f.size, 0)
                 return (
-                  <li className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
-                    selectedAnimaTe === '' ? 'bg-accent-soft border border-accent' : 'bg-transparent border border-transparent'
-                  }`}>
+                  <li className={`model-row ds-model-row${selectedAnimaTe === '' ? ' ds-is-on' : ''}`}>
                     <input type="radio" name="anima_te" checked={selectedAnimaTe === ''}
                       onChange={() => void pickAnimaTe('')}
                       className="shrink-0"
@@ -1638,7 +1633,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             const totalSize = m.files.reduce((s, f) => s + f.size, 0)
             return (
               <ModelGroupCard key={id} title={m.name}>
-                <div className="flex items-center gap-2 text-xs">
+                <div className="ds-model-row">
                   <span className="text-fg-tertiary">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, id, m.description, t)} · <code>{m.repo}</code></span>
                   <span style={{ flex: 1 }} />
                   <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
@@ -1684,11 +1679,8 @@ function ModelGroupCard({
   children: React.ReactNode
 }) {
   return (
-    <div className="rounded-sm border border-subtle bg-sunken p-2.5">
-      <h4 className="text-xs font-semibold text-fg-primary mb-1.5 flex items-center gap-2">
-        <span>{title}</span>
-        {helpTooltip && <InfoButton>{helpTooltip}</InfoButton>}
-      </h4>
+    <div className="ds-model-group">
+      <h4 className="ds-model-group-title" style={{ margin: 0 }}><FieldLabel label={title} tip={helpTooltip} /></h4>
       {children}
     </div>
   )
@@ -1713,9 +1705,10 @@ function ModelStatusBadge({ exists, size, status, fileCount, existsCount }: {
   return <StatusLabel bg="bg-overlay" fg="text-fg-tertiary" text={t('settings.notDownloaded')} />
 }
 
-function StatusLabel({ bg, fg, text, pulse }: { bg: string; fg: string; text: string; pulse?: boolean }) {
+function StatusLabel({ fg, text, pulse }: { bg: string; fg: string; text: string; pulse?: boolean }) {
+  const tone = fg === 'text-ok' ? 'ds-ok' : fg === 'text-err' ? 'ds-err' : fg === 'text-warn' ? 'ds-warn' : 'ds-mute'
   return (
-    <span className={`text-xs px-1.5 py-0.5 rounded-sm font-mono ${bg} ${fg}`}
+    <span className={`ds-badge ds-mono ${tone}`}
       style={pulse ? { animation: 'pulse 1.5s infinite' } : undefined}
     >{text}</span>
   )
@@ -1727,10 +1720,10 @@ function DownloadButton({ exists, status, busy, onClick }: {
   const { t } = useTranslation()
   const running = status === 'running' || busy
   if (running) {
-    return <button disabled className="btn btn-secondary btn-sm" style={{ opacity: 0.5 }}>...</button>
+    return <button disabled className="ds-ctl ds-sm" style={{ opacity: 0.5 }}>...</button>
   }
   return (
-    <button onClick={onClick} className={exists ? 'btn btn-secondary btn-sm' : 'btn btn-primary btn-sm'}
+    <button onClick={onClick} className={exists ? 'ds-ctl ds-sm' : 'ds-btn-primary ds-sm'}
       title={exists ? t('settings.redownloadTitle') : t('common.download')}>
       {exists ? t('settings.redownload') : t('settings.downloadAction')}
     </button>
@@ -1805,17 +1798,17 @@ function PyTorchSection() {
               : `CPU ${status.cuda_build}`
 
   return (
-    <details id="pytorch" open={!!hasIssue} className="rounded-md border border-subtle bg-surface group scroll-mt-24">
-      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+    <details id="pytorch" open={!!hasIssue} className="ds-set-sect group">
+      <summary className="ds-set-head cursor-pointer list-none" style={{ paddingBottom: 15, flexWrap: 'wrap' }}>
         <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
-        <h2 className="text-sm font-semibold text-fg-primary m-0">PyTorch</h2>
+        <h2 className="ds-cap" style={{ margin: 0 }}>PyTorch</h2>
         <span className="text-xs text-fg-tertiary">{t('settings.trainingCoreDependency')}</span>
-        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : status?.is_cpu_with_gpu ? 'text-err' : 'text-warn'}`}>
+        <span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : status?.is_cpu_with_gpu ? 'ds-err' : 'ds-warn'}`} style={{ marginLeft: 'auto' }}>
           {statusLabel}
         </span>
       </summary>
 
-      <div className="px-4 pb-4 flex flex-col gap-3">
+      <div className="ds-set-body" style={{ paddingTop: 0 }}>
         {error && <div className="text-err text-xs font-mono">{error}</div>}
         {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
 
@@ -1873,7 +1866,7 @@ function PyTorchSection() {
             <button
               onClick={() => void reinstall('auto')}
               disabled={busy || !status.cuda_detect.available}
-              className={status.is_cpu_with_gpu ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+              className={status.is_cpu_with_gpu ? 'ds-btn-primary ds-sm' : 'ds-ctl ds-sm'}
               title={status.cuda_detect.available
                 ? t('settings.autoSelect', { tag: status.recommended_cu_tag })
                 : t('settings.noNvidiaDriverCannotCuda')}
@@ -1885,7 +1878,7 @@ function PyTorchSection() {
             <button onClick={() => void refresh()} disabled={busy}
               className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm">↻</button>
             <button type="button" onClick={() => setAdvancedOpen(!advancedOpen)}
-              className="btn btn-ghost btn-sm text-xs text-fg-tertiary ml-auto">
+              className="ds-ctl ds-ghost ds-sm text-xs text-fg-tertiary ml-auto">
               {advancedOpen ? '▾' : '▸'} {t('settings.advancedManualCuda')}
             </button>
           </div>
@@ -1902,7 +1895,7 @@ function PyTorchSection() {
                     key={tag}
                     onClick={() => void reinstall(tag)}
                     disabled={busy}
-                    className={`btn btn-secondary btn-sm ${
+                    className={`ds-ctl ds-sm ${
                       status.cuda_build === tag ? 'border-accent' : ''
                     }`}
                     title={
@@ -1989,15 +1982,15 @@ function FlashAttentionSection() {
   const statusOk = status?.installed && !error
 
   return (
-    <details id="flash-attn" open={!!hasIssue} className="rounded-md border border-subtle bg-surface group scroll-mt-24">
-      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+    <details id="flash-attn" open={!!hasIssue} className="ds-set-sect group">
+      <summary className="ds-set-head cursor-pointer list-none" style={{ paddingBottom: 15, flexWrap: 'wrap' }}>
         <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
-        <h2 className="text-sm font-semibold text-fg-primary m-0">Flash Attention</h2>
+        <h2 className="ds-cap" style={{ margin: 0 }}>Flash Attention</h2>
         <span className="text-xs text-fg-tertiary">{t('settings.trainingAccelerationOptional')}</span>
-        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : 'text-warn'}`}>{statusLabel}</span>
+        <span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : 'ds-warn'}`} style={{ marginLeft: 'auto' }}>{statusLabel}</span>
       </summary>
 
-      <div className="px-4 pb-4 flex flex-col gap-3">
+      <div className="ds-set-body" style={{ paddingTop: 0 }}>
         {error && <div className="text-err text-xs font-mono">{error}</div>}
         {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
 
@@ -2039,7 +2032,7 @@ function FlashAttentionSection() {
             <button
               onClick={() => void install(null)}
               disabled={busy || !canAutoInstall}
-              className="btn btn-primary btn-sm"
+              className="ds-btn-primary ds-sm"
               title={canAutoInstall
                 ? t('settings.autoSelect', { tag: bestCandidate?.name ?? '' })
                 : t('settings.noWheelManual')}
@@ -2049,7 +2042,7 @@ function FlashAttentionSection() {
             <button onClick={() => void refresh()} disabled={busy}
               className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm">↻</button>
             <button type="button" onClick={() => setCandidatesOpen(!candidatesOpen)}
-              className="btn btn-ghost btn-sm text-xs text-fg-tertiary ml-auto">
+              className="ds-ctl ds-ghost ds-sm text-xs text-fg-tertiary ml-auto">
               {candidatesOpen ? '▾' : '▸'} {t('settings.candidateWheels', { n: usable.length })}
             </button>
           </div>
@@ -2074,7 +2067,7 @@ function FlashAttentionSection() {
                       <button
                         onClick={() => void install(c.url)}
                         disabled={busy}
-                        className={c.usable ? 'btn btn-primary btn-sm shrink-0' : 'btn btn-secondary btn-sm shrink-0'}
+                        className={c.usable ? 'ds-btn-primary ds-sm shrink-0' : 'ds-ctl ds-sm shrink-0'}
                         title={c.usable ? t('settings.installWheel') : t('settings.wheelAbiIncompatible')}
                       >
                         {c.usable ? t('settings.installAction') : t('settings.forceInstall')}
@@ -2097,7 +2090,7 @@ function FlashAttentionSection() {
                   <button
                     onClick={() => { if (manualUrl.trim()) void install(manualUrl.trim()) }}
                     disabled={busy || !manualUrl.trim()}
-                    className="btn btn-secondary btn-sm shrink-0"
+                    className="ds-ctl ds-sm shrink-0"
                   >{t('settings.install')}</button>
                 </div>
               </div>
@@ -2164,20 +2157,24 @@ function XformersSection() {
   const hasIssue = !!error
 
   return (
-    <details id="xformers" open={!!hasIssue} className="rounded-md border border-subtle bg-surface group scroll-mt-24">
-      <summary className="cursor-pointer p-4 list-none flex items-center gap-2">
+    <details id="xformers" open={!!hasIssue} className="ds-set-sect group">
+      <summary className="ds-set-head cursor-pointer list-none" style={{ paddingBottom: 15, flexWrap: 'wrap' }}>
         <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
-        <h2 className="text-sm font-semibold text-fg-primary m-0">xformers</h2>
+        <h2 className="ds-cap" style={{ margin: 0 }}>
+          <FieldLabel
+            label="xformers"
+            tip={<>
+              <p><Trans i18nKey="settings.xformersHelp1" components={{ strong: <strong />, code: <code /> }} /></p>
+              <p>{t('settings.xformersHelp2')}</p>
+              <p>{t('settings.xformersHelp3')}</p>
+            </>}
+          />
+        </h2>
         <span className="text-xs text-fg-tertiary">{t('settings.xformersSubtitle')}</span>
-        <InfoButton>
-          <p><Trans i18nKey="settings.xformersHelp1" components={{ strong: <strong />, code: <code /> }} /></p>
-          <p>{t('settings.xformersHelp2')}</p>
-          <p>{t('settings.xformersHelp3')}</p>
-        </InfoButton>
-        <span className={`ml-auto text-xs font-mono ${statusOk ? 'text-ok' : 'text-warn'}`}>{statusLabel}</span>
+        <span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : 'ds-warn'}`} style={{ marginLeft: 'auto' }}>{statusLabel}</span>
       </summary>
 
-      <div className="px-4 pb-4 flex flex-col gap-3">
+      <div className="ds-set-body" style={{ paddingTop: 0 }}>
         {error && <div className="text-err text-xs font-mono">{error}</div>}
         {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
 
@@ -2194,7 +2191,7 @@ function XformersSection() {
             <button
               onClick={() => void install()}
               disabled={busy}
-              className="btn btn-primary btn-sm"
+              className="ds-btn-primary ds-sm"
             >
               {busy
                 ? t('settings.installing')
@@ -2205,7 +2202,7 @@ function XformersSection() {
             <button
               onClick={() => void refresh()}
               disabled={busy}
-              className="btn btn-ghost btn-sm"
+              className="ds-ctl ds-ghost ds-sm"
               title={t('settings.refreshStatus')}
             >↻</button>
           </div>

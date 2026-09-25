@@ -19,7 +19,7 @@ const SettingsPageLazy = lazy(() => import('../pages/tools/Settings'))
 // 宽度：对齐 Claude Design 原型的紧凑右侧抽屉（原型 520px）。这里给密集的真实
 // 设置内容留余量 → 600px，小屏 94vw 兜底。比旧版 1024px 窄很多，single-column，
 // 不再带 PAGE INDEX（原型抽屉没有），更贴近原型 chrome。
-const DRAWER_WIDTH_CLASS = 'w-[min(600px,94vw)]'
+const DRAWER_WIDTH_CLASS = 'w-[min(560px,100vw)]'
 const ANIM_MS = 220
 
 export default function SettingsDrawer() {
@@ -72,16 +72,17 @@ export default function SettingsDrawer() {
        *  panel 槽位无人覆盖 → 看见底层页面 / 出现黑白闪屏。 */}
       <div
         onClick={() => void close()}
-        className={`absolute inset-0 transition-colors ease-out ${
-          active ? 'bg-zinc-950/40' : 'bg-zinc-950/0'
-        }`}
-        style={{ transitionDuration: `${ANIM_MS}ms` }}
+        className="absolute inset-0 transition-colors ease-out"
+        style={{
+          background: active ? 'rgba(20,22,20,.18)' : 'transparent',
+          transitionDuration: `${ANIM_MS}ms`,
+        }}
         aria-label="close settings"
       />
       <aside
         role="dialog"
         aria-modal="true"
-        className={`absolute top-0 right-0 bottom-0 flex flex-col bg-canvas border-l border-subtle shadow-2xl transition-transform ease-out m-drawer-full ${DRAWER_WIDTH_CLASS} ${
+        className={`ds-drawer transition-transform ease-out m-drawer-full ${DRAWER_WIDTH_CLASS} ${
           active ? 'translate-x-0' : 'translate-x-full'
         }`}
         style={{ transitionDuration: `${ANIM_MS}ms` }}

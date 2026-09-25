@@ -59,7 +59,8 @@
     "remote": "(Remote)",
     "local": "Local",
     "filename": "Filename",
-    "rename": "Rename"
+    "rename": "Rename",
+    "reset": "Reset"
   },
   "status": {
     "created": "Created",
@@ -1877,7 +1878,19 @@
     "vaeHelp": "The VAE is shared by Anima and Krea 2. Pick the official qwen_image_vae or register your own .safetensors — training, sampling and test generation all follow this choice.",
     "animaTeHelp": "Anima's text encoder (Qwen3-0.6B). You can point it at your own transformers folder — it must contain config.json plus the tokenizer/weight files.",
     "appearance": "Appearance & language",
-    "languageDesc": "Applies instantly. Technical names (navit_packing, LoKr, …) stay in English in every language."
+    "languageDesc": "Applies instantly. Technical names (navit_packing, LoKr, …) stay in English in every language.",
+    "sectionsCap": "Sections",
+    "railNote": "Tagger presets, WandB and the booru proxy live on their own pages.",
+    "savedBadge": "Saved",
+    "unsavedBadge": "Unsaved",
+    "footerSaved": "Changes are saved to secrets.json",
+    "footerDirty": "There are unsaved changes — press Save",
+    "done": "Done",
+    "modeActive": "active",
+    "modelNames": {
+      "animaMain": "Anima main model",
+      "krea2Main": "Krea 2 main model"
+    }
   },
   "monitor": {
     "taskLabel": "Task",

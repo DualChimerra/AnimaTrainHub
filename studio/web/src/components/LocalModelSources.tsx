@@ -103,11 +103,7 @@ export function LocalModelRows({
       {local.map((row) => (
         <li
           key={row.value}
-          className={`model-row flex items-center gap-2 text-xs px-1.5 py-1 rounded-sm ${
-            row.is_current
-              ? 'bg-accent-soft border border-accent'
-              : 'bg-transparent border border-transparent'
-          }`}
+          className={`model-row ds-model-row${row.is_current ? ' ds-is-on' : ''}`}
         >
           <input
             type="radio"
@@ -125,12 +121,10 @@ export function LocalModelRows({
             className="font-mono text-fg-primary w-32 shrink-0 truncate"
             title={row.value}
           >{row.label}</code>
-          <span className="badge badge-neutral text-[10px] shrink-0">
+          <span className="ds-badge ds-mute shrink-0">
             {t('settings.localBaseModel')}
           </span>
-          <span className={`text-xs px-1.5 py-0.5 rounded-sm font-mono ${
-            row.exists ? 'bg-ok-soft text-ok' : 'bg-err-soft text-err'
-          }`}>
+          <span className={`ds-badge ds-mono ${row.exists ? 'ds-ok' : 'ds-err'}`}>
             {row.exists ? `✓ ${fmtBytes(row.size)}` : t('settings.localModelMissing')}
           </span>
           <span style={{ flex: 1 }} />
@@ -139,10 +133,9 @@ export function LocalModelRows({
               value={domain}
               disabled={busy === row.value}
               onChange={(e) => void changeFamily(row, e.target.value)}
-              className="input input-mono shrink-0"
-              // .input 是 width:100% 的表单基类；这里在行内当小控件用，
-              // 显式收窄免得把同一行的注销按钮挤出卡片
-              style={{ padding: '2px 4px', fontSize: 'var(--t-xs)', width: 96 }}
+              className="ds-inp ds-mono shrink-0"
+              // ds-inp is width:100%; narrowed here so the remove button stays on the row
+              style={{ height: 26, padding: '0 6px', width: 96 }}
               title={t('settings.localModelFamilyHint')}
             >
               {familyOptions.map((f) => (
@@ -153,7 +146,7 @@ export function LocalModelRows({
           <button
             onClick={() => void unregister(row)}
             disabled={busy === row.value}
-            className="btn btn-ghost btn-sm shrink-0"
+            className="ds-ctl ds-ghost ds-sm shrink-0"
             title={t('settings.localModelRemoveHint')}
           >
             {t('settings.localModelRemove')}
@@ -204,7 +197,7 @@ export function AddLocalModelButton({
       <button
         onClick={() => setPicking(true)}
         disabled={saving}
-        className="btn btn-secondary btn-sm"
+        className="ds-ctl ds-sm"
       >
         {saving
           ? t('common.saving')

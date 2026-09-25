@@ -1518,7 +1518,11 @@
     "vaeHelp": "VAE 由 Anima 与 Krea 2 共用。可用官方 qwen_image_vae，也可登记自己的 .safetensors —— 训练、采样与测试出图都跟随这一选择。",
     "animaTeHelp": "Anima 的文本编码器（Qwen3-0.6B）。可以指向你自己的 transformers 目录，目录里需要有 config.json 和 tokenizer / 权重文件。",
     "appearance": "外观与语言",
-    "languageDesc": "即时生效。技术名词（navit_packing、LoKr 等）在任何语言下都保持英文原样。"
+    "languageDesc": "即时生效。技术名词（navit_packing、LoKr 等）在任何语言下都保持英文原样。",
+    "modelNames": {
+      "animaMain": "Anima 主模型",
+      "krea2Main": "Krea 2 主模型"
+    }
   },
   "monitor": {
     "taskLabel": "任务",
