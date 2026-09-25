@@ -2259,7 +2259,7 @@
     },
     "reg": {
       "title": "正则集（可选）",
-      "subtitle": "Booru 拉图或 base 模型自生成中性 prior；可镜像 train 结构或平铺单桶 1_data/"
+      "subtitle": "Booru 拉图或 base 模型自生成中性 prior；可镜像 train 结构或平铺单桶 <code>1_data/</code>"
     },
     "train": {
       "title": "训练",
@@ -2577,7 +2577,7 @@
     "pickerTitleConfigured": "当前 version 私有配置；点击展开选预设作为起点重置",
     "pickerTitleEmpty": "点击选预设作为起点创建当前 version 配置",
     "configChip": "配置",
-    "scopedConfigLabel": "{{title}} / {{label}} 配置",
+    "scopedConfigLabel": "{{title}} · {{label}}",
     "notConfiguredLabel": "未配置 — 选预设作为起点",
     "readPresetParams": "读取此预设参数",
     "estDuration": "预计耗时",

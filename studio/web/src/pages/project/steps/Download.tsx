@@ -267,7 +267,7 @@ export default function DownloadPage() {
             <button type="button" className="ds-ctl" onClick={() => setShowPathPicker(true)} disabled={uploader.busy}>
               {t('download.uploadFromPath')}
             </button>
-            <Link className="ds-btn-primary" to={nextTo}>{t('dataset.nextCurate')}</Link>
+            <Link className="ds-btn-primary" to={nextTo}>{t('dataset.nextCurate')}<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13m-5-6 6 6-6 6" /></svg></Link>
           </>
         }
       />
