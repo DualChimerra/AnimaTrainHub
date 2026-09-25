@@ -309,10 +309,10 @@
       "lrScheduler": {
         "none": "常数",
         "cosine": "Cosine",
-        "cosineWithRestart": "Cosine 重启",
+        "cosineWithRestart": "Cosine 热重启",
         "cosineWithWarmup": "Cosine 预热",
-        "cosineCycles": "自定义 Cosine 周期",
-        "constantThenCosine": "常数后 Cosine 衰减"
+        "cosineCycles": "Cosine 等长周期",
+        "constantThenCosine": "常数 + Cosine 衰减"
       },
       "optimizerType": {
         "adamw": "AdamW",
