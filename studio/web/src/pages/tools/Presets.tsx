@@ -87,6 +87,7 @@ export default function PresetsPage() {
   // ── backend state ──
   const [schema, setSchema] = useState<SchemaResponse | null>(null)
   const [presets, setPresets] = useState<PresetSummary[]>([])
+  const [presetsLoaded, setPresetsLoaded] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [config, setConfig] = useState<ConfigData | null>(null)
   const [busy, setBusy] = useState(false)
@@ -156,13 +157,14 @@ export default function PresetsPage() {
   const refreshList = () => {
     api.listPresets().then((list) => {
       setPresets(list)
+      setPresetsLoaded(true)
       // 拉每个 preset 的 config 填表格列（best-effort，失败列显示 —）。
       list.forEach((p) => {
         api.getPreset(p.name)
           .then((c) => setConfigCache((m) => ({ ...m, [p.name]: c })))
           .catch(() => {})
       })
-    }).catch(() => setPresets([]))
+    }).catch(() => { setPresets([]); setPresetsLoaded(true) })
   }
 
   // ── 选 preset 切换 ──
@@ -228,14 +230,12 @@ export default function PresetsPage() {
   // ── 首次拿到列表后：自动选最近一个，省一次「切换」点击 ──
   const autoSelectedRef = useRef(false)
   useEffect(() => {
-    if (autoSelectedRef.current) return
-    if (presets.length > 0 && selected === null) {
-      autoSelectedRef.current = true
-      setSelected(presets[0].name)
-    } else if (presets.length === 0 && schema) {
-      autoSelectedRef.current = true
-    }
-  }, [presets, selected, schema])
+    // Wait for the list itself: the schema can arrive first, and an empty
+    // list at that moment is "not loaded yet", not "no presets".
+    if (autoSelectedRef.current || !presetsLoaded) return
+    autoSelectedRef.current = true
+    if (presets.length > 0 && selected === null) setSelected(presets[0].name)
+  }, [presets, presetsLoaded, selected])
 
   // 编辑器开着时 Esc 关闭（dirty 时仍可关 —— 改动留在内存，跟切 preset 一致）。
   useEffect(() => {
@@ -632,7 +632,7 @@ export default function PresetsPage() {
                           </td>
                           <td className="ds-num">{cfgRank(c)}</td>
                           <td className="ds-num">{cfgRes(c)}</td>
-                          <td>{c?.optimizer_type ? schemaEnumLabel('optimizer_type', String(c.optimizer_type), t) : '—'}</td>
+                          <td style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 130 }} title={c?.optimizer_type ? schemaEnumLabel('optimizer_type', String(c.optimizer_type), t) : undefined}>{c?.optimizer_type ? schemaEnumLabel('optimizer_type', String(c.optimizer_type), t) : '—'}</td>
                           <td className="ds-muted" style={{ whiteSpace: 'nowrap' }}>{fmtUpdated(p.updated_at)}</td>
                           <td onClick={(e) => e.stopPropagation()}>
                             <KebabMenu label={t('presets.rowMenu', { name: p.name })} items={rowMenu(p.name)} />

@@ -1,6 +1,6 @@
 import type { TFunction } from 'i18next'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useTranslation } from 'react-i18next'
+import { Trans, useTranslation } from 'react-i18next'
 import { Link, useOutletContext } from 'react-router-dom'
 import {
   api,
@@ -532,7 +532,7 @@ export default function RegularizationPage() {
       idx={5}
       eyebrow={t('reg.eyebrow')}
       title={t('steps.reg.title')}
-      subtitle={t('steps.reg.subtitle')}
+      subtitle={<Trans i18nKey="steps.reg.subtitle" components={{ code: <code /> }} />}
       actions={
         <>
           {!reg?.exists && <Link className="ds-ctl" to={trainUrl}>{t('reg.skipStep')}</Link>}

@@ -309,7 +309,11 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
 
   const overviewActive = inRoute && currentStep === null
   // ADR-0007 §11.5 cursor 派生：cursor 之前的 phase = done。
-  const cursorPhase: VersionPhase = (version?.phase as VersionPhase | undefined) ?? 'curating'
+  // The cursor only means something while the version is being prepared; a
+  // trained / training version has every step behind it (same as Overview).
+  const cursorPhase: VersionPhase = !version
+    ? 'curating'
+    : version.status === 'preparing' ? version.phase : 'ready'
   const cursorIdx = PHASE_ORDER.indexOf(cursorPhase)
 
   const isStepDone = (key: string): boolean => {

@@ -642,6 +642,8 @@ function PathStringField({
   return (
     <FieldShell
       {...shell}
+      // Paths are long: full width under the name, not squeezed into the side column.
+      stack={kind === 'path'}
       below={
         <>
           {/* resume_state / resume_lora：贴字段的 dropdown，按 version 分组列文件 */}
@@ -669,31 +671,44 @@ function PathStringField({
         </>
       }
     >
-      <input
-        type="text"
-        value={text}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        aria-label={label}
-        title={text || undefined}
-        className={'ds-inp' + (kind === 'path' ? ' ds-mono' : '')}
-      />
-      {(kind === 'path' || suffix) && (
-        <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {kind === 'path' && (
-            <button
-              ref={browseBtnRef}
-              type="button"
-              onClick={() => setPicking((p) => !p)}
-              disabled={disabled}
-              className="ds-ctl ds-ghost"
-              style={{ height: 24 }}
-            >
-              {useResumePicker ? t('field.browseProject') : t('field.browse')}
-            </button>
-          )}
-          {suffix}
+      {kind === 'path' ? (
+        // input + folder button on one row, as in the mockup
+        <span style={{ display: 'flex', gap: 6, width: '100%' }}>
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => onChange(e.target.value)}
+            disabled={disabled}
+            aria-label={label}
+            title={text || undefined}
+            className="ds-inp ds-mono"
+            style={{ flex: 1 }}
+          />
+          <button
+            ref={browseBtnRef}
+            type="button"
+            onClick={() => setPicking((p) => !p)}
+            disabled={disabled}
+            className="ds-iconbtn"
+            aria-label={useResumePicker ? t('field.browseProject') : t('field.browse')}
+            title={useResumePicker ? t('field.browseProject') : t('field.browse')}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+          </button>
         </span>
+      ) : (
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          aria-label={label}
+          title={text || undefined}
+          className="ds-inp"
+        />
+      )}
+      {suffix && (
+        <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>{suffix}</span>
       )}
     </FieldShell>
   )

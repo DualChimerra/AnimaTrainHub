@@ -648,7 +648,7 @@ export default function TrainPage() {
     return base.replace(/\.(safetensors|ckpt|pt|bin|gguf)$/i, '') || String(config?.model_family ?? '—')
   })()
   const subtitle = config
-    ? [modelName, `${String(config.lora_type ?? 'lora')} r${String(config.lora_rank ?? '—')}`, t('train.nParams', { count: totalFields })].join(' · ')
+    ? <><code>{modelName}</code>{' · '}{[`${LORA_TYPE_LABEL[String(config.lora_type ?? 'lora')] ?? String(config.lora_type)} r${String(config.lora_rank ?? '—')}`, t('train.nParams', { count: totalFields })].join(' · ')}</>
     : t('steps.train.subtitle')
 
   const triggerUnderDop = !!config?.dop_enabled && groupFields('loss').includes('dop_enabled')
@@ -695,6 +695,7 @@ export default function TrainPage() {
             disabled={busy || !configResp?.has_config}
             className="ds-btn-primary"
           >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
             {t('train.startTrainBtn')}
           </button>
           {scheduleOpen && (
@@ -967,6 +968,9 @@ type TrainTabId = 'model' | 'data' | 'optim' | 'system'
 type FieldFilterMode = 'all' | 'changed' | 'nondefault' | 'locked'
 
 /** Which schema groups each tab of the form shows. */
+/** How the network type reads in the page subtitle (the mockup writes "LoKr r32"). */
+const LORA_TYPE_LABEL: Record<string, string> = { lora: 'LoRA', lokr: 'LoKr', loha: 'LoHa', ortho: 'OrthoLoRA', tlora: 'T-LoRA' }
+
 const TRAIN_TABS = [
   { id: 'model', groups: ['model', 'lora'] },
   { id: 'data', groups: ['dataset', 'caption'] },

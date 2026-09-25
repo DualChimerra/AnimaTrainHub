@@ -6,7 +6,7 @@ import TaskLogDrawer, { type LogSource } from './TaskLogDrawer'
 interface Props {
   idx: number | string
   title: string
-  subtitle?: string
+  subtitle?: ReactNode
   /** Caption above the title; defaults to "STEP N" for a numeric idx. */
   eyebrow?: string
   /** Green eyebrow (the mockup's version steps). On unless set to false. */

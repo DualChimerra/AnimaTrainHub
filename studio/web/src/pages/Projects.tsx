@@ -817,7 +817,7 @@ function NewProjectDialog({
           />
         </FieldLabel>
 
-        <FieldLabel label={t('common.notes')} hint="note (optional)">
+        <FieldLabel label={t('common.notes')} hint="note">
           <textarea
             className="input"
             value={form.note}
