@@ -81,7 +81,7 @@ describe('SoupPage', () => {
   it('needs two checkpoints before it will merge', async () => {
     const user = userEvent.setup()
     renderPage()
-    const merge = await screen.findByRole('button', { name: /^merge$/i })
+    const merge = await screen.findByRole('button', { name: /^merge/i })
     expect(merge).toBeDisabled()
     await addTwo(user)
     await waitFor(() => expect(merge).toBeEnabled())
@@ -108,14 +108,14 @@ describe('SoupPage', () => {
     renderPage()
     await addTwo(user)
     expect(await screen.findByText('different rank')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^merge$/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^merge/i })).toBeDisabled()
   })
 
   it('merges and hands the result to the generate page', async () => {
     const user = userEvent.setup()
     renderPage()
     await addTwo(user)
-    const merge = await screen.findByRole('button', { name: /^merge$/i })
+    const merge = await screen.findByRole('button', { name: /^merge/i })
     await waitFor(() => expect(merge).toBeEnabled())
     await user.click(merge)
 
