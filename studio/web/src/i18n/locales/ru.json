@@ -3062,5 +3062,46 @@
       "МБ",
       "ГБ"
     ]
+  },
+  "commandPalette": {
+    "placeholder": "Поиск по студии: проекты, задачи, теги, страницы…",
+    "searchingTags": "Ищу теги…",
+    "noResults": "Ничего не найдено",
+    "navigate": "по списку",
+    "select": "открыть",
+    "close": "закрыть",
+    "searchTagsHint": "Теги ищутся по {{n}} изобр.",
+    "shortcutHint": "Ctrl K — открыть откуда угодно",
+    "imageCount": "{{n}} изобр. с этим тегом",
+    "pages": "Страницы",
+    "tags": "Теги",
+    "presets": "Пресеты",
+    "projects": "Проекты",
+    "currentProject": "Текущий проект",
+    "groupProjects": "Проекты и версии",
+    "groupTasks": "Задачи и файлы",
+    "groupActions": "Действия и настройки",
+    "matches_one": "{{count}} совпадение",
+    "matches_few": "{{count}} совпадения",
+    "matches_many": "{{count}} совпадений",
+    "matches_other": "{{count}} совпадения",
+    "kind": {
+      "project": "проект",
+      "step": "шаг",
+      "task": "задача",
+      "tag": "тег",
+      "page": "страница",
+      "preset": "пресет",
+      "setting": "настройка"
+    },
+    "home": "Проекты",
+    "homeSub": "Список проектов",
+    "queueSub": "Все задачи",
+    "presetsSub": "Шаблоны конфига тренировки",
+    "monitorSub": "Метрики чекпоинтов",
+    "settingsSub": "Глобальные настройки",
+    "presetItem": "Пресет тренировки",
+    "projectItem": "Проект #{{id}}",
+    "generateSub": "Одиночно / XY-перебор"
   }
 }

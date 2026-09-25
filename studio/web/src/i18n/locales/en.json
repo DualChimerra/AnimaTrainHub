@@ -129,7 +129,22 @@
     "settingsSub": "Global settings",
     "presetItem": "Training preset",
     "projectItem": "Project #{{id}}",
-    "generateSub": "Generate / XY matrix"
+    "generateSub": "Generate / XY matrix",
+    "shortcutHint": "Ctrl K — open from anywhere",
+    "groupProjects": "Projects and versions",
+    "groupTasks": "Tasks and files",
+    "groupActions": "Actions and settings",
+    "matches_one": "{{count}} match",
+    "matches_other": "{{count}} matches",
+    "kind": {
+      "project": "project",
+      "step": "step",
+      "task": "task",
+      "tag": "tag",
+      "page": "page",
+      "preset": "preset",
+      "setting": "setting"
+    }
   },
   "sidebar": {
     "title": "Anima",

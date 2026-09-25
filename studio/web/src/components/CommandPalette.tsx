@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
-import { api, type CaptionEntry, type PresetSummary, type ProjectSummary } from '../api/client'
+import { api, type CaptionEntry, type PresetSummary, type ProjectSummary, type Task } from '../api/client'
 import { useProjectCtx } from '../context/ProjectContext'
 import { useSettingsDrawer } from '../lib/SettingsDrawer'
 
 type IconKey = 'folder' | 'queue' | 'preset' | 'monitor' | 'cog' | 'image' | 'step' | 'tag'
+/** Right-hand label of a row (commandPalette.kind.*). */
+type Kind = 'project' | 'step' | 'task' | 'tag' | 'page' | 'preset' | 'setting'
 
 interface Item {
   id: string
   label: string
   sub?: string
   group: string
+  kind: Kind
   icon: IconKey
   /** 路由跳转。跟 action 二选一。 */
   path?: string
@@ -22,12 +25,6 @@ interface Item {
 const SEARCH_ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" />
-  </svg>
-)
-
-const CHEVRON_ICON = (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M9 6l6 6-6 6" />
   </svg>
 )
 
@@ -64,6 +61,8 @@ export default function CommandPalette({ open, onClose }: Props) {
   const [presets, setPresets] = useState<PresetSummary[]>([])
   const [presetsLoaded, setPresetsLoaded] = useState(false)
 
+  const [tasks, setTasks] = useState<Task[]>([])
+
   const [captions, setCaptions] = useState<CaptionEntry[]>([])
   const [captionsCacheKey, setCaptionsCacheKey] = useState<string | null>(null)
   const [captionsLoading, setCaptionsLoading] = useState(false)
@@ -89,6 +88,13 @@ export default function CommandPalette({ open, onClose }: Props) {
     })
     return () => { cancelled = true }
   }, [open, projectsLoaded])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    api.listQueue().then((items) => { if (!cancelled) setTasks(items) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [open])
 
   useEffect(() => {
     if (!open || presetsLoaded) return
@@ -126,31 +132,17 @@ export default function CommandPalette({ open, onClose }: Props) {
 
   const allItems = useMemo<Item[]>(() => {
     const items: Item[] = []
-
-    items.push({ id: 'home',     label: t('commandPalette.home'),     sub: t('commandPalette.homeSub'),     group: t('commandPalette.pages'), icon: 'folder',  path: '/' })
-    items.push({ id: 'queue',    label: t('nav.queue'),               sub: t('commandPalette.queueSub'),    group: t('commandPalette.pages'), icon: 'queue',   path: '/queue' })
-    items.push({ id: 'generate', label: t('nav.generate'),            sub: t('commandPalette.generateSub'), group: t('commandPalette.pages'), icon: 'image',   path: '/tools/generate' })
-    items.push({ id: 'presets',  label: t('nav.presets'),             sub: t('commandPalette.presetsSub'), group: t('commandPalette.pages'), icon: 'preset',  path: '/tools/presets' })
-    items.push({ id: 'monitor',  label: t('nav.monitor'),             sub: t('commandPalette.monitorSub'), group: t('commandPalette.pages'), icon: 'monitor', path: '/tools/monitor' })
-    items.push({ id: 'settings', label: t('nav.settings'),            sub: t('commandPalette.settingsSub'), group: t('commandPalette.pages'), icon: 'cog',     action: () => settingsDrawer.open() })
-
-    for (const p of presets) {
-      items.push({
-        id: `preset:${p.name}`,
-        label: p.name,
-        sub: t('commandPalette.presetItem'),
-        group: t('commandPalette.presets'),
-        icon: 'preset',
-        path: '/tools/presets',
-      })
-    }
+    const gProjects = t('commandPalette.groupProjects')
+    const gTasks = t('commandPalette.groupTasks')
+    const gActions = t('commandPalette.groupActions')
 
     for (const p of projects) {
       items.push({
         id: `project:${p.id}`,
         label: p.title || `#${p.id}`,
         sub: p.slug ? `/${p.slug}` : t('commandPalette.projectItem', { id: p.id }),
-        group: t('commandPalette.projects'),
+        group: gProjects,
+        kind: 'project',
         icon: 'folder',
         path: `/projects/${p.id}`,
       })
@@ -159,20 +151,51 @@ export default function CommandPalette({ open, onClose }: Props) {
     if (ctx) {
       const cpid = ctx.project.id
       const cvid = ctx.activeVersion?.id
-      const group = t('commandPalette.currentProject')
-      items.push({ id: `overview:${cpid}`, label: t('nav.overview'), sub: ctx.project.title, group, icon: 'folder', path: `/projects/${cpid}` })
-      items.push({ id: `download:${cpid}`, label: t('nav.download'), sub: ctx.project.title, group, icon: 'step', path: `/projects/${cpid}/download` })
+      const sub = ctx.activeVersion ? `${ctx.project.title} / ${ctx.activeVersion.label}` : ctx.project.title
+      items.push({ id: `overview:${cpid}`, label: t('nav.overview'), sub: ctx.project.title, group: gProjects, kind: 'step', icon: 'folder', path: `/projects/${cpid}` })
+      items.push({ id: `download:${cpid}`, label: t('nav.download'), sub: ctx.project.title, group: gProjects, kind: 'step', icon: 'step', path: `/projects/${cpid}/download` })
       if (cvid) {
         const base = `/projects/${cpid}/v/${cvid}`
-        items.push({ id: `curate:${cpid}`, label: t('nav.curate'),   sub: ctx.project.title, group, icon: 'step', path: `${base}/curate` })
-        items.push({ id: `edit:${cpid}`,   label: t('nav.tagEdit'),  sub: ctx.project.title, group, icon: 'step', path: `${base}/edit` })
-        items.push({ id: `reg:${cpid}`,    label: t('nav.reg'),      sub: ctx.project.title, group, icon: 'step', path: `${base}/reg` })
-        items.push({ id: `train:${cpid}`,  label: t('nav.train'),    sub: ctx.project.title, group, icon: 'step', path: `${base}/train` })
+        items.push({ id: `curate:${cpid}`, label: t('nav.curate'),  sub, group: gProjects, kind: 'step', icon: 'step', path: `${base}/curate` })
+        items.push({ id: `edit:${cpid}`,   label: t('nav.tagEdit'), sub, group: gProjects, kind: 'step', icon: 'step', path: `${base}/edit` })
+        items.push({ id: `reg:${cpid}`,    label: t('nav.reg'),     sub, group: gProjects, kind: 'step', icon: 'step', path: `${base}/reg` })
+        items.push({ id: `train:${cpid}`,  label: t('nav.train'),   sub, group: gProjects, kind: 'step', icon: 'step', path: `${base}/train` })
       }
     }
 
+    for (const task of tasks) {
+      items.push({
+        id: `task:${task.id}`,
+        label: `#${task.id} · ${task.name}`,
+        sub: t(`status.${task.status === 'pending' ? 'queued' : task.status}`),
+        group: gTasks,
+        kind: 'task',
+        icon: 'queue',
+        path: `/queue/${task.id}`,
+      })
+    }
+
+    items.push({ id: 'home',     label: t('commandPalette.home'), sub: t('commandPalette.homeSub'),     group: gActions, kind: 'page', icon: 'folder',  path: '/' })
+    items.push({ id: 'queue',    label: t('nav.queue'),           sub: t('commandPalette.queueSub'),    group: gActions, kind: 'page', icon: 'queue',   path: '/queue' })
+    items.push({ id: 'generate', label: t('nav.generate'),        sub: t('commandPalette.generateSub'), group: gActions, kind: 'page', icon: 'image',   path: '/tools/generate' })
+    items.push({ id: 'presets',  label: t('nav.presets'),         sub: t('commandPalette.presetsSub'),  group: gActions, kind: 'page', icon: 'preset',  path: '/tools/presets' })
+    items.push({ id: 'monitor',  label: t('nav.monitor'),         sub: t('commandPalette.monitorSub'),  group: gActions, kind: 'page', icon: 'monitor', path: '/tools/monitor' })
+    items.push({ id: 'settings', label: t('nav.settings'),        sub: t('commandPalette.settingsSub'), group: gActions, kind: 'setting', icon: 'cog', action: () => settingsDrawer.open() })
+
+    for (const p of presets) {
+      items.push({
+        id: `preset:${p.name}`,
+        label: p.name,
+        sub: t('commandPalette.presetItem'),
+        group: gActions,
+        kind: 'preset',
+        icon: 'preset',
+        path: '/tools/presets',
+      })
+    }
+
     return items
-  }, [projects, presets, ctx, t, settingsDrawer])
+  }, [projects, presets, tasks, ctx, t, settingsDrawer])
 
   const filteredNav = useMemo(() => {
     if (!query.trim()) return allItems
@@ -207,7 +230,8 @@ export default function CommandPalette({ open, onClose }: Props) {
         id: `tag:${tag}`,
         label: tag,
         sub: t('commandPalette.imageCount', { n: count }),
-        group: t('commandPalette.tags'),
+        group: t('commandPalette.groupTasks'),
+        kind: 'tag',
         icon: 'tag',
         path: `/projects/${cpid}/v/${cvid}/edit`,
       }))
@@ -217,12 +241,15 @@ export default function CommandPalette({ open, onClose }: Props) {
 
   const grouped = useMemo(() => {
     const map = new Map<string, Item[]>()
+    for (const g of [t('commandPalette.groupProjects'), t('commandPalette.groupTasks'), t('commandPalette.groupActions')]) {
+      if (filtered.some((i) => i.group === g)) map.set(g, [])
+    }
     for (const item of filtered) {
       if (!map.has(item.group)) map.set(item.group, [])
       map.get(item.group)!.push(item)
     }
     return map
-  }, [filtered])
+  }, [filtered, t])
 
   const flatItems = useMemo(() => {
     const out: Item[] = []
@@ -263,70 +290,61 @@ export default function CommandPalette({ open, onClose }: Props) {
 
   if (!open) return null
 
+  const q = query.trim()
   return (
     <div
-      className="fixed inset-0 z-[80] flex justify-center px-4"
-      style={{ paddingTop: '12vh', background: 'rgba(23,24,26,0.42)', backdropFilter: 'blur(2px)' }}
+      className="fixed inset-0 z-[80]"
+      style={{ background: 'rgba(20,22,20,.18)' }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div
-        className="card w-full max-w-[560px] h-fit overflow-hidden flex flex-col"
-        style={{ boxShadow: 'var(--sh-xl)', maxHeight: 'min(70vh, 560px)' }}
+        className="ds-palette"
+        style={{ width: 'min(640px, calc(100vw - 32px))', top: '12vh' }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('commandPalette.placeholder')}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2.5 px-[18px] py-3.5 border-b border-subtle">
-          <span className="text-fg-tertiary">{SEARCH_ICON}</span>
+        <div className="ds-palette-q">
+          <span style={{ color: 'var(--ink-3)', display: 'grid' }}>{SEARCH_ICON}</span>
           <input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent border-none outline-none text-md text-fg-primary placeholder:text-fg-disabled"
+            aria-label={t('commandPalette.placeholder')}
             placeholder={t('commandPalette.placeholder')}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setActiveIdx(0) }}
             onKeyDown={handleKeyDown}
           />
-          {captionsLoading && (
-            <span className="text-2xs text-fg-tertiary animate-pulse">{t('commandPalette.searchingTags')}</span>
-          )}
-          <kbd className="kbd">esc</kbd>
+          {captionsLoading && <span className="ds-kpi-meta">{t('commandPalette.searchingTags')}</span>}
+          {q && <span className="ds-badge ds-mute">{t('commandPalette.matches', { count: flatItems.length })}</span>}
         </div>
 
-        <div ref={listRef} className="flex-1 overflow-y-auto p-2">
+        <div ref={listRef} style={{ maxHeight: 'min(56vh, 460px)', overflowY: 'auto', paddingBottom: 6 }}>
           {filtered.length === 0 ? (
-            <div className="text-sm text-fg-tertiary text-center py-6">{t('commandPalette.noResults')}</div>
+            <div className="ds-empty">{t('commandPalette.noResults')}</div>
           ) : (
             [...grouped.entries()].map(([group, items]) => (
-              <div key={group} className="mb-1">
-                <div className="px-3 py-1.5">
-                  <span className="caption">
-                    {group}
-                  </span>
-                </div>
+              <div key={group}>
+                <div className="ds-cap ds-palette-sect">{group}</div>
                 {items.map((item) => {
                   const idx = flatItems.indexOf(item)
-                  const isActive = idx === activeIdx
                   return (
                     <button
                       key={item.id}
+                      type="button"
                       data-palette-idx={idx}
                       onClick={() => select(item)}
                       onMouseEnter={() => setActiveIdx(idx)}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left border-none cursor-pointer transition-colors ${
-                        isActive ? 'bg-overlay' : 'bg-transparent hover:bg-overlay'
-                      }`}
+                      className={`ds-palette-row${idx === activeIdx ? ' ds-is-on' : ''}`}
+                      style={{ width: '100%', textAlign: 'left' }}
                     >
-                      <span className="text-fg-tertiary shrink-0 grid place-items-center w-4">{ITEM_ICONS[item.icon]}</span>
-                      <span className="flex-1 min-w-0 flex items-baseline gap-2">
-                        <span className="text-sm font-semibold text-fg-primary overflow-hidden text-ellipsis whitespace-nowrap shrink-0 max-w-[55%]">
-                          {item.label}
-                        </span>
-                        {item.sub && (
-                          <span className="text-xs text-fg-tertiary overflow-hidden text-ellipsis whitespace-nowrap">
-                            {item.sub}
-                          </span>
-                        )}
+                      <span className="ds-palette-ico">{ITEM_ICONS[item.icon]}</span>
+                      <span className="ds-palette-name">
+                        <Highlight text={item.label} q={q} />
+                        {item.sub && <span style={{ color: 'var(--ink-4)' }}> · <Highlight text={item.sub} q={q} /></span>}
                       </span>
-                      <span className="text-fg-tertiary shrink-0">{CHEVRON_ICON}</span>
+                      <span className="ds-palette-kind">{t(`commandPalette.kind.${item.kind}`)}</span>
                     </button>
                   )
                 })}
@@ -335,15 +353,25 @@ export default function CommandPalette({ open, onClose }: Props) {
           )}
         </div>
 
-        <div className="flex items-center gap-4 px-[18px] py-2 border-t border-subtle text-2xs text-fg-tertiary">
-          <span className="flex items-center gap-1"><kbd className="kbd">↑↓</kbd> {t('commandPalette.navigate')}</span>
-          <span className="flex items-center gap-1"><kbd className="kbd">enter</kbd> {t('commandPalette.select')}</span>
-          <span className="flex items-center gap-1"><kbd className="kbd">esc</kbd> {t('commandPalette.close')}</span>
-          {queryEnoughForTags && ctx?.activeVersion && (
-            <span className="ml-auto opacity-70">{t('commandPalette.searchTagsHint', { n: captions.length })}</span>
-          )}
+        <div className="ds-palette-foot">
+          <span><span className="ds-kbd">↑</span><span className="ds-kbd">↓</span>{t('commandPalette.navigate')}</span>
+          <span><span className="ds-kbd">Enter</span>{t('commandPalette.select')}</span>
+          <span><span className="ds-kbd">Esc</span>{t('commandPalette.close')}</span>
+          <span style={{ marginLeft: 'auto' }}>
+            {queryEnoughForTags && ctx?.activeVersion
+              ? t('commandPalette.searchTagsHint', { n: captions.length })
+              : t('commandPalette.shortcutHint')}
+          </span>
         </div>
       </div>
     </div>
   )
+}
+
+/** Marks the first case-insensitive occurrence of `q` in `text`. */
+function Highlight({ text, q }: { text: string; q: string }) {
+  if (!q) return <>{text}</>
+  const i = text.toLowerCase().indexOf(q.toLowerCase())
+  if (i < 0) return <>{text}</>
+  return <>{text.slice(0, i)}<em>{text.slice(i, i + q.length)}</em>{text.slice(i + q.length)}</>
 }
