@@ -7,6 +7,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../components/Toast'
+import { DialogProvider } from '../components/Dialog'
 import type { Task } from '../api/client'
 import QueueDetailPage, { SnapshotConfigTab } from './QueueDetail'
 
@@ -145,9 +146,11 @@ function renderDetailPage() {
   return render(
     <MemoryRouter initialEntries={['/queue/119']}>
       <ToastProvider>
-        <Routes>
-          <Route path="/queue/:id" element={<QueueDetailPage />} />
-        </Routes>
+        <DialogProvider>
+          <Routes>
+            <Route path="/queue/:id" element={<QueueDetailPage />} />
+          </Routes>
+        </DialogProvider>
       </ToastProvider>
     </MemoryRouter>
   )
@@ -181,8 +184,8 @@ describe('QueueDetailPage 暂停按钮 SSE 刷新', () => {
 
     renderDetailPage()
 
-    // 初始：running header 已渲染（PID 卡片），但 is_pausable=false → 暂停按钮不在
-    await waitFor(() => expect(screen.getByText('取消任务')).toBeInTheDocument())
+    // 初始：running header 已渲染（标题带任务名），但 is_pausable=false → 暂停按钮不在
+    await waitFor(() => expect(screen.getByText(/^#119 · /)).toBeInTheDocument())
     expect(screen.queryByTestId('detail-pause-btn')).not.toBeInTheDocument()
 
     // 后端首个 epoch backup 落盘 → is_pausable 升级；推一条 SSE 事件
@@ -208,7 +211,7 @@ describe('QueueDetailPage 暂停按钮 SSE 刷新', () => {
     })
 
     renderDetailPage()
-    await waitFor(() => expect(screen.getByText('取消任务')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/^#119 · /)).toBeInTheDocument())
     const before = getTaskCalls()
 
     await waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThan(0))

@@ -15,6 +15,7 @@ import PageHead from '../components/ds/PageHead'
 import { useEventStream } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { buildTrainingForecast } from '../lib/queueEstimates'
+import { useQueueFormat, type QueueFormat } from '../lib/queueFormat'
 import { jobJumpPath } from './queue/jobUtils'
 
 /** 备注输入上限 —— 与后端 _MAX_NOTE_LEN 对齐（超了后端截断，这里先拦住）。 */
@@ -53,37 +54,6 @@ const Icon = {
       <path d="M5 4h14v11l-5 5H5z" /><path d="M19 15h-5v5" />
     </svg>
   ),
-}
-
-/** Clock time, with the date when it is not today; durations and "ago" in the UI language. */
-function useQueueFormat() {
-  const { t, i18n } = useTranslation()
-  const lang = i18n.language
-  return useMemo(() => {
-    const clock = (ts: number) => {
-      const d = new Date(ts * 1000)
-      const today = d.toDateString() === new Date().toDateString()
-      return new Intl.DateTimeFormat(lang, today
-        ? { hour: '2-digit', minute: '2-digit' }
-        : { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(d)
-    }
-    const dur = (sec: number) => {
-      const s = Math.max(0, Math.round(sec))
-      if (s < 60) return t('queue.dur.s', { n: s })
-      const m = Math.round(s / 60)
-      if (m < 60) return t('queue.dur.m', { n: m })
-      return t('queue.dur.hm', { h: Math.floor(m / 60), m: String(m % 60).padStart(2, '0') })
-    }
-    const rtf = new Intl.RelativeTimeFormat(lang, { numeric: 'auto' })
-    const ago = (ts: number) => {
-      const s = Math.max(0, Date.now() / 1000 - ts)
-      if (s < 60) return rtf.format(0, 'second')
-      if (s < 3600) return rtf.format(-Math.floor(s / 60), 'minute')
-      if (s < 86400) return rtf.format(-Math.floor(s / 3600), 'hour')
-      return rtf.format(-Math.floor(s / 86400), 'day')
-    }
-    return { clock, dur, ago }
-  }, [t, lang])
 }
 
 export default function QueuePage() {
@@ -706,7 +676,7 @@ export default function QueuePage() {
   )
 }
 
-type Fmt = ReturnType<typeof useQueueFormat>
+type Fmt = QueueFormat
 
 // ── QueueCard ───────────────────────────────────────────────────────────────
 // One training task as the mockup's .qcard: title row (status, id, time,
