@@ -15,7 +15,7 @@ From raw images to test renders in a single browser window, including from your 
 
 <br>
 
-<img src="docs/images/hero-en.png" alt="The training page on desktop and the training monitor on a phone" width="100%">
+<img src="docs/images/projects-en.png" alt="Projects: every LoRA project with its current step, the running task and the queue" width="100%">
 
 </div>
 
@@ -34,7 +34,7 @@ Dataset → curation → preprocess → tags → reg set → training → queue 
 <td width="50%" valign="top">
 
 **📖 Every setting explains itself**<br>
-All 182 training options carry a plain-language description and a recommended value, in English or Russian, right next to the field.
+All 182 training options carry a plain-language description and a recommended value, in English or Russian: hover the setting name to see it.
 
 </td>
 </tr>
@@ -50,6 +50,43 @@ Tailscale Funnel or ngrok give you an address that never changes. The "open on s
 **🪶 Trains on 6 GB**<br>
 Block swap, fp8, latent and text-encoder caches, NaViT packing. Before you start you see the step count, the expected time and whether it fits in VRAM.
 
+</td>
+</tr>
+</table>
+
+<br>
+
+## A quick tour
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/images/overview-en.png" alt="Project overview" width="100%"><br>
+<b>Project overview</b> · The pipeline of the active version, KPIs, tasks and versions on one page.
+</td>
+<td width="50%" valign="top">
+<img src="docs/images/dataset-en.png" alt="Dataset" width="100%"><br>
+<b>Dataset</b> · Drag & drop or Booru scrape, with format and size stats.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/images/curate-en.png" alt="Curation" width="100%"><br>
+<b>Curation</b> · Dataset → train set, concept folders with repeats, validation set.
+</td>
+<td width="50%" valign="top">
+<img src="docs/images/train-en.png" alt="Train" width="100%"><br>
+<b>Train</b> · Config with a hover tip on every setting, step budget and a live preview.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/images/task-en.png" alt="Task" width="100%"><br>
+<b>Task</b> · Loss and LR curves, samples per epoch, logs and outputs.
+</td>
+<td width="50%" valign="top">
+<img src="docs/images/queue-en.png" alt="Queue" width="100%"><br>
+<b>Queue</b> · One GPU slot, a timeline to the end of the queue, pause and resume.
 </td>
 </tr>
 </table>
@@ -73,7 +110,7 @@ Block swap, fp8, latent and text-encoder caches, NaViT packing. Before you start
 - **GPU queue**: pause with progress saved, resume, hold the queue, schedule a start.
 - **Monitoring**: loss / LR curves, per-step samples, logs, output files with a zip export.
 
-<img src="docs/images/monitor-en.png" alt="Training monitor: loss, learning rate, samples" width="100%">
+<img src="docs/images/task-en.png" alt="Task page: progress, loss and learning rate, samples per epoch" width="100%">
 
 ### 🧪 Algorithms
 | | |
@@ -91,8 +128,6 @@ Block swap, fp8, latent and text-encoder caches, NaViT packing. Before you start
 - Prompts straight from dataset captions, several LoRAs with individual weights.
 - **Checkpoint soup**: average several epochs or runs into one file and test it right away. Incompatible checkpoints are refused up front with the reason.
 
-<img src="docs/images/soup-en.png" alt="Checkpoint soup" width="100%">
-
 ### ⚙️ Environment
 - The first launch creates a `venv`, picks a PyTorch build for your driver (cu118–cu130) and installs dependencies.
 - All caches (pip, HuggingFace, torch, npm) stay inside the project folder.
@@ -105,15 +140,10 @@ Outputs are saved as `lora_unet_*` and load into ComfyUI without conversion.
 
 ## From your phone
 
-<img src="docs/images/phones-en.png" alt="Project overview, monitor and training page on a phone" width="100%">
-
 Every page is laid out for a phone: columns stack, the monitor takes the full width, crop handles and thumbnail checkboxes work with a finger.
 
 <table>
 <tr>
-<td width="46%" valign="top">
-<img src="docs/images/remote-en.png" alt="Remote access settings" width="100%">
-</td>
 <td valign="top">
 
 **Settings → Remote access**
@@ -146,7 +176,7 @@ Nothing is opened on your router. The link carries a persistent access key, and 
 <td width="33%" valign="top">
 
 **🎨 Interface**<br>
-New design on [Tailark](https://tailark.com) (zinc + indigo, Geist). Fully in English and Russian, no Chinese left in the UI.
+New design, ported page by page from an approved mockup: warm neutrals, a lime accent, Geist type. Every setting explains itself on hover. Fully in English and Russian, no Chinese left in the UI.
 
 </td>
 <td width="33%" valign="top">

@@ -969,8 +969,12 @@
   "schema": {
     "enums": {
       "lrScheduler": {
-        "cosineCycles": "Настраиваемые косинусные циклы",
-        "constantThenCosine": "Постоянная LR → плавное снижение"
+        "none": "Constant",
+        "cosine": "Cosine",
+        "cosineWithRestart": "Cosine with warm restarts",
+        "cosineWithWarmup": "Cosine with warmup",
+        "cosineCycles": "Cosine with equal cycles",
+        "constantThenCosine": "Constant with cosine decay"
       },
       "timestepSampling": {
         "dualPeak": "Dual Peak — два пика для стиля"
@@ -1078,7 +1082,7 @@
       "grad_checkpoint": "Градиентный чекпоинтинг (экономит видеопамять, примерно +1/3 вычислений)",
       "grad_accum": "Число шагов накопления градиента (эффективный батч = batch_size × grad_accum)",
       "learning_rate": "Скорость обучения. Для automagic рекомендуется 1e-6 (подставляется автоматически); для lion — lr AdamW делённая на 3; prodigy и PPSF требуют 1.0",
-      "lr_scheduler": "Расписание скорости обучения (none — постоянная; prodigy и PPSF жёстко требуют none)",
+      "lr_scheduler": "Как меняется скорость обучения по ходу тренировки. Constant — не меняется. Cosine — плавно снижается к концу. Cosine with warmup — сначала разгон, потом плавный спад. Cosine with warm restarts — спад с перезапусками, каждый цикл длиннее предыдущего. Cosine with equal cycles — N одинаковых косинусных циклов, у каждого можно задать свой пик. Constant with cosine decay — постоянная lr, а в конце плавный спад. Prodigy, PPSF, Automagic и SOAP-SF всегда используют Constant.",
       "lr_scheduler_t0": "Длина первого цикла cosine_with_restart (в шагах)",
       "lr_scheduler_t_mult": "Во сколько раз каждый следующий цикл cosine_with_restart длиннее предыдущего (>1 — циклы растут)",
       "lr_scheduler_eta_min": "Нижний предел затухания для косинусных расписаний; должен быть сильно меньше стартовой lr (например 1e-6 при старте 1e-4)",
@@ -1195,7 +1199,7 @@
       "lora_module_dropout": "0.05–0.1 — дешёвая защита от копирования",
       "learning_rate": "1e-4 для LoKr с AdamW",
       "grad_accum": "2–4",
-      "lr_scheduler": "cosine_with_warmup",
+      "lr_scheduler": "Cosine with warmup",
       "lr_scheduler_warmup_steps": "100",
       "grad_clip_max_norm": "1.0",
       "optimizer_type": "adamw — честная база; soap сходится быстрее при той же lr",

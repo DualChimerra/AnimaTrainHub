@@ -348,10 +348,10 @@
       "lrScheduler": {
         "none": "Constant",
         "cosine": "Cosine",
-        "cosineWithRestart": "Cosine with restart",
+        "cosineWithRestart": "Cosine with warm restarts",
         "cosineWithWarmup": "Cosine with warmup",
-        "cosineCycles": "Custom cosine cycles",
-        "constantThenCosine": "Constant, then cosine decay"
+        "cosineCycles": "Cosine with equal cycles",
+        "constantThenCosine": "Constant with cosine decay"
       },
       "optimizerType": {
         "adamw": "AdamW",
@@ -471,7 +471,7 @@
       "grad_checkpoint": "Gradient checkpointing (saves VRAM, roughly +1/3 compute)",
       "grad_accum": "Gradient accumulation steps (effective batch = batch_size × grad_accum)",
       "learning_rate": "Learning rate. Automagic recommends 1e-6 (auto-applied on switch); Lion recommends AdamW lr / 3; Prodigy / PPSF require 1.0",
-      "lr_scheduler": "Learning-rate scheduler (none = constant; Prodigy / PPSF lock this to none)",
+      "lr_scheduler": "How the learning rate changes over the run. Constant: it stays the same. Cosine: it eases down to the end. Cosine with warmup: a ramp-up first, then a smooth decay. Cosine with warm restarts: decays and restarts, each cycle longer than the last. Cosine with equal cycles: N identical cosine cycles, each can have its own peak. Constant with cosine decay: flat learning rate, then a smooth decay at the end. Prodigy, PPSF, Automagic and SOAP-SF always use Constant.",
       "lr_scheduler_t0": "First cosine_with_restart cycle length (unit: step)",
       "lr_scheduler_t_mult": "cosine_with_restart cycle-length multiplier relative to the previous cycle (>1 = lengthening cycles)",
       "lr_scheduler_eta_min": "LR decay floor for cosine schedules; should be much smaller than the initial lr (e.g. 1e-6 for an initial lr of 1e-4)",
@@ -648,7 +648,7 @@
       "lora_module_dropout": "0.05–0.1 — cheap protection against copying",
       "learning_rate": "1e-4 for LoKr with AdamW",
       "grad_accum": "2–4",
-      "lr_scheduler": "cosine_with_warmup",
+      "lr_scheduler": "Cosine with warmup",
       "lr_scheduler_warmup_steps": "100",
       "grad_clip_max_norm": "1.0",
       "optimizer_type": "adamw is the honest baseline; soap converges faster at the same lr",
