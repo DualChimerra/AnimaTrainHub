@@ -445,8 +445,8 @@ describe('GeneratePage 端到端 smoke', () => {
     // 看 X 轴 select 的 value（一行 select 元素，AxisCard.label='X'）。
     await waitFor(() => {
       const xLabel = screen.getAllByText('X 轴')[0]
-      // AxisCard 外框跟 LoRA 槽对齐用 bg-overlay（原 bg-sunken 在 dark 下近黑显突兀）
-      const card = xLabel.closest('div.bg-overlay')!
+      // AxisCard uses the same frame as a LoRA slot card (.ds-card.ds-flat)
+      const card = xLabel.closest('div.ds-card')!
       const axisSelect = card.querySelector('select') as HTMLSelectElement
       expect(axisSelect.value).toBe('lora_ckpt')
     })
