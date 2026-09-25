@@ -4,14 +4,14 @@ import { api, type DaemonStatus } from '../../../api/client'
 import { useEventStream } from '../../../lib/useEventStream'
 import { useToast } from '../../../components/Toast'
 
-/** Header 行尾的「清理显存」+「日志」按钮：单一按钮，状态隐式（busy / 未加载时 disabled）。
- *
- * 之前 sidebar 末尾的"推理 daemon · 状态"卡片合并到这里 —— 用户决策：
- * 不要时刻显示状态文字，需要释放 VRAM 时按按钮就行。
- *
- * 日志按钮：onToggleLog 切换 daemon log 抽屉（位于 Generate 页底部 40vh）。
- */
-export default function DaemonControls({ onToggleLog }: { onToggleLog?: () => void }) {
+/** Bottom status strip of the Generate page (mockup .logbar): inference daemon
+ *  state, model loaded / queue size, "clear VRAM" and the log drawer toggle. */
+export default function DaemonControls({ queued, logOpen, onToggleLog }: {
+  /** Generate tasks waiting in the queue. */
+  queued: number
+  logOpen: boolean
+  onToggleLog: () => void
+}) {
   const { t } = useTranslation()
   const { toast } = useToast()
   const [status, setStatus] = useState<DaemonStatus | null>(null)
@@ -20,7 +20,7 @@ export default function DaemonControls({ onToggleLog }: { onToggleLog?: () => vo
   useEffect(() => {
     void api.getDaemonStatus()
       .then(setStatus)
-      .catch(() => { /* 启动一闪 */ })
+      .catch(() => { /* startup flicker */ })
   }, [])
 
   useEventStream((evt) => {
@@ -38,11 +38,7 @@ export default function DaemonControls({ onToggleLog }: { onToggleLog?: () => vo
     setUnloading(true)
     try {
       const r = await api.unloadDaemon()
-      if (r.noop) {
-        toast(t('generate.vramAlreadyFree'), 'info')
-      } else {
-        toast(t('generate.vramUnloadRequested'), 'success')
-      }
+      toast(r.noop ? t('generate.vramAlreadyFree') : t('generate.vramUnloadRequested'), r.noop ? 'info' : 'success')
     } catch (e) {
       toast(String(e), 'error')
     } finally {
@@ -51,11 +47,24 @@ export default function DaemonControls({ onToggleLog }: { onToggleLog?: () => vo
   }
 
   const canUnload = !!(status && status.model_loaded && !status.busy && status.state !== 'unloading')
+  const dot = !status || status.state === 'stopped'
+    ? 'ds-dot-mute'
+    : status.busy || status.state === 'starting' || status.state === 'unloading' ? 'ds-dot-run' : 'ds-dot-ok'
+  const detail = [
+    status ? t(`generate.daemonState.${status.state}`) : t('generate.daemonLoading'),
+    status && (status.model_loaded ? t('generate.daemonModelLoaded') : t('generate.daemonModelNotLoaded')),
+    t('generate.daemonQueue', { n: queued }),
+  ].filter(Boolean).join(' · ')
 
   return (
-    <div className="flex items-center gap-2 m-wrap">
+    <div className="ds-logbar">
+      <span className={`ds-dot ${dot}`} />
+      <span>{t('generate.daemonTitle')}</span>
+      <span className="ds-mono" style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail}</span>
       <button
-        className="btn btn-ghost text-sm"
+        type="button"
+        className="ds-mono"
+        style={{ marginLeft: 'auto', color: 'inherit', opacity: canUnload && !unloading ? 1 : 0.45 }}
         onClick={handleUnload}
         disabled={!canUnload || unloading}
         title={
@@ -67,11 +76,9 @@ export default function DaemonControls({ onToggleLog }: { onToggleLog?: () => vo
       >
         {unloading ? t('generate.unloadingVram') : t('generate.unloadVram')}
       </button>
-      {onToggleLog && (
-        <button className="btn btn-ghost text-sm" onClick={onToggleLog}>
-          {t('generate.logDrawerOpen')}
-        </button>
-      )}
+      <button type="button" className="ds-mono" style={{ color: 'inherit' }} aria-expanded={logOpen} onClick={onToggleLog}>
+        {t('dataset.logToggle')} {logOpen ? '↓' : '↑'}
+      </button>
     </div>
   )
 }

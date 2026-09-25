@@ -87,10 +87,10 @@ async function waitForInitialLorasLoad() {
   await screen.findByRole('button', { name: /开始生成/ })
 }
 
-// 正向 / 负向 textarea 现在归到左侧「提示词」分页 tab（默认 tab 是 LoRA）；
-// 要操作 prompt 的用例先切到这一页。
-async function openPromptsTab(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: '提示词' }))
+// The settings column shows prompts, LoRA and parameters at once (no tabs any
+// more); kept as a no-op so the call sites read the same.
+async function openPromptsTab(_user: ReturnType<typeof userEvent.setup>) {
+  await Promise.resolve()
 }
 
 describe('GeneratePage 端到端 smoke', () => {

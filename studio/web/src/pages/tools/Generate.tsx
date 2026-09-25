@@ -9,12 +9,15 @@ import {
   type XYMatrixSpec,
 } from '../../api/client'
 import BaseModelSelect, { useBaseModelOptions, useKrea2TeOptions } from '../../components/BaseModelSelect'
-import PageHeader from '../../components/PageHeader'
+import FieldLabel from '../../components/ds/FieldLabel'
+import KebabMenu, { type KebabItem } from '../../components/ds/KebabMenu'
+import PageHead from '../../components/ds/PageHead'
 import { useToast } from '../../components/Toast'
 import { schemaEnumLabel } from '../../lib/schema'
 import { useEventStream } from '../../lib/useEventStream'
 import { useMonitorProgress } from '../../lib/useMonitorProgress'
 import { useLocalStorageState } from '../../lib/useLocalStorageState'
+import { useQueueFormat } from '../../lib/queueFormat'
 import AspectChips, { aspectFromDimensions, type AspectName } from './generate/AspectChips'
 import DaemonControls from './generate/DaemonControls'
 import DaemonLogDrawer from './generate/DaemonLogDrawer'
@@ -33,6 +36,7 @@ import { saveSingleSamples, saveXYMatrix } from './generate/saveTestImages'
 import { useGenerateHistory } from './generate/useGenerateHistory'
 import {
   entryImageUrl,
+  entryParams,
   entryTaskId,
   type HistoryEntry,
 } from './generate/entryAdapter'
@@ -41,7 +45,6 @@ import PromptList from './generate/PromptList'
 import NegPromptInput from './generate/NegPromptInput'
 import SampleGallery from './generate/SampleGallery'
 import SidebarLoras from './generate/SidebarLoras'
-import SidebarSectionTabs, { type SidebarTab } from './generate/SidebarSectionTabs'
 import SidebarXYAxes from './generate/SidebarXYAxes'
 import StatusBadge from './generate/StatusBadge'
 import ViewModeTabs, { type ViewMode } from './generate/ViewModeTabs'
@@ -284,8 +287,6 @@ export default function GeneratePage() {
     phase: null, batchIdx: null, batchTotal: null, currentStep: null, totalSteps: null,
   })
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false)
-  // 左侧配置区当前分页（LoRA/XY · 提示词 · 配置）。跨 session 记忆用户停留的页。
-  const [sidebarTab, setSidebarTab] = useLocalStorageState<SidebarTab>('studio:generate:sidebarTab', 'lora')
   const [logOpen, setLogOpen] = useState(false)
   // 训练 / reg-ai / 打标等 GPU 任务在跑时，禁用生成防 VRAM 竞争（driver 抢
   // 3D / Copy engine 触发图像渲染卡顿，甚至训练进程 OOM）。listQueue 默认
@@ -800,238 +801,251 @@ export default function GeneratePage() {
       ? t('generate.startGenerateCount', { n: xyCellCount })
       : t('generate.startGenerate')
 
+  const fmt = useQueueFormat()
+  const fmtRun = (sec: number) => (sec < 60 ? t('generate.secShort', { n: Math.max(0, sec).toFixed(1) }) : fmt.dur(sec))
+
+  // What the result card describes: the reviewed history entry, else the run
+  // frozen at dispatch for the displayed task, else the live sidebar values.
+  const shownParams: GenerateParamsSnapshot | null = historyOverride
+    ? entryParams(historyOverride)
+    : frozenRun?.snapshot ?? null
+  const shown = {
+    loras: shownParams ? shownParams.loras.map((l) => ({ name: l.name, scale: l.scale })) : loras.filter((l) => l.path).map((l) => ({ name: loraBasename(l.path), scale: l.scale })),
+    seed: shownParams?.seed ?? seed,
+    steps: shownParams?.steps ?? steps,
+    cfg: shownParams?.cfg_scale ?? cfgScale,
+    sampler: shownParams?.sampler_name ?? samplerName,
+    scheduler: shownParams?.scheduler ?? scheduler,
+  }
+  const firstLora = shown.loras[0]
+  const resultSub = [
+    firstLora
+      ? `${firstLora.name.replace(/\.safetensors$/i, '')} · ${t('generate.weightShort', { w: firstLora.scale.toFixed(2) })}`
+      : t('generate.noLora'),
+    shown.loras.length > 1 ? `+${shown.loras.length - 1}` : null,
+    `seed ${shown.seed}`,
+  ].filter(Boolean).join(' · ')
+  const paramsLine = `${t('generate.stepsN', { count: shown.steps })} · guidance ${shown.cfg.toFixed(1)} · ${schemaEnumLabel('sample_sampler_name', shown.sampler, t)} / ${schemaEnumLabel('sample_scheduler', shown.scheduler, t)}`
+  const footerStatus = historyOverride || !currentTask || busy
+    ? null
+    : currentTask.status === 'done'
+      ? {
+          text: currentTask.started_at && currentTask.finished_at
+            ? t('generate.doneIn', { time: fmtRun(currentTask.finished_at - currentTask.started_at) })
+            : t('status.done'),
+          tone: 'ok' as const,
+        }
+      : currentTask.status === 'failed'
+        ? { text: currentTask.error_msg || t('status.failed'), tone: 'err' as const }
+        : currentTask.status === 'canceled'
+          ? { text: t('status.canceled') }
+          : null
+
+  const resultMenu: KebabItem[] = [
+    { label: t('generate.cancelCurrentTitle'), onSelect: () => void handleCancel(), disabled: !cancelable },
+    {
+      label: pendingGenerateIds.length > 0 ? t('generate.clearQueue', { n: pendingGenerateIds.length }) : t('generate.clearQueueEmpty'),
+      onSelect: () => void clearQueue(),
+      disabled: pendingGenerateIds.length === 0,
+    },
+  ]
+
+  // Sampler and scheduler are picked together, as "euler / simple".
+  const samplerCombos = SAMPLER_OPTIONS_BY_FAMILY[modelFamily].flatMap((s) =>
+    SCHEDULER_OPTIONS_BY_FAMILY[modelFamily].map((sc) => ({ s, sc })))
+
   return (
-    <div className="fade-in flex flex-col m-page-scroll" style={{ height: '100%', overflow: 'hidden' }}>
-      <PageHeader
+    <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <PageHead
+        eyebrow={t('generate.eyebrow')}
         title={t('generate.title')}
         subtitle={t('generate.subtitle')}
-        actions={
-          <div className="flex items-center gap-2 m-wrap">
-            {/* 0.17 P-I：取消（当前显示 task）+ 清空队列（所有 pending）始终在位，不可用时
-                disabled，放「清理显存」（DaemonControls）左边。 */}
+        tools={
+          <>
+            <ViewModeTabs mode={mode} onModeChange={setMode} />
+            {/* 0.17 P-I：batch size（每次入队 task 数）；xy 一次一个矩阵、不适用。 */}
+            {mode !== 'xy' && (
+              <input
+                type="number"
+                className="ds-inp ds-mono"
+                style={{ width: 58, textAlign: 'center' }}
+                min={1} max={32}
+                value={batchSize}
+                onChange={(e) => setBatchSize(Number(e.target.value))}
+                title={t('generate.batchSizeTitle')}
+                aria-label={t('generate.batchSizeTitle')}
+              />
+            )}
+            {/* R-5：GPU 任务运行时不硬禁用——后端准入保证互斥，提交只是入队排队。 */}
             <button
-              className="btn btn-ghost"
-              onClick={handleCancel}
-              disabled={!cancelable}
-              title={t('generate.cancelCurrentTitle')}
+              type="button"
+              className="ds-btn-primary"
+              onClick={handleGenerate}
+              disabled={submitting}
+              title={activeBlockingTask ? t('generate.queuedBehindActiveTask', { id: activeBlockingTask.id }) : undefined}
             >
-              {t('common.cancel')}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M8 5v14l11-7z" /></svg>
+              {generateLabel}
             </button>
-            <button
-              className="btn btn-ghost"
-              onClick={() => void clearQueue()}
-              disabled={pendingGenerateIds.length === 0}
-              title={t('generate.clearQueueTitle')}
-              data-testid="generate-clear-queue"
-            >
-              {pendingGenerateIds.length > 0
-                ? t('generate.clearQueue', { n: pendingGenerateIds.length })
-                : t('generate.clearQueueEmpty')}
-            </button>
-            <DaemonControls onToggleLog={() => setLogOpen((v) => !v)} />
-          </div>
+          </>
         }
       />
 
-      {/* 三列各自独立滚动，整页固定高度 = viewport。relative：进度条 absolute 叠在顶部
-          p-6 既有 gap 上、不占布局，出现/消失不推动内容（防页面抖动）。 */}
-      <div className="relative p-6 flex gap-4 items-stretch flex-wrap xl:flex-nowrap flex-1 min-h-0 m-page-scroll m-p-sm m-gap-sm">
-        {/* 出图进度条：全宽细线（浏览器加载条式）+ 小相位文字，绝对定位叠在 header 与内容间
-            的既有 gap 上；覆盖 load/clip/sample/vae 全阶段，切历史图也照常显示当前进度。 */}
-        {(busy || progress.currentStep != null || progress.phase != null) && (
-          <div className="absolute top-0 inset-x-0 z-10 pointer-events-none">
-            <GenerateProgressBar busy={busy} progress={progress} />
-          </div>
-        )}
+      <div className="ds-scroll ds-tight" style={{ minHeight: 0 }}>
+        <div className="ds-gen-grid">
 
-          {/* 左：sidebar — 单卡片包裹；内容区独立 scroll，底部 footer 固定 tab + 生成按钮 */}
-          <div className="card flex flex-col w-full xl:w-[420px] shrink-0 self-stretch min-h-0 overflow-hidden m-h-auto">
-            {/* 内容区：三个 section 都常驻 DOM、用 display 切换（不卸载）—— 切 tab 不重渲不闪烁。
-                scrollbar-gutter: stable both-edges —— 两侧都常驻预留滚动条槽（槽在 padding 外侧、
-                靠 border），所以左右 18px 内边距恒对称，且滚动条出现时只占右槽、不挤压/不位移内容。 */}
-            <div
-              className="flex flex-col flex-1 min-h-0 overflow-y-auto"
-              style={{ padding: 18, scrollbarGutter: 'stable both-edges' }}
-            >
+          {/* Settings */}
+          <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 13, minHeight: 0, overflowY: 'auto', scrollbarGutter: 'stable' }}>
 
-            {/* tab=lora：mode=single → LoRA 选择；mode=xy → XY 轴（顶部合并 LoRA 选择） */}
-            <div style={{ display: sidebarTab === 'lora' ? undefined : 'none' }}>
-              {mode === 'single' ? (
-                <>
-                  <div className="flex items-baseline justify-between mb-3">
-                    <h3 className="m-0 text-md font-semibold">LoRA</h3>
-                    <span className="text-xs text-fg-tertiary">{t('generate.loraHint')}</span>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 7 }}>
+                  <span className="ds-cap" style={{ flex: 1 }}>{t('generate.positive')}</span>
+                  {!datasetPickerOpen && (
+                    <button
+                      type="button"
+                      className="ds-ctl-note"
+                      style={{ color: 'var(--green-text)' }}
+                      onClick={() => setDatasetPickerOpen(true)}
+                      title={t('generate.pickFromDatasetTitle')}
+                    >
+                      {t('generate.pickFromDataset')}
+                    </button>
+                  )}
+                </div>
+                {datasetPickerOpen && (
+                  <div style={{ marginBottom: 8 }}>
+                    <PromptFromDatasetPicker
+                      value={datasetPick}
+                      onChange={setDatasetPick}
+                      onClose={() => {
+                        setDatasetPick(null)
+                        setDatasetPickerOpen(false)
+                      }}
+                    />
                   </div>
-                  <SidebarLoras
+                )}
+                <PromptList prompts={prompts} onChange={setPrompts} modelFamily={modelFamily} />
+              </div>
+
+              <div>
+                <div className="ds-cap" style={{ marginBottom: 7 }}>{t('generate.negative')}</div>
+                <NegPromptInput value={negPrompt} onChange={setNegPrompt} modelFamily={modelFamily} />
+              </div>
+
+              {/* single → LoRA slots; xy → axes (LoRA picking is part of the axes) */}
+              <div>
+                {mode === 'single' ? (
+                  <>
+                    <div className="ds-cap" style={{ marginBottom: 8 }}>
+                      <FieldLabel label="LoRA" tip={t('generate.loraHint')} />
+                    </div>
+                    <SidebarLoras loras={loras} onChange={setLoras} catalog={catalog} />
+                  </>
+                ) : (
+                  <SidebarXYAxes
+                    xDraft={xDraft}
+                    yDraft={yDraft}
+                    onXChange={setXDraft}
+                    onYChange={setYDraft}
                     loras={loras}
-                    onChange={setLoras}
+                    onLorasChange={setLoras}
                     catalog={catalog}
                   />
-                </>
-              ) : (
-                <SidebarXYAxes
-                  xDraft={xDraft}
-                  yDraft={yDraft}
-                  onXChange={setXDraft}
-                  onYChange={setYDraft}
-                  loras={loras}
-                  onLorasChange={setLoras}
-                  catalog={catalog}
-                />
-              )}
-            </div>
-
-            {/* tab=prompts */}
-            <div style={{ display: sidebarTab === 'prompts' ? undefined : 'none' }}>
-              <div className="flex items-baseline justify-between mb-3">
-                <h3 className="m-0 text-md font-semibold">{t('generate.prompts')}</h3>
-                {!datasetPickerOpen && (
-                  <button
-                    onClick={() => setDatasetPickerOpen(true)}
-                    className="btn btn-ghost text-xs text-fg-tertiary"
-                    title={t('generate.pickFromDatasetTitle')}
-                  >
-                    {t('generate.pickFromDataset')}
-                  </button>
                 )}
               </div>
-              {datasetPickerOpen && (
-                <div className="mb-3">
-                  <PromptFromDatasetPicker
-                    value={datasetPick}
-                    onChange={setDatasetPick}
-                    onClose={() => {
-                      setDatasetPick(null)
-                      setDatasetPickerOpen(false)
-                    }}
-                  />
-                </div>
-              )}
-              <label className="caption block mb-1">{t('generate.positive')}</label>
-              <PromptList prompts={prompts} onChange={setPrompts} modelFamily={modelFamily} />
-              <label className="caption block mb-1 mt-3">{t('generate.negative')}</label>
-              <NegPromptInput value={negPrompt} onChange={setNegPrompt} modelFamily={modelFamily} />
-            </div>
 
-            {/* tab=config */}
-            <div style={{ display: sidebarTab === 'config' ? undefined : 'none' }}>
-              <h3 className="m-0 text-md font-semibold mb-3">{t('generate.samplingParams')}</h3>
-              <div className="flex flex-col gap-3">
-                <div>
-                  <label className="caption block mb-1.5">{t('generate.aspect')}</label>
-                  <AspectChips
-                    aspect={aspect}
-                    onPick={(a, w, h) => {
-                      setAspect(a)
-                      if (w && h) { setWidth(w); setHeight(h) }
-                    }}
-                  />
-                </div>
-                <div className="flex gap-2 items-end">
-                  <NumField label={t('generate.width')} value={width} onChange={(v) => { setWidth(v); setAspect(aspectFromDimensions(v, height)) }} min={256} max={4096} step={64} />
-                  <NumField label={t('generate.height')} value={height} onChange={(v) => { setHeight(v); setAspect(aspectFromDimensions(width, v)) }} min={256} max={4096} step={64} />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const newW = height, newH = width
-                      setWidth(newW); setHeight(newH)
-                      setAspect(aspectFromDimensions(newW, newH))
-                    }}
-                    title={t('generate.swapSizeTitle')}
-                    className="font-mono inline-flex items-center gap-1.5 shrink-0"
-                    style={{
-                      border: '1px solid var(--border-subtle)',
-                      background: 'var(--bg-sunken)',
-                      borderRadius: 'var(--r-md)',
-                      padding: '7px 10px',
-                      fontSize: 12,
-                      color: 'var(--fg-secondary)',
-                      cursor: 'pointer',
-                      height: 32,
-                    }}
-                  >
-                    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M16 3l4 4-4 4"/>
-                      <path d="M20 7H4"/>
-                      <path d="M8 21l-4-4 4-4"/>
-                      <path d="M4 17h16"/>
-                    </svg>
-                    Swap
-                  </button>
-                </div>
-                <div className="flex gap-2">
-                  <NumField label={t('generate.steps')} value={steps} onChange={setSteps} min={1} max={150} />
-                  <NumField label="CFG" value={cfgScale} onChange={setCfgScale} min={0} max={20} step={0.5} />
-                  {/* 0.17 P-I：count 移到「开始生成」旁改为 batch size（每次入队 task 数）。 */}
-                </div>
-                <div className="flex gap-2">
-                  <div className="flex-1 min-w-0">
-                    <label className="caption block mb-1">{t('generate.sampler')}</label>
-                    <select
-                      className="input text-xs w-full"
-                      value={samplerName}
-                      onChange={(e) => setSamplerName(e.target.value as SamplerName)}
-                      aria-label={t('generate.sampler')}
-                    >
-                      {/* 文案与训练配置页共用 schema.enums.* 映射；选项按族白名单 */}
-                      {SAMPLER_OPTIONS_BY_FAMILY[modelFamily].map((s) => (
-                        <option key={s} value={s}>{schemaEnumLabel('sample_sampler_name', s, t)}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <label className="caption block mb-1">{t('generate.scheduler')}</label>
-                    <select
-                      className="input text-xs w-full"
-                      value={scheduler}
-                      onChange={(e) => setScheduler(e.target.value as SchedulerName)}
-                      aria-label={t('generate.scheduler')}
-                    >
-                      {SCHEDULER_OPTIONS_BY_FAMILY[modelFamily].map((s) => (
-                        <option key={s} value={s}>{schemaEnumLabel('sample_scheduler', s, t)}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <NumField label={t('generate.width')} value={width} onChange={(v) => { setWidth(v); setAspect(aspectFromDimensions(v, height)) }} min={256} max={4096} step={64} />
+                <NumField label={t('generate.height')} value={height} onChange={(v) => { setHeight(v); setAspect(aspectFromDimensions(width, v)) }} min={256} max={4096} step={64} />
+                <NumField label={t('generate.steps')} value={steps} onChange={setSteps} min={1} max={150} />
+                <NumField label={t('generate.guidance')} value={cfgScale} onChange={setCfgScale} min={0} max={20} step={0.5} />
                 <NumField
                   label={t('generate.seed')}
+                  tip={t('generate.seedHint')}
                   value={seed}
                   onChange={setSeed}
                   min={0}
+                  onRandom={() => setSeed(1 + Math.floor(Math.random() * 2 ** 31))}
                 />
-                <div className="text-2xs text-fg-tertiary font-mono" style={{ marginTop: -4 }}>
-                  {t('generate.seedHint')}
-                </div>
-                <div>
-                  <label className="caption block mb-1">{t('generate.modelFamily')}</label>
+                <div style={{ minWidth: 0 }}>
+                  <div className="ds-cap" style={{ marginBottom: 6 }}>{t('generate.sampler')}</div>
+                  {/* 文案与训练配置页共用 schema.enums.* 映射；选项按族白名单 */}
                   <select
-                    className="input text-xs w-full"
-                    value={modelFamily}
-                    onChange={(e) => setModelFamily(e.target.value as GenerateFamily)}
-                    aria-label={t('generate.modelFamily')}
+                    className="ds-inp"
+                    value={`${samplerName}|${scheduler}`}
+                    onChange={(e) => {
+                      const [s, sc] = e.target.value.split('|')
+                      setSamplerName(s as SamplerName)
+                      setScheduler(sc as SchedulerName)
+                    }}
+                    aria-label={t('generate.sampler')}
                   >
-                    <option value="anima">{schemaEnumLabel('model_family', 'anima', t)}</option>
-                    <option value="krea2">{schemaEnumLabel('model_family', 'krea2', t)}</option>
+                    {samplerCombos.map(({ s, sc }) => (
+                      <option key={`${s}|${sc}`} value={`${s}|${sc}`}>
+                        {schemaEnumLabel('sample_sampler_name', s, t)} / {schemaEnumLabel('sample_scheduler', sc, t)}
+                      </option>
+                    ))}
                   </select>
                 </div>
+              </div>
+              <div className="ds-ctl-note" style={{ marginTop: -4, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ flex: 1 }}>{t('generate.sizeNote', { mp: ((width * height) / 1e6).toFixed(2) })}</span>
+                <button
+                  type="button"
+                  className="ds-ctl-note"
+                  style={{ color: 'var(--green-text)' }}
+                  onClick={() => {
+                    const newW = height, newH = width
+                    setWidth(newW); setHeight(newH)
+                    setAspect(aspectFromDimensions(newW, newH))
+                  }}
+                  title={t('generate.swapSizeTitle')}
+                >
+                  {t('generate.swapSize')}
+                </button>
+              </div>
+
+              <div>
+                <div className="ds-cap" style={{ marginBottom: 7 }}>{t('generate.aspect')}</div>
+                <AspectChips
+                  aspect={aspect}
+                  onPick={(a, w, h) => {
+                    setAspect(a)
+                    if (w && h) { setWidth(w); setHeight(h) }
+                  }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--line)', paddingTop: 13 }}>
+                <div className="ds-cap">{t('generate.modelSection')}</div>
+                <select
+                  className="ds-inp"
+                  value={modelFamily}
+                  onChange={(e) => setModelFamily(e.target.value as GenerateFamily)}
+                  aria-label={t('generate.modelFamily')}
+                  title={t('generate.modelFamily')}
+                >
+                  <option value="anima">{schemaEnumLabel('model_family', 'anima', t)}</option>
+                  <option value="krea2">{schemaEnumLabel('model_family', 'krea2', t)}</option>
+                </select>
                 <div>
-                  <label className="caption block mb-1">{t('generate.baseModel')}</label>
+                  <div className="ds-cap" style={{ marginBottom: 6 }}>
+                    <FieldLabel label={t('generate.baseModel')} tip={t('generate.baseModelHint')} />
+                  </div>
                   <BaseModelSelect
                     value={baseModel}
                     onChange={onBaseModelChange}
                     family={modelFamily}
-                    className="input text-xs w-full"
+                    className="ds-inp"
                     ariaLabel={t('generate.baseModel')}
                   />
-                  <div className="text-2xs text-fg-tertiary font-mono mt-1">
-                    {t('generate.baseModelHint')}
-                  </div>
                 </div>
                 {modelFamily === 'krea2' && (
                   <div>
-                    <label className="caption block mb-1">{t('generate.textEncoder')}</label>
+                    <div className="ds-cap" style={{ marginBottom: 6 }}>{t('generate.textEncoder')}</div>
                     <select
-                      className="input text-xs w-full"
+                      className="ds-inp"
                       value={effectiveTe}
                       onChange={(e) => setTextEncoder(
                         // "自定义" = 不覆盖，跟随设置页 selected_te
@@ -1042,8 +1056,6 @@ export default function GeneratePage() {
                       aria-label={t('generate.textEncoder')}
                     >
                       {effectiveTe === 'custom' && (
-                        // 设置页选的是本地编码器目录；切成 bf16/fp8 即临时
-                        // 覆盖回官方权重（与底模下拉的覆盖语义一致）
                         <option value="custom">{t('generate.textEncoderCustom')}</option>
                       )}
                       <option value="bf16">{t('generate.textEncoderBf16')}</option>
@@ -1056,74 +1068,30 @@ export default function GeneratePage() {
                   </div>
                 )}
               </div>
-            </div>
 
-            </div>
-
-            {/* footer：分页 tab（segmented）+「开始生成」同处一个 footer、跟内容区共卡片，
-                border-top 分隔。tab 选中态用 sunken 轨道而非橙色，跟下方生成按钮区分开。 */}
-            <div
-              className="shrink-0 flex flex-col gap-2.5"
-              style={{ borderTop: '1px solid var(--border-subtle)', padding: 12 }}
-            >
-              <SidebarSectionTabs tab={sidebarTab} onTabChange={setSidebarTab} mode={mode} />
-              {/* items-stretch：batch 框跟「开始生成」按钮等高（按钮 padding:12 定高度）。 */}
-              <div className="flex items-stretch gap-3">
-                {/* R-5：GPU 任务运行时不再硬禁用——后端准入（R-1）保证互斥，
-                    提交只是入队排队（锚点 §4-5）。按钮 title 提示会排队。 */}
-                <button
-                  className="btn btn-primary flex-1"
-                  style={{ padding: 12, fontWeight: 600, justifyContent: 'center' }}
-                  onClick={handleGenerate}
-                  disabled={submitting}
-                  title={
-                    activeBlockingTask
-                      ? t('generate.queuedBehindActiveTask', { id: activeBlockingTask.id })
-                      : undefined
-                  }
-                >
-                  {generateLabel}
-                </button>
-                {/* 0.17 P-I：batch size（每次入队 task 数），固定宽不抖动、无 label，hover
-                    显示「批次数量」。取消已移右上。xy 一次一个矩阵、不适用。 */}
-                {mode !== 'xy' && (
-                  <input
-                    type="number"
-                    className="input shrink-0"
-                    style={{ width: 64, textAlign: 'center' }}
-                    min={1} max={32}
-                    value={batchSize}
-                    onChange={(e) => setBatchSize(Number(e.target.value))}
-                    title={t('generate.batchSizeTitle')}
-                    aria-label={t('generate.batchSizeTitle')}
-                  />
-                )}
-              </div>
             </div>
           </div>
 
-          {/* 中：card flex-1 占满列高。overflow-hidden（非 auto）——内容本就 fit（预览区
-              flex-1 min-h-0，XY 网格自带滚动），auto 会因一点点溢出触发幻影滚动条、吃掉
-              10px 宽把 card 挤窄 → 结果卡与右栏之间凭空多出 10px margin（#2 根因）。 */}
-          <div className="flex-1 min-w-0 flex flex-col overflow-hidden self-stretch m-pane">
-            <div className="card flex-1 flex flex-col m-p-sm" style={{ padding: 18, minHeight: 0 }}>
-              <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
-                <div className="flex items-center gap-2">
-                  <span className="text-md font-semibold">{t('generate.results')}</span>
-                  {currentTask && (
+          {/* Result */}
+          <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+            <div className="ds-card-head ds-pad">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="ds-card-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {t('generate.results')}
+                  {currentTask && !historyOverride && (
                     <>
-                      <span className="caption">#{currentTask.id}</span>
+                      <span className="ds-mono ds-muted" style={{ fontSize: 11.5, fontWeight: 400 }}>#{currentTask.id}</span>
                       <StatusBadge status={currentTask.status} />
                     </>
                   )}
-                  {currentTask?.error_msg && (
-                    <span className="text-xs text-err ml-1">{currentTask.error_msg}</span>
-                  )}
                 </div>
-                <ViewModeTabs mode={mode} onModeChange={setMode} />
+                <div className="ds-card-sub ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{resultSub}</div>
               </div>
-
-              {/* 进度条已上移到页面 header 下（全宽细线），不再在结果卡内。 */}
+              <div className="ds-card-tools">
+                <KebabMenu trigger="icon" label={t('generate.moreActions')} items={resultMenu} />
+              </div>
+            </div>
+            <div className="ds-card-body" style={{ paddingTop: 2, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
               {historyOverride ? (
                 <div className="flex-1 min-h-0 flex flex-col gap-2">
                   {historyOverride.mode === 'xy' && historyOverride.xyMeta ? (
@@ -1156,8 +1124,7 @@ export default function GeneratePage() {
                       compositeUrl={historyOverride.source === 'disk' ? historyOverride.imageUrl : undefined}
                     />
                   ) : (
-                    /* DiskEntry single / legacy XY（无 xyMeta） / CacheEntry single
-                       → 单图视图（内嵌缩放平移；ZoomableImage 自带视口样式 + readout） */
+                    /* DiskEntry single / legacy XY（无 xyMeta） / CacheEntry single → 单图视图 */
                     <div className="flex-1 min-h-0 w-full">
                       <ZoomableImage
                         key={historyOverride.id}
@@ -1166,18 +1133,14 @@ export default function GeneratePage() {
                       />
                     </div>
                   )}
-                  {/* 单图视图不再显示 filename footer（"single image N" 与
-                      ZoomableImage readout 重复）；XY 网格保留 folder / 任务号
-                      作批次标识。0.17 P-I：删「返回当前」——统一时间线后回到
-                      实时点右栏 running 项即可。 */}
                   {historyOverride.source === 'disk' && historyOverride.xyMeta && (
-                    <div className="text-xs text-fg-tertiary shrink-0">
+                    <div className="ds-cell-key" style={{ flex: 'none' }}>
                       {historyOverride.folder ?? (historyOverride.filename ?? '').replace(/\.png$/i, '')}
                     </div>
                   )}
                 </div>
               ) : !currentTask ? (
-                <div className="flex-1 grid place-items-center rounded-md border border-subtle bg-sunken text-fg-tertiary text-sm">
+                <div className="ds-thumb" style={{ flex: 1, minHeight: 200, fontSize: 12 }}>
                   {t('generate.emptyHint')}
                 </div>
               ) : mode === 'xy' && showCompareView ? (
@@ -1202,34 +1165,33 @@ export default function GeneratePage() {
               ) : samples.length === 0 && previewStep ? (
                 <div className="flex-1 min-h-0 flex flex-col items-center gap-2">
                   <div className="flex-1 min-h-0 w-full flex items-center justify-center">
-                    {/* 中间步预览是低分辨率 latent2rgb 图（模糊但能看出大致图）：铺满结果区
-                        —— width/height:100% + object-contain 会放大小图并保持比例；旧的
-                        maxWidth/maxHeight 只限上限，小图不放大 → 显示成中间一小块。 */}
+                    {/* 中间步预览是低分辨率 latent2rgb 图：铺满结果区（object-contain 放大保持比例） */}
                     <img
                       src={previewStep.dataUrl}
                       alt={`step ${previewStep.step}/${previewStep.total}`}
-                      className="rounded-md"
-                      style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                      style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: 10 }}
                     />
                   </div>
-                  <div className="text-xs text-fg-tertiary shrink-0">
+                  <div className="ds-cell-key" style={{ flex: 'none' }}>
                     {t('generate.previewStep', { step: previewStep.step, total: previewStep.total })}
                   </div>
                 </div>
               ) : samples.length === 0 ? (
-                <div className="flex-1 grid place-items-center rounded-md border border-subtle bg-sunken text-fg-tertiary text-sm">
+                <div className="ds-thumb" style={{ flex: 1, minHeight: 200, fontSize: 12 }}>
                   {busy ? t('generate.waitingImages') : t('generate.finishedNoImages')}
                 </div>
               ) : (
                 <SampleGallery samples={samples} taskId={currentTask.id} />
               )}
             </div>
+            <GenerateProgressBar busy={busy} progress={progress} status={footerStatus} params={paramsLine} />
           </div>
 
-          {/* 右：出图时间线（live 队列 + done 历史，按当前 mode 分桶） */}
+          {/* History: live queue + done results, bucketed by the current mode */}
           <PreviewHistoryRail
             items={timelineItems}
             mode={mode}
+            selectedId={historyOverride?.id ?? null}
             onSelect={(it) => {
               if (it.kind === 'done') handleHistorySelect(it.entry)
               // running 项：清 override 回到实时视图（currentTask 已跟着 running 走）。
@@ -1240,10 +1202,14 @@ export default function GeneratePage() {
             onRefresh={history.refresh}
             loading={history.loading}
           />
+        </div>
       </div>
+
+      <DaemonControls queued={pendingGenerateIds.length} logOpen={logOpen} onToggleLog={() => setLogOpen((v) => !v)} />
 
       {/* daemon log 抽屉（fixed 定位 + translateY，隐藏时完全不可见，不占 layout） */}
       <DaemonLogDrawer open={logOpen} onClose={() => setLogOpen(false)} />
     </div>
   )
 }
+

@@ -50,7 +50,8 @@ export default function NumberListInput({
         <input
           type="text"
           inputMode="decimal"
-          className="input font-mono text-xs flex-1"
+          className="ds-inp ds-mono"
+          style={{ flex: 1, width: 'auto' }}
           placeholder={placeholder}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

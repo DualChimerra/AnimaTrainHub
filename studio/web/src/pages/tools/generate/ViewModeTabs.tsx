@@ -1,10 +1,7 @@
 import { useTranslation } from 'react-i18next'
 
-/** 视图模式 tab：单图 / XY 矩阵。
- *
- * 用户决策：双图对比合并进 XY 模式内部（selectedIndices=2 时自动切到
- * compare sub-view，不再单独占顶部 tab）。 */
-
+/** 单图 / XY 矩阵 模式切换（页头 segmented control）。
+ *  compare 是 xy 内部 sub-view（选 2 张自动进入），不在此列出。 */
 export type ViewMode = 'single' | 'xy'
 
 export default function ViewModeTabs({
@@ -16,14 +13,16 @@ export default function ViewModeTabs({
   const { t } = useTranslation()
   const tab = (m: ViewMode, label: string) => (
     <button
+      type="button"
+      aria-pressed={mode === m}
       onClick={() => onModeChange(m)}
-      className={`seg-item min-h-[28px] px-3 ${mode === m ? 'is-active' : ''}`}
+      className={`ds-seg-item${mode === m ? ' ds-is-active' : ''}`}
     >
       {label}
     </button>
   )
   return (
-    <div className="seg" role="tablist">
+    <div className="ds-seg">
       {tab('single', t('generate.singleMode'))}
       {tab('xy', t('generate.xyMode'))}
     </div>

@@ -45,8 +45,9 @@ export default function PromptList({ prompts, onChange, modelFamily = 'anima' }:
     <div className="relative">
       <textarea
         ref={taRef}
-        className="input w-full font-mono text-sm resize-none overflow-hidden"
-        rows={5}
+        className="ds-inp"
+        style={{ height: 'auto', minHeight: 84, padding: '9px 11px 20px', fontSize: 12, lineHeight: 1.55, resize: 'none', overflow: 'hidden' }}
+        rows={4}
         value={value}
         onChange={(e) => { onChange([e.target.value]); suggest.notifyChange() }}
         onKeyDown={(e) => { suggest.handleKeyDown(e) }}
@@ -58,7 +59,7 @@ export default function PromptList({ prompts, onChange, modelFamily = 'anima' }:
       />
       {tokenCount != null && (
         <span className="absolute bottom-1.5 right-2 text-2xs text-fg-tertiary pointer-events-none select-none">
-          {tokenCount} tokens
+          {t('generate.tokenCount', { n: tokenCount })}
         </span>
       )}
       <TagSuggestList

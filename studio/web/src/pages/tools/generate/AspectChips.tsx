@@ -38,65 +38,7 @@ export function aspectFromDimensions(w: number, h: number): AspectName {
   return 'custom'
 }
 
-function RatioGlyph({ w, h, color }: { w: number; h: number; color: string }) {
-  const max = 22
-  const ratio = w / h
-  const ww = ratio >= 1 ? max : max * ratio
-  const hh = ratio >= 1 ? max / ratio : max
-  return (
-    <span style={{ width: max, height: max, display: 'inline-grid', placeItems: 'center' }}>
-      <span style={{
-        width: ww, height: hh,
-        border: `1.5px solid ${color}`,
-        borderRadius: 2,
-      }} />
-    </span>
-  )
-}
-
-function PresetCard({
-  preset, active, onClick,
-}: {
-  preset: AspectPreset
-  active: boolean
-  onClick: () => void
-}) {
-  const accent = active ? 'var(--accent)' : 'var(--fg-tertiary)'
-  return (
-    <button
-      onClick={onClick}
-      title={`${preset.kind} · ${preset.w}×${preset.h}`}
-      style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        gap: 4,
-        padding: '8px 4px',
-        borderRadius: 'var(--r-md)',
-        border: active ? '1px solid var(--accent)' : '1px solid var(--border-subtle)',
-        background: active ? 'var(--accent-soft)' : 'var(--bg-sunken)',
-        cursor: 'pointer',
-        minWidth: 0,
-      }}
-    >
-      <RatioGlyph w={preset.w} h={preset.h} color={accent} />
-      <span
-        className="font-mono"
-        style={{
-          fontSize: 13, fontWeight: 600,
-          color: active ? 'var(--accent)' : 'var(--fg-secondary)',
-        }}
-      >
-        {preset.ratio}
-      </span>
-      <span
-        className="font-mono"
-        style={{ fontSize: 10, color: 'var(--fg-tertiary)', whiteSpace: 'nowrap' }}
-      >
-        {preset.w}×{preset.h}
-      </span>
-    </button>
-  )
-}
-
+/** Aspect presets as a row of pills; the active one is dark, the size shows on hover. */
 export default function AspectChips({
   aspect, onPick,
 }: {
@@ -104,20 +46,19 @@ export default function AspectChips({
   onPick: (ratio: AspectName, w?: number, h?: number) => void
 }) {
   return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(4, 1fr)',
-        gap: 6,
-      }}
-    >
+    <div className="ds-pills" style={{ flexWrap: 'wrap' }}>
       {ASPECT_PRESETS.map((p) => (
-        <PresetCard
+        <button
           key={p.ratio}
-          preset={p}
-          active={aspect === p.ratio}
+          type="button"
+          className={`ds-pill${aspect === p.ratio ? ' ds-is-active' : ''}`}
+          style={{ height: 26, padding: '0 10px', fontFamily: 'var(--mono)', fontSize: 11.5 }}
+          title={`${p.kind} · ${p.w}×${p.h}`}
+          aria-pressed={aspect === p.ratio}
           onClick={() => onPick(p.ratio, p.w, p.h)}
-        />
+        >
+          {p.ratio}
+        </button>
       ))}
     </div>
   )
