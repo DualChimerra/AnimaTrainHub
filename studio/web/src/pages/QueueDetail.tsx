@@ -15,6 +15,7 @@ import { useDialog } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import KebabMenu, { type KebabItem } from '../components/ds/KebabMenu'
 import PageHead from '../components/ds/PageHead'
+import YamlLines from '../components/ds/YamlLines'
 import { useEventStream } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { useQueueFormat, type QueueFormat } from '../lib/queueFormat'
@@ -1477,28 +1478,6 @@ function OutputsDownloadDialog({
 }
 
 // ── Snapshot config tab (ADR-0007 §11.7) ────────────────────────────────────
-
-/** Highlights a YAML dump line by line: keys, strings, comments. */
-function YamlLines({ text }: { text: string }) {
-  return (
-    <>
-      {text.split('\n').map((line, i) => {
-        const comment = line.match(/^(\s*)(#.*)$/)
-        if (comment) return <div key={i}>{comment[1]}<span className="ds-c">{comment[2]}</span></div>
-        const kv = line.match(/^(\s*-?\s*)([^:#'"\s][^:]*?):(\s+(.*))?$/)
-        if (!kv) return <div key={i}>{line || ' '}</div>
-        const value = kv[4] ?? ''
-        const isString = /^['"]/.test(value) || (value !== '' && !/^(-?[\d.e+-]+|true|false|null|~|\[.*\]|\{.*\})$/i.test(value))
-        return (
-          <div key={i}>
-            {kv[1]}<span className="ds-k">{kv[2]}</span>:{kv[3] != null && ' '}
-            {value && <span className={isString ? 'ds-s' : 'ds-v'}>{value}</span>}
-          </div>
-        )
-      })}
-    </>
-  )
-}
 
 /** The training config frozen when the task started, read-only, plus
  *  "apply this config": PUT it into the version and open the train step, where

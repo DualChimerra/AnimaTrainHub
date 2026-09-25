@@ -9,10 +9,13 @@ import {
 } from '../../api/client'
 import ConfigSkeleton from '../../components/ConfigSkeleton'
 import { useDialog } from '../../components/Dialog'
-import PageHeader from '../../components/PageHeader'
+import KebabMenu, { type KebabItem } from '../../components/ds/KebabMenu'
+import PageHead from '../../components/ds/PageHead'
+import YamlLines from '../../components/ds/YamlLines'
 import PathPicker from '../../components/PathPicker'
 import SchemaForm from '../../components/SchemaForm'
 import { useToast } from '../../components/Toast'
+import { schemaEnumLabel } from '../../lib/schema'
 import { useSettingsDrawer } from '../../lib/SettingsDrawer'
 import { useAdvancedMode } from '../../lib/useAdvancedMode'
 import {
@@ -46,19 +49,7 @@ function generateToml(config: ConfigData): string {
   return keys.map((k) => `${k} = ${toTomlValue(config[k])}`).join('\n')
 }
 
-// 相对时间（与 Overview 同款，prototype Presets 表格 / 详情用）。
-function fmtAgo(ts: number): string {
-  const sec = Math.max(0, Date.now() / 1000 - ts)
-  if (sec < 60) return 'just now'
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`
-  return `${Math.floor(sec / 86400)}d ago`
-}
-
 // 表格列 / 详情卡用：从一份 config 派生 optimizer / rank / resolution。
-function cfgOptimizer(c?: ConfigData): string {
-  return (c?.optimizer_type as string | undefined) ?? '—'
-}
 function cfgRank(c?: ConfigData): string {
   const v = c?.lora_rank
   return v === undefined || v === null ? '—' : String(v)
@@ -88,7 +79,7 @@ type ConflictChoice =
   | { kind: 'cancel' }
 
 export default function PresetsPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { toast } = useToast()
   const { confirm } = useDialog()
   const settingsDrawer = useSettingsDrawer()
@@ -142,6 +133,9 @@ export default function PresetsPage() {
   const [tomlOpen, setTomlOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
   const [showImportPathPicker, setShowImportPathPicker] = useState(false)
+  const [filter, setFilter] = useState('')
+  const [summaryFormat, setSummaryFormat] = useState<'yaml' | 'toml'>('yaml')
+  const [previewYaml, setPreviewYaml] = useState('')
   const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
   const newNameInputRef = useRef<HTMLInputElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -350,9 +344,14 @@ export default function PresetsPage() {
   }
 
   // "复制副本":Save-As 语义 —— 把当前 config 写到新名字下,refresh + 自动选中。
-  const handleDuplicate = async () => {
-    if (!config || busy) return
-    const baseName = selected ?? 'preset'
+  const handleDuplicate = async (name: string | null = selected) => {
+    if (busy || !name) return
+    const src = name === selected && config
+      ? config
+      : configCache[name] ?? await api.getPreset(name).catch(() => null)
+    if (!src) return
+    const srcDesc = name === selected ? descDraft : descriptions[name] ?? ''
+    const baseName = name
     let candidate = `${baseName}-copy`
     let i = 2
     while (presets.find((p) => p.name === candidate)) {
@@ -360,9 +359,9 @@ export default function PresetsPage() {
     }
     setBusy(true)
     try {
-      await api.savePreset(candidate, config)
-      if (descDraft) {
-        const next = { ...descriptions, [candidate]: descDraft }
+      await api.savePreset(candidate, src)
+      if (srcDesc) {
+        const next = { ...descriptions, [candidate]: srcDesc }
         setDescriptions(next); savePresetDescriptions(next)
       }
       refreshList()
@@ -378,16 +377,16 @@ export default function PresetsPage() {
     setEditorOpen(true)
   }
 
-  const handleDelete = async () => {
-    if (!selected) return
-    if (!(await confirm(t('presets.confirmDelete', { name: selected }), { tone: 'danger', okText: t('common.delete') }))) return
+  const handleDelete = async (name: string | null = selected) => {
+    if (!name) return
+    if (!(await confirm(t('presets.confirmDelete', { name }), { tone: 'danger', okText: t('common.delete') }))) return
     setBusy(true)
-    const target = selected
+    const target = name
     api.deletePreset(target).then(() => {
       const { [target]: _, ...rest } = descriptions
       setDescriptions(rest); savePresetDescriptions(rest)
       setConfigCache((m) => { const { [target]: _drop, ...keep } = m; return keep })
-      setSelected(null)
+      if (target === selected) setSelected(null)
       refreshList()
       toast(t('presets.deleted'), 'success')
     }).catch((e) => toast(String(e), 'error')).finally(() => setBusy(false))
@@ -487,9 +486,58 @@ export default function PresetsPage() {
 
   const selectedConfig = selected ? configCache[selected] : undefined
 
+  // Row click / row menu: switch the selection; drop the previous config first
+  // so the editor never shows (or saves) the old preset under the new name.
+  const selectPreset = (name: string) => {
+    if (name === selected) return
+    setConfig(null)
+    setSelected(name)
+  }
+
+  // Summary YAML: the same pruned dump the preset file gets on save.
+  const summarySource = selected ? (selectedConfig ?? config) : null
+  useEffect(() => {
+    if (!summarySource) { setPreviewYaml(''); return }
+    let alive = true
+    api.previewConfigYaml(summarySource)
+      .then((res) => { if (alive) setPreviewYaml(res.yaml) })
+      .catch(() => { if (alive) setPreviewYaml('') })
+    return () => { alive = false }
+  }, [summarySource])
+
+  const fmtUpdated = (ts: number) => {
+    const d = new Date(ts * 1000)
+    const time = new Intl.DateTimeFormat(i18n.language, { hour: '2-digit', minute: '2-digit' }).format(d)
+    if (d.toDateString() === new Date().toDateString()) return t('presets.todayAt', { time })
+    return new Intl.DateTimeFormat(i18n.language, { day: 'numeric', month: 'short' }).format(d)
+  }
+
   // ── 渲染 ──
+  const q = filter.trim().toLowerCase()
+  const shownPresets = q
+    ? presets.filter((p) => p.name.toLowerCase().includes(q) || (descriptions[p.name] ?? '').toLowerCase().includes(q))
+    : presets
+  const summaryConfig = selected ? (selectedConfig ?? config ?? undefined) : undefined
+  const yamlFieldCount = previewYaml ? previewYaml.split('\n').filter((l) => /^[^\s#]/.test(l)).length : 0
+
+  const headMenu: KebabItem[] = [
+    { label: t('presets.importUpload'), onSelect: onImportClick, disabled: busy },
+    { label: t('presets.importPath'), onSelect: () => setShowImportPathPicker(true), disabled: busy },
+    { label: t('presets.exportYaml'), onSelect: () => setExportDialogOpen(true), disabled: busy || !selected || !config },
+  ]
+  const rowMenu = (name: string): KebabItem[] => [
+    { label: t('presets.editConfig'), onSelect: () => { selectPreset(name); setEditorOpen(true) }, disabled: busy },
+    { label: t('presets.duplicate'), onSelect: () => void handleDuplicate(name), disabled: busy },
+    { label: t('presets.exportYaml'), onSelect: () => { selectPreset(name); setExportDialogOpen(true) }, disabled: busy },
+    { label: t('common.delete'), onSelect: () => void handleDelete(name), tone: 'err', disabled: busy },
+  ]
+  const kv = (k: string, v: React.ReactNode) => (
+    <div className="ds-kv" key={k}><span className="ds-k">{k}</span><span className="ds-v">{v}</span></div>
+  )
+  const raw = (v: unknown) => (v === undefined || v === null || v === '' ? '—' : Array.isArray(v) ? `[${v.join(', ')}]` : String(v))
+
   return (
-    <div className="fade-in">
+    <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <input
         ref={fileInputRef}
         type="file"
@@ -502,123 +550,174 @@ export default function PresetsPage() {
         }}
       />
 
-      <PageHeader
-        title="Presets"
-        eyebrow="Training configs"
-        subtitle="Global preset pool. Fork configs to or from a version's private config."
-        actions={
+      <PageHead
+        eyebrow={t('presets.eyebrow')}
+        title={t('presets.title')}
+        subtitle={t('presets.subtitle')}
+        tools={
           <>
-            <button onClick={onImportClick} disabled={busy} className="btn btn-secondary btn-sm">
-              {t('presets.importUpload')}
-            </button>
-            <button onClick={() => setShowImportPathPicker(true)} disabled={busy} className="btn btn-secondary btn-sm">
-              {t('presets.importPath')}
-            </button>
-            <button onClick={handleNew} disabled={busy} className="btn btn-primary btn-sm">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
-              <span>{t('presets.newPresetBtn')}</span>
+            <KebabMenu trigger="icon" label={t('presets.headMenu')} items={headMenu} />
+            <button type="button" onClick={handleNew} disabled={busy} className="ds-btn-primary">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+              {t('presets.newPresetBtn')}
             </button>
           </>
         }
       />
 
-      <div className="px-7 pb-7 m-px" style={{ paddingTop: 0 }}>
-        <div className="grid items-start gap-5 m-grid-1" style={{ gridTemplateColumns: 'minmax(0, 1fr) 360px' }}>
+      <div className="ds-scroll ds-tight" style={{ minHeight: 0 }}>
+        <div className="ds-presets-grid">
 
-          {/* ── 列表表格 ── */}
-          <div className="card overflow-hidden">
-            <div
-              className="caption presets-row"
-              style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr) 0.8fr 0.8fr minmax(0,1fr)', gap: 12, padding: '12px 20px', borderBottom: '1px solid var(--border-subtle)' }}
-            >
-              <span>{t('presets.colName')}</span>
-              <span>{t('presets.colOptimizer')}</span>
-              <span>{t('presets.colRank')}</span>
-              <span>{t('presets.colRes')}</span>
-              <span>{t('presets.colUpdated')}</span>
-            </div>
-
-            {presets.length === 0 ? (
-              <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-tertiary)', fontSize: 'var(--t-sm)' }}>
-                {t('presets.empty')}
+          {/* ── list ── */}
+          <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+            <div className="ds-card-head ds-pad">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="ds-card-title">{t('presets.allTitle')}</div>
+                <div className="ds-card-sub">{t('presets.allSub', { count: presets.length })}</div>
               </div>
-            ) : (
-              presets.map((p, i) => {
-                const active = p.name === selected
-                const c = configCache[p.name]
-                return (
-                  <button
-                    key={p.name}
-                    className="presets-row"
-                    onClick={() => setSelected(p.name)}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr) 0.8fr 0.8fr minmax(0,1fr)',
-                      gap: 12,
-                      padding: '15px 20px',
-                      width: '100%',
-                      textAlign: 'left',
-                      alignItems: 'center',
-                      border: 'none',
-                      borderBottom: i < presets.length - 1 ? '1px solid var(--border-subtle)' : 'none',
-                      background: active ? 'var(--accent-soft)' : 'transparent',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <span className="mono" style={{ fontWeight: 600, fontSize: 'var(--t-sm)', color: active ? 'var(--accent)' : 'var(--fg-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
-                    <span className="mono" style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cfgOptimizer(c)}</span>
-                    <span className="mono" style={{ fontSize: 'var(--t-sm)' }}>{cfgRank(c)}</span>
-                    <span className="mono" style={{ fontSize: 'var(--t-sm)' }}>{cfgRes(c)}</span>
-                    <span style={{ fontSize: 'var(--t-xs)', color: 'var(--fg-tertiary)' }}>{fmtAgo(p.updated_at)}</span>
-                  </button>
-                )
-              })
-            )}
+              <div className="ds-card-tools">
+                <span className="ds-search" style={{ width: 200 }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+                  <input className="ds-inp" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t('presets.filterPlaceholder')} aria-label={t('presets.filterPlaceholder')} />
+                </span>
+              </div>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              {presets.length === 0 ? (
+                <div className="ds-empty">{t('presets.empty')}</div>
+              ) : shownPresets.length === 0 ? (
+                <div className="ds-empty">{t('presets.noMatch', { search: filter })}</div>
+              ) : (
+                <table className="ds-tbl">
+                  <thead>
+                    <tr>
+                      <th>{t('presets.colName')}</th>
+                      <th>{t('presets.colType')}</th>
+                      <th>{t('presets.colRank')}</th>
+                      <th>{t('presets.colRes')}</th>
+                      <th>{t('presets.colOptimizer')}</th>
+                      <th>{t('presets.colUpdated')}</th>
+                      <th style={{ width: 40 }} />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shownPresets.map((p) => {
+                      const active = p.name === selected
+                      const c = configCache[p.name]
+                      const lt = c?.lora_type as string | undefined
+                      return (
+                        <tr
+                          key={p.name}
+                          onClick={() => selectPreset(p.name)}
+                          style={{ cursor: 'pointer', background: active ? 'var(--green-soft)' : undefined }}
+                          aria-selected={active}
+                        >
+                          <td>
+                            <span className="ds-cell-main">
+                              <span className="ds-sect-icon" style={active ? { background: '#fff' } : undefined}>
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M8.5 6h4a3 3 0 0 1 3 3v.5M8.5 18h4a3 3 0 0 0 3-3v-.5" /></svg>
+                              </span>
+                              <span className="ds-mono" style={{ fontWeight: 600, minWidth: 0 }}>
+                                {p.name}
+                                {descriptions[p.name] && <span className="ds-cell-key">{descriptions[p.name]}</span>}
+                              </span>
+                            </span>
+                          </td>
+                          <td>
+                            {lt ? (
+                              <span className={`ds-badge ${c?.model_family === 'krea2' ? 'ds-info' : active ? 'ds-ok' : 'ds-mute'}`}>
+                                {schemaEnumLabel('lora_type', lt, t)}
+                              </span>
+                            ) : '—'}
+                          </td>
+                          <td className="ds-num">{cfgRank(c)}</td>
+                          <td className="ds-num">{cfgRes(c)}</td>
+                          <td>{c?.optimizer_type ? schemaEnumLabel('optimizer_type', String(c.optimizer_type), t) : '—'}</td>
+                          <td className="ds-muted" style={{ whiteSpace: 'nowrap' }}>{fmtUpdated(p.updated_at)}</td>
+                          <td onClick={(e) => e.stopPropagation()}>
+                            <KebabMenu label={t('presets.rowMenu', { name: p.name })} items={rowMenu(p.name)} />
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
 
-          {/* ── 详情卡 ── */}
-          <div className="card m-static m-p" style={{ padding: 22, position: 'sticky', top: 0 }}>
-            {selected && config ? (
+          {/* ── summary ── */}
+          <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+            {selected && summaryConfig ? (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-                  <span className="mono" style={{ fontSize: 'var(--t-md)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected}</span>
-                </div>
-                {descriptions[selected] && (
-                  <p style={{ margin: '0 0 14px', fontSize: 'var(--t-sm)', color: 'var(--fg-secondary)' }}>{descriptions[selected]}</p>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', marginTop: descriptions[selected] ? 0 : 12 }}>
-                  {([
-                    ['scope', 'global'],
-                    ['optimizer', cfgOptimizer(selectedConfig ?? config)],
-                    ['rank / alpha', `${cfgRank(selectedConfig ?? config)} / ${cfgAlpha(selectedConfig ?? config)}`],
-                    ['resolution', cfgRes(selectedConfig ?? config)],
-                    ['updated', fmtAgo(presets.find((p) => p.name === selected)?.updated_at ?? Date.now() / 1000)],
-                  ] as [string, string][]).map(([k, v], idx, arr) => (
-                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: idx < arr.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
-                      <span style={{ fontSize: 'var(--t-sm)', color: 'var(--fg-secondary)' }}>{k}</span>
-                      <span className="mono" style={{ fontSize: 'var(--t-sm)', fontWeight: 600 }}>{v}</span>
+                <div className="ds-card-head ds-pad">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="ds-card-title ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected}</div>
+                    <div className="ds-card-sub">
+                      {[descriptions[selected], yamlFieldCount ? t('presets.fieldsN', { count: yamlFieldCount }) : null].filter(Boolean).join(' · ')}
                     </div>
+                  </div>
+                  <div className="ds-card-tools">
+                    <button type="button" className="ds-ctl ds-ghost" onClick={() => setEditorOpen(true)} disabled={busy || !config}>
+                      {t('presets.edit')}
+                    </button>
+                    <KebabMenu
+                      trigger="icon"
+                      label={t('presets.rowMenu', { name: selected })}
+                      items={[
+                        { label: t('presets.duplicate'), onSelect: () => void handleDuplicate(selected), disabled: busy || !config },
+                        { label: t('presets.exportYaml'), onSelect: () => setExportDialogOpen(true), disabled: busy || !config },
+                        { label: t('common.delete'), onSelect: () => void handleDelete(selected), tone: 'err', disabled: busy },
+                      ]}
+                    />
+                  </div>
+                </div>
+                <div style={{ padding: '0 17px 12px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
+                  {kv(t('presets.kvNetwork'), raw(summaryConfig.lora_type))}
+                  {kv('rank / alpha', `${cfgRank(summaryConfig)} / ${cfgAlpha(summaryConfig)}`)}
+                  {kv(t('presets.colOptimizer'), raw(summaryConfig.optimizer_type))}
+                  {kv('learning_rate', raw(summaryConfig.learning_rate))}
+                  {kv(t('presets.kvResolution'), raw(summaryConfig.resolution))}
+                  {kv('batch × ga', `${raw(summaryConfig.batch_size)} × ${raw(summaryConfig.grad_accum)}`)}
+                  {kv(t('presets.kvEpochs'), raw(summaryConfig.epochs))}
+                  {kv('Timestep', raw(summaryConfig.timestep_sampling))}
+                </div>
+                <div className="ds-tabs" style={{ padding: '0 17px' }} role="tablist">
+                  {(['yaml', 'toml'] as const).map((f) => (
+                    <button
+                      key={f}
+                      type="button"
+                      role="tab"
+                      aria-selected={summaryFormat === f}
+                      className={`ds-tab${summaryFormat === f ? ' ds-is-active' : ''}`}
+                      onClick={() => setSummaryFormat(f)}
+                    >
+                      {f.toUpperCase()}
+                    </button>
                   ))}
+                  <span style={{ flex: 1 }} />
+                  <button
+                    type="button"
+                    className="ds-ctl-note"
+                    style={{ alignSelf: 'center' }}
+                    onClick={() => {
+                      const text = summaryFormat === 'yaml' ? previewYaml : generateToml(summaryConfig)
+                      navigator.clipboard.writeText(text)
+                        .then(() => toast(t('presets.copied'), 'success'))
+                        .catch(() => toast(t('presets.copyFailed'), 'error'))
+                    }}
+                  >
+                    {t('common.copy')}
+                  </button>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 18 }}>
-                  <button className="btn btn-secondary btn-sm" onClick={() => setEditorOpen(true)} disabled={busy || !config}>
-                    {t('presets.editConfig')}
-                  </button>
-                  <button className="btn btn-secondary btn-sm" onClick={handleDuplicate} disabled={busy || !config}>
-                    {t('presets.duplicate')}
-                  </button>
-                  <button className="btn btn-secondary btn-sm" onClick={() => setExportDialogOpen(true)} disabled={busy || !config}>
-                    {t('presets.exportYaml')}
-                  </button>
-                  <button className="btn btn-ghost btn-sm" onClick={handleDelete} disabled={busy} style={{ color: 'var(--err)' }}>
-                    {t('common.delete')}
-                  </button>
-                </div>
+                <pre className="ds-yaml" style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+                  {summaryFormat === 'yaml'
+                    ? (previewYaml ? <YamlLines text={`# ${t('presets.yamlPruned')}\n${previewYaml}`} /> : t('common.loading'))
+                    : generateToml(summaryConfig)}
+                </pre>
               </>
             ) : (
-              <div style={{ padding: '24px 4px', textAlign: 'center', color: 'var(--fg-tertiary)', fontSize: 'var(--t-sm)' }}>
-                {t('presets.selectHint')}
-              </div>
+              <div className="ds-empty">{t('presets.selectHint')}</div>
             )}
           </div>
         </div>
@@ -639,27 +738,27 @@ export default function PresetsPage() {
           >
             {/* header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '18px 24px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
-              <h2 style={{ margin: 0, fontSize: 'var(--t-xl)', fontWeight: 700 }}>
+              <h2 style={{ margin: 0, fontSize: 17, fontWeight: 600, letterSpacing: '-.02em' }}>
                 {isNew ? t('presets.newPresetBtn') : <>{t('presets.editPrefix')} · <span className="mono">{selected}</span></>}
               </h2>
               <span style={{ flex: 1 }} />
-              <span className="seg">
+              <span className="ds-seg">
                 <button
                   type="button"
                   onClick={() => advancedMode && toggleAdvancedMode()}
-                  className={`seg-item ${!advancedMode ? 'is-active' : ''}`}
+                  className={`ds-seg-item${!advancedMode ? ' ds-is-active' : ''}`}
                 >
                   {t('train.simpleMode')}
                 </button>
                 <button
                   type="button"
                   onClick={() => !advancedMode && toggleAdvancedMode()}
-                  className={`seg-item ${advancedMode ? 'is-active' : ''}`}
+                  className={`ds-seg-item${advancedMode ? ' ds-is-active' : ''}`}
                 >
                   {t('train.advancedMode')}
                 </button>
               </span>
-              <button onClick={() => setEditorOpen(false)} className="btn btn-ghost btn-sm" aria-label={t('common.cancel')}>
+              <button type="button" onClick={() => setEditorOpen(false)} className="ds-kebab" aria-label={t('common.cancel')}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
               </button>
             </div>
@@ -670,11 +769,11 @@ export default function PresetsPage() {
               <div style={{ display: 'flex', gap: 12 }}>
                 {isNew ? (
                   <label className="flex flex-col gap-1.5" style={{ flex: 1 }}>
-                    <span className="text-sm font-medium text-fg-secondary">{t('presets.presetName')}</span>
+                    <span className="ds-cap">{t('presets.presetName')}</span>
                     <input
                       ref={newNameInputRef}
                       autoFocus
-                      className="input input-mono font-mono"
+                      className="ds-inp ds-mono"
                       placeholder="my-training-preset"
                       value={newName}
                       onChange={(e) => { setNewName(e.target.value); setNewNameError('') }}
@@ -684,14 +783,14 @@ export default function PresetsPage() {
                   </label>
                 ) : (
                   <label className="flex flex-col gap-1.5" style={{ flex: 1 }}>
-                    <span className="text-sm font-medium text-fg-secondary">{t('presets.nameReadonly')}</span>
-                    <div className="py-2 px-3 rounded-md border border-subtle bg-sunken font-mono text-sm text-fg-primary">{selected}</div>
+                    <span className="ds-cap">{t('presets.nameReadonly')}</span>
+                    <input className="ds-inp ds-mono" value={selected ?? ''} disabled readOnly />
                   </label>
                 )}
                 <label className="flex flex-col gap-1.5" style={{ flex: 1.5 }}>
-                  <span className="text-sm font-medium text-fg-secondary">{t('presets.description')}</span>
+                  <span className="ds-cap">{t('presets.description')}</span>
                   <input
-                    className="input"
+                    className="ds-inp"
                     placeholder={t('presets.descPlaceholder')}
                     value={descDraft}
                     onChange={(e) => { setDescDraft(e.target.value); setDescDirty(true) }}
@@ -701,7 +800,7 @@ export default function PresetsPage() {
               </div>
 
               {(droppedFields.length > 0 || defaultedFields.length > 0) && (
-                <div className="rounded-md border border-warn bg-warn-soft px-3.5 py-2.5 text-xs text-warn space-y-1">
+                <div className="ds-note ds-warn" style={{ display: 'block' }}>
                   <span className="font-semibold">{t('presets.compatNoticeTitle')}</span>
                   {droppedFields.length > 0 && (
                     <div>{t('presets.droppedFieldsBody')}<code className="ml-1 text-[11px] opacity-80">{droppedFields.join(', ')}</code></div>
@@ -762,8 +861,8 @@ export default function PresetsPage() {
 
             {/* footer */}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '14px 24px', borderTop: '1px solid var(--border-subtle)' }}>
-              <button className="btn btn-secondary" onClick={() => setEditorOpen(false)}>{t('common.cancel')}</button>
-              <button className="btn btn-primary" onClick={handleSave} disabled={saveDisabled}>
+              <button type="button" className="ds-ctl" onClick={() => setEditorOpen(false)}>{t('common.cancel')}</button>
+              <button type="button" className="ds-btn-primary" onClick={handleSave} disabled={saveDisabled}>
                 {isNew ? t('common.create') : t('common.save')}
               </button>
             </div>
