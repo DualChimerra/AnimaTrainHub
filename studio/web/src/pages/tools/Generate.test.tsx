@@ -87,10 +87,10 @@ async function waitForInitialLorasLoad() {
   await screen.findByRole('button', { name: /开始生成/ })
 }
 
-// 正向 / 负向 textarea 现在归到左侧「提示词」分页 tab（默认 tab 是 LoRA）；
-// 要操作 prompt 的用例先切到这一页。
-async function openPromptsTab(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: '提示词' }))
+// The settings column shows prompts, LoRA and parameters at once (no tabs any
+// more); kept as a no-op so the call sites read the same.
+async function openPromptsTab(_user: ReturnType<typeof userEvent.setup>) {
+  await Promise.resolve()
 }
 
 describe('GeneratePage 端到端 smoke', () => {
@@ -445,8 +445,8 @@ describe('GeneratePage 端到端 smoke', () => {
     // 看 X 轴 select 的 value（一行 select 元素，AxisCard.label='X'）。
     await waitFor(() => {
       const xLabel = screen.getAllByText('X 轴')[0]
-      // AxisCard 外框跟 LoRA 槽对齐用 bg-overlay（原 bg-sunken 在 dark 下近黑显突兀）
-      const card = xLabel.closest('div.bg-overlay')!
+      // AxisCard uses the same frame as a LoRA slot card (.ds-card.ds-flat)
+      const card = xLabel.closest('div.ds-card')!
       const axisSelect = card.querySelector('select') as HTMLSelectElement
       expect(axisSelect.value).toBe('lora_ckpt')
     })

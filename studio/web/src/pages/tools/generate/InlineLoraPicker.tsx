@@ -25,6 +25,9 @@ interface CommonProps {
   /** × 按钮回调：单选模式 = 删整个槽；多选模式 = 关 inline 面板 */
   onClose: () => void
   onPickExternal?: () => void
+  /** Rendered inside a LoRA slot card that already has its own name row, ×
+   *  and weight slider: drop the frame, title, × and weight. */
+  embedded?: boolean
 }
 
 interface SingleModeProps extends CommonProps {
@@ -86,7 +89,7 @@ type Props = SingleModeProps | MultiModeProps
  */
 export default function InlineLoraPicker(props: Props) {
   const { t } = useTranslation()
-  const { catalog, onClose, onPickExternal } = props
+  const { catalog, onClose, onPickExternal, embedded = false } = props
   // 解构出稳定的 loader（useCallback）+ 响应式数据，effect deps 用纯标识符。
   const { projects, ensureProjects, ensureVersions, versionsOf, fetchCkpts } = catalog
   const isSingle = props.mode === 'single'
@@ -362,12 +365,12 @@ export default function InlineLoraPicker(props: Props) {
 
   return (
     <div
-      className="rounded-md border border-subtle bg-overlay p-2.5 flex flex-col gap-2"
+      className={embedded ? 'flex flex-col gap-2' : 'rounded-md border border-subtle bg-overlay p-2.5 flex flex-col gap-2'}
       data-testid="inline-lora-picker"
     >
       {/* header */}
       <div className="flex items-center gap-2">
-        <span className="text-xs font-semibold text-fg-secondary shrink-0">{t('generate.pickLora')}</span>
+        {!embedded && <span className="text-xs font-semibold text-fg-secondary shrink-0">{t('generate.pickLora')}</span>}
         {/* 更新中（旧 chips 还在原地）时给个不占布局的小提示，不替换 grid 内容 */}
         {updating && ckpts.length > 0 && (
           <span className="text-2xs text-fg-tertiary shrink-0">{t('common.loading')}</span>
@@ -376,26 +379,27 @@ export default function InlineLoraPicker(props: Props) {
         {onPickExternal && (
           <button
             onClick={onPickExternal}
-            className="btn btn-ghost btn-sm text-2xs text-fg-tertiary"
+            className={embedded ? 'ds-ctl-note' : 'btn btn-ghost btn-sm text-2xs text-fg-tertiary'}
+            style={embedded ? { color: 'var(--green-text)' } : undefined}
             title={t('generate.externalFileHint')}
           >
             {t('generate.externalFile')}
           </button>
         )}
-        <button
+        {!embedded && <button
           onClick={onClose}
           className="btn btn-ghost btn-sm text-fg-tertiary px-1.5"
           title={isSingle ? t('generate.removeSlot') : t('generate.closePanel')}
           aria-label={isSingle ? t('generate.removeLora') : t('generate.closePicker')}
         >
           ×
-        </button>
+        </button>}
       </div>
 
       {/* project / version 下拉 */}
       <div className="flex gap-2">
         <select
-          className="input text-xs flex-1"
+          className="ds-inp"
           value={pid ?? ''}
           onChange={(e) => {
             // 切项目：pid + vid 同批更新，立即把 vid 清成 null（与 setPid 一起
@@ -412,7 +416,7 @@ export default function InlineLoraPicker(props: Props) {
           ))}
         </select>
         <select
-          className="input text-xs flex-1"
+          className="ds-inp"
           value={vid ?? ''}
           onChange={(e) => setVid(e.target.value ? Number(e.target.value) : null)}
           disabled={versions.length === 0}
@@ -430,7 +434,7 @@ export default function InlineLoraPicker(props: Props) {
       {/* search */}
       <input
         type="text"
-        className="input text-xs"
+        className="ds-inp"
         placeholder={t('generate.searchCkpt')}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
@@ -504,7 +508,7 @@ export default function InlineLoraPicker(props: Props) {
       </div>
 
       {/* 权重 slider —— single 模式恒显；multi 模式按 showWeight + 有选时显 */}
-      {showWeight && (isSingle || picked.size > 0) && (
+      {showWeight && !embedded && (isSingle || picked.size > 0) && (
         <div
           className="flex items-center gap-2 pt-1"
           style={{ borderTop: '1px solid var(--border-subtle)' }}

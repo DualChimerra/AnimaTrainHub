@@ -108,20 +108,22 @@ function RootLayout() {
   }, [navOpen])
 
   return (
-    <div className={`flex h-[100dvh] overflow-hidden bg-sunken`}>
-      <Sidebar mobile={isMobile} mobileOpen={navOpen} onMobileClose={() => setNavOpen(false)} />
-      {isMobile && navOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-zinc-950/40 backdrop-blur-[2px]"
-          onClick={() => setNavOpen(false)}
-          aria-hidden="true"
-        />
-      )}
-      {/* Tailark 式 inset 面板：内容区作为一张浮在侧栏底色上的卡片（手机端全屏无边距）。 */}
-      <div className={`flex-1 min-w-0 flex ${isMobile ? '' : 'py-2 pr-2'}`}>
-        <div className={`flex-1 min-w-0 flex flex-col relative overflow-hidden bg-canvas ${isMobile ? '' : 'rounded-xl border border-subtle shadow-sm'}`}>
+    // The whole app is one white panel on the warm canvas (mockup .viewport /
+    // .app): sidebar and main column share it. On a phone the panel is
+    // full-bleed and the sidebar slides in as a drawer.
+    <div className="ds-viewport">
+      <div className="ds-app">
+        <Sidebar mobile={isMobile} mobileOpen={navOpen} onMobileClose={() => setNavOpen(false)} />
+        {isMobile && navOpen && (
+          <div
+            className="fixed inset-0 z-40 bg-zinc-950/40 backdrop-blur-[2px]"
+            onClick={() => setNavOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+        <div className="ds-main relative overflow-hidden">
           <Topbar mobile={isMobile} onOpenNav={() => setNavOpen(true)} />
-          <main style={{ flex: 1, overflow: 'auto', background: 'var(--bg-canvas)' }}>
+          <main style={{ flex: 1, overflow: 'auto' }}>
             <Outlet />
           </main>
           <SettingsDrawer />

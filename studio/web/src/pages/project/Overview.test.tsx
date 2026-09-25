@@ -1,16 +1,19 @@
-/** ProjectOverview 组件级 regression test。
+/** ProjectOverview regression test.
  *
- *  覆盖训练态 StatusBanner 的暂停按钮实时刷新：latestTask 是 Overview 内独立
- *  local state（不是 project prop），Layout 的 version_state_changed reload 碰
- *  不到它。暂停按钮门控的 is_pausable 由 train_loop_started + 首个 epoch 的
- *  auto_epoch_backup_written 翻 true —— Overview 必须自己订阅这些 SSE 事件重拉
- *  latestTask，否则暂停按钮训练期一直不出现，得切版本 / 刷新页面才有。
+ *  The pause action of a running training task must appear live: the task
+ *  list is Overview's own local state (not a project prop), so Layout's
+ *  version_state_changed reload never touches it. is_pausable flips to true
+ *  on train_loop_started + the first epoch's auto_epoch_backup_written, so
+ *  Overview has to subscribe to those SSE events and refetch the queue;
+ *  otherwise the pause item never shows up until a version switch or reload.
  *
- *  jsdom 默认没有 EventSource（useEventStream 内部 typeof 守卫会短路），这里塞
- *  个 fake 让 hook 真订阅，再手动驱动事件验证组件会重拉 listQueue 并显示按钮。 */
-import { render, screen, waitFor } from '@testing-library/react'
+ *  jsdom has no EventSource (useEventStream's typeof guard short-circuits), so
+ *  a fake is installed to make the hook subscribe, then events are driven by
+ *  hand to check that the component refetches listQueue and shows the item. */
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DialogProvider } from '../../components/Dialog'
 import { ToastProvider } from '../../components/Toast'
 import { api, type ProjectDetail, type Task, type Version } from '../../api/client'
 import ProjectOverview from './Overview'
@@ -68,11 +71,13 @@ function renderOverview(project: ProjectDetail) {
   return render(
     <MemoryRouter initialEntries={['/projects/3']}>
       <ToastProvider>
-        <Routes>
-          <Route element={<Outlet context={ctxValue} />}>
-            <Route path="/projects/:id" element={<ProjectOverview />} />
-          </Route>
-        </Routes>
+        <DialogProvider>
+          <Routes>
+            <Route element={<Outlet context={ctxValue} />}>
+              <Route path="/projects/:id" element={<ProjectOverview />} />
+            </Route>
+          </Routes>
+        </DialogProvider>
       </ToastProvider>
     </MemoryRouter>
   )
@@ -81,8 +86,8 @@ function renderOverview(project: ProjectDetail) {
 beforeEach(() => {
   FakeEventSource.instances = []
   vi.stubGlobal('EventSource', FakeEventSource)
-  // detail tab 的 getCuration / listCaptionsFull 等都有 .catch —— 统一 404 让它们
-  // 安静失败，不污染测试；listQueue 单独 spy 控制返回。
+  // Captions / outputs / checkpoints all have a .catch: a blanket 404 lets them
+  // fail quietly; listQueue is spied separately to control what it returns.
   vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
     ok: false, status: 404, json: async () => null, text: async () => '',
     headers: new Headers(),
@@ -94,27 +99,28 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('ProjectOverview 训练态暂停按钮 SSE 刷新', () => {
-  it('auto_epoch_backup_written 事件触发重拉 latestTask → 暂停按钮出现', async () => {
-    // listQueue：首拉 is_pausable=false（首个 epoch backup 未落盘），之后 true。
+describe('ProjectOverview pause action refreshes over SSE', () => {
+  it('auto_epoch_backup_written refetches the tasks and the pause item appears', async () => {
+    // listQueue: is_pausable=false at first (no epoch backup on disk yet), true afterwards.
     let pausable = false
     const listSpy = vi.spyOn(api, 'listQueue')
       .mockImplementation(async () => [makeTrainTask(pausable)])
 
     renderOverview(makeProject())
 
-    // 训练 banner 已渲染（取消训练按钮随 taskId 出现），但 is_pausable=false →
-    // 暂停按钮不在。
+    // Open the task's ⋯ menu: cancel is there, pause is not (is_pausable=false).
+    const kebab = await screen.findByRole('button', { name: 'Actions' })
+    fireEvent.click(kebab)
     await waitFor(() => expect(screen.getByText('取消训练')).toBeInTheDocument())
     expect(screen.queryByText('暂停')).not.toBeInTheDocument()
     const callsBefore = listSpy.mock.calls.length
 
-    // 后端首个 epoch backup 落盘 → is_pausable 升级；推一条 SSE 事件。
+    // The first epoch backup lands on disk -> is_pausable flips; push an SSE event.
     pausable = true
     await waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThan(0))
     FakeEventSource.instances[0].emit({ type: 'auto_epoch_backup_written', task_id: 42 })
 
-    // 重拉后暂停按钮出现（不依赖切版本 / 刷新页面）。
+    // After the refetch the open menu shows pause (no version switch / reload needed).
     await waitFor(() => expect(screen.getByText('暂停')).toBeInTheDocument())
     expect(listSpy.mock.calls.length).toBeGreaterThan(callsBefore)
   })

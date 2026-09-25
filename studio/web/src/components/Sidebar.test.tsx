@@ -113,13 +113,11 @@ describe('Sidebar (PP0)', () => {
   it('marks the active route', () => {
     renderAt('/tools/presets')
     const link = screen.getByRole('link', { name: /预设/ })
-    // 活跃 link：bg-surface + font-semibold（重设计 token 化后的活跃态）
-    expect(link.className).toMatch(/bg-surface/)
-    expect(link.className).toMatch(/font-semibold/)
-    // 非活跃 link 没有这俩
+    // 活跃 link 带 ds-is-active（2026 设计：白底卡片 + 细描边）
+    expect(link.className).toMatch(/ds-is-active/)
+    // 非活跃 link 没有
     const queue = screen.getByRole('link', { name: /队列/ })
-    expect(queue.className).not.toMatch(/bg-surface/)
-    expect(queue.className).not.toMatch(/font-semibold/)
+    expect(queue.className).not.toMatch(/ds-is-active/)
   })
 
   it('does not include the removed Datasets link', () => {
@@ -142,9 +140,9 @@ describe('Sidebar (PP0)', () => {
     renderAt('/queue', STICKY)
     // 在队列页：队列高亮，概览不高亮（inRoute 门控，避免 currentStep===null 误判）
     const queue = screen.getByRole('link', { name: /队列/ })
-    expect(queue.className).toMatch(/bg-surface/)
+    expect(queue.className).toMatch(/ds-is-active/)
     const overview = screen.getByRole('link', { name: /概览/ })
-    expect(overview.className).not.toMatch(/bg-surface/)
+    expect(overview.className).not.toMatch(/ds-is-active/)
   })
 
   it('shows no project section without a sticky selection', () => {

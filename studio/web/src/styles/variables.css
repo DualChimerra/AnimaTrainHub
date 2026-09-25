@@ -52,5 +52,5 @@
   --font-geist-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --leading-body: 1.5;
-  --tracking-body: -0.006em;
+  --tracking-body: -0.01em;
 }

@@ -284,10 +284,10 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
 
 // ── EvalMetricsPanel ──────────────────────────────────────────────────────
 
-const EVAL_METRIC_KEYS = ['clip_t', 'clip_i', 'dino_i', 'ccip_i', 'tag_recall'] as const
-type EvalMetricKey = typeof EVAL_METRIC_KEYS[number]
+export const EVAL_METRIC_KEYS = ['clip_t', 'clip_i', 'dino_i', 'ccip_i', 'tag_recall'] as const
+export type EvalMetricKey = typeof EVAL_METRIC_KEYS[number]
 // 核心指标常显；动漫域新指标默认关，只在算过（状态非 not_run）时才显示卡片/列。
-const CORE_METRIC_KEYS = new Set<EvalMetricKey>(['clip_t', 'clip_i', 'dino_i'])
+export const CORE_METRIC_KEYS = new Set<EvalMetricKey>(['clip_t', 'clip_i', 'dino_i'])
 
 const EVAL_LABELS: Record<EvalMetricKey, string> = {
   clip_t: 'CLIP-T',
@@ -307,23 +307,23 @@ const EVAL_COLORS: Record<EvalMetricKey, string> = {
 }
 
 
-function checkpointSortValue(result: EvalMetricResult, index: number): number {
+export function checkpointSortValue(result: EvalMetricResult, index: number): number {
   const value = result.checkpoint?.value
   if (typeof value === 'number') return value
   return result.updated_at ?? result.created_at ?? index
 }
 
-function checkpointLabel(result: EvalMetricResult): string {
+export function checkpointLabel(result: EvalMetricResult): string {
   return result.checkpoint?.label
     || result.checkpoint?.path?.split(/[\\/]/).pop()
     || result.run_id
 }
 
-function metricState(result: EvalMetricResult, key: EvalMetricKey): EvalMetricState | undefined {
+export function metricState(result: EvalMetricResult, key: EvalMetricKey): EvalMetricState | undefined {
   return result.metric_states?.[key]
 }
 
-function metricValue(result: EvalMetricResult, key: EvalMetricKey): number | null {
+export function metricValue(result: EvalMetricResult, key: EvalMetricKey): number | null {
   const stateValue = metricState(result, key)?.value
   if (typeof stateValue === 'number' && Number.isFinite(stateValue)) return stateValue
   const raw = result.metrics?.[key]
@@ -356,7 +356,7 @@ function toneClass(tone: 'ok' | 'warn' | 'err' | 'muted'): string {
 
 // 一行 checkpoint 的统一进度文案 + 色调（不管 inline/训练后/手动触发，都从同一份
 // run.json/metrics.json 状态推：先出图（sample_run.summary done/total），再算指标。
-function evalRowStatus(result: EvalMetricResult): {
+export function evalRowStatus(result: EvalMetricResult): {
   /** i18n key, or null when the raw backend status is the best label we have. */
   key: string | null
   params?: Record<string, unknown>

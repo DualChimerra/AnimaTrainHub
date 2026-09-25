@@ -93,7 +93,7 @@ it('removes a note straight from the menu', async () => {
   await waitFor(() => expect(screen.queryByTestId('task-note-1')).not.toBeInTheDocument())
 })
 
-it('feeds the row samples and hides them on request', async () => {
+it('opens the row samples on request and hides them again', async () => {
   vi.spyOn(api, 'listQueue').mockResolvedValue([makeTask()])
   vi.spyOn(api, 'listTaskSamples').mockResolvedValue({
     items: [{ filename: 'epoch_1.png', mtime: 1, size: 1, epoch: 1, step: null }],
@@ -101,6 +101,10 @@ it('feeds the row samples and hides them on request', async () => {
   })
   renderQueue()
 
+  // Cards carry no strip until asked (the mockup's queue cards).
+  fireEvent.contextMenu(await screen.findByText('lora run'))
+  expect(screen.queryByTestId('sample-strip-1')).not.toBeInTheDocument()
+  fireEvent.click(await screen.findByText('显示采样图'))
   expect(await screen.findByTestId('sample-strip-1')).toBeInTheDocument()
 
   fireEvent.contextMenu(screen.getByText('lora run'))

@@ -4,11 +4,10 @@ import { useTranslation } from 'react-i18next'
 export default function StatusBadge({ status }: { status: string }) {
   const { t } = useTranslation()
   const cls =
-    status === 'done'    ? 'badge badge-ok'
-    : status === 'running'  ? 'badge badge-info'
-    : status === 'failed'   ? 'badge badge-err'
-    : status === 'canceled' ? 'badge'
-    : 'badge'
+    status === 'done'    ? 'ds-badge ds-ok'
+    : status === 'running'  ? 'ds-badge ds-info'
+    : status === 'failed'   ? 'ds-badge ds-err'
+    : 'ds-badge ds-mute'
   const label =
     status === 'done'    ? t('status.done')
     : status === 'running'  ? t('status.generating')

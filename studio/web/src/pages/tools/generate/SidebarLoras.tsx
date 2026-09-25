@@ -24,6 +24,8 @@ export default function SidebarLoras({
 }) {
   const { t } = useTranslation()
   const [externalForIdx, setExternalForIdx] = useState<number | null>(null)
+  // Slot whose checkpoint picker is unfolded (empty slots always show it).
+  const [editingIdx, setEditingIdx] = useState<number | null>(null)
 
   // 已选 path（互相 disable，避免重复添加）—— 排除空槽
   const existingPaths = useMemo(
@@ -47,11 +49,17 @@ export default function SidebarLoras({
           version_id: null,
         }
     onChange(loras.map((l, idx) => (idx === i ? entry : l)))
+    if (picked) setEditingIdx(null)
+  }
+
+  const handleWeight = (i: number, w: number) => {
+    onChange(loras.map((l, idx) => (idx === i ? { ...l, scale: w } : l)))
   }
 
   const handleSlotRemove = (i: number) => {
     onChange(loras.filter((_, idx) => idx !== i))
     if (externalForIdx === i) setExternalForIdx(null)
+    setEditingIdx(null)
   }
 
   const handleAddSlot = () => {
@@ -83,22 +91,58 @@ export default function SidebarLoras({
             />
           )
         }
+        const open = !hasCkpt || editingIdx === i
         return (
-          <InlineLoraPicker
-            // key 只用 index：避免 ckpt 切换 / 反选时整个 picker remount
+          <div
             key={`lora-${i}`}
-            mode="single"
-            catalog={catalog}
-            value={
-              hasCkpt
-                ? { path: l.path, projectId: l.project_id ?? null, versionId: l.version_id ?? null }
-                : null
-            }
-            weight={l.scale}
-            onChange={(p, w) => handleSlotChange(i, p, w)}
-            onClose={() => handleSlotRemove(i)}
-            onPickExternal={() => setExternalForIdx(i)}
-          />
+            className="ds-card ds-flat"
+            style={{ padding: '10px 11px', border: '1px solid var(--line-2)', display: 'flex', flexDirection: 'column', gap: 8 }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="ds-badge ds-mute">{t('generate.slotN', { n: i + 1 })}</span>
+              <button
+                type="button"
+                className="ds-mono"
+                style={{ fontSize: 11.5, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left', color: hasCkpt ? 'var(--ink)' : 'var(--ink-3)' }}
+                title={hasCkpt ? l.path : undefined}
+                aria-expanded={open}
+                onClick={() => { if (hasCkpt) setEditingIdx(editingIdx === i ? null : i) }}
+              >
+                {hasCkpt ? slotName(l.path) : t('generate.loraNotPicked')}
+              </button>
+              <button type="button" className="ds-kebab" aria-label={t('generate.removeSlot')} title={t('generate.removeSlot')} onClick={() => handleSlotRemove(i)}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              </button>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+              <input
+                type="range"
+                className="ds-range"
+                min={0} max={1.5} step={0.05}
+                value={l.scale}
+                style={{ '--p': `${(l.scale / 1.5) * 100}%` } as React.CSSProperties}
+                onChange={(e) => handleWeight(i, Number(e.target.value))}
+                aria-label={t('generate.loraWeight')}
+              />
+              <span className="ds-mono" style={{ fontSize: 11.5, width: 34, textAlign: 'right' }}>{l.scale.toFixed(2)}</span>
+            </div>
+            {open && (
+              <InlineLoraPicker
+                mode="single"
+                embedded
+                catalog={catalog}
+                value={
+                  hasCkpt
+                    ? { path: l.path, projectId: l.project_id ?? null, versionId: l.version_id ?? null }
+                    : null
+                }
+                weight={l.scale}
+                onChange={(p, w) => handleSlotChange(i, p, w)}
+                onClose={() => handleSlotRemove(i)}
+                onPickExternal={() => setExternalForIdx(i)}
+              />
+            )}
+          </div>
         )
       })}
 
@@ -125,6 +169,11 @@ export default function SidebarLoras({
       )}
     </div>
   )
+}
+
+/** Slot title: the checkpoint file name without extension. */
+function slotName(path: string): string {
+  return (path.split(/[\\/]/).pop() ?? path).replace(/\.safetensors$/i, '')
 }
 
 /** 历史回填后 resolve 失败的 LoRA 槽渲染（决策 #8 / plan §3）。

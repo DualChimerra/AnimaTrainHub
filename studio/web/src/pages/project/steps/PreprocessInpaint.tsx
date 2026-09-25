@@ -15,7 +15,7 @@ import InpaintCanvas, {
   type InpaintMode,
   type InpaintStroke,
 } from '../../../components/preprocess/InpaintCanvas'
-import PreprocessToolsBar from '../../../components/preprocess/PreprocessToolsBar'
+import PreprocessToolsBar, { PreprocessCard, PreprocessHeadTools } from '../../../components/preprocess/PreprocessToolsBar'
 import StepShell from '../../../components/StepShell'
 import { useToast } from '../../../components/Toast'
 import { useLocalStorageState } from '../../../lib/useLocalStorageState'
@@ -363,154 +363,160 @@ export default function PreprocessInpaintPage() {
     <StepShell
       idx={2}
       mobilePageScroll
-      title={t('steps.preprocess.title')}
-      subtitle={t('preprocessInpaint.subtitle')}
-      actions={
-        <>
-          {/* 保存 = 两个数据面的全部未保存改动；文案 / 可用性不随模式变 */}
-          <button
-            type="button"
-            onClick={() => void saveAll()}
-            disabled={busy || editedNames.length === 0}
-            className="btn btn-ghost btn-sm"
-          >
-            {t('preprocessInpaint.saveAll', { n: editedNames.length })}
-          </button>
-          <button
-            type="button"
-            onClick={() => void saveActive()}
-            disabled={busy || activeHistory.length === 0}
-            className="btn btn-primary btn-sm"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z" />
-            </svg>
-            <span>{t('preprocessInpaint.saveActive')}</span>
-          </button>
-        </>
-      }
+      eyebrow={t('ppFrame.eyebrow')}
+      title={t('ppFrame.title')}
+      subtitle={t('ppFrame.subtitle')}
+      actions={<PreprocessHeadTools projectId={project.id} versionId={vid} />}
       belowHeader={<PreprocessToolsBar current="inpaint" projectId={project.id} versionId={vid} />}
     >
-      <div className="flex flex-col h-full gap-3 min-h-0 m-h-auto">
-        <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden m-h-auto">
-          <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm flex-wrap">
-            <div className="flex items-center gap-1">
-              {(['all', 'pending', 'edited'] as const).map((k) => (
-                <button
-                  key={k}
-                  onClick={() => setFilter(k)}
-                  className={
-                    'px-2 py-0.5 rounded-full text-xs transition-colors ' +
-                    (filter === k
-                      ? 'bg-accent-soft text-accent font-semibold'
-                      : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
-                  }
-                >
-                  {t(`preprocessInpaint.filter.${k}`)} {counts[k]}
-                </button>
-              ))}
-            </div>
-            {activeImage && (
-              <span className="text-fg-tertiary text-xs font-mono ml-2">
-                {activeImage.name} · {activeImage.w}×{activeImage.h}
-              </span>
-            )}
-            <span className="flex-1" />
-            <button
-              onClick={undo}
-              disabled={!activeName || activeHistory.length === 0}
-              className="btn btn-ghost btn-sm"
-              title="Ctrl+Z"
-            >↶ {t('preprocessInpaint.undo')}</button>
-            <button
-              onClick={redo}
-              disabled={!activeName || activeRedo.length === 0}
-              className="btn btn-ghost btn-sm"
-              title="Ctrl+Shift+Z"
-            >↷ {t('preprocessInpaint.redo')}</button>
-            <button
-              onClick={clearActive}
-              disabled={!activeName || activeHistory.length === 0}
-              className="btn btn-ghost btn-sm"
-            >{t('preprocessInpaint.clearActive')}</button>
-          </header>
-
-          <div className="flex-1 min-h-0 overflow-hidden p-3 m-h-auto m-p-sm">
-            {loading && (
-              <p className="text-fg-tertiary text-sm">{t('preprocessInpaint.loading')}</p>
-            )}
-            {!loading && images.length === 0 && (
-              <p className="text-fg-tertiary text-sm">
-                {t('preprocessInpaint.emptyWorkspace')}{' '}
-                <Link to={`/projects/${project.id}/v/${vid}/preprocess`} className="text-accent hover:underline">
-                  {t('preprocessInpaint.goToOverview')}
-                </Link>
-              </p>
-            )}
-
-            {activeImage && (
-              <div
-                className="grid gap-3 h-full min-h-0 pp-editor-grid"
-                style={{ gridTemplateColumns: '220px minmax(0, 1fr) 260px' }}
+      <PreprocessCard current="inpaint" projectId={project.id} versionId={vid}>
+        <div className="ds-pp-toolbar">
+            <>
+              {/* 保存 = 两个数据面的全部未保存改动；文案 / 可用性不随模式变 */}
+              <button
+                type="button"
+                onClick={() => void saveAll()}
+                disabled={busy || editedNames.length === 0}
+                className="ds-ctl ds-ghost"
               >
-                <Filmstrip
-                  items={filteredImages}
-                  activeName={activeName}
-                  onSelect={setActiveName}
-                  thumbUrl={(im) => {
-                    const { folder, filename } = splitRel(im.name)
-                    return api.versionThumbUrl(
-                      project.id, vid, 'train', filename, folder, 256,
-                    ) + `&_=${im.mtime}`
-                  }}
-                  emptyHint={t(`preprocessInpaint.filmstripEmpty.${filter}`)}
-                  renderOverlay={(im) => {
-                    const hist = historyByImage[im.name] ?? []
-                    const hasPaint = hist.some((h) => h.kind === 'paint')
-                    const hasMask = im.mask_mtime != null
-                      || hist.some((h) => h.kind === 'mask')
-                    if (!hasPaint && !hasMask) return null
-                    return (
-                      <span className="fs-badge">
-                        {hasPaint ? '✎' : ''}{hasMask ? 'M' : ''}
-                      </span>
-                    )
-                  }}
-                />
-
-                <div className="min-w-0 min-h-0 overflow-hidden">
-                  <InpaintCanvas
-                    key={activeImage.name}
-                    ref={canvasRef}
-                    imageUrl={rawUrl(activeImage)}
-                    imageW={activeImage.w}
-                    imageH={activeImage.h}
-                    mode={mode}
-                    strokes={activePaintStrokes}
-                    maskStrokes={activeMaskStrokes}
-                    maskBaseUrl={maskBaseUrlFor(activeImage)}
-                    brush={brush}
-                    erase={erase}
-                    onStrokeEnd={onStrokeEnd}
-                    onMaskStrokeEnd={onMaskStrokeEnd}
-                    onPickColor={onPickColor}
-                  />
+                {t('preprocessInpaint.saveAll', { n: editedNames.length })}
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveActive()}
+                disabled={busy || activeHistory.length === 0}
+                className="ds-btn-primary"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z" />
+                </svg>
+                <span>{t('preprocessInpaint.saveActive')}</span>
+              </button>
+            </>
+        </div>
+        <div className="ds-pp-body">
+          <div className="flex flex-col h-full gap-3 min-h-0 m-h-auto">
+            <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden m-h-auto">
+              <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm flex-wrap">
+                <div className="flex items-center gap-1">
+                  {(['all', 'pending', 'edited'] as const).map((k) => (
+                    <button
+                      key={k}
+                      onClick={() => setFilter(k)}
+                      className={
+                        'px-2 py-0.5 rounded-full text-xs transition-colors ' +
+                        (filter === k
+                          ? 'bg-accent-soft text-accent font-semibold'
+                          : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
+                      }
+                    >
+                      {t(`preprocessInpaint.filter.${k}`)} {counts[k]}
+                    </button>
+                  ))}
                 </div>
+                {activeImage && (
+                  <span className="text-fg-tertiary text-xs font-mono ml-2">
+                    {activeImage.name} · {activeImage.w}×{activeImage.h}
+                  </span>
+                )}
+                <span className="flex-1" />
+                <button
+                  onClick={undo}
+                  disabled={!activeName || activeHistory.length === 0}
+                  className="btn btn-ghost btn-sm"
+                  title="Ctrl+Z"
+                >↶ {t('preprocessInpaint.undo')}</button>
+                <button
+                  onClick={redo}
+                  disabled={!activeName || activeRedo.length === 0}
+                  className="btn btn-ghost btn-sm"
+                  title="Ctrl+Shift+Z"
+                >↷ {t('preprocessInpaint.redo')}</button>
+                <button
+                  onClick={clearActive}
+                  disabled={!activeName || activeHistory.length === 0}
+                  className="btn btn-ghost btn-sm"
+                >{t('preprocessInpaint.clearActive')}</button>
+              </header>
 
-                <ToolPanel
-                  mode={mode}
-                  setMode={setMode}
-                  erase={erase}
-                  setErase={setErase}
-                  brush={brush}
-                  setBrush={setBrush}
-                  recentColors={recentColors}
-                />
+              <div className="flex-1 min-h-0 overflow-hidden p-3 m-h-auto m-p-sm">
+                {loading && (
+                  <p className="text-fg-tertiary text-sm">{t('preprocessInpaint.loading')}</p>
+                )}
+                {!loading && images.length === 0 && (
+                  <p className="text-fg-tertiary text-sm">
+                    {t('preprocessInpaint.emptyWorkspace')}{' '}
+                    <Link to={`/projects/${project.id}/v/${vid}/preprocess`} className="text-accent hover:underline">
+                      {t('preprocessInpaint.goToOverview')}
+                    </Link>
+                  </p>
+                )}
+
+                {activeImage && (
+                  <div
+                    className="grid gap-3 h-full min-h-0 pp-editor-grid"
+                    style={{ gridTemplateColumns: '220px minmax(0, 1fr) 260px' }}
+                  >
+                    <Filmstrip
+                      items={filteredImages}
+                      activeName={activeName}
+                      onSelect={setActiveName}
+                      thumbUrl={(im) => {
+                        const { folder, filename } = splitRel(im.name)
+                        return api.versionThumbUrl(
+                          project.id, vid, 'train', filename, folder, 256,
+                        ) + `&_=${im.mtime}`
+                      }}
+                      emptyHint={t(`preprocessInpaint.filmstripEmpty.${filter}`)}
+                      renderOverlay={(im) => {
+                        const hist = historyByImage[im.name] ?? []
+                        const hasPaint = hist.some((h) => h.kind === 'paint')
+                        const hasMask = im.mask_mtime != null
+                          || hist.some((h) => h.kind === 'mask')
+                        if (!hasPaint && !hasMask) return null
+                        return (
+                          <span className="fs-badge">
+                            {hasPaint ? '✎' : ''}{hasMask ? 'M' : ''}
+                          </span>
+                        )
+                      }}
+                    />
+
+                    <div className="min-w-0 min-h-0 overflow-hidden">
+                      <InpaintCanvas
+                        key={activeImage.name}
+                        ref={canvasRef}
+                        imageUrl={rawUrl(activeImage)}
+                        imageW={activeImage.w}
+                        imageH={activeImage.h}
+                        mode={mode}
+                        strokes={activePaintStrokes}
+                        maskStrokes={activeMaskStrokes}
+                        maskBaseUrl={maskBaseUrlFor(activeImage)}
+                        brush={brush}
+                        erase={erase}
+                        onStrokeEnd={onStrokeEnd}
+                        onMaskStrokeEnd={onMaskStrokeEnd}
+                        onPickColor={onPickColor}
+                      />
+                    </div>
+
+                    <ToolPanel
+                      mode={mode}
+                      setMode={setMode}
+                      erase={erase}
+                      setErase={setErase}
+                      brush={brush}
+                      setBrush={setBrush}
+                      recentColors={recentColors}
+                    />
+                  </div>
+                )}
               </div>
-            )}
+            </section>
           </div>
-        </section>
-      </div>
+        </div>
+      </PreprocessCard>
     </StepShell>
   )
 }

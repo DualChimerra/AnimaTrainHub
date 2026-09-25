@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useBlocker, useOutletContext } from 'react-router-dom'
+import { Link, useBlocker, useOutletContext } from 'react-router-dom'
 import {
   api,
   type CommitItem,
@@ -57,6 +57,10 @@ export default function TagEditPage() {
   // '' = 全部；否则限定到该 folder（1_data / 2_data ...）。命名特意区分于下面
   // editing 时用的 `activeFolder`（那个是当前编辑图所在 folder，纯展示）。
   const [folderFilter, setFolderFilter] = useState<string>('')
+  // tag picked in the statistics card; its remove / replace work on it
+  const [pickedTag, setPickedTag] = useState<string | null>(null)
+  // natural size of the active image, read from the loaded original
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
 
   const reloadCache = useCallback(async () => {
     if (versionId == null) return
@@ -194,6 +198,13 @@ export default function TagEditPage() {
   const navKeys = selectedKeys.length > 0 ? selectedKeys : filteredKeys
   const activeIndex = activeKey ? navKeys.indexOf(activeKey) : -1
 
+  // the active-image card always shows one image (mockup): fall back to the
+  // first visible one when nothing is active or the active one went away
+  useEffect(() => {
+    if ((!activeKey || !meta.has(activeKey)) && filteredKeys.length > 0) setActiveKey(filteredKeys[0])
+  }, [activeKey, meta, filteredKeys])
+  useEffect(() => { setDims(null) }, [activeKey])
+
   const tagSuggestions = useMemo(() => {
     const set = new Set<string>()
     for (const tags of cache.values()) for (const tag of tags) set.add(tag)
@@ -206,7 +217,7 @@ export default function TagEditPage() {
       for (const k of keys) {
         if ((cache.get(k) ?? []).includes(tag)) matched.add(k)
       }
-      setSel(matched); setAnchor(null)
+      setSel(matched); setAnchor(null); setPickedTag(tag)
       toast(t('tagEdit.selectedContaining', { tag, n: matched.size }), 'success')
     },
     [keys, cache, toast, t]
@@ -263,6 +274,7 @@ export default function TagEditPage() {
     )
     if (!ok) return
     applyBulkUpdates(updates)
+    if (tag === pickedTag) setPickedTag(null)
     toast(t('tagEdit.removedFromN', { tag, n: updates.size }), 'success')
   }
 
@@ -292,6 +304,7 @@ export default function TagEditPage() {
     )
     if (!ok) return
     applyBulkUpdates(updates)
+    if (oldTag === pickedTag) setPickedTag(newTag)
     toast(t('tagEdit.replacedInN', { from: oldTag, to: newTag, n: updates.size }), 'success')
   }
 
@@ -315,6 +328,7 @@ export default function TagEditPage() {
     setSel(new Set())
     setAnchor(null)
     setFolderFilter('')
+    setPickedTag(null)
     await reload()
   }
 
@@ -327,70 +341,87 @@ export default function TagEditPage() {
   const activeFolder = activeMeta?.folder ?? ''
   const activeName = activeMeta?.name ?? ''
   const activeTags = activeKey ? cache.get(activeKey) ?? [] : []
-
-  const isEditing = Boolean(activeKey)
+  const pickedCount = pickedTag
+    ? filteredKeys.reduce((n, k) => n + ((cache.get(k) ?? []).includes(pickedTag) ? 1 : 0), 0)
+    : 0
 
   return (
     <StepShell
       idx={4}
       mobilePageScroll
-      eyebrow={`Step 3 · ${project.title} / ${activeVersion?.label ?? '—'}`}
+      eyebrow={t('steps.eyebrowStep', { n: 3, label: activeVersion.label })}
       title={t('tagEdit.title')}
       subtitle={t('tagEdit.subtitle')}
       actions={
         <>
-          {activeVersion.trigger_word && (
-            <span className="badge badge-neutral" title={t('tagEdit.triggerWordHint')}>
-              {t('tagEdit.triggerWord')}:{' '}
-              <code className="font-mono">{activeVersion.trigger_word}</code>
-            </span>
-          )}
           {stats && (
-            <span className={allTagged ? 'badge badge-ok' : 'badge badge-neutral'}>
+            <span className={`ds-badge ${allTagged ? 'ds-ok' : 'ds-mute'}`}>
               {t('tagEdit.taggedBadge', { tagged: taggedTotal, total: trainTotal })}
             </span>
           )}
-          <SaveBar
-            pid={project.id}
-            vid={activeVersion.id}
-            dirtyCount={dirtyKeys.length}
-            onSave={onSave}
-            onAfterRestore={onAfterRestore}
-          />
+          <a
+            className="ds-ctl"
+            href={dirty ? undefined : api.versionTrainZipUrl(project.id, activeVersion.id)}
+            download={dirty ? undefined : true}
+            aria-disabled={dirty}
+            title={dirty ? t('tagEdit.saveThenDownload') : t('tagEdit.downloadTitle')}
+            onClick={(e) => { if (dirty) { e.preventDefault(); toast(t('tagEdit.saveThenDownloadToast'), 'error') } }}
+          >{t('tagEdit.downloadZip')}</a>
+          <Link className="ds-btn-primary" to={`/projects/${project.id}/v/${activeVersion.id}/reg`}>
+            {t('tagEdit.next')}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13m-5-6 6 6-6 6" /></svg>
+          </Link>
         </>
       }
+      footer={
+        <SaveBar
+          pid={project.id}
+          vid={activeVersion.id}
+          dirtyCount={dirtyKeys.length}
+          onSave={onSave}
+          onDiscard={() => setCache(new Map(initial))}
+          onAfterRestore={onAfterRestore}
+        />
+      }
     >
-      <div className="flex flex-1 min-h-0 gap-2.5 m-stack m-page-scroll">
+      <div className="ds-te-grid">
+        <TagStatsPanel
+          cache={cache}
+          allKeys={filteredKeys}
+          selectedKeys={selectedKeys}
+          triggerWord={activeVersion.trigger_word || undefined}
+          pickedTag={pickedTag}
+          onPickTag={handlePickTag}
+          onRemoveTag={removeTagFromSelected}
+          onReplaceTag={replaceTagInSelected}
+        />
 
-        <section
-          className="rounded-md border border-subtle bg-surface flex flex-col min-w-0 overflow-hidden m-pane"
-          style={{ flex: isEditing ? 1.5 : 1 }}
-        >
-          {folderNames.length > 1 && (
-            <div className="px-2 pt-2 pb-1.5 flex items-center gap-1 flex-wrap shrink-0 border-b border-subtle">
-              {['', ...folderNames].map((f) => {
-                const isActive = f === folderFilter
-                const label = f || t('common.all')
-                const count = f ? folderCounts.get(f) ?? 0 : keys.length
-                return (
-                  <button
-                    key={f || '__all__'}
-                    type="button"
-                    onClick={() => setFolderFilter(f)}
-                    className={
-                      'px-2 py-0.5 rounded-full text-xs transition-colors ' +
-                      (isActive
-                        ? 'bg-accent-soft text-accent font-semibold'
-                        : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
-                    }
-                  >
-                    {label} {count}
-                  </button>
-                )
-              })}
+        <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div className="ds-card-head ds-pad">
+            <div>
+              <div className="ds-card-title">{t('tagEdit.imagesTitle')}</div>
+              <div className="ds-card-sub">
+                {t('tagEdit.imagesSub', { n: filteredKeys.length })}
+                {pickedTag && ` · ${t('tagEdit.withTag', { n: pickedCount, tag: pickedTag })}`}
+              </div>
             </div>
-          )}
-          <div className="flex-1 overflow-y-auto p-2">
+            <div className="ds-card-tools">
+              <select
+                className="ds-inp"
+                style={{ width: 170 }}
+                value={folderFilter}
+                onChange={(e) => setFolderFilter(e.target.value)}
+                aria-label={t('tagEdit.folderLabel')}
+                disabled={folderNames.length < 2}
+              >
+                <option value="">{t('tagEdit.allFolders', { n: keys.length })}</option>
+                {folderNames.map((f) => (
+                  <option key={f} value={f}>{f} · {folderCounts.get(f) ?? 0}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, padding: '2px 17px 14px' }}>
             <ImageGrid
               items={captionItems}
               selected={sel}
@@ -398,6 +429,7 @@ export default function TagEditPage() {
               onSelect={handleClick}
               onActivate={setActiveKey}
               clickMode="activate"
+              columnsClass="grid-cols-[repeat(auto-fill,minmax(76px,1fr))]"
               ariaLabel="tag-edit-grid"
               emptyHint={
                 folderFilter
@@ -406,67 +438,61 @@ export default function TagEditPage() {
               }
             />
           </div>
-        </section>
+          {selectedKeys.length > 0 && (
+            <BulkActionBar
+              variant="bar"
+              cache={cache}
+              selectedKeys={selectedKeys}
+              onApply={applyBulkUpdates}
+              tagSuggestions={tagSuggestions}
+              onClearSelection={() => { setSel(new Set()); setAnchor(null); setPickedTag(null) }}
+              onSelectAll={() => setSel(new Set(filteredKeys))}
+              totalCount={filteredKeys.length}
+            />
+          )}
+        </div>
 
-        {isEditing && (
-          <section className="flex-1 rounded-md border border-subtle bg-surface flex flex-col min-w-0 overflow-hidden m-pane-sm">
-            <div className="px-3 py-2 border-b border-subtle shrink-0 flex items-center gap-2">
-              <span className="text-xs text-fg-tertiary">{t('tagEdit.singleEdit')}</span>
-              <code className="flex-1 min-w-0 text-xs font-mono text-fg-secondary truncate">
-                {activeFolder}/{activeName}
-              </code>
-            </div>
-            <div className="flex-1 relative p-2 min-h-0">
-              {/* 原图分辨率 + zoom/pan（核对细节 tag 需要看清局部）；
-                  size=0 = 原图直出，本地服务加载可接受。
-                  ZoomableImage 自带视口样式 + readout 条 */}
-              <ZoomableImage
-                key={activeKey}
-                src={api.versionThumbUrl(project.id, activeVersion.id, 'train', activeName, activeFolder, 0)}
-                alt={activeName}
-              />
-            </div>
-          </section>
-        )}
-
-        <div className="flex flex-col gap-2.5 min-w-0 flex-1 min-h-0 m-pane" style={{ flex: '0 0 32%' }}>
-          {isEditing ? (
-            // editing 时：bulk + 标签分布 都和"调单图标签"无关，整个侧栏让位给
-            // TagEditor。退出 editing 后自动回来，sel / folderFilter 等 state
-            // 保留（隐藏的是 UI 不是状态）。
-            <section className="flex-1 rounded-md border border-subtle bg-surface p-2.5 flex flex-col gap-2 min-h-0 overflow-hidden">
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button onClick={() => navActive(-1)} disabled={navKeys.length === 0} aria-label={t('tagEdit.prevImage')} className="btn btn-secondary btn-sm">◀</button>
-                <span className="text-xs text-fg-tertiary font-mono flex-1 text-center">
-                  {activeIndex >= 0 ? `${activeIndex + 1} / ${navKeys.length}` : `– / ${navKeys.length}`}
-                </span>
-                <button onClick={() => navActive(1)} disabled={navKeys.length === 0} aria-label={t('tagEdit.nextImage')} className="btn btn-secondary btn-sm">▶</button>
-                <button onClick={() => setActiveKey('')} className="btn btn-ghost btn-sm ml-1" aria-label={t('tagEdit.closeEdit')}>✕</button>
+        <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div className="ds-card-head ds-pad">
+            <div style={{ minWidth: 0 }}>
+              <div className="ds-card-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={activeName}>
+                {activeName || t('tagEdit.noActive')}
               </div>
-              <TagEditor tags={activeTags} onChange={updateActiveTags} />
-            </section>
+              <div className="ds-card-sub">
+                {activeKey
+                  ? [dims && `${dims.w} × ${dims.h}`, activeFolder, activeIndex >= 0 && `${activeIndex + 1} / ${navKeys.length}`].filter(Boolean).join(' · ')
+                  : '—'}
+              </div>
+            </div>
+            <div className="ds-card-tools" style={{ flexWrap: 'nowrap' }}>
+              <button type="button" className="ds-kebab" onClick={() => navActive(-1)} disabled={navKeys.length === 0} aria-label={t('tagEdit.prevImage')}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M15 6l-6 6 6 6" /></svg>
+              </button>
+              <button type="button" className="ds-kebab" onClick={() => navActive(1)} disabled={navKeys.length === 0} aria-label={t('tagEdit.nextImage')}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 6l6 6-6 6" /></svg>
+              </button>
+            </div>
+          </div>
+          {activeKey ? (
+            <>
+              <div style={{ padding: '0 17px 12px', flex: 'none' }}>
+                {/* 原图直出 + 滚轮缩放 / 拖拽平移 / 双击 fit↔100%（核对细节 tag） */}
+                <div style={{ height: 186 }}>
+                  <ZoomableImage
+                    key={activeKey}
+                    src={api.versionThumbUrl(project.id, activeVersion.id, 'train', activeName, activeFolder, 0)}
+                    alt={activeName}
+                    readout={false}
+                    onNaturalSize={(w, h) => setDims({ w, h })}
+                  />
+                </div>
+              </div>
+              <div style={{ padding: '0 17px 14px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <TagEditor tags={activeTags} onChange={updateActiveTags} triggerWord={activeVersion.trigger_word || undefined} />
+              </div>
+            </>
           ) : (
-            // BulkActionBar + TagStatsPanel 合到同一个外框 section（"标签编辑
-            // 工作区"），视觉上是一个面板：上半是 batch 输入区，下半是标签分布
-            // 兼快捷单 tag 操作区。两者共享"操作 = 给当前选中图做"的语义。
-            <section className="flex-1 min-h-0 rounded-md border border-subtle bg-surface flex flex-col overflow-hidden">
-              <BulkActionBar
-                cache={cache}
-                selectedKeys={selectedKeys}
-                onApply={applyBulkUpdates}
-                tagSuggestions={tagSuggestions}
-                onClearSelection={() => setSel(new Set())}
-                onSelectAll={() => setSel(new Set(filteredKeys))}
-                totalCount={filteredKeys.length}
-              />
-              <TagStatsPanel
-                cache={cache}
-                selectedKeys={selectedKeys}
-                onPickTag={handlePickTag}
-                onRemoveTag={removeTagFromSelected}
-                onReplaceTag={replaceTagInSelected}
-              />
-            </section>
+            <div className="ds-empty" style={{ margin: 'auto 17px' }}>{t('tagEdit.noActiveHint')}</div>
           )}
         </div>
       </div>

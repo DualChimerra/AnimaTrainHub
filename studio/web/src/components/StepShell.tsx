@@ -1,49 +1,49 @@
 import type { ReactNode } from 'react'
-import PageHeader from './PageHeader'
+import { useTranslation } from 'react-i18next'
+import PageHead from './ds/PageHead'
 import TaskLogDrawer, { type LogSource } from './TaskLogDrawer'
 
 interface Props {
   idx: number | string
   title: string
   subtitle?: string
-  /** 主标题上方的 caption；不传时由 idx 派生（数字 idx → "Step N"）。 */
+  /** Caption above the title; defaults to "STEP N" for a numeric idx. */
   eyebrow?: string
+  /** Green eyebrow (the mockup's version steps). On unless set to false. */
   accentEyebrow?: boolean
   actions?: ReactNode
   topRight?: ReactNode
   children: ReactNode
-  /** header 与内容区之间的全宽条（如过滤 / 排序行），不随内容滚动。与项目页
-   *  FilterBar 一致：自带 `px-6 py-2 border-b`，内容区随之改用 pt-4（贴着分隔线）。 */
+  /** Full-width block between the head and the content (tool summary,
+   *  filters); does not scroll with the content. */
   belowHeader?: ReactNode
-  /** 本页任务日志源（issue #251 统一抽屉）；falsy 项自动过滤，全空时不渲染。 */
+  /** Page task logs (issue #251 shared drawer); falsy entries are dropped and
+   *  nothing renders when all are empty. */
   logSources?: Array<LogSource | null | undefined | false>
   /** Phone only: let the whole page scroll instead of the content pane. For pages
    *  whose content is a plain list; leave it off where the content is a
    *  virtualised grid that needs a fixed-height box. */
   mobilePageScroll?: boolean
+  /** Bar pinned under the content, above the job log strip (e.g. the tag
+   *  editor's unsaved-changes bar). */
+  footer?: ReactNode
 }
 
-export default function StepShell({ idx, title, subtitle, eyebrow, accentEyebrow, actions, topRight, children, belowHeader, logSources, mobilePageScroll }: Props) {
-  // 数字 idx → "Step N" eyebrow，匹配 redesign 原型的流水线步骤标题。
-  const derivedEyebrow = eyebrow ?? (typeof idx === 'number' || /^\d+$/.test(String(idx)) ? `Step ${idx}` : undefined)
+/** Frame of a version step, as in the mockup: page head with the step
+ *  eyebrow and tools, an optional block under it, the content filling the
+ *  rest of the height, and the job log strip at the bottom. */
+export default function StepShell({ idx, title, subtitle, eyebrow, accentEyebrow = true, actions, topRight, children, belowHeader, logSources, mobilePageScroll, footer }: Props) {
+  const { t } = useTranslation()
+  const derivedEyebrow = eyebrow ?? (typeof idx === 'number' || /^\d+$/.test(String(idx)) ? t('steps.stepN', { n: idx }) : undefined)
+  const tools = actions || topRight ? <>{topRight}{actions}</> : undefined
   return (
     <div className={`step-shell fade-in flex flex-col h-full relative ${mobilePageScroll ? 'is-page-scroll' : ''}`}>
-      <PageHeader
-        title={title}
-        eyebrow={derivedEyebrow}
-        accentEyebrow={accentEyebrow}
-        subtitle={subtitle}
-        actions={actions}
-        topRight={topRight}
-        sticky
-      />
+      <PageHead accent={accentEyebrow} eyebrow={derivedEyebrow} title={title} subtitle={subtitle} tools={tools} />
       {belowHeader}
-      {/* flex column container: overflow:hidden stops page scroll; children use flex:1 to fill。
-          内容区四周统一 p-6（含 belowHeader 分隔线下方也对称留白，不再顶部特例 pt-4）。 */}
-      <div className="step-shell-body flex-1 min-h-0 flex flex-col overflow-hidden p-6">
+      <div className="step-shell-body flex-1 min-h-0 flex flex-col overflow-hidden" style={{ padding: '0 24px 18px' }}>
         {children}
       </div>
-      {/* 页面级 footer 抽屉：全宽贴底，展开时 overlay 在内容上方（issue #251） */}
+      {footer}
       {logSources && <TaskLogDrawer sources={logSources} />}
     </div>
   )

@@ -50,7 +50,8 @@ export default function NumberListInput({
         <input
           type="text"
           inputMode="decimal"
-          className="input font-mono text-xs flex-1"
+          className="ds-inp ds-mono"
+          style={{ flex: 1, width: 'auto' }}
           placeholder={placeholder}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -91,7 +92,7 @@ export default function NumberListInput({
                 padding: '2px 4px 2px 8px',
                 borderRadius: 999,
                 background: 'var(--accent-soft)',
-                color: 'var(--accent)',
+                color: 'var(--accent-text, var(--accent))',
                 border: '1px solid transparent',
               }}
             >

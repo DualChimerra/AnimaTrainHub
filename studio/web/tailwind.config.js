@@ -65,6 +65,18 @@ export default {
         ring:       'var(--ring)',
       },
 
+      // text-accent* read --accent-text when a skin defines it: a light accent
+      // can be a good fill yet unreadable as text. Without it they fall back to
+      // --accent / --accent-hover, i.e. exactly the old colours.
+      textColor: {
+        accent: {
+          DEFAULT: 'var(--accent-text, var(--accent))',
+          hover:   'var(--accent-text, var(--accent-hover))',
+          soft:    'var(--accent-soft)',
+          fg:      'var(--accent-fg)',
+        },
+      },
+
       // 状态色作为边框 / ring 时用淡色描边（text-* / bg-* 仍是实色），
       // 让 `border-warn bg-warn-soft` 这类提示条呈现 Tailark 式的柔和告警。
       borderColor: {

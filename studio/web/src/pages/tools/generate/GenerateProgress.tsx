@@ -1,16 +1,14 @@
 import { useTranslation } from 'react-i18next'
 
-/** 出图进度：细条 + 相位标签，覆盖**全流程**（不再只有采样 step）。
+/** 出图进度：覆盖**全流程**（不再只有采样 step）。
  *
  * 来源：daemon 推 SSE
  *   - generate_phase          { name: 'load'|'clip'|'sample'|'vae' }  ← 覆盖非采样阶段
  *   - generate_image_started  { batch_idx, batch_total, total_steps }
  *   - generate_preview_step   { step, total, image_b64? }
  *
- * Generate.tsx 聚合成 progress prop。设计成 header 下方**细条 overlay**（absolute、
- * pointer-events-none）：不挤压预览、不增加上下高度；切历史图也照常显示当前进度。
+ * Generate.tsx 聚合成 progress prop；渲染在「结果」卡片底栏（mockup：meter + 状态 + 参数）。
  */
-
 export type GeneratePhase = 'load' | 'clip' | 'sample' | 'vae'
 
 export interface GenerateProgress {
@@ -32,14 +30,19 @@ const PHASE_BASE: Record<GeneratePhase, number> = {
   vae: 0.95,
 }
 
+/** Result card footer: meter, status text and the run's parameters. */
 export default function GenerateProgressBar({
-  busy, progress,
+  busy, progress, status, params,
 }: {
   busy: boolean
   progress: GenerateProgress
+  /** Text when nothing is in flight ("done · 6.4 s", an error, …). */
+  status?: { text: string; tone?: 'ok' | 'err' } | null
+  /** Right-aligned parameter line. */
+  params?: string
 }) {
   const { t } = useTranslation()
-  if (!busy && progress.currentStep == null && progress.phase == null) return null
+  const active = busy || progress.currentStep != null || progress.phase != null
 
   const stepFrac =
     progress.currentStep != null && progress.totalSteps && progress.totalSteps > 0
@@ -58,7 +61,6 @@ export default function GenerateProgressBar({
   const overall = bt && bt > 1 && bi != null ? Math.min(1, (bi + frac) / bt) : frac
   const pct = Math.round(overall * 100)
 
-  // 相位文字
   let phaseLabel: string
   if (progress.phase === 'load') phaseLabel = t('generate.phaseLoad')
   else if (progress.phase === 'clip') phaseLabel = t('generate.phaseClip')
@@ -69,24 +71,32 @@ export default function GenerateProgressBar({
 
   const batchTag = bt && bt > 1 && bi != null ? `${bi + 1}/${bt} · ` : ''
 
+  if (!active && !status && !params) return null
+  const meterPct = active ? pct : status?.tone === 'ok' ? 100 : status ? 0 : null
+
   return (
-    <div className="shrink-0">
-      {/* 浏览器加载条式：贴页面 header 下沿的全宽细线（2px） */}
-      <div style={{ height: 2, background: 'var(--bg-sunken)', overflow: 'hidden' }}>
-        <div
-          style={{
-            width: `${pct}%`,
-            height: '100%',
-            background: 'var(--accent)',
-            transition: 'width 150ms linear',
-          }}
-        />
-      </div>
-      {/* 小相位文字（与页面内容 p-6 对齐） */}
-      <div className="flex items-center justify-between px-6 font-mono text-2xs" style={{ paddingTop: 2, paddingBottom: 2 }}>
-        <span className="text-fg-secondary truncate">{batchTag}{phaseLabel}</span>
-        <span className="text-fg-tertiary shrink-0 ml-2">{pct}%</span>
-      </div>
+    <div style={{ borderTop: '1px solid var(--line)', padding: '11px 17px', display: 'flex', alignItems: 'center', gap: 12, flex: 'none' }}>
+      {meterPct != null && (
+        <span className="ds-meter" style={{ width: 180, flex: 'none' }}>
+          <i style={{ width: `${meterPct}%`, transition: 'width 150ms linear' }} />
+        </span>
+      )}
+      {active ? (
+        <span className="ds-mono" style={{ fontSize: 11.5, color: 'var(--ink-2)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {batchTag}{phaseLabel} · {pct}%
+        </span>
+      ) : status ? (
+        <span
+          className="ds-mono"
+          style={{ fontSize: 11.5, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: status.tone === 'err' ? 'var(--red-text)' : status.tone === 'ok' ? 'var(--green-text)' : 'var(--ink-3)' }}
+          title={status.text}
+        >
+          {status.text}
+        </span>
+      ) : null}
+      {params && (
+        <span className="ds-mono ds-muted" style={{ fontSize: 11.5, marginLeft: 'auto', whiteSpace: 'nowrap' }}>{params}</span>
+      )}
     </div>
   )
 }

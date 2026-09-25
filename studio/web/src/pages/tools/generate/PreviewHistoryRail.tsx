@@ -18,8 +18,9 @@ import { entryBadge, entryDisplayLabel, entryThumbUrl, type HistoryEntry } from 
 
 // item 84px 方形 + 6px 间距 = 90px stride（0.17：从 56 放大 1.5× —— 原来太小、✕ 易误触、
 // 内部小字看不清）
-const ITEM_SIZE = 84
-const ITEM_STRIDE = 90
+// Square thumbs filling the 168px history column (13px padding) + 8px gap.
+const ITEM_SIZE = 142
+const ITEM_STRIDE = 150
 const OVERSCAN = 4
 const VIEWPORT_FALLBACK = 2000
 
@@ -44,10 +45,12 @@ interface Props {
   onCancel: (taskId: number) => void
   onRefresh?: () => Promise<void>
   loading?: boolean
+  /** Entry id being reviewed; null = the live view (the running item is "now"). */
+  selectedId?: string | null
 }
 
 export default function PreviewHistoryRail({
-  items, mode, onSelect, onCancel, onRefresh, loading,
+  items, mode, onSelect, onCancel, onRefresh, loading, selectedId = null,
 }: Props) {
   const { t } = useTranslation()
   const list = useMemo(() => items.filter((it) => itemMode(it) === mode), [items, mode])
@@ -76,46 +79,45 @@ export default function PreviewHistoryRail({
   const slice = list.slice(start, end)
 
   return (
-    <div
-      className="card flex flex-col gap-1 self-stretch generate-history-rail"
-      style={{ width: 110, padding: 8 }}
-    >
-      {onRefresh && (
-        <button
-          className="btn btn-ghost text-2xs shrink-0"
-          style={{ padding: '1px 4px' }}
-          onClick={() => void onRefresh()}
-          disabled={loading}
-          title={t('generate.refreshHistoryTitle')}
-        >
-          {loading ? t('generate.checkingShort') : t('generate.refreshHistory')}
-        </button>
-      )}
+    <div className="ds-card generate-history-rail" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{ padding: '13px 13px 9px', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span className="ds-cap" style={{ flex: 1 }}>{t('generate.history')}</span>
+        {onRefresh && (
+          <button
+            type="button"
+            className="ds-kebab"
+            onClick={() => void onRefresh()}
+            disabled={loading}
+            title={t('generate.refreshHistoryTitle')}
+            aria-label={t('generate.refreshHistory')}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
+          </button>
+        )}
+      </div>
       {total === 0 ? (
-        <div className="text-fg-tertiary text-2xs text-center pt-3">{t('generate.noHistory')}</div>
+        <div className="ds-cell-key" style={{ padding: '0 13px 13px', textAlign: 'center' }}>{t('generate.noHistory')}</div>
       ) : (
         <div
           ref={scrollRef}
-          className="flex-1 min-h-0 overflow-y-auto"
+          style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 13px 13px' }}
           onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
         >
-          <div style={{ height: total * ITEM_STRIDE, position: 'relative' }}>
+          <div style={{ height: total * ITEM_STRIDE - (ITEM_STRIDE - ITEM_SIZE), position: 'relative' }}>
             {slice.map((it, i) => {
               const idx = start + i
+              const sel = it.kind === 'done'
+                ? it.entry.id === selectedId
+                : selectedId == null && it.task.status === 'running'
               return (
                 <div
                   key={itemKey(it)}
-                  style={{
-                    position: 'absolute',
-                    top: idx * ITEM_STRIDE,
-                    left: 0,
-                    right: 0,
-                  }}
+                  style={{ position: 'absolute', top: idx * ITEM_STRIDE, left: 0, right: 0 }}
                 >
                   {it.kind === 'done' ? (
-                    <HistoryItem entry={it.entry} onSelect={() => onSelect(it)} />
+                    <HistoryItem entry={it.entry} selected={sel} onSelect={() => onSelect(it)} />
                   ) : (
-                    <LiveItem task={it.task} onSelect={() => onSelect(it)} onCancel={() => onCancel(it.task.id)} />
+                    <LiveItem task={it.task} selected={sel} onSelect={() => onSelect(it)} onCancel={() => onCancel(it.task.id)} />
                   )}
                 </div>
               )
@@ -127,55 +129,60 @@ export default function PreviewHistoryRail({
   )
 }
 
-function HistoryItem({ entry, onSelect }: { entry: HistoryEntry; onSelect: () => void }) {
+/** Thumb caption: "XY 3×2" for matrices, otherwise seed and the first LoRA weight. */
+function entryCaption(entry: HistoryEntry): string {
   const badge = entryBadge(entry)
+  if (badge) return badge
+  const p = entry.params as Partial<HistoryEntry['params']> | undefined
+  if (!p || p.seed == null) return entryDisplayLabel(entry)
+  const w = p.loras?.[0]?.scale
+  return w != null ? `seed ${p.seed} · w ${w.toFixed(2)}` : `seed ${p.seed}`
+}
+
+function HistoryItem({ entry, selected, onSelect }: { entry: HistoryEntry; selected: boolean; onSelect: () => void }) {
   return (
-    <div
-      className="relative rounded-sm border border-subtle hover:border-strong cursor-pointer overflow-hidden"
-      style={{ width: '100%', height: ITEM_SIZE, flexShrink: 0 }}
+    <button
+      type="button"
+      className={`ds-thumb${selected ? ' ds-sel' : ''}`}
+      style={{ width: '100%', height: ITEM_SIZE, padding: 0, cursor: 'pointer' }}
       onClick={onSelect}
       title={`${entryDisplayLabel(entry)} · ${new Date(entry.createdAt).toLocaleString()}`}
     >
       <img
         src={entryThumbUrl(entry)}
         alt=""
-        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
         loading="lazy"
       />
-      {badge && (
-        <span className="absolute bottom-0 right-0 bg-canvas/80 text-fg-primary text-[10px] px-1 rounded-tl">
-          {badge}
-        </span>
-      )}
-    </div>
+      <span className="ds-cap">{entryCaption(entry)}</span>
+    </button>
   )
 }
 
 /** 进行中项：pending 灰占位 + ✕；running 脉冲边框，点击回到实时视图。 */
-function LiveItem({ task, onSelect, onCancel }: { task: Task; onSelect: () => void; onCancel: () => void }) {
+function LiveItem({ task, selected, onSelect, onCancel }: { task: Task; selected: boolean; onSelect: () => void; onCancel: () => void }) {
   const { t } = useTranslation()
   const running = task.status === 'running'
   return (
     <div
-      className={`relative rounded-sm border overflow-hidden flex items-center justify-center ${running ? 'border-accent cursor-pointer' : 'border-subtle border-dashed'}`}
-      style={{ width: '100%', height: ITEM_SIZE, flexShrink: 0, background: 'var(--bg-overlay)' }}
+      className={`ds-thumb${selected ? ' ds-sel' : ''}`}
+      style={{ width: '100%', height: ITEM_SIZE, cursor: running ? 'pointer' : undefined, outline: running ? undefined : '1px dashed var(--line-3)', outlineOffset: -1 }}
       onClick={running ? onSelect : undefined}
       title={`#${task.id} · ${running ? t('status.running') : t('status.queued')}`}
     >
       {running
-        ? <span className="dot dot-running" style={{ transform: 'scale(1.4)' }} />
-        : <span className="text-fg-secondary text-xs text-center leading-tight px-1">{t('status.queued')}</span>}
-      {/* ✕ 放大 + 内缩 + 圆底，做成明确目标，避免和点选卡片本体误触。 */}
+        ? <span className="ds-dot ds-dot-run" style={{ transform: 'scale(1.4)' }} />
+        : <span>{t('status.queued')}</span>}
       <button
+        type="button"
         onClick={(e) => { e.stopPropagation(); onCancel() }}
-        className="absolute top-1 right-1 text-err bg-canvas/90 hover:bg-canvas rounded text-sm leading-none px-1.5 py-0.5 cursor-pointer border-0 font-bold"
+        className="ds-pin"
+        style={{ cursor: 'pointer' }}
         title={t('common.cancel')}
         aria-label={t('common.cancel')}
         data-testid={`timeline-cancel-${task.id}`}
       >✕</button>
-      <span className="absolute bottom-0 left-0 bg-canvas/80 text-fg-tertiary text-[11px] px-1 rounded-tr">
-        #{task.id}
-      </span>
+      <span className="ds-cap">{running ? t('generate.historyNow') : `#${task.id}`}</span>
     </div>
   )
 }

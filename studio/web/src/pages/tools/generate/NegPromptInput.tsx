@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { TagSuggestList } from '../../../components/tagSuggest/TagSuggestList'
 import { useTagSuggest } from '../../../components/tagSuggest/useTagSuggest'
@@ -12,6 +13,7 @@ export default function NegPromptInput({ value, onChange, modelFamily = 'anima' 
   /** token 计数用的族（选对应 tokenizer）；不传默认 anima。 */
   modelFamily?: string
 }) {
+  const { t } = useTranslation()
   const taRef = useRef<HTMLTextAreaElement>(null)
   const suggest = useTagSuggest({
     value,
@@ -35,8 +37,9 @@ export default function NegPromptInput({ value, onChange, modelFamily = 'anima' 
     <div className="relative">
       <textarea
         ref={taRef}
-        className="input w-full font-mono text-xs resize-none overflow-hidden"
-        rows={5}
+        className="ds-inp"
+        style={{ height: 'auto', minHeight: 44, padding: '9px 11px 20px', fontSize: 12, lineHeight: 1.55, color: 'var(--ink-2)', resize: 'none', overflow: 'hidden' }}
+        rows={3}
         value={value}
         onChange={(e) => { onChange(e.target.value); suggest.notifyChange() }}
         onKeyDown={(e) => { suggest.handleKeyDown(e) }}
@@ -47,7 +50,7 @@ export default function NegPromptInput({ value, onChange, modelFamily = 'anima' 
       />
       {tokenCount != null && (
         <span className="absolute bottom-1.5 right-2 text-2xs text-fg-tertiary pointer-events-none select-none">
-          {tokenCount} tokens
+          {t('generate.tokenCount', { n: tokenCount })}
         </span>
       )}
       <TagSuggestList

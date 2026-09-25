@@ -180,7 +180,7 @@ describe('SchemaForm takeover behavior', () => {
   })
 
   it('disables InfoNoise-controlled timestep fields and uses frontend alt descriptions', () => {
-    render(
+    const { container } = render(
       <SchemaForm
         schema={schema}
         values={{
@@ -198,7 +198,9 @@ describe('SchemaForm takeover behavior', () => {
     const timestepSelect = screen.getAllByRole('combobox').find((el) => (el as HTMLSelectElement).value === 'uniform') as HTMLSelectElement
     expect(timestepSelect).toBeDisabled()
     expect(screen.getByText('InfoNoise controls timestep sampling')).toBeInTheDocument()
-    expect(screen.getByText('InfoNoise takes over timestep sampling')).toBeInTheDocument()
+    // The description lives in the hover tip on the field name.
+    fireEvent.mouseEnter(container.querySelector('[data-field="timestep_sampling"] .ds-label') as Element)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('InfoNoise takes over timestep sampling')
     expect(screen.queryByText('Normal timestep description')).not.toBeInTheDocument()
   })
 

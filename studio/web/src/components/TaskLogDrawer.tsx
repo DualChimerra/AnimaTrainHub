@@ -26,14 +26,14 @@ export interface LogSource {
 }
 
 const STATUS_BADGE: Record<LogSourceStatus, string> = {
-  pending: 'badge badge-neutral',
-  running: 'badge badge-warn',
-  done: 'badge badge-ok',
-  failed: 'badge badge-err',
-  canceled: 'badge badge-neutral',
-  paused: 'badge badge-neutral',
-  // 0.17 P-B：scheduled（计划任务）还没跑，无日志，视觉同 pending。
-  scheduled: 'badge badge-neutral',
+  pending: 'ds-badge ds-mute',
+  running: 'ds-badge ds-ok',
+  done: 'ds-badge ds-mute',
+  failed: 'ds-badge ds-err',
+  canceled: 'ds-badge ds-mute',
+  paused: 'ds-badge ds-warn',
+  // scheduled jobs have not run yet and have no log; same look as pending.
+  scheduled: 'ds-badge ds-mute',
 }
 
 const isLiveStatus = (s: LogSourceStatus) => s === 'pending' || s === 'running'
@@ -112,7 +112,7 @@ export default function TaskLogDrawer({
   return (
     <>
       {/* 占位：与 footer header 同高，让页面内容不被贴底的 header 盖住 */}
-      <div className="shrink-0 h-9" aria-hidden />
+      <div className="shrink-0" style={{ height: 34 }} aria-hidden />
       {/* footer 抽屉本体：贴页面底、全宽、无圆角无 margin；anchored bottom，
           body 高度动画 0 ↔ 40vh 时 header 随抽屉上升，充当内容/日志分隔条 */}
       <div
@@ -129,26 +129,27 @@ export default function TaskLogDrawer({
               setExpanded((v) => !v)
             }
           }}
-          className="h-9 shrink-0 cursor-pointer select-none border-t-2 border-accent bg-surface px-4 flex items-center gap-2 text-sm"
+          className="ds-logbar cursor-pointer select-none"
+          style={{ padding: '0 20px' }}
         >
           <span
-            className={`inline-block transition-transform text-fg-tertiary w-3 ${expanded ? 'rotate-90' : ''}`}
-          >
-            ▸
-          </span>
-          <span className={STATUS_BADGE[active.status]}>{active.status}</span>
-          <span className="text-fg-secondary shrink-0">{active.label}</span>
+            className={`ds-dot${live ? ' ds-dot-run' : ''}`}
+            style={live ? undefined : { background: active.status === 'failed' ? 'var(--err)' : 'var(--line-3)' }}
+          />
+          <span className="shrink-0" style={{ color: 'var(--ink-2)' }}>{active.label}</span>
+          <span className={STATUS_BADGE[active.status]}>{t(`status.${active.status}`, { defaultValue: active.status })}</span>
           {elapsed != null && elapsed > 0 && (
-            <span className="text-fg-tertiary text-xs shrink-0">· {Math.round(elapsed)}s</span>
+            <span className="ds-mono shrink-0">{Math.round(elapsed)}s</span>
           )}
-          <span className="mono truncate flex-1 min-w-0 text-fg-secondary text-xs">{lastLine}</span>
+          <span className="ds-mono truncate flex-1 min-w-0">{lastLine}</span>
           {live && active.onCancel && (
             <button
               onClick={(e) => {
                 e.stopPropagation()
                 active.onCancel?.()
               }}
-              className="btn btn-ghost btn-sm text-err"
+              className="ds-ctl ds-ghost"
+              style={{ height: 24, color: 'var(--err)' }}
             >
               {t('common.cancel')}
             </button>
@@ -159,20 +160,23 @@ export default function TaskLogDrawer({
                 e.stopPropagation()
                 active.onRetry?.()
               }}
-              className="btn btn-ghost btn-sm text-accent"
+              className="ds-ctl ds-ghost"
+              style={{ height: 24 }}
             >
               {t('common.retry')}
             </button>
           )}
+          <span className="ds-mono shrink-0" aria-hidden>{expanded ? t('logDrawer.collapse') : t('logDrawer.expand')} {expanded ? '↓' : '↑'}</span>
         </div>
         <div
           data-testid="log-drawer-body"
-          className="overflow-hidden bg-sunken transition-[height] duration-200 ease-out"
+          className="overflow-hidden transition-[height] duration-200 ease-out"
           style={{ height: expanded ? '40vh' : '0px' }}
         >
           <pre
             ref={preRef}
-            className="m-0 h-full px-4 py-2 text-[11px] leading-relaxed font-mono text-fg-secondary overflow-y-auto whitespace-pre-wrap break-words"
+            className="m-0 h-full py-2 text-[11px] leading-relaxed font-mono overflow-y-auto whitespace-pre-wrap break-words"
+            style={{ padding: '10px 20px', background: 'var(--panel)', color: 'var(--ink-2)' }}
           >
             {active.lines.length === 0
               ? t('jobProgress.waitingLogs')

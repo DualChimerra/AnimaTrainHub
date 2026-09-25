@@ -1,9 +1,18 @@
+/** Project dataset (download/) page, laid out as the approved mockup
+ *  (Dataset artboard): booru scraping and file import side by side, the
+ *  download stats with the format split, and the downloaded images with a
+ *  bulk bar, over the data-jobs strip at the bottom.
+ *
+ *  Booru scraping goes through the existing estimate / download endpoints
+ *  (danbooru and gelbooru — the sources the backend supports). The exclusion
+ *  chips edit the same global list as the download settings. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useOutletContext } from 'react-router-dom'
+import { Link, useOutletContext } from 'react-router-dom'
 import {
   api,
   type DownloadFile,
+  type Job,
   type ProjectDetail,
   type UploadResult,
   type Version,
@@ -11,16 +20,21 @@ import {
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
 import PathPicker from '../../../components/PathPicker'
-import StepShell from '../../../components/StepShell'
-import UploadProgressBar from '../../../components/UploadProgressBar'
+import JobLogBar from '../../../components/ds/JobLogBar'
+import PageHead from '../../../components/ds/PageHead'
 import { useDialog } from '../../../components/Dialog'
 import { useToast } from '../../../components/Toast'
 import { useEventStream } from '../../../lib/useEventStream'
-import { useUploadProgress } from '../../../lib/useUploadProgress'
+import { useUploadProgress, type UseUploadProgress } from '../../../lib/useUploadProgress'
 
-// 跟 studio/datasets.py:IMAGE_EXTS 对齐 — 上传白名单 = 全链路图片白名单 + .zip。
+// Same list as studio/datasets.py:IMAGE_EXTS, plus .zip.
 const UPLOAD_ACCEPT =
   '.png,.jpg,.jpeg,.webp,.bmp,.gif,.zip,image/png,image/jpeg,image/webp,image/bmp,image/gif,application/zip'
+
+type Source = 'danbooru' | 'gelbooru'
+const SOURCES: Source[] = ['danbooru', 'gelbooru']
+type SortKey = 'new' | 'old' | 'name' | 'size'
+type ViewMode = 'grid' | 'list'
 
 interface Ctx {
   project: ProjectDetail
@@ -28,283 +42,35 @@ interface Ctx {
   reload: () => Promise<void>
 }
 
-// 信息密度优先：上传 panel + 已下载 grid 占主区域。
-export default function DownloadPage() {
-  const { t } = useTranslation()
-  const { project, reload } = useOutletContext<Ctx>()
-  const { toast } = useToast()
-  const { confirm } = useDialog()
-  const [files, setFiles] = useState<DownloadFile[]>([])
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [anchor, setAnchor] = useState<string | null>(null)
-  const [deleting, setDeleting] = useState(false)
-  const [previewIdx, setPreviewIdx] = useState<number | null>(null)
-  const [lastUpload, setLastUpload] = useState<UploadResult | null>(null)
-
-  const refreshFiles = useCallback(async () => {
-    try {
-      const r = await api.listFiles(project.id)
-      setFiles(r.items)
-    } catch {
-      /* ignore */
-    }
-  }, [project.id])
-
-  useEffect(() => {
-    void refreshFiles()
-  }, [refreshFiles])
-
-  useEventStream((evt) => {
-    if (
-      evt.type === 'project_state_changed' &&
-      evt.project_id === project.id
-    ) {
-      void refreshFiles()
-    }
-  })
-
-  return (
-    <StepShell
-      idx={1}
-      mobilePageScroll
-      eyebrow={`Project · ${project.title}`}
-      title={t('steps.download.title')}
-      subtitle={t('steps.download.subtitle')}
-    >
-    <div className="flex flex-col h-full gap-3 min-h-0 m-h-auto">
-
-      {/* 主体左右两栏：左（booru/upload + 状态 + grid） / 右（下载统计侧边栏） */}
-      <div className="grid gap-3 flex-1 min-h-0 m-grid-1" style={{ gridTemplateColumns: '1fr 240px' }}>
-
-        {/* 左栏 */}
-        <div className="flex flex-col gap-2 min-h-0 min-w-0">
-
-          {/* 操作行：本地上传 */}
-          <div className="shrink-0">
-            <UploadPanel
-              pid={project.id}
-              onUploaded={(r) => {
-                setLastUpload(r)
-                void refreshFiles()
-                void reload()
-              }}
-            />
-          </div>
-
-          {/* 状态条：仅在有上次上传结果时出现，details 折叠 */}
-          {lastUpload && (
-            <div className="flex flex-col gap-1.5 shrink-0">
-              <UploadResultStrip
-                result={lastUpload}
-                onDismiss={() => setLastUpload(null)}
-              />
-            </div>
-          )}
-
-          {/* 已下载 grid — 占满剩余高度，支持多选 + 删除 + 大图预览 */}
-          <DownloadedGrid
-            project={project}
-            files={files}
-            selected={selected}
-            anchor={anchor}
-            deleting={deleting}
-            onSelect={(name, e) => {
-              const r = applySelection(
-                selected,
-                name,
-                e,
-                files.map((f) => f.name),
-                anchor
-              )
-              setSelected(r.next)
-              setAnchor(r.anchor)
-            }}
-            onPreview={(name) => {
-              const i = files.findIndex((f) => f.name === name)
-              if (i >= 0) setPreviewIdx(i)
-            }}
-            onSelectAll={() => setSelected(new Set(files.map((f) => f.name)))}
-            onClear={() => {
-              setSelected(new Set())
-              setAnchor(null)
-            }}
-            onDelete={async () => {
-              if (selected.size === 0) return
-              if (!(await confirm(
-                t('download.confirmDelete', { n: selected.size }),
-                { tone: 'danger', okText: t('common.delete') },
-              ))) return
-              setDeleting(true)
-              try {
-                const r = await api.deleteProjectFiles(
-                  project.id,
-                  Array.from(selected)
-                )
-                toast(
-                  t('download.deletedToast', { deleted: r.deleted.length }) +
-                    (r.missing.length ? t('download.deletedSkipped', { skipped: r.missing.length }) : ''),
-                  'success'
-                )
-                setSelected(new Set())
-                setAnchor(null)
-                await refreshFiles()
-                void reload()
-              } catch (e) {
-                toast(String(e), 'error')
-              } finally {
-                setDeleting(false)
-              }
-            }}
-          />
-        </div>
-
-        {/* 右栏：下载统计侧边栏 */}
-        <DownloadStatsSidebar files={files} projectDownloadCount={project.download_image_count} />
-      </div>
-    </div>
-
-    {previewIdx !== null && files[previewIdx] && (
-      <ImagePreviewModal
-        src={api.projectThumbUrl(project.id, files[previewIdx].name, 'download', 1600)}
-        caption={files[previewIdx].name}
-        hasPrev={previewIdx > 0}
-        hasNext={previewIdx < files.length - 1}
-        onClose={() => setPreviewIdx(null)}
-        onPrev={() => previewIdx > 0 && setPreviewIdx(previewIdx - 1)}
-        onNext={() => previewIdx < files.length - 1 && setPreviewIdx(previewIdx + 1)}
-      />
-    )}
-    </StepShell>
-  )
+function fmtBytes(t: (k: string) => string, n: number): string {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} ${t('overview.unitGB')}`
+  if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)} ${t('overview.unitMB')}`
+  if (n >= 1024) return `${Math.round(n / 1024)} ${t('overview.unitKB')}`
+  return `${n} ${t('overview.unitB')}`
 }
 
-// ---------------------------------------------------------------------------
-// 已下载 grid — 多选 + 删除
-// ---------------------------------------------------------------------------
+const extOf = (name: string) => (name.split('.').pop() ?? '?').toLowerCase().replace('jpeg', 'jpg')
 
-function DownloadedGrid({
-  project,
-  files,
-  selected,
-  anchor,
-  deleting,
-  onSelect,
-  onPreview,
-  onSelectAll,
-  onClear,
-  onDelete,
-}: {
-  project: ProjectDetail
-  files: DownloadFile[]
-  selected: Set<string>
-  anchor: string | null
-  deleting: boolean
-  onSelect: (name: string, e: React.MouseEvent) => void
-  onPreview: (name: string) => void
-  onSelectAll: () => void
-  onClear: () => void
-  onDelete: () => void | Promise<void>
-}) {
-  const { t } = useTranslation()
-  // anchor 仅父组件用，这里不读但保留参数避免未来漂移
-  void anchor
-  const items = useMemo(
-    () =>
-      files.map((f) => ({
-        name: f.name,
-        thumbUrl: api.projectThumbUrl(project.id, f.name),
-      })),
-    [files, project.id]
-  )
-  return (
-    <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden m-pane">
-      <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm m-wrap">
-        <h3 className="font-semibold">{t('download.sectionTitle')}</h3>
-        <span className="text-fg-tertiary">{t('download.imageCount', { n: files.length })}</span>
-        {selected.size > 0 && (
-          <span className="text-accent">{t('download.selectedCount', { n: selected.size })}</span>
-        )}
-        <span className="flex-1" />
-        <button
-          onClick={onSelectAll}
-          disabled={files.length === 0 || deleting}
-          className="btn btn-ghost btn-sm"
-        >
-          {t('common.selectAll')}
-        </button>
-        <button
-          onClick={onClear}
-          disabled={selected.size === 0 || deleting}
-          className="btn btn-ghost btn-sm"
-        >
-          {t('common.deselect')}
-        </button>
-        <button
-          onClick={() => void onDelete()}
-          disabled={selected.size === 0 || deleting}
-          className="btn btn-sm bg-err-soft text-err"
-          title={t('download.deleteTitle')}
-        >
-          {deleting ? t('download.deleting') : t('download.deleteBtn', { n: selected.size })}
-        </button>
-      </header>
-      <div className="flex-1 min-h-0 overflow-y-auto p-2">
-        <ImageGrid
-          items={items}
-          selected={selected}
-          onSelect={onSelect}
-          onActivate={onPreview}
-          onPreview={onPreview}
-          clickMode="activate"
-          ariaLabel="downloaded-grid"
-          emptyHint={t('download.emptyHint')}
-        />
-      </div>
-    </section>
-  )
+const Icon = {
+  upload: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4m0 0-4 4m4-4 4 4" /><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>,
+  minus: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M5 12h14" /></svg>,
+  plus: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>,
+  x: <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>,
+  check: <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.2" strokeLinecap="round"><path d="m5 13 4 4L19 7" /></svg>,
 }
 
-// ---------------------------------------------------------------------------
-// 本地上传紧凑 panel
-// ---------------------------------------------------------------------------
+// ── upload flow (shared by the import card and "choose a server file") ──
 
-function UploadPanel({
-  pid,
-  onUploaded,
-}: {
-  pid: number
-  onUploaded: (r: UploadResult) => void
-}) {
+function useUploader(pid: number, onDone: (r: UploadResult) => void) {
   const { t } = useTranslation()
   const { toast } = useToast()
-  const inputRef = useRef<HTMLInputElement>(null)
-  const [picked, setPicked] = useState<File[]>([])
-  const [uploading, setUploading] = useState(false)
+  const progress: UseUploadProgress = useUploadProgress()
+  const [busy, setBusy] = useState(false)
   const [processing, setProcessing] = useState(false)
-  const [dragging, setDragging] = useState(false)
-  const [showPathPicker, setShowPathPicker] = useState(false)
-  const uploadProgress = useUploadProgress()
 
-  const choose = (fl: FileList | null) => {
-    if (!fl || fl.length === 0) return
-    setPicked(Array.from(fl))
-  }
-  const reset = () => {
-    setPicked([])
-    if (inputRef.current) inputRef.current.value = ''
-  }
-  const applyUploadResult = (r: UploadResult) => {
-    const skipped = r.skipped.length
-    toast(
-      t('download.uploadAdded', { n: r.added.length }) +
-        (skipped ? t('download.uploadSkippedSuffix', { skipped }) : ''),
-      r.added.length > 0 ? 'success' : 'error'
-    )
-    onUploaded(r)
-  }
-  // 后端改异步：上传字节后拿到 upload job，轮询 upload/status 等后台 worker
-  // 解压 / 转码完成。job 终态前返回 null，done 拿 result，failed 抛错。
-  const waitForUpload = async (): Promise<UploadResult> => {
+  // The backend stores the bytes, then processes them (unzip / convert) in
+  // an `upload` job; poll its status until it settles.
+  const waitForUpload = useCallback(async (): Promise<UploadResult> => {
     for (;;) {
       await new Promise((r) => window.setTimeout(r, 1500))
       const st = await api.getUploadStatus(pid)
@@ -314,300 +80,697 @@ function UploadPanel({
       if (job.status === 'failed') throw new Error(job.error_msg || t('download.uploadFailed'))
       if (job.status === 'canceled') throw new Error(t('download.uploadCanceled'))
     }
-  }
-  const submit = async () => {
-    if (picked.length === 0) return
-    const totalBytes = picked.reduce((s, f) => s + f.size, 0)
-    setUploading(true)
+  }, [pid, t])
+
+  const report = useCallback((r: UploadResult) => {
+    const skipped = r.skipped.length
+    toast(
+      t('download.uploadAdded', { n: r.added.length }) + (skipped ? t('download.uploadSkippedSuffix', { skipped }) : ''),
+      r.added.length > 0 ? 'success' : 'error',
+    )
+    onDone(r)
+  }, [onDone, t, toast])
+
+  const uploadFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return false
+    setBusy(true)
     setProcessing(false)
-    uploadProgress.start(totalBytes)
+    progress.start(files.reduce((s, f) => s + f.size, 0))
     try {
-      await api.uploadProjectFiles(pid, picked, uploadProgress.onProgress)
-      uploadProgress.finish()
-      // 字节已传完，进入后台处理阶段（解压 / 转码）。
+      await api.uploadProjectFiles(pid, files, progress.onProgress)
+      progress.finish()
       setProcessing(true)
-      const result = await waitForUpload()
-      applyUploadResult(result)
-      reset()
-      // 短延迟后清掉进度条；让用户看清完成状态
-      window.setTimeout(() => uploadProgress.reset(), 800)
+      report(await waitForUpload())
+      window.setTimeout(() => progress.reset(), 800)
+      return true
     } catch (e) {
-      uploadProgress.fail(e)
+      progress.fail(e)
       toast(String(e), 'error')
+      return false
     } finally {
       setProcessing(false)
-      setUploading(false)
+      setBusy(false)
     }
-  }
-  const importFromPath = async (path: string) => {
-    setShowPathPicker(false)
-    setUploading(true)
+  }, [pid, progress, report, toast, waitForUpload])
+
+  const importPath = useCallback(async (path: string) => {
+    setBusy(true)
     setProcessing(true)
     try {
       await api.uploadProjectFileFromPath(pid, path)
-      applyUploadResult(await waitForUpload())
+      report(await waitForUpload())
     } catch (e) {
       toast(String(e), 'error')
     } finally {
       setProcessing(false)
-      setUploading(false)
+      setBusy(false)
+    }
+  }, [pid, report, toast, waitForUpload])
+
+  return { progress, busy, processing, uploadFiles, importPath }
+}
+
+// ── page ─────────────────────────────────────────────────────────────────
+
+export default function DownloadPage() {
+  const { t } = useTranslation()
+  const { project, activeVersion, reload } = useOutletContext<Ctx>()
+  const { toast } = useToast()
+  const { confirm } = useDialog()
+
+  const [files, setFiles] = useState<DownloadFile[]>([])
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [anchor, setAnchor] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [previewIdx, setPreviewIdx] = useState<number | null>(null)
+  const [lastUpload, setLastUpload] = useState<UploadResult | null>(null)
+  const [view, setView] = useState<ViewMode>('grid')
+  const [sort, setSort] = useState<SortKey>('new')
+  const [showPathPicker, setShowPathPicker] = useState(false)
+  const [inTrain, setInTrain] = useState<Set<string>>(new Set())
+
+  const refreshFiles = useCallback(async () => {
+    try {
+      const r = await api.listFiles(project.id)
+      setFiles(r.items)
+    } catch { /* ignore */ }
+  }, [project.id])
+  useEffect(() => { void refreshFiles() }, [refreshFiles])
+
+  // "в train" pins: download names the active version's train set came from.
+  const activeVid = activeVersion?.id ?? null
+  const refreshTrain = useCallback(async () => {
+    if (activeVid == null) { setInTrain(new Set()); return }
+    try {
+      const view = await api.getCuration(project.id, activeVid)
+      const s = new Set<string>()
+      for (const items of Object.values(view.right)) for (const it of items) s.add(it.origin ?? it.name)
+      setInTrain(s)
+    } catch { setInTrain(new Set()) }
+  }, [project.id, activeVid])
+  useEffect(() => { void refreshTrain() }, [refreshTrain])
+
+  const onUploaded = useCallback((r: UploadResult) => {
+    setLastUpload(r)
+    void refreshFiles()
+    void reload()
+  }, [refreshFiles, reload])
+  const uploader = useUploader(project.id, onUploaded)
+
+  // Booru download job + its log.
+  const [job, setJob] = useState<Job | null>(null)
+  const [log, setLog] = useState<string[]>([])
+  const refreshJob = useCallback(async () => {
+    try {
+      const st = await api.getDownloadStatus(project.id)
+      setJob(st.job)
+      setLog(st.log_tail ? st.log_tail.split('\n').filter(Boolean) : [])
+    } catch { /* ignore */ }
+  }, [project.id])
+  useEffect(() => { void refreshJob() }, [refreshJob])
+
+  const jobIdRef = useRef<number | null>(null)
+  jobIdRef.current = job?.id ?? null
+  useEventStream((evt) => {
+    if (evt.type === 'job_log_appended' && evt.job_id != null && evt.job_id === jobIdRef.current) {
+      setLog((prev) => [...prev.slice(-400), String(evt.text ?? '')])
+    } else if (evt.type === 'job_state_changed' && evt.project_id === project.id && evt.kind === 'download') {
+      void refreshJob()
+      if (evt.status === 'done' || evt.status === 'failed' || evt.status === 'canceled') {
+        void refreshFiles()
+        void reload()
+      }
+    } else if (evt.type === 'project_state_changed' && evt.project_id === project.id) {
+      void refreshFiles()
+      void refreshTrain()
+    }
+  })
+
+  const jobActive = job != null && (job.status === 'running' || job.status === 'pending')
+  // "[262/400] saved …" lines carry the scrape progress.
+  const jobProgress = useMemo(() => {
+    for (let i = log.length - 1; i >= 0; i--) {
+      const m = log[i].match(/^\[(\d+)\/(\d+)\]/)
+      if (m) return { n: Number(m[1]), total: Number(m[2]) }
+    }
+    return null
+  }, [log])
+
+  const sortedFiles = useMemo(() => {
+    const arr = [...files]
+    switch (sort) {
+      case 'new': return arr.sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0) || b.name.localeCompare(a.name, undefined, { numeric: true }))
+      case 'old': return arr.sort((a, b) => (a.mtime ?? 0) - (b.mtime ?? 0) || a.name.localeCompare(b.name, undefined, { numeric: true }))
+      case 'size': return arr.sort((a, b) => b.size - a.size)
+      default: return arr.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+    }
+  }, [files, sort])
+
+  const deleteSelected = async () => {
+    if (selected.size === 0) return
+    if (!(await confirm(t('download.confirmDelete', { n: selected.size }), { tone: 'danger', okText: t('common.delete') }))) return
+    setDeleting(true)
+    try {
+      const r = await api.deleteProjectFiles(project.id, Array.from(selected))
+      toast(
+        t('download.deletedToast', { deleted: r.deleted.length }) + (r.missing.length ? t('download.deletedSkipped', { skipped: r.missing.length }) : ''),
+        'success',
+      )
+      setSelected(new Set())
+      setAnchor(null)
+      await refreshFiles()
+      void reload()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setDeleting(false)
     }
   }
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    setDragging(false)
-    if (uploading) return
-    if (e.dataTransfer.files?.length) choose(e.dataTransfer.files)
-  }
-  const totalBytes = picked.reduce((s, f) => s + f.size, 0)
-  const fileNames = picked.map((f) => f.name).join(', ')
+
+  const nextTo = activeVersion ? `/projects/${project.id}/v/${activeVersion.id}/curate` : `/projects/${project.id}`
+  const uploadDetail = uploader.busy ? (uploader.processing ? t('download.uploadProcessing') : t('download.uploading')) : null
+  const logDetail = jobActive && job
+    ? `#${job.id} ${t('dataset.logScrape')}${jobProgress ? ` · ${jobProgress.n.toLocaleString()} / ${jobProgress.total.toLocaleString()}` : ''}`
+    : uploadDetail
+      ? `${t('dataset.logUpload')} · ${uploadDetail}`
+      : null
 
   return (
-    <section className="flex flex-col gap-1.5 rounded-md border border-subtle bg-surface px-3 py-2.5">
-      <PanelTitle accent="emerald">{t('download.uploadPanel')}</PanelTitle>
-      <label
-        onDragOver={(e) => {
-          e.preventDefault()
-          if (!uploading) setDragging(true)
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={onDrop}
-        className={[
-          'flex items-center gap-2 cursor-pointer transition-colors rounded-sm border border-dashed text-sm px-2.5 py-1.5',
-          dragging ? 'border-accent text-accent bg-accent-soft' : 'border-dim text-fg-secondary',
-        ].join(' ')}
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          accept={UPLOAD_ACCEPT}
-          onChange={(e) => choose(e.target.files)}
-          disabled={uploading}
-          className="hidden"
-        />
-        <span className="font-medium">{t('download.clickOrDrop')}</span>
-        <span className="text-fg-tertiary">{t('download.acceptedFormats')}</span>
-        <span className="flex-1" />
-        {picked.length > 0 && (
-          <span className="text-ok">
-            {t('download.filesSelected', { n: picked.length, mb: (totalBytes / 1024 / 1024).toFixed(1) })}
-          </span>
-        )}
-      </label>
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => setShowPathPicker(true)}
-          disabled={uploading}
-          className="btn btn-secondary btn-sm"
-        >
-          {t('download.uploadFromPath')}
-        </button>
-        <span className="text-xs text-fg-tertiary">{t('download.uploadFromPathHint')}</span>
-      </div>
-      {picked.length > 0 && (
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={submit}
-            disabled={uploading}
-            className="btn btn-primary btn-sm"
-          >
-            {processing
-              ? t('download.uploadProcessing')
-              : uploading
-                ? t('download.uploading')
-                : t('download.uploadCount', { n: picked.length })}
-          </button>
-          <button
-            onClick={reset}
-            disabled={uploading}
-            className="btn btn-ghost btn-sm"
-          >
-            {t('common.cancel')}
-          </button>
-          <span
-            className="truncate min-w-0 flex-1 ml-1 text-xs text-fg-tertiary"
-            title={fileNames}
-          >
-            {fileNames}
-          </span>
+    <div className="fade-in" style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+      <PageHead
+        accent
+        eyebrow={t('dataset.eyebrow')}
+        title={t('steps.download.title')}
+        subtitle={t('dataset.subtitle')}
+        tools={
+          <>
+            <button type="button" className="ds-ctl" onClick={() => setShowPathPicker(true)} disabled={uploader.busy}>
+              {t('download.uploadFromPath')}
+            </button>
+            <Link className="ds-btn-primary" to={nextTo}>{t('dataset.nextCurate')}</Link>
+          </>
+        }
+      />
+
+      <div className="ds-scroll" style={{ flex: '1 0 auto' }}>
+        <div className="ds-ds-top">
+          <BooruCard pid={project.id} job={jobActive ? job : null} onStarted={(j) => { setJob(j); setLog([]) }} />
+          <UploadCard uploader={uploader} lastUpload={lastUpload} onDismissResult={() => setLastUpload(null)} />
         </div>
-      )}
-      {uploadProgress.state.phase !== 'idle' && (
-        <UploadProgressBar state={uploadProgress.state} />
+
+        <StatsCard project={project} files={files} selected={selected.size} />
+
+        <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div className="ds-card-head ds-pad">
+            <div>
+              <div className="ds-card-title">{t('download.sectionTitle')}</div>
+              <div className="ds-card-sub">{t('dataset.gridSub', { count: files.length })}</div>
+            </div>
+            <div className="ds-card-tools">
+              <div className="ds-seg" role="group">
+                <button type="button" className={`ds-seg-item${view === 'grid' ? ' ds-is-active' : ''}`} aria-pressed={view === 'grid'} onClick={() => setView('grid')}>{t('dataset.viewGrid')}</button>
+                <button type="button" className={`ds-seg-item${view === 'list' ? ' ds-is-active' : ''}`} aria-pressed={view === 'list'} onClick={() => setView('list')}>{t('dataset.viewList')}</button>
+              </div>
+              <select className="ds-inp" style={{ width: 170 }} value={sort} onChange={(e) => setSort(e.target.value as SortKey)} aria-label={t('dataset.sortLabel')}>
+                <option value="new">{t('dataset.sortNew')}</option>
+                <option value="old">{t('dataset.sortOld')}</option>
+                <option value="name">{t('dataset.sortName')}</option>
+                <option value="size">{t('dataset.sortSize')}</option>
+              </select>
+            </div>
+          </div>
+
+          {selected.size > 0 && (
+            <div className="ds-bulkbar">
+              <span className="ds-cbox ds-on" style={{ borderColor: 'var(--green-600)', background: 'var(--green-600)' }}>{Icon.check}</span>
+              <span style={{ fontWeight: 500 }}>{t('dataset.selectedN', { n: selected.size })}</span>
+              <span style={{ flex: 1 }} />
+              {selected.size < files.length && (
+                <button type="button" className="ds-ctl ds-ghost" style={{ height: 26, color: 'var(--green-text)' }} onClick={() => setSelected(new Set(files.map((f) => f.name)))} disabled={deleting}>
+                  {t('common.selectAll')}
+                </button>
+              )}
+              <button type="button" className="ds-ctl ds-ghost" style={{ height: 26, color: 'var(--green-text)' }} onClick={() => { setSelected(new Set()); setAnchor(null) }} disabled={deleting}>
+                {t('dataset.clearSel')}
+              </button>
+              <button type="button" className="ds-btn-danger" style={{ height: 26 }} onClick={() => void deleteSelected()} disabled={deleting} title={t('download.deleteTitle')}>
+                {deleting ? t('download.deleting') : t('download.deleteBtn', { n: selected.size })}
+              </button>
+            </div>
+          )}
+
+          <div className="ds-card-body" style={{ paddingTop: 12 }}>
+            {view === 'grid' ? (
+              <div style={{ height: files.length === 0 ? 'auto' : 'min(62vh, 640px)' }}>
+                <ImageGrid
+                  items={sortedFiles.map((f) => ({
+                    name: f.name,
+                    thumbUrl: api.projectThumbUrl(project.id, f.name),
+                    badge: inTrain.has(f.name) ? t('dataset.inTrain') : undefined,
+                  }))}
+                  selected={selected}
+                  onSelect={(name, e) => {
+                    const r = applySelection(selected, name, e, sortedFiles.map((f) => f.name), anchor)
+                    setSelected(r.next)
+                    setAnchor(r.anchor)
+                  }}
+                  onActivate={(name) => setPreviewIdx(sortedFiles.findIndex((f) => f.name === name))}
+                  onPreview={(name) => setPreviewIdx(sortedFiles.findIndex((f) => f.name === name))}
+                  clickMode="activate"
+                  columnsClass="grid-cols-[repeat(auto-fill,minmax(104px,1fr))]"
+                  ariaLabel="downloaded-grid"
+                  emptyHint={t('download.emptyHint')}
+                />
+              </div>
+            ) : (
+              <FileList
+                files={sortedFiles}
+                selected={selected}
+                inTrain={inTrain}
+                onToggle={(name) => {
+                  const next = new Set(selected)
+                  if (next.has(name)) next.delete(name); else next.add(name)
+                  setSelected(next)
+                  setAnchor(name)
+                }}
+                onOpen={(name) => setPreviewIdx(sortedFiles.findIndex((f) => f.name === name))}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      <JobLogBar
+        title={t('dataset.logTitle')}
+        running={jobActive || uploader.busy}
+        detail={logDetail}
+        pct={jobActive && jobProgress && jobProgress.total > 0 ? Math.round((jobProgress.n / jobProgress.total) * 100) : null}
+        log={log}
+      />
+
+      {previewIdx !== null && previewIdx >= 0 && sortedFiles[previewIdx] && (
+        <ImagePreviewModal
+          src={api.projectThumbUrl(project.id, sortedFiles[previewIdx].name, 'download', 1600)}
+          caption={sortedFiles[previewIdx].name}
+          hasPrev={previewIdx > 0}
+          hasNext={previewIdx < sortedFiles.length - 1}
+          onClose={() => setPreviewIdx(null)}
+          onPrev={() => previewIdx > 0 && setPreviewIdx(previewIdx - 1)}
+          onNext={() => previewIdx < sortedFiles.length - 1 && setPreviewIdx(previewIdx + 1)}
+        />
       )}
       {showPathPicker && (
         <PathPicker
           dirOnly={false}
           onClose={() => setShowPathPicker(false)}
-          onPick={(path) => { void importFromPath(path) }}
+          onPick={(path) => { setShowPathPicker(false); void uploader.importPath(path) }}
         />
       )}
-    </section>
+    </div>
   )
 }
 
-function UploadResultStrip({
-  result,
-  onDismiss,
-}: {
-  result: UploadResult
-  onDismiss: () => void
+// ── booru ────────────────────────────────────────────────────────────────
+
+function BooruCard({ pid, job, onStarted }: {
+  pid: number
+  job: Job | null
+  onStarted: (job: Job) => void
 }) {
   const { t } = useTranslation()
-  const skipped = result.skipped.length
-  const ok = result.added.length
-  return (
-    <details className="group rounded-md border border-subtle bg-surface overflow-hidden">
-      <summary className="cursor-pointer flex items-center gap-2 list-none px-2.5 py-1.5 text-sm select-none">
-        <span className="inline-block transition-transform group-open:rotate-90 text-fg-tertiary w-3">▸</span>
-        <span className="badge badge-ok">upload</span>
-        <span className="text-fg-secondary">
-          {t('download.added')} <strong className="text-ok">{ok}</strong>
-          {skipped > 0 && (
-            <>
-              {' · '}{t('download.skipped')} <strong className="text-warn">{skipped}</strong>
-            </>
-          )}
-        </span>
-        <span className="flex-1" />
-        <button
-          onClick={(e) => {
-            e.preventDefault()
-            onDismiss()
-          }}
-          className="btn btn-ghost btn-sm"
-          title={t('common.close')}
-        >
-          ×
-        </button>
-      </summary>
-      {skipped > 0 ? (
-        <ul className="px-3 py-2 text-xs font-mono text-warn bg-sunken max-h-[160px] overflow-auto border-t border-subtle m-0 list-none">
-          {result.skipped.map((s, i) => (
-            <li key={`${s.name}-${i}`} className="truncate">
-              {s.name} <span className="text-fg-tertiary">— {s.reason}</span>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="px-3 py-2 text-xs text-fg-tertiary border-t border-subtle m-0">
-          {t('download.allSucceeded')}
-        </p>
-      )}
-    </details>
-  )
-}
+  const { toast } = useToast()
+  const { prompt } = useDialog()
+  const [source, setSource] = useState<Source>('danbooru')
+  const [query, setQuery] = useState('')
+  const [estimate, setEstimate] = useState<{ query: string; source: Source; count: number } | null>(null)
+  const [searching, setSearching] = useState(false)
+  const [limit, setLimit] = useState(100)
+  const [starting, setStarting] = useState(false)
+  const [exclude, setExclude] = useState<string[] | null>(null)
+  const [hasKeys, setHasKeys] = useState<Record<Source, boolean> | null>(null)
 
-// ---------------------------------------------------------------------------
-// 杂项 — 小标题
-// ---------------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false
+    void api.getSecrets()
+      .then((s) => {
+        if (cancelled) return
+        setExclude(s.download.exclude_tags ?? [])
+        setHasKeys({
+          danbooru: !!(s.danbooru.username && s.danbooru.api_key),
+          gelbooru: !!(s.gelbooru.user_id && s.gelbooru.api_key),
+        })
+      })
+      .catch(() => { if (!cancelled) setExclude([]) })
+    return () => { cancelled = true }
+  }, [])
 
-function PanelTitle({
-  accent,
-  children,
-}: {
-  accent: 'cyan' | 'emerald'
-  children: React.ReactNode
-}) {
-  const dotCls = accent === 'cyan' ? 'bg-accent' : 'bg-ok'
-  return (
-    <h3 className="caption flex items-center gap-1.5">
-      <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${dotCls}`} />
-      {children}
-    </h3>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// 下载统计侧边栏
-// ---------------------------------------------------------------------------
-function DownloadStatsSidebar({
-  files,
-  projectDownloadCount,
-}: {
-  files: DownloadFile[]
-  projectDownloadCount: number
-}) {
-  const { t } = useTranslation()
-  // 按扩展名分组统计
-  const extCounts = useMemo(() => {
-    const m: Record<string, number> = {}
-    for (const f of files) {
-      const ext = f.name.split('.').pop()?.toLowerCase() ?? '?'
-      m[ext] = (m[ext] ?? 0) + 1
+  const saveExclude = async (next: string[]) => {
+    const prev = exclude
+    setExclude(next)
+    setEstimate(null)
+    try {
+      await api.updateSecrets({ download: { exclude_tags: next } })
+    } catch (e) {
+      setExclude(prev)
+      toast(String(e), 'error')
     }
-    return Object.entries(m).sort((a, b) => b[1] - a[1])
-  }, [files])
+  }
+
+  const search = async () => {
+    const tag = query.trim()
+    if (!tag) { toast(t('download.tagEmpty'), 'error'); return }
+    setSearching(true)
+    try {
+      const r = await api.estimateDownload(pid, { tag, api_source: source })
+      setEstimate({ query: tag, source, count: r.count })
+      if (r.count > 0) setLimit((l) => Math.min(Math.max(1, l), r.count))
+      if (r.count === 0) toast(t('download.noResults'), 'info')
+    } catch (e) {
+      setEstimate(null)
+      toast(String(e), 'error')
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const start = async () => {
+    const tag = query.trim()
+    if (!tag) { toast(t('download.tagEmpty'), 'error'); return }
+    if (limit < 1) { toast(t('download.countMin'), 'error'); return }
+    setStarting(true)
+    try {
+      const j = await api.startDownload(pid, { tag, count: limit, api_source: source })
+      toast(t('download.started', { id: j.id }), 'success')
+      onStarted(j)
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const fresh = estimate && estimate.query === query.trim() && estimate.source === source ? estimate : null
+  const found = fresh && fresh.count > 0 ? fresh.count : null
+  const pct = found ? Math.round((Math.min(limit, found) / found) * 100) : null
+  const desc = found == null
+    ? t('dataset.limitDescNoEstimate')
+    : pct != null && pct < 100 ? t('dataset.limitDesc', { pct }) : t('dataset.limitDescAll')
 
   return (
-    <div className="flex flex-col gap-3 min-w-0">
-      {/* 总量卡片 */}
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <PanelTitle accent="cyan">{t('download.statsTitle')}</PanelTitle>
-        <StatRow label={t('download.statsTotal')} value={projectDownloadCount} />
-        <StatRow label={t('download.statsVisible')} value={files.length} />
-        {files.length > 0 && (
-          <StatRow
-            label={t('download.statsTotalSize')}
-            value={files.reduce((s, f) => s + f.size, 0)}
-            format="bytes"
-          />
+    <div className="ds-card" style={{ display: 'flex', flexDirection: 'column' }}>
+      <div className="ds-card-head ds-pad">
+        <div>
+          <div className="ds-card-title">{t('dataset.booruTitle')}</div>
+          <div className="ds-card-sub">{t('dataset.booruSub')}</div>
+        </div>
+        <div className="ds-card-tools">
+          <span className="ds-cap">{t('dataset.source')}</span>
+          <div className="ds-seg" role="group" aria-label={t('dataset.source')}>
+            {SOURCES.map((s) => (
+              <button key={s} type="button" className={`ds-seg-item${source === s ? ' ds-is-active' : ''}`} aria-pressed={source === s} onClick={() => setSource(s)}>{s}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: '0 17px 14px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <form className="ds-searchgroup" onSubmit={(e) => { e.preventDefault(); void search() }}>
+          <span className="ds-q">
+            <input className="ds-mono" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('dataset.queryPlaceholder')} style={{ paddingLeft: 12 }} aria-label={t('dataset.queryPlaceholder')} />
+          </span>
+          <button type="submit" disabled={searching}>{searching ? t('download.querying') : t('dataset.find')}</button>
+        </form>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }} title={t('dataset.excludeHint')}>
+          <span className="ds-cap" style={{ flex: 'none' }}>{t('dataset.exclude')}</span>
+          {(exclude ?? []).map((tag) => (
+            <span key={tag} className="ds-chip">
+              {tag}
+              <button type="button" className="ds-chip-x" aria-label={`${t('dataset.excludeRemove')} ${tag}`} onClick={() => void saveExclude((exclude ?? []).filter((x) => x !== tag))}>{Icon.x}</button>
+            </span>
+          ))}
+          <button
+            type="button"
+            className="ds-chip-add"
+            disabled={exclude == null}
+            onClick={async () => {
+              const v = (await prompt(t('dataset.excludePrompt')))?.trim()
+              if (v && !(exclude ?? []).includes(v)) void saveExclude([...(exclude ?? []), v])
+            }}
+          >
+            {t('dataset.excludeAdd')}
+          </button>
+        </div>
+        {hasKeys && !hasKeys[source] && (
+          <div className="ds-note ds-warn" style={{ fontSize: 11.5 }}>{t('dataset.noCredentials', { source })}</div>
         )}
       </div>
 
-      {/* 格式分布 */}
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5 flex-1 flex flex-col min-h-0 m-h-auto">
-        <PanelTitle accent="emerald">{t('download.formatTitle')}</PanelTitle>
-        {files.length === 0 ? (
-          <p className="text-xs text-fg-tertiary m-0 mt-1.5">
-            {t('common.noImages')}
-          </p>
-        ) : (
-          <div className="flex flex-col gap-1.5 mt-1.5 flex-1 overflow-y-auto">
-            {extCounts.map(([ext, count]) => {
-              const pct = Math.round((count / files.length) * 100)
-              return (
-                <div key={ext} className="flex items-center gap-1.5">
-                  <span className="text-xs font-mono text-fg-primary w-9 uppercase text-right">
-                    {ext}
-                  </span>
-                  <div className="flex-1 h-1.5 rounded bg-sunken overflow-hidden">
-                    <div
-                      className="h-full bg-accent rounded transition-[width] duration-300 ease-out"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <span className="text-xs text-fg-tertiary w-9 text-right">{count}</span>
-                </div>
-              )
-            })}
+      <div className="ds-field" style={{ borderTop: '1px solid var(--line)', borderBottom: 0 }}>
+        <div className="ds-field-txt">
+          <div className="ds-field-name"><span className="ds-label">{t('dataset.limitLabel')}</span><span className="ds-key">limit</span></div>
+          <div className="ds-field-desc">{desc}</div>
+        </div>
+        <div className="ds-field-ctl" style={{ width: 156, justifyContent: 'center' }}>
+          <span className="ds-stepper" style={{ width: 112 }}>
+            <input
+              inputMode="numeric"
+              value={limit}
+              onChange={(e) => setLimit(Math.max(0, Number(e.target.value.replace(/\D/g, '')) || 0))}
+              aria-label={t('dataset.limitLabel')}
+            />
+            <button type="button" aria-label={t('dataset.less')} onClick={() => setLimit((l) => Math.max(1, l - 10))}>{Icon.minus}</button>
+            <button type="button" aria-label={t('dataset.more')} onClick={() => setLimit((l) => (found ? Math.min(found, l + 10) : l + 10))}>{Icon.plus}</button>
+          </span>
+        </div>
+      </div>
+
+      <div className="ds-cardfoot" style={{ marginTop: 'auto' }}>
+        <span className="ds-hint">
+          {t('dataset.matches')}
+          <b className="ds-mono" style={{ color: 'var(--ink)', fontWeight: 500 }}>
+            {fresh ? (fresh.count >= 0 ? fresh.count.toLocaleString() : t('dataset.matchesUnknown')) : '—'}
+          </b>
+          {job && <span className="ds-badge ds-ok"><span className="ds-dot ds-dot-run" />{t('dataset.taskBadge', { id: job.id })}</span>}
+        </span>
+        <span className="ds-cardfoot-act">
+          <button type="button" className="ds-btn-primary" style={{ height: 34 }} onClick={() => void start()} disabled={starting || !query.trim() || limit < 1}>
+            {starting ? t('download.downloading') : t('dataset.downloadN', { n: limit.toLocaleString() })}
+          </button>
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ── import ───────────────────────────────────────────────────────────────
+
+function UploadCard({ uploader, lastUpload, onDismissResult }: {
+  uploader: ReturnType<typeof useUploader>
+  lastUpload: UploadResult | null
+  onDismissResult: () => void
+}) {
+  const { t } = useTranslation()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [picked, setPicked] = useState<File[]>([])
+  const [dragging, setDragging] = useState(false)
+  const { progress, busy, processing } = uploader
+
+  const choose = (fl: FileList | null) => { if (fl && fl.length > 0) setPicked(Array.from(fl)) }
+  const reset = () => { setPicked([]); if (inputRef.current) inputRef.current.value = '' }
+  const totalBytes = picked.reduce((s, f) => s + f.size, 0)
+  const st = progress.state
+  const pct = st.phase === 'uploading' && st.total > 0 ? Math.round((st.loaded / st.total) * 100)
+    : st.phase === 'processing' || processing ? 100 : null
+
+  return (
+    <div className="ds-card" style={{ display: 'flex', flexDirection: 'column' }}>
+      <div className="ds-card-head ds-pad">
+        <div>
+          <div className="ds-card-title">{t('download.uploadPanel')}</div>
+          <div className="ds-card-sub">{t('dataset.uploadSub')}</div>
+        </div>
+      </div>
+      <div className="ds-card-body" style={{ paddingTop: 0, display: 'flex', flexDirection: 'column', gap: 10, flex: 1 }}>
+        <label
+          className="ds-empty"
+          style={{
+            padding: 22, minHeight: 170, flex: 1, gap: 6, justifyContent: 'center', cursor: busy ? 'default' : 'pointer',
+            ...(dragging ? { borderColor: 'var(--green-600)', background: 'var(--green-soft)', color: 'var(--green-text)' } : {}),
+          }}
+          onDragOver={(e) => { e.preventDefault(); if (!busy) setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => { e.preventDefault(); setDragging(false); if (!busy && e.dataTransfer.files?.length) choose(e.dataTransfer.files) }}
+        >
+          <input ref={inputRef} type="file" multiple accept={UPLOAD_ACCEPT} className="hidden" disabled={busy} onChange={(e) => choose(e.target.files)} />
+          {Icon.upload}
+          <span style={{ fontWeight: 500, color: 'var(--ink-2)' }}>{t('dataset.dropHint')}</span>
+          {picked.length > 0 && (
+            <span style={{ fontSize: 11 }} title={picked.map((f) => f.name).join(', ')}>
+              {t('dataset.filesPicked', { count: picked.length, size: fmtBytes(t, totalBytes) })}
+            </span>
+          )}
+        </label>
+
+        {(picked.length > 0 || busy) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {pct != null ? (
+              <>
+                <span className="ds-meter" style={{ flex: 1 }}><i style={{ width: `${pct}%` }} /></span>
+                <span className="ds-mono" style={{ fontSize: 11, color: 'var(--ink-3)' }}>
+                  {st.phase === 'uploading' ? t('dataset.uploadPct', { pct }) : t('dataset.processing')}
+                </span>
+              </>
+            ) : (
+              <span style={{ flex: 1 }} />
+            )}
+            {!busy && <button type="button" className="ds-ctl ds-ghost" onClick={reset}>{t('common.cancel')}</button>}
+            <button
+              type="button"
+              className="ds-btn-primary"
+              disabled={busy || picked.length === 0}
+              onClick={async () => { if (await uploader.uploadFiles(picked)) reset() }}
+            >
+              {processing ? t('download.uploadProcessing') : busy ? t('download.uploading') : t('download.uploadCount', { n: picked.length })}
+            </button>
           </div>
+        )}
+        {st.phase === 'error' && st.error && <div className="ds-note ds-warn" style={{ fontSize: 11.5 }}>{st.error}</div>}
+
+        {lastUpload && (
+          <details className="ds-note" style={{ fontSize: 11.5 }}>
+            <summary style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, listStyle: 'none' }}>
+              <span>
+                {t('download.added')} <b>{lastUpload.added.length}</b>
+                {lastUpload.skipped.length > 0 && <> · {t('download.skipped')} <b>{lastUpload.skipped.length}</b></>}
+              </span>
+              <span style={{ flex: 1 }} />
+              <button type="button" aria-label={t('common.close')} onClick={(e) => { e.preventDefault(); onDismissResult() }}>{Icon.x}</button>
+            </summary>
+            {lastUpload.skipped.length > 0 ? (
+              <ul className="ds-mono" style={{ margin: '8px 0 0', padding: 0, listStyle: 'none', maxHeight: 140, overflow: 'auto' }}>
+                {lastUpload.skipped.map((s, i) => <li key={`${s.name}-${i}`}>{s.name} — {s.reason}</li>)}
+              </ul>
+            ) : (
+              <div style={{ marginTop: 6 }}>{t('download.allSucceeded')}</div>
+            )}
+          </details>
         )}
       </div>
     </div>
   )
 }
 
-function StatRow({
-  label,
-  value,
-  format,
-}: {
-  label: string
-  value: number
-  format?: 'bytes'
+// ── stats ────────────────────────────────────────────────────────────────
+
+const FORMAT_COLORS = ['var(--green)', '#cfe3ad', 'var(--line-2)', '#e3ecd4', '#d4d5d1']
+
+function StatsCard({ project, files, selected }: {
+  project: ProjectDetail
+  files: DownloadFile[]
+  selected: number
 }) {
-  const display = format === 'bytes'
-    ? value > 1024 * 1024
-      ? `${(value / 1024 / 1024).toFixed(1)} MB`
-      : `${(value / 1024).toFixed(0)} KB`
-    : String(value)
+  const { t } = useTranslation()
+  const [convertsToPng, setConvertsToPng] = useState<boolean | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void api.getSecrets().then((s) => { if (!cancelled) setConvertsToPng(!!s.download.convert_to_png) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  const formats = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const f of files) m.set(extOf(f.name), (m.get(extOf(f.name)) ?? 0) + 1)
+    return Array.from(m, ([ext, n]) => ({ ext, n })).sort((a, b) => b.n - a.n)
+  }, [files])
+  const total = files.reduce((s, f) => s + f.size, 0)
+
   return (
-    <div className="flex justify-between items-baseline mt-1.5 text-xs">
-      <span className="text-fg-tertiary">{label}</span>
-      <span className="font-mono text-fg-primary font-medium">{display}</span>
+    <div className="ds-card">
+      <div className="ds-card-head ds-pad">
+        <div>
+          <div className="ds-card-title">{t('dataset.statsTitle')}</div>
+          <div className="ds-card-sub">{t('dataset.statsSub')}</div>
+        </div>
+      </div>
+      <div className="ds-statgrid ds-ds-stats" style={{ borderTop: '1px solid var(--line)', marginTop: 13 }}>
+        <div><div className="ds-cap">{t('dataset.statTotal')}</div><div className="ds-stat-v">{(project.download_image_count ?? files.length).toLocaleString()}</div></div>
+        <div><div className="ds-cap">{t('dataset.statVisible')}</div><div className="ds-stat-v">{files.length.toLocaleString()}</div></div>
+        <div><div className="ds-cap">{t('dataset.statSelected')}</div><div className="ds-stat-v" style={{ color: 'var(--green-text)' }}>{selected.toLocaleString()}</div></div>
+        <div><div className="ds-cap">{t('dataset.statSize')}</div><div className="ds-stat-v">{files.length ? fmtBytes(t, total) : '—'}</div></div>
+      </div>
+      {formats.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--line)', padding: '13px 17px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 9 }}>
+            <span className="ds-cap" style={{ flex: 1 }}>{t('dataset.formats')}</span>
+            {convertsToPng && formats.length > 1 && <span className="ds-kpi-meta">{t('dataset.formatsPngNote')}</span>}
+          </div>
+          <div style={{ display: 'flex', gap: 3, height: 12 }}>
+            {formats.map((f, i) => (
+              <span
+                key={f.ext}
+                style={{
+                  flex: f.n, background: FORMAT_COLORS[i % FORMAT_COLORS.length],
+                  borderRadius: `${i === 0 ? 4 : 0}px ${i === formats.length - 1 ? 4 : 0}px ${i === formats.length - 1 ? 4 : 0}px ${i === 0 ? 4 : 0}px`,
+                }}
+              />
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 18, marginTop: 9, flexWrap: 'wrap' }}>
+            {formats.map((f, i) => (
+              <span key={f.ext} className="ds-legend">
+                <s style={{ background: FORMAT_COLORS[i % FORMAT_COLORS.length] }} />
+                {f.ext} · {f.n.toLocaleString()} · {Math.round((f.n / files.length) * 100)}%
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── list view ────────────────────────────────────────────────────────────
+
+function FileList({ files, selected, inTrain, onToggle, onOpen }: {
+  files: DownloadFile[]
+  selected: Set<string>
+  inTrain: Set<string>
+  onToggle: (name: string) => void
+  onOpen: (name: string) => void
+}) {
+  const { t } = useTranslation()
+  if (files.length === 0) return <div className="ds-muted" style={{ fontSize: 12.5 }}>{t('download.emptyHint')}</div>
+  return (
+    <div style={{ maxHeight: 'min(62vh, 640px)', overflow: 'auto', margin: '0 -17px' }}>
+      <table className="ds-tbl">
+        <thead>
+          <tr>
+            <th style={{ width: 40 }} />
+            <th>{t('common.file')}</th>
+            <th>{t('dataset.colTrain')}</th>
+            <th>{t('dataset.colMeta')}</th>
+            <th>{t('common.size')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {files.map((f) => {
+            const on = selected.has(f.name)
+            return (
+              <tr key={f.name} style={on ? { background: 'var(--green-soft)' } : undefined}>
+                <td>
+                  <button type="button" className={`ds-cbox${on ? ' ds-on' : ''}`} aria-pressed={on} aria-label={`${on ? t('common.deselect') : t('common.select')} ${f.name}`} onClick={() => onToggle(f.name)}>
+                    {Icon.check}
+                  </button>
+                </td>
+                <td><button type="button" className="ds-mono" style={{ fontSize: 12, textAlign: 'left' }} onClick={() => onOpen(f.name)}>{f.name}</button></td>
+                <td>{inTrain.has(f.name) ? <span className="ds-badge ds-ok">{t('dataset.inTrain')}</span> : <span className="ds-muted">—</span>}</td>
+                <td className="ds-muted">{f.has_meta ? 'booru' : '—'}</td>
+                <td className="ds-num">{fmtBytes(t, f.size)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }

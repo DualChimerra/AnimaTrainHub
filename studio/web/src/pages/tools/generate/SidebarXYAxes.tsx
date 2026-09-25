@@ -151,20 +151,19 @@ function AxisCard({
   const { t } = useTranslation()
   const isCkpt = draft.axis === 'lora_ckpt'
 
-  // 背景 / padding 对齐 LoRA 槽的 InlineLoraPicker（bg-overlay + p-2.5）；不用 bg-sunken
-  // —— dark 下近黑，跟 LoRA 区不一致显突兀。
+  // Same frame as a LoRA slot card.
   return (
-    <div className="bg-overlay border border-subtle rounded-md p-2.5 flex flex-col gap-2">
+    <div className="ds-card ds-flat" style={{ padding: '10px 11px', border: '1px solid var(--line-2)', display: 'flex', flexDirection: 'column', gap: 8 }}>
       {/* 轴名单独成行作整张卡的标题（下面的轴类型 dropdown + 取值都隶属它）；× 放这行
           最右端、跟轴名分处两端 —— 之前单字母 "X" 跟下拉同行、像个关闭按钮，易混淆。 */}
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-fg-secondary">
+        <span className="ds-badge ds-mute">
           {t('generate.xyAxis', { label })}
         </span>
         {onRemove && (
           <button
             onClick={onRemove}
-            className="btn btn-ghost btn-sm text-fg-tertiary hover:text-err shrink-0 px-1.5"
+            className="ds-kebab"
             title={t('generate.xyRemoveAxisTitle', { label })}
             aria-label={t('generate.xyRemoveAxisAria', { label })}
           >
@@ -174,7 +173,7 @@ function AxisCard({
       </div>
 
       <select
-        className="input text-xs w-full"
+        className="ds-inp"
         value={draft.axis}
         onChange={(e) => {
           const newAxis = e.target.value as XYAxisType
@@ -196,7 +195,6 @@ function AxisCard({
       {/* 用细线把轴类型 dropdown 跟取值分隔（不靠缩进、不占横向空间）；取值隶属上面
           选中的轴类型：lora_ckpt → 多选 chip picker（产出 raw + loraIndex）；
           lora_scale → 纯数字 chip（不绑 LoRA）；steps/cfg → 文本。 */}
-      <div className="divider" />
       {isCkpt ? (
         <AxisLoraCkptPicker
           draft={draft}
@@ -214,7 +212,7 @@ function AxisCard({
       ) : (
         <input
           type="text"
-          className="input font-mono text-xs"
+          className="ds-inp ds-mono"
           placeholder={placeholderFor(draft.axis)}
           value={draft.raw}
           onChange={(e) => onChange({ ...draft, raw: e.target.value })}
@@ -247,9 +245,7 @@ export default function SidebarXYAxes({
   return (
     // 外层不再套 .card —— 父级 sidebar 已是统一卡片，这里只做内容分组避免双重边框。
     <div>
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-md font-semibold">{t('generate.xyAxes')}</div>
-      </div>
+      <div className="ds-cap" style={{ marginBottom: 8 }}>{t('generate.xyAxes')}</div>
       <div className="flex flex-col gap-2">
         <AxisCard
           label="X" draft={xDraft} onChange={onXChange}
