@@ -73,9 +73,9 @@ DEFAULT_CROP_SCALES = (0.35, 0.45, 0.55, 0.60, 0.65, 0.72, 0.76, 0.85)
 DEFAULT_CROP_MAX_CANDIDATES_PER_IMAGE = 10
 DEFAULT_CROP_EARLY_ACCEPT_SCORE = 0.88
 
-# 灵敏度三档 → (variant_score, crop_score)：差分/裁剪判定的松紧，是 UI 唯一暴露的
-# 调节项；其余阈值/性能参数全固化为上面的 DEFAULT_*。宽松=阈值更低、更激进多找，
-# 严格=阈值更高、只留高置信匹配。仅「重复 + 同分镜差分」(both) 模式生效。
+# Three sensitivity tiers -> (variant_score, crop_score): how loose/strict the diff/crop judgment is, the only tunable
+# exposed in the UI; all other thresholds/performance params are fixed as the DEFAULT_* above. Looser = lower thresholds,
+# more aggressive matching; stricter = higher thresholds, only keeps high-confidence matches. Only takes effect in the "duplicate + same-shot diff" (both) mode.
 DEFAULT_SENSITIVITY = "standard"
 SENSITIVITY_SCORES: dict[str, tuple[float, float]] = {
     "loose": (62.0, 0.66),
@@ -93,7 +93,7 @@ from studio.domain.errors import DomainError, InvalidPathError, NotFoundError, V
 class DuplicateFinderError(DomainError):
     """Duplicate finder business error.
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    PR-2 C3 added a DomainError base -- the handler auto-translates it into the dual-write envelope.
     """
     default_code = "duplicate.error"
 
@@ -251,12 +251,12 @@ def _require_imagehash() -> None:
 
 
 def options_from_payload(payload: dict[str, Any]) -> DuplicateOptions:
-    """从扫描请求构造 DuplicateOptions。
+    """Builds DuplicateOptions from a scan request.
 
-    UI 只暴露两项 —— match_scope（匹配范围）+ sensitivity（灵敏度）。其余阈值/性能
-    参数全部固化为 DuplicateOptions 的 DEFAULT_* 默认值，不再从 payload 读取。
-      - detect_crops 跟随 match_scope（both 才开裁剪/缩放检测）。
-      - variant_score / crop_score 由 sensitivity 三档映射（仅 both 模式实际生效）。
+    The UI only exposes two knobs -- match_scope (matching range) + sensitivity. All other threshold/performance
+    params are fixed to DuplicateOptions's DEFAULT_* defaults and are no longer read from the payload.
+      - detect_crops follows match_scope (crop/scale detection only turns on for both).
+      - variant_score / crop_score are mapped from the three sensitivity tiers (only actually takes effect in both mode).
     """
     match_scope = payload.get("match_scope", "both")
     if match_scope not in ("strict", "both"):
@@ -308,7 +308,7 @@ def options_to_json(options: DuplicateOptions) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # ADR 0010 — train-scope duplicates API
 #
-# scope 收窄到 versions/{label}/train/，每个 version 独立审核。
+# Scope narrowed to versions/{label}/train/, each version reviewed independently.
 # ---------------------------------------------------------------------------
 
 
@@ -318,12 +318,12 @@ def _resolve_train_sources(
     version_id: int,
     project_dir: Path,
 ) -> list[tuple[str, Path]]:
-    """ADR 0010 train scope: 列 `versions/{label}/train/{folder}/` 全部图作
-    duplicate-scan sources。
+    """ADR 0010 train scope: lists all images under `versions/{label}/train/{folder}/` as
+    duplicate-scan sources.
 
-    跳过 train manifest 已标 `duplicate_removed` 的（用户审核过的不再 dup-scan）。
-    name 用 POSIX rel path 形式（`"1_data/X.png"`）跟 train manifest entry key
-    一致；下游 group/report/apply 走同一形式。
+    Skips entries already marked `duplicate_removed` in the train manifest (already user-reviewed, no need to dup-scan again).
+    name uses the POSIX rel path form (`"1_data/X.png"`) matching the train manifest entry key;
+    downstream group/report/apply all use this same form.
     """
     from ..projects import versions as ver
 
@@ -363,11 +363,11 @@ def scan_train_duplicates(
     options: DuplicateOptions,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """ADR 0010 train-scope 重复扫描。主流程跟 scan_project_duplicates 一致，
-    只是 sources 解析改成 `_resolve_train_sources`。
+    """ADR 0010 train-scope duplicate scan. The main flow matches scan_project_duplicates;
+    only the sources resolution is swapped for `_resolve_train_sources`.
 
-    返回结构跟老版本相同（前端契约不变；PR-3 改 endpoint 后才换前端），仅
-    `target` 字段改成 `"train"` 表明 scope。
+    The returned structure matches the old version (frontend contract unchanged; the frontend only switches after PR-3 changes the endpoint), only
+    the `target` field changes to `"train"` to indicate scope.
     """
     _require_imagehash()
     project, project_dir = curation._project_dir(conn, project_id)  # noqa: SLF001
@@ -403,8 +403,8 @@ def scan_train_duplicates(
                 "text": f"Checking {total_pairs} crop/scale relation pairs...",
             })
         crop_relations = find_crop_relations(infos, options, on_progress=on_progress)
-        # 裁剪/缩放 = 更严格的重复判断：把 crop 关系当额外的重复边并进分组，
-        # 让 crop 候选像普通重复候选一样出现在同一个分组卡里（a,b → a,b,c）。
+        # Crop/scale = a stricter duplicate judgment: treats the crop relationship as an extra duplicate edge merged into grouping,
+        # so crop candidates show up in the same group card as ordinary duplicate candidates (a,b -> a,b,c).
         if crop_relations:
             groups, pair_metrics = merge_crop_relations_into_groups(
                 infos, groups, pair_metrics, crop_relations,
@@ -436,11 +436,11 @@ def apply_train_duplicate_removals(
     *,
     names: list[str],
 ) -> dict[str, Any]:
-    """ADR 0010 train scope: 把 names 标记 duplicate_removed（per-version 审核
-    状态，写到 train manifest）。
+    """ADR 0010 train scope: marks names as duplicate_removed (per-version review
+    status, written to the train manifest).
 
-    `names` 是 train rel path 形式（`"1_data/X.png"`）。物理文件不动——保留
-    作"已审核但跳过"标记，跟老 mark_duplicate_removed 一致。
+    `names` is in train rel path form (`"1_data/X.png"`). The physical file is left alone -- kept
+    as a "reviewed but skipped" marker, matching the old mark_duplicate_removed.
     """
     from ..projects import versions as ver
 
@@ -458,7 +458,7 @@ def apply_train_duplicate_removals(
         )
 
     project_dir = projects.project_dir(project["id"], project["slug"])
-    # 校验 rel path 形式（跟 core._validate_rel_name 一致：两段、无 ..）
+    # Validate rel path form (matches core._validate_rel_name: two segments, no ..)
     for raw_name in names:
         if not raw_name or "\\" in raw_name or raw_name.startswith("/"):
             raise InvalidPathError("Invalid path", details={"name": raw_name})
@@ -1420,11 +1420,11 @@ def find_crop_relations(
 
 
 def crop_relation_to_metrics(relation: CropRelation) -> PairMetrics:
-    """把一条 crop/scale 关系折成一个 PairMetrics，让 crop 候选能像普通重复候选
-    一样进分组卡（复用 _group_to_json / _item_to_json 的既有渲染路径）。
+    """Folds a crop/scale relationship into a single PairMetrics so crop candidates can join grouping cards
+    the same way ordinary duplicate candidates do (reusing _group_to_json / _item_to_json's existing render path).
 
-    前端只展示 match_type / score / note；其余结构化 diff 字段对 crop 无意义，填
-    占位。score 用 crop 匹配度（0–1）放大到 0–100，跟结构分数量级一致。
+    The frontend only shows match_type / score / note; the other structured diff fields are meaningless for crop, so they're
+    left as placeholders. score uses the crop match degree (0-1) scaled up to 0-100, matching the structural score's magnitude.
     """
     return PairMetrics(
         score=round(relation.score * 100, 2),
@@ -1453,12 +1453,12 @@ def merge_crop_relations_into_groups(
     pair_metrics: dict[tuple[str, str], PairMetrics],
     crop_relations: list[CropRelation],
 ) -> tuple[list[list[ImageInfo]], dict[tuple[str, str], PairMetrics]]:
-    """把 crop/scale 关系当作额外的重复边并进已有分组。
+    """Merges a crop/scale relationship into existing groups as an extra duplicate edge.
 
-    重新在全体 infos 上跑一次 union-find：先接回结构分组已连的边，再叠加 crop 边，
-    重新聚合成分组。crop pair 补一条 synthetic PairMetrics 进 pair_metrics，分组卡
-    里 crop 候选就带 match_type/score 正常展示。keep 选择沿用 sort_group_for_keep
-    （像素/体积最大者保留），裁剪小图自然落到「建议去除」。
+    Reruns union-find over all infos: first reconnects the edges already linked by structural grouping, then layers crop edges on top,
+    re-aggregating into groups. Each crop pair adds a synthetic PairMetrics into pair_metrics, so crop candidates in a group card
+    display match_type/score normally too. keep selection still uses sort_group_for_keep
+    (largest by pixels/volume is kept), so a downscaled crop naturally lands in "recommended for removal".
     """
     uf = UnionFind([info.name for info in infos])
     for group in groups:

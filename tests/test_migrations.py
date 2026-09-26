@@ -1,4 +1,3 @@
-"""PP1 — schema migration framework: v1 → v2 升级保留旧 tasks 数据。"""
 from __future__ import annotations
 
 import sqlite3
@@ -41,13 +40,11 @@ def test_v2_creates_tables_and_extends_tasks(tmp_path: Path) -> None:
 
 
 def test_v5_adds_task_type_column(tmp_path: Path) -> None:
-    """v5: tasks 加 task_type 列，旧 task 自动 fallback 到 'train'。"""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         assert "task_type" in cols
-        # 新建一个 task，default 应该是 'train'
         c.execute(
             "INSERT INTO tasks(name, config_name, status, priority, created_at) "
             "VALUES (?, ?, 'pending', 0, ?)",
@@ -59,14 +56,12 @@ def test_v5_adds_task_type_column(tmp_path: Path) -> None:
 
 
 def test_v14_adds_generate_meta_columns(tmp_path: Path) -> None:
-    """v14: tasks 加 generate_params / generate_cover（0.17 P-I forward-write），全 nullable。"""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         assert "generate_params" in cols
         assert "generate_cover" in cols
-        # 老 task（不写这两列）保持 NULL
         c.execute(
             "INSERT INTO tasks(name, config_name, status, priority, created_at) "
             "VALUES (?, ?, 'pending', 0, ?)",
@@ -79,7 +74,6 @@ def test_v14_adds_generate_meta_columns(tmp_path: Path) -> None:
 
 
 def test_v15_adds_scheduled_at_column(tmp_path: Path) -> None:
-    """v15: tasks 加 scheduled_at（0.17 P-B 计划任务），nullable 不 backfill。"""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
@@ -96,7 +90,6 @@ def test_v15_adds_scheduled_at_column(tmp_path: Path) -> None:
 
 
 def test_v16_adds_job_created_at_column(tmp_path: Path) -> None:
-    """v16: project_jobs 加 created_at（P-G 入队时间），nullable 不 backfill。"""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
@@ -105,7 +98,6 @@ def test_v16_adds_job_created_at_column(tmp_path: Path) -> None:
 
 
 def test_v17_adds_tasks_params_column(tmp_path: Path) -> None:
-    """v17: tasks 加 params（R-2 台账合并），nullable 不 backfill。"""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
@@ -114,7 +106,6 @@ def test_v17_adds_tasks_params_column(tmp_path: Path) -> None:
 
 
 def test_v1_db_upgrades_in_place_preserving_tasks(tmp_path: Path) -> None:
-    """模拟 PP0 之前留下来的 v1 库（只有 tasks 表）：执行 init_db 应升到 v2 且数据不丢。"""
     dbfile = tmp_path / "legacy.db"
     legacy = sqlite3.connect(str(dbfile))
     legacy.executescript(
@@ -148,7 +139,6 @@ def test_v1_db_upgrades_in_place_preserving_tasks(tmp_path: Path) -> None:
         rows = list(c.execute("SELECT * FROM tasks"))
         assert len(rows) == 1
         assert rows[0]["name"] == "legacy_task"
-        # 新增列默认 NULL，能直接查出来
         assert rows[0]["project_id"] is None
         assert rows[0]["version_id"] is None
         assert current_version(c) == len(MIGRATIONS) + 1
@@ -164,12 +154,10 @@ def test_apply_all_is_idempotent(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# v11 — ADR 0010 加 preprocessing phase + 回填 curating+train 非空
 # ---------------------------------------------------------------------------
 
 
 def _setup_v11_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """init db + monkeypatch PROJECTS_DIR → 让 _v11 能找到 train/ 物理图。"""
     from studio.services.projects import projects
     dbfile = tmp_path / "studio.db"
     db.init_db(dbfile)
@@ -180,7 +168,6 @@ def _setup_v11_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_v11_advances_curating_with_train_image_to_preprocessing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """curating + train/{folder}/{image} 存在 → 推进到 preprocessing。"""
     from studio.infrastructure.migrations._v11_preprocessing_phase import migrate as v11
     from studio.services.projects import projects, versions
     dbfile = _setup_v11_env(tmp_path, monkeypatch)
@@ -204,7 +191,6 @@ def test_v11_advances_curating_with_train_image_to_preprocessing(
 def test_v11_keeps_curating_when_train_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """curating + train 空 → 保持 curating。"""
     from studio.infrastructure.migrations._v11_preprocessing_phase import migrate as v11
     from studio.services.projects import projects, versions
     dbfile = _setup_v11_env(tmp_path, monkeypatch)
@@ -224,7 +210,6 @@ def test_v11_keeps_curating_when_train_empty(
 def test_v11_ignores_other_phases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """tagging / editing / regularizing / ready 不动，无论 train 状态。"""
     from studio.infrastructure.migrations._v11_preprocessing_phase import migrate as v11
     from studio.services.projects import projects, versions
     dbfile = _setup_v11_env(tmp_path, monkeypatch)
@@ -240,7 +225,6 @@ def test_v11_ignores_other_phases(
                 "UPDATE versions SET phase = ? WHERE id = ?", (phase, v["id"])
             )
         conn.commit()
-        # train 有图也不该被推
         for label in ["v1", "v2", "v3", "v4"]:
             sub = projects.project_dir(p["id"], p["slug"]) / "versions" / label / "train" / "1_data"
             sub.mkdir(parents=True, exist_ok=True)
@@ -258,7 +242,6 @@ def test_v11_ignores_other_phases(
 def test_v11_ignores_train_root_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """train/ 根目录直接放的图忽略 → phase 保持 curating。"""
     from studio.infrastructure.migrations._v11_preprocessing_phase import migrate as v11
     from studio.services.projects import projects, versions
     dbfile = _setup_v11_env(tmp_path, monkeypatch)

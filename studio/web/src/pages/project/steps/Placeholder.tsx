@@ -1,4 +1,4 @@
-/** PP2-PP6 的步骤页占位。每个 PP 落地时会被实际页面替换。 */
+/** Placeholder step page for PP2-PP6. Replaced by the real page as each PP lands. */
 export default function StepPlaceholder({
   step,
   doc,

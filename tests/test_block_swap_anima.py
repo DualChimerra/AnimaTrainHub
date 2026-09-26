@@ -173,7 +173,7 @@ def test_pinned_budget_guard_fails_fast_before_any_placement(monkeypatch):
 
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 1024)  # 1KB: must reject
     model = _TinyDiT()
-    with pytest.raises(RuntimeError, match="内存不足以换出"):
+    with pytest.raises(RuntimeError, match="Not enough memory to swap out"):
         place_model_for_block_swap(model, "cuda", torch.float32, 2)
     # fail-fast semantics: the model hasn't moved at all (still all on CPU, no marker)
     assert all(p.device.type == "cpu" for p in model.parameters())

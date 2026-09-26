@@ -1,4 +1,3 @@
-"""ADR-0007 §11.5-A / §11.5-B: phase check_completion + advance / skip 函数测试。"""
 from __future__ import annotations
 
 import time
@@ -37,7 +36,6 @@ def _put_image(folder: Path, name: str, with_caption: bool = True) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pure check function tests (stats dict 直接喂)
 # ---------------------------------------------------------------------------
 
 
@@ -74,7 +72,6 @@ def test_check_tagging_empty() -> None:
 
 
 def test_check_editing_same_as_tagging() -> None:
-    """editing 是 tagging 的兜底，应该 100% 行为一致。"""
     stats = {"train_image_count": 10, "tagged_image_count": 5}
     assert (
         versions_phase.check_editing(stats).reason
@@ -83,7 +80,6 @@ def test_check_editing_same_as_tagging() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Regularizing check (要 DB，因为查 project_jobs)
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +115,6 @@ def test_check_regularizing_blocks_when_job_pending(isolated) -> None:
 
 
 def test_check_regularizing_done_job_doesnt_block(isolated) -> None:
-    """已完成的 reg job 不阻塞 cursor 前进。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         _job = project_jobs.create_job(
@@ -132,7 +127,6 @@ def test_check_regularizing_done_job_doesnt_block(isolated) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ready check (要 file system，因为读 config.yaml)
 # ---------------------------------------------------------------------------
 
 
@@ -151,21 +145,18 @@ def test_check_ready_no_config(isolated) -> None:
 
 
 def test_advance_phase_blocked_by_failed_check(isolated) -> None:
-    """curating phase + train 为空 → next 失败 + cursor 不动。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         advanced, result, new_phase = versions_phase.advance_phase(conn, v["id"])
     assert not advanced
     assert not result.ok
     assert new_phase is None
-    # cursor 应该还在 curating
     with db.connection_for(isolated["db"]) as conn:
         v2 = versions.get_version(conn, v["id"])
     assert versions.get_phase(v2) == "curating"
 
 
 def test_advance_phase_curating_to_preprocessing(isolated) -> None:
-    """curating phase + train 有图 → 推进到 preprocessing（ADR 0010 加新 phase）。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         p = projects.get_project(conn, v["project_id"])
@@ -183,11 +174,9 @@ def test_advance_phase_curating_to_preprocessing(isolated) -> None:
 
 
 def test_advance_phase_editing_blocked_by_missing_caption(isolated) -> None:
-    """editing phase + caption 覆盖不到 100% → 失败（editing 兜底 caption 校验）。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         p = projects.get_project(conn, v["project_id"])
-        # 强制把 cursor 跳到 editing
         versions.update_version(conn, v["id"], phase="editing")
     vdir = versions.version_dir(p["id"], p["slug"], v["label"])
     _put_image(vdir / "train" / "5_concept", "001", with_caption=False)
@@ -200,7 +189,6 @@ def test_advance_phase_editing_blocked_by_missing_caption(isolated) -> None:
 
 
 def test_skip_phase_only_works_for_skippable(isolated) -> None:
-    """curating 不允许 skip。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         advanced, result, _ = versions_phase.skip_phase(conn, v["id"])
@@ -209,7 +197,6 @@ def test_skip_phase_only_works_for_skippable(isolated) -> None:
 
 
 def test_skip_phase_preprocessing_jumps_to_editing(isolated) -> None:
-    """preprocessing 可跳过（无 preprocess job running） → cursor 跳到 editing。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         versions.update_version(conn, v["id"], phase="preprocessing")
@@ -220,7 +207,6 @@ def test_skip_phase_preprocessing_jumps_to_editing(isolated) -> None:
 
 
 def test_skip_phase_preprocessing_blocked_by_running_job(isolated) -> None:
-    """有 preprocess job pending/running → 拒跳过（防 concurrent job 撞车）。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         versions.update_version(conn, v["id"], phase="preprocessing")
@@ -235,7 +221,6 @@ def test_skip_phase_preprocessing_blocked_by_running_job(isolated) -> None:
 
 
 def test_check_preprocessing_ok_without_running_job(isolated) -> None:
-    """无 concurrent preprocess job → OK（preprocessing 可跳过不强求完成度）。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         result = versions_phase.check_preprocessing(conn, v["id"])
@@ -243,7 +228,6 @@ def test_check_preprocessing_ok_without_running_job(isolated) -> None:
 
 
 def test_skip_phase_regularizing_jumps_to_ready(isolated) -> None:
-    """regularizing skip → cursor 跳 ready。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         versions.update_version(conn, v["id"], phase="regularizing")
@@ -254,7 +238,6 @@ def test_skip_phase_regularizing_jumps_to_ready(isolated) -> None:
 
 
 def test_skip_phase_regularizing_blocked_by_running_job(isolated) -> None:
-    """regularizing skip 校验"无 job running"，有 job 时拒绝。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         versions.update_version(conn, v["id"], phase="regularizing")
@@ -269,19 +252,16 @@ def test_skip_phase_regularizing_blocked_by_running_job(isolated) -> None:
 
 
 def test_advance_phase_at_ready_returns_check_result(isolated) -> None:
-    """已到 ready（最后 phase）→ phase 不再前进，但返回 check 结果让调用方决定 status 转换。"""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         versions.update_version(conn, v["id"], phase="ready")
         advanced, result, new_phase = versions_phase.advance_phase(conn, v["id"])
     assert not advanced
     assert new_phase is None
-    # 无 config → check_ready 应失败
     assert not result.ok
 
 
 # ---------------------------------------------------------------------------
-# update_version 新字段校验
 # ---------------------------------------------------------------------------
 
 

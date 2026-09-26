@@ -23,7 +23,6 @@ class _FakeTokenizer:
             return {"input_ids": list(range(34))}
 
         max_length = kwargs.get("max_length")
-        # 后缀调用：无 padding 无 max_length（在线主调用带 padding="longest"）
         if max_length is None and kwargs.get("padding") is None:
             return {
                 "input_ids": torch.arange(5).repeat(len(texts), 1),
@@ -136,8 +135,6 @@ def test_online_mode_never_writes_cache_and_keeps_model_loaded(tmp_path):
     assert not (tmp_path / ".text-cache").exists()
     assert condition.context.shape == (2, 7, 2, 4)
     assert condition.attention_mask.sum(dim=1).tolist() == [7, 6]
-    # 在线模式不截断 + longest pad：最长条 "ab" 无 interior pad，token 连续
-    # （positions 34/35 + suffix 36..40）；旧定长口径的 pad 位移不复存在。
     assert condition.context[0, :, 0, 0].tolist() == [
         134.0, 135.0, 136.0, 137.0, 138.0, 139.0, 140.0,
     ]
@@ -164,7 +161,7 @@ def test_cached_mode_precaches_reuses_and_releases_model(tmp_path):
     assert first_loader.models[0].model.calls == 2
 
     def fail_loader(*args):
-        raise AssertionError("完整缓存命中不应加载 Qwen3-VL")
+        raise AssertionError("a full cache hit should not load Qwen3-VL")
 
     second = _stack(tmp_path, fail_loader, cache_enabled=True)
     second.prepare_text_cache(
@@ -216,8 +213,6 @@ def test_cached_batch_miss_repairs_sidecar_after_prepare(tmp_path):
 
 
 def test_offload_model_round_trip():
-    """offload_model 把 TE 挪 CPU（DiT 独占显存）；ensure_model 搬回（Comfy
-    free_memory 语义）。未加载 / 重复调用安全 no-op。"""
     import torch
 
     from training.families.krea2.text_encoding import Krea2TextStack
@@ -235,21 +230,18 @@ def test_offload_model_round_trip():
         "unused-dir", device="cpu", cache_enabled=False,
         tokenizer=object(), model_loader=lambda *a: fake,
     )
-    stack.offload_model()          # 未加载 → no-op
+    stack.offload_model()
     assert fake.device_history == []
     assert stack.ensure_model() is fake
     stack.offload_model()
     assert fake.device_history == ["cpu"]
-    stack.offload_model()          # 重复 → no-op
+    stack.offload_model()
     assert fake.device_history == ["cpu"]
-    assert stack.ensure_model() is fake   # 搬回 self.device
+    assert stack.ensure_model() is fake
     assert fake.device_history == ["cpu", "cpu"]
 
 
 def test_manual_cast_patch_fp16_storage_fp32_compute():
-    """manual_cast 等价 patch（ComfyUI sd.py:258 口径）：权重 fp16 常驻，
-    Embedding 输出与 Linear 计算都进 fp32 域；fp16→fp32 cast 精确，数值与
-    整模 upcast 逐位一致。"""
 
     class _Tiny(torch.nn.Module):
         def __init__(self):
@@ -270,7 +262,7 @@ def test_manual_cast_patch_fp16_storage_fp32_compute():
     out = patched.proj(embedded)
     assert embedded.dtype == torch.float32
     assert out.dtype == torch.float32
-    assert patched.embed.weight.dtype == torch.float16    # 存储不动
+    assert patched.embed.weight.dtype == torch.float16
     assert patched.proj.weight.dtype == torch.float16
     expected = torch.nn.functional.linear(
         embedded, model.proj.weight.float(), model.proj.bias.float(),
@@ -279,7 +271,6 @@ def test_manual_cast_patch_fp16_storage_fp32_compute():
 
 
 def test_compute_dtype_none_leaves_model_unpatched():
-    """compute_dtype 缺省（训练路径现状）不 patch 任何模块。"""
     model = torch.nn.Linear(2, 2)
     stack = Krea2TextStack(
         "unused-dir", device="cpu", dtype=torch.float32, cache_enabled=False,
@@ -290,8 +281,6 @@ def test_compute_dtype_none_leaves_model_unpatched():
 
 
 def test_online_lru_skips_backbone_on_repeat_and_matches_first_encode(tmp_path):
-    """在线模式 prompt LRU：同 caption 二次编码零 backbone 调用，condition
-    与首次逐位一致（Comfy conditioning 节点缓存同款语义）。"""
     loader = _Loader()
     stack = _stack(tmp_path, loader, cache_enabled=False)
 
@@ -315,7 +304,7 @@ def test_online_lru_evicts_beyond_capacity(tmp_path):
     stack.encode_text_for_batch(["b"], device="cpu", dtype=torch.float32)
     stack.encode_text_for_batch(["c"], device="cpu", dtype=torch.float32)
 
-    assert not stack.online_conditions_cached(["a"])   # 最旧被逐出
+    assert not stack.online_conditions_cached(["a"])
     assert stack.online_conditions_cached(["b", "c"])
 
 
@@ -326,14 +315,13 @@ def test_online_lru_dedupes_batch_and_not_used_in_cached_mode(tmp_path):
     condition = stack.encode_text_for_batch(
         ["ab", "ab", "c"], device="cpu", dtype=torch.float32,
     )
-    assert condition.context.shape[0] == 3      # 重复 caption 仍按位置返回
+    assert condition.context.shape[0] == 3
 
     cached_stack = _stack(tmp_path, _Loader(), cache_enabled=True)
-    assert not cached_stack.online_conditions_cached(["ab"])  # cached 模式恒 False
+    assert not cached_stack.online_conditions_cached(["ab"])
 
 
 def test_precache_online_prompts_fills_lru_and_skips_hits(tmp_path):
-    """任务级预编码：miss 编码进 LRU（去重），已命中不再触发 backbone。"""
     loader = _Loader()
     stack = _stack(tmp_path, loader, cache_enabled=False)
 
@@ -343,9 +331,8 @@ def test_precache_online_prompts_fills_lru_and_skips_hits(tmp_path):
     calls = loader.models[0].model.calls
 
     assert stack.precache_online_prompts(["a", "b"]) == 0
-    assert loader.models[0].model.calls == calls  # 全命中零编码
+    assert loader.models[0].model.calls == calls
 
-    # 预编码后 encode_text_for_batch 命中 LRU，backbone 不再前向
     stack.encode_text_for_batch(["a", "b"], device="cpu", dtype=torch.float32)
     assert loader.models[0].model.calls == calls
 
@@ -354,11 +341,10 @@ def test_precache_online_prompts_noop_in_cached_mode(tmp_path):
     loader = _Loader()
     stack = _stack(tmp_path, loader, cache_enabled=True)
     assert stack.precache_online_prompts(["a", "b"]) == 0
-    assert loader.calls == 0  # cached 模式不加载模型
+    assert loader.calls == 0
 
 
 def test_precache_online_prompts_raises_capacity_for_large_tasks(tmp_path):
-    """多 prompt 任务（>16 条默认容量）：容量抬到本批需求，预编码不自逐出。"""
     loader = _Loader()
     stack = _stack(tmp_path, loader, cache_enabled=False)
     prompts = [f"p{i}" for i in range(20)]

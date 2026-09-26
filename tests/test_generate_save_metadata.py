@@ -1,6 +1,3 @@
-"""POST /api/generate/save 写 PNG metadata (anima_params + a1111 parameters)、
-GET /api/generate/disk/history 扫 PNG metadata、GET /api/generate/disk/image/*
-静态返回的覆盖测试。"""
 from __future__ import annotations
 
 import json
@@ -20,7 +17,6 @@ def _png_bytes(color: tuple[int, int, int] = (0, 0, 0), size: tuple[int, int] = 
 
 
 def _params(**overrides) -> dict:
-    """前端 snapshot shape：loras 是 name+ids（无 path），跟 paramsSnapshot.ts 对齐。"""
     base = {
         "schema_version": 1,
         "mode": "single",
@@ -75,9 +71,6 @@ def _post_xy_save(
     cells: list[tuple[int, int, dict]],
     task_id: int | None = None,
 ):
-    """XY save 帮手：composite + N 张 cell + cells_manifest 一次 multipart 发出去。
-
-    `cells` 每条 = (xi, yi, cell_params)；cell_params 是物化后的 single-snapshot。"""
     files: list[tuple[str, tuple[str, bytes, str]]] = [
         ("image", ("xy plot.png", _png_bytes(), "image/png")),
     ]
@@ -109,15 +102,12 @@ def test_save_writes_anima_params_text_block(client) -> None:
     assert "anima_params" in text
     parsed = json.loads(text["anima_params"])
     assert parsed["seed"] == 42
-    # server 端 enrich 强制 schema_version=2（即使前端传 1 也覆盖）
     assert parsed["schema_version"] == 2
-    # server 端 enrich 补 created_at + mode
     assert parsed["mode"] == "single"
     assert "created_at" in parsed
 
 
 def test_save_writes_a1111_parameters_text_block(client) -> None:
-    """a1111 兼容 `parameters` 块：ComfyUI / WebUI / Civitai 拖图能识别。"""
     tc, _ = client
     p = _params(
         seed=42, steps=20, cfg_scale=7.0, width=1024, height=1024,
@@ -136,13 +126,10 @@ def test_save_writes_a1111_parameters_text_block(client) -> None:
     text = _open_png_text(saved)
     assert "parameters" in text
     a1111 = text["parameters"]
-    # 第一行：prompt + <lora:name:scale> 嵌入
     first_line = a1111.split("\n", 1)[0]
     assert "1girl, anime" in first_line
-    assert "<lora:my-lora:0.8>" in first_line  # 注意 a1111 语法去 .safetensors
-    # 第二行：negative
+    assert "<lora:my-lora:0.8>" in first_line
     assert "Negative prompt: blurry" in a1111
-    # 第三行：参数串
     assert "Steps: 20" in a1111
     assert "CFG scale: 7.0" in a1111
     assert "Seed: 42" in a1111
@@ -150,7 +137,6 @@ def test_save_writes_a1111_parameters_text_block(client) -> None:
 
 
 def test_save_does_not_write_sidecar(client) -> None:
-    """sidecar 已砍 —— 同目录不应出现 image_N.json。"""
     tc, _ = client
     r = tc.post(
         "/api/generate/save",
@@ -160,7 +146,6 @@ def test_save_does_not_write_sidecar(client) -> None:
     assert r.status_code == 200
     saved = Path(r.json()["path"])
     assert not saved.with_suffix(".json").exists()
-    # 返回结构也没 sidecar 字段了
     assert "sidecar" not in r.json()
 
 
@@ -222,7 +207,6 @@ def test_disk_history_lists_entries_from_png_metadata(client) -> None:
 
 
 def test_disk_history_skips_png_without_anima_params(client) -> None:
-    """没有 anima_params tEXt 块的 PNG（老数据 / 客户端没传 params）不入列表。"""
     tc, test_dir = client
     single_dir = test_dir / "2026-01-01" / "single"
     single_dir.mkdir(parents=True)
@@ -234,11 +218,9 @@ def test_disk_history_skips_png_without_anima_params(client) -> None:
 
 
 def test_disk_history_skips_png_with_only_a1111_block(client) -> None:
-    """光有 a1111 parameters 块、没 anima_params 的 PNG 也跳过（避免半 entry）。"""
     tc, test_dir = client
     single_dir = test_dir / "2026-01-01" / "single"
     single_dir.mkdir(parents=True)
-    # 手工写一个只含 a1111 块的 PNG
     info = PngImagePlugin.PngInfo()
     info.add_text("parameters", "fake prompt\nSteps: 1, Sampler: x")
     img = Image.new("RGB", (8, 8))
@@ -250,7 +232,6 @@ def test_disk_history_skips_png_with_only_a1111_block(client) -> None:
 
 
 def test_disk_history_includes_xy_mode_entries(client) -> None:
-    """xy 模式的合成大图 + cell 文件夹走 disk-history。"""
     tc, _ = client
     _post_xy_save(
         tc,
@@ -283,7 +264,6 @@ def test_disk_image_serves_saved_file(client) -> None:
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
     assert len(r.content) > 0
-    # 落盘图加了 strong cache header（决策：内容稳定可强 cache）
     assert "max-age" in r.headers.get("cache-control", "")
 
 
@@ -296,12 +276,10 @@ def test_disk_image_validates_inputs(client) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 1a/1b 新功能：文件命名 v2 / migrate / thumb / DELETE / path safety
 # ---------------------------------------------------------------------------
 
 
 def test_save_uses_v2_filename(client) -> None:
-    """决策 #6：single v2 命名 'single image 1.png'，1-based。XY 见 test_save_xy_creates_folder。"""
     tc, _ = client
     r1 = tc.post(
         "/api/generate/save",
@@ -331,7 +309,6 @@ def test_save_sets_task_id_from_form_field(client) -> None:
 
 
 def test_save_atomic_write_no_tmp_remains(client, tmp_path) -> None:
-    """决策 #11：atomic write 不留 .tmp 文件。"""
     tc, test_dir = client
     tc.post(
         "/api/generate/save",
@@ -339,12 +316,10 @@ def test_save_atomic_write_no_tmp_remains(client, tmp_path) -> None:
         files={"image": ("a.png", _png_bytes(), "image/png")},
     )
     leftover = list((test_dir).rglob("*.tmp*"))
-    assert leftover == [], f"留有 atomic write tmp 文件: {leftover}"
+    assert leftover == [], f"leftover atomic-write tmp file(s): {leftover}"
 
 
 def test_save_xy_skips_a1111_block(client) -> None:
-    """决策 #7：XY composite PNG 不写 a1111 parameters 块（矩阵图单图对应不上）。
-    cell PNG 是 single-snapshot，**会**写 a1111 block。"""
     tc, _ = client
     r = _post_xy_save(
         tc,
@@ -359,7 +334,6 @@ def test_save_xy_skips_a1111_block(client) -> None:
     composite_text = _open_png_text(composite)
     assert "anima_params" in composite_text
     assert "parameters" not in composite_text
-    # cell 是 single-snapshot：anima_params + a1111 块都在
     cell = Path(r.json()["cells"][0])
     cell_text = _open_png_text(cell)
     assert "anima_params" in cell_text
@@ -367,9 +341,7 @@ def test_save_xy_skips_a1111_block(client) -> None:
 
 
 def test_disk_history_migrates_v1_to_v2(client, tmp_path) -> None:
-    """决策 #18：v1 PNG（lora_configs[].path）扫到后 migrate 成 v2（loras[].name 无 path）。"""
     tc, test_dir = client
-    # 手工写一个 v1 schema PNG
     v1_params = {
         "schema_version": 1,
         "mode": "single",
@@ -385,14 +357,13 @@ def test_disk_history_migrates_v1_to_v2(client, tmp_path) -> None:
     raw = _gen._inject_png_metadata(_png_bytes(), v1_params, mode="single")
     single_dir = test_dir / "2026-06-08" / "single"
     single_dir.mkdir(parents=True)
-    (single_dir / "image_0.png").write_bytes(raw)  # 故意用 v1 命名 image_N.png
+    (single_dir / "image_0.png").write_bytes(raw)
 
     r = tc.get("/api/generate/disk/history")
     entries = r.json()["entries"]
     assert len(entries) == 1
     params = entries[0]["params"]
     assert params["schema_version"] == 2
-    # v1 lora_configs[].path → v2 loras[].name basename（无 path 字段）
     assert "lora_configs" not in params
     assert params["loras"] == [
         {"name": "my-lora.safetensors", "scale": 0.8,
@@ -401,7 +372,6 @@ def test_disk_history_migrates_v1_to_v2(client, tmp_path) -> None:
 
 
 def test_disk_history_skips_tmp_files(client, tmp_path) -> None:
-    """atomic write 半途留下的 .tmp.png 不入历史。"""
     tc, test_dir = client
     single_dir = test_dir / "2026-06-08" / "single"
     single_dir.mkdir(parents=True)
@@ -443,7 +413,6 @@ def test_disk_delete_removes_file(client, tmp_path) -> None:
     entry = tc.get("/api/generate/disk/history").json()["entries"][0]
     path = Path(entry["path"])
     assert path.is_file()
-    # 从 entry 解析出 disk delete URL；后端校验路径
     encoded = entry["image_url"].rsplit("/", 1)[-1]
     delete_url = f"/api/generate/disk/{entry['date']}/{entry['mode']}/{encoded}"
     r = tc.delete(delete_url)
@@ -451,16 +420,13 @@ def test_disk_delete_removes_file(client, tmp_path) -> None:
     assert r.json()["ok"] is True
     assert r.json()["noop"] is False
     assert not path.is_file()
-    # 二次删 noop=True
     r2 = tc.delete(delete_url)
     assert r2.status_code == 200
     assert r2.json()["noop"] is True
 
 
 def test_disk_path_traversal_attack_blocked(client) -> None:
-    """安全：含 .. 的 path 必须 400。"""
     tc, _ = client
-    # FastAPI path param 默认不允许 / —— 但 `..%2F` URL encoded 可能逃过
     for evil in [
         "%2E%2E%2Fsecret.png",        # ../secret.png URL encoded
         "..%5Csecret.png",            # ..\secret.png URL encoded (Windows)
@@ -499,7 +465,6 @@ def test_save_disabled_returns_403(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 # ---------------------------------------------------------------------------
-# XY 文件夹布局（恢复 PreviewXYGrid 历史回看）
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +476,6 @@ def _xy_snapshot(*, x_raw: str = "10, 20, 30", y_raw: str | None = "3, 5") -> di
 
 
 def test_save_xy_creates_folder_with_composite_and_cells(client) -> None:
-    """XY save 落出 <date>/xy/xy plot N/{xy plot.png + cell x<i> y<j>.png ...}，无残留 tmp。"""
     tc, test_dir = client
     r = _post_xy_save(
         tc,
@@ -529,12 +493,10 @@ def test_save_xy_creates_folder_with_composite_and_cells(client) -> None:
     assert (folder / "xy plot.png").is_file()
     assert (folder / "cell x0 y0.png").is_file()
     assert (folder / "cell x1 y0.png").is_file()
-    # 无残留 tmp
     assert not list(folder.parent.glob(".xy plot *.tmp"))
 
 
 def test_save_xy_cell_carries_single_snapshot_and_xy_origin(client) -> None:
-    """cell PNG 是 single-snapshot：mode='single' + a1111 块 + xy_origin 链回 XY plot。"""
     tc, _ = client
     r = _post_xy_save(
         tc,
@@ -551,7 +513,7 @@ def test_save_xy_cell_carries_single_snapshot_and_xy_origin(client) -> None:
     cell1 = Path(r.json()["cells"][1])
     text = _open_png_text(cell1)
     assert "anima_params" in text
-    assert "parameters" in text  # single mode 写 a1111
+    assert "parameters" in text
     parsed = json.loads(text["anima_params"])
     assert parsed["mode"] == "single"
     assert parsed["steps"] == 20
@@ -560,7 +522,6 @@ def test_save_xy_cell_carries_single_snapshot_and_xy_origin(client) -> None:
 
 
 def test_save_xy_rejects_cell_xy_collision(client) -> None:
-    """两条 cell 同 (xi, yi) → 400."""
     tc, _ = client
     r = _post_xy_save(
         tc,
@@ -575,9 +536,7 @@ def test_save_xy_rejects_cell_xy_collision(client) -> None:
 
 
 def test_save_xy_rejects_cell_count_mismatch(client) -> None:
-    """cells_manifest 数 != cells 数 → 400."""
     tc, _ = client
-    # 手工拼一个 mismatch：1 file vs 2 manifest entries
     r = tc.post(
         "/api/generate/save",
         data={
@@ -598,13 +557,11 @@ def test_save_xy_rejects_cell_count_mismatch(client) -> None:
 
 
 def test_save_xy_folder_index_skips_legacy_files(client) -> None:
-    """残留的 legacy 平铺 `xy plot 7.png` 占位 → 新文件夹从 8 起，不撞号。"""
     tc, test_dir = client
     xy_dir = test_dir / "2026-06-08" / "xy"
     xy_dir.mkdir(parents=True)
     (xy_dir / "xy plot 7.png").write_bytes(_png_bytes())
 
-    # 把"今天"设成 2026-06-08
     from datetime import date as _date
     from studio.api.routers import generate as _gen
     class _FixedDate(_date):
@@ -627,7 +584,6 @@ def test_save_xy_folder_index_skips_legacy_files(client) -> None:
 
 
 def test_disk_history_xy_folder_entry_has_xy_meta(client) -> None:
-    """扫到 XY 文件夹时返回 xy_meta（per-cell 信息 + 直读 URL）。"""
     tc, _ = client
     _post_xy_save(
         tc,
@@ -652,16 +608,13 @@ def test_disk_history_xy_folder_entry_has_xy_meta(client) -> None:
     samples_by_pos = {(s["xy"]["xi"], s["xy"]["yi"]): s for s in meta["samples"]}
     assert samples_by_pos[(0, 0)]["xy"]["xv"] == "10"
     assert samples_by_pos[(1, 0)]["xy"]["xv"] == "20"
-    # image_url 已 encode（空格 → %20）
     assert "%20" in samples_by_pos[(0, 0)]["image_url"]
 
 
 def test_disk_history_skips_legacy_xy_flat_files(client) -> None:
-    """legacy 平铺 `xy plot N.png` 文件即便带 anima_params 也不出现在 history（用户决策 hide）。"""
     tc, test_dir = client
     xy_dir = test_dir / "2026-06-08" / "xy"
     xy_dir.mkdir(parents=True)
-    # 写一个带 anima_params 的 legacy 平铺文件
     info = PngImagePlugin.PngInfo()
     info.add_text("anima_params", json.dumps(_params(mode="xy")))
     Image.new("RGB", (8, 8)).save(xy_dir / "xy plot 99.png", format="PNG", pnginfo=info)
@@ -671,11 +624,9 @@ def test_disk_history_skips_legacy_xy_flat_files(client) -> None:
 
 
 def test_disk_history_skips_xy_folder_without_composite(client) -> None:
-    """文件夹存在但没 composite（半成品 / 手 mkdir）→ 跳过。"""
     tc, test_dir = client
     xy_dir = test_dir / "2026-06-08" / "xy" / "xy plot 1"
     xy_dir.mkdir(parents=True)
-    # 只有 cell，没 composite
     info = PngImagePlugin.PngInfo()
     info.add_text("anima_params", json.dumps(_params(mode="single")))
     Image.new("RGB", (8, 8)).save(xy_dir / "cell x0 y0.png", format="PNG", pnginfo=info)
@@ -685,7 +636,6 @@ def test_disk_history_skips_xy_folder_without_composite(client) -> None:
 
 
 def test_disk_xy_folder_delete_removes_recursively(client) -> None:
-    """DELETE /api/generate/disk/<date>/xy/<folder> → rmtree 整文件夹。"""
     tc, _ = client
     r = _post_xy_save(
         tc,
@@ -700,7 +650,6 @@ def test_disk_xy_folder_delete_removes_recursively(client) -> None:
     assert delete_r.status_code == 200
     assert delete_r.json()["noop"] is False
     assert not folder.exists()
-    # 二次删 noop=True
     assert tc.delete(url).json()["noop"] is True
 
 
@@ -718,48 +667,36 @@ def test_disk_xy_image_route_resolves_subpath(client) -> None:
     assert cell_r.status_code == 200
     assert cell_r.headers["content-type"] == "image/png"
     assert len(cell_r.content) > 0
-    # composite 也可读
     composite_r = tc.get(entry["image_url"])
     assert composite_r.status_code == 200
-    # thumb 也可读
     thumb_r = tc.get(entry["thumb_url"])
     assert thumb_r.status_code == 200
 
 
 def test_disk_xy_path_traversal_blocked(client) -> None:
-    """folder / filename 反 traversal：folder=`..` / 非法 folder name → 400."""
     tc, _ = client
-    # folder name 不符 `xy plot N`
     r1 = tc.get("/api/generate/disk/image/2026-06-08/xy/not%20a%20folder/cell.png")
     assert r1.status_code == 400
-    # date 非法
     r2 = tc.get("/api/generate/disk/image/bad-date/xy/xy%20plot%201/x.png")
     assert r2.status_code == 400
-    # filename 非法
     r3 = tc.get("/api/generate/disk/image/2026-06-08/xy/xy%20plot%201/..%2Fsecret.png")
     assert r3.status_code in (400, 404)
-    # DELETE 同样校验
     r4 = tc.delete("/api/generate/disk/2026-06-08/xy/bad%20folder")
     assert r4.status_code == 400
 
 
 # ---------------------------------------------------------------------------
-# _read_png_anima_params：手写 PNG chunk 扫描（替代 PIL.Image.open，~350× 提速）
-# 三种文本块 × ascii/latin-1/CJK + 负例，逐值与 PIL 读法一致。
 # ---------------------------------------------------------------------------
 
 
 def _write_png_with_anima(path: Path, params: dict, *, zip: bool) -> None:
     info = PngImagePlugin.PngInfo()
-    # add_text(zip=True) → zTXt；zip=False → tEXt；含非 latin-1（CJK）时 Pillow
-    # 自动 fallback 到 iTXt（两种 zip 都是）。reader 三种 chunk 都要能读。
     info.add_text("anima_params", json.dumps(params, ensure_ascii=False), zip=zip)
     Image.new("RGB", (8, 8)).save(path, format="PNG", pnginfo=info)
 
 
 @pytest.mark.parametrize("zip_flag", [True, False])
 def test_read_png_anima_params_ascii_roundtrip(tmp_path: Path, zip_flag: bool) -> None:
-    """ascii 内容：zip=True → zTXt，zip=False → tEXt，都要读出原 dict。"""
     from studio.api.routers import generate as _gen
     p = tmp_path / "a.png"
     params = _params(seed=123, prompts=["1girl, anime"])
@@ -768,11 +705,9 @@ def test_read_png_anima_params_ascii_roundtrip(tmp_path: Path, zip_flag: bool) -
 
 
 def test_read_png_anima_params_cjk_uses_itxt(tmp_path: Path) -> None:
-    """CJK 内容（ensure_ascii=False）→ Pillow 落 iTXt；reader utf-8 解出，逐值
-    与 PIL 读法一致（防 latin-1 误解码导致的静默乱码）。"""
     from studio.api.routers import generate as _gen
     p = tmp_path / "a.png"
-    params = _params(prompts=["1girl, 白发, 红眼"], negative_prompt="模糊")
+    params = _params(prompts=["1girl, white hair, red eyes"], negative_prompt="blurry")
     _write_png_with_anima(p, params, zip=True)
     out = _gen._read_png_anima_params(p)
     assert out == params
@@ -782,7 +717,6 @@ def test_read_png_anima_params_cjk_uses_itxt(tmp_path: Path) -> None:
 
 
 def test_read_png_anima_params_missing_returns_none(tmp_path: Path) -> None:
-    """没有 anima_params 块（只有像素 / 只有 a1111 parameters 块）→ None。"""
     from studio.api.routers import generate as _gen
     p = tmp_path / "a.png"
     Image.new("RGB", (8, 8)).save(p, format="PNG")
@@ -794,10 +728,9 @@ def test_read_png_anima_params_missing_returns_none(tmp_path: Path) -> None:
 
 
 def test_read_png_anima_params_non_png_returns_none(tmp_path: Path) -> None:
-    """非 PNG / 截断文件 → None（不抛）。"""
     from studio.api.routers import generate as _gen
     p = tmp_path / "a.png"
     p.write_bytes(b"not a png file at all")
     assert _gen._read_png_anima_params(p) is None
-    p.write_bytes(b"\x89PNG\r\n\x1a\n")  # 只有签名，无 chunk
+    p.write_bytes(b"\x89PNG\r\n\x1a\n")
     assert _gen._read_png_anima_params(p) is None

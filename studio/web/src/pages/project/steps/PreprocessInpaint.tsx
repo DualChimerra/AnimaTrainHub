@@ -507,7 +507,7 @@ export default function PreprocessInpaintPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Tool panel（right side）
+// Tool panel (right side)
 // ---------------------------------------------------------------------------
 
 function ToolPanel({

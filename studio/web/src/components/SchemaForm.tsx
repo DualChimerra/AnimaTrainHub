@@ -9,16 +9,16 @@ interface Props {
   schema: SchemaResponse
   values: ConfigData
   onChange: (values: ConfigData) => void
-  /** 这些字段名将以 readonly / disabled 渲染（项目特定 / 全局控制）。 */
+  /** These field names render as readonly / disabled (project-specific / global control). */
   disabledFields?: string[]
-  /** 每个 disabled 字段的徽章；缺省走 Field 默认「自动 · 项目控制」。
-   * 支持 ReactNode 以便嵌入可点击链接（如跳到 Settings 对应区段）。 */
+  /** Badge for each disabled field; defaults to Field's built-in "auto - project controlled".
+   * Supports ReactNode so a clickable link can be embedded (e.g. jump to the matching Settings section). */
   disabledHints?: Record<string, React.ReactNode>
-  /** 字段不 disabled 但要挂个徽章（如「自动 · 项目设置」表示项目预填了，
-   * 但仍允许用户修改）。优先级：disabledHints > autoHints。 */
+  /** A field isn't disabled but still gets a badge (e.g. "auto - project setting" meaning the project pre-filled it,
+   * but the user can still edit it). Priority: disabledHints > autoHints. */
   autoHints?: Record<string, React.ReactNode>
-  /** 字段右侧额外按钮槽（如「↺ 重置为全局默认」）。仅对 string/path 字段
-   * 生效；按字段名查表。 */
+  /** Extra button slot to the right of a field (e.g. "reset to global default"). Only applies to string/path fields;
+   * looked up by field name. */
   fieldSuffixes?: Record<string, React.ReactNode>
   /** false = hide fields marked advanced. The app always shows everything. */
   advancedMode?: boolean
@@ -34,9 +34,9 @@ interface Props {
   emptyHint?: string
 }
 
-/** 计算当前 advancedMode 下哪些 group 至少有一个可见字段（用于侧栏锚点导航）。
- * 与下面的 buckets 逻辑保持一致：跳过 hidden / 跳过 advanced（简单模式下）。
- * 不考虑 show_when —— 那是 per-field 动态，section header 仍按 bucket 渲染。 */
+/** Computes which groups have at least one visible field under the current advancedMode (used for sidebar anchor navigation).
+ * Kept consistent with the buckets logic below: skips hidden / skips advanced (in simple mode).
+ * Doesn't account for show_when -- that's per-field and dynamic; the section header still renders by bucket. */
 export function visibleSchemaGroups(
   schema: SchemaResponse,
   advancedMode: boolean,
@@ -54,9 +54,9 @@ export function visibleSchemaGroups(
 }
 
 /**
- * 按 schema.groups 分区渲染表单：每组一条小标题（名称 · 键 · 字段数），下面是
- * 字段行（mockup .subgroup / .field）。show_when 用 evalShowWhen 做条件显示，
- * 依赖当前 values。
+ * Renders the form partitioned by schema.groups: each group gets a small heading (name - key - field count), followed
+ * by the field rows (mockup .subgroup / .field). show_when uses evalShowWhen for conditional display,
+ * depending on the current values.
  */
 export default function SchemaForm({
   schema, values, onChange, disabledFields, disabledHints, autoHints, fieldSuffixes, advancedMode = true,
@@ -73,18 +73,18 @@ export default function SchemaForm({
   const takeoverValueForField = (prop: typeof props[string]) =>
     prop.disable_value ?? prop.default
 
-  /** R6 确认弹窗的待决改动（非空时渲染 RuleImpactDialog）。 */
+  /** Pending change for the R6 confirmation dialog (renders RuleImpactDialog when non-null). */
   const [pendingImpact, setPendingImpact] = useState<{
     trigger: { field: string; from: unknown; to: unknown }
     next: ConfigData
     writes: RuleImpactChange[]
   } | null>(null)
 
-  /** 某次改动落地后规则会写哪些字段（有损清单：目标值 ≠ 当前值才列入）。
-   * 来源：① disable_when takeover（reset 到 disable_value / default）；
-   * ② advisory 改写 —— 切到 automagic 时 learning_rate 建议 1e-6
-   *（upstream ostris/ai-toolkit + diffusion-pipe 默认；AdamW 量级 lr 起跑
-   * 会让 sign-agreement 自适应慢 ~100× 才收敛）。 */
+  /** Which fields a rule will write once a change lands (a lossy list: only included if target value != current value).
+   * Sources: (1) disable_when takeover (resets to disable_value / default);
+   * (2) advisory rewrite -- switching to automagic suggests learning_rate 1e-6
+   * (matches upstream ostris/ai-toolkit + diffusion-pipe defaults; starting at AdamW-scale lr would make
+   * sign-agreement's adaptation converge ~100x slower). */
   const computeRuleWrites = (
     next: ConfigData, triggerField: string,
   ): RuleImpactChange[] => {
@@ -111,10 +111,10 @@ export default function SchemaForm({
     return writes
   }
 
-  // setField 入口拦截（R6，D6）：违反态不进表单 state —— 有损联动改值先弹
-  // 确认（确认 = 触发改动 + 全部联动写值一次性提交；取消 = 什么都不发生），
-  // 无损（联动目标本来就在钉值上）静默应用。model_family 不在任何 disable_when
-  // 里出现，族切换仍由调用方（Train/Presets 的 onFormChange）拦去 FamilySwitchDialog。
+  // setField entry point interception (R6, D6): a violating state never enters form state -- a lossy chained
+  // change pops a confirmation first (confirm = trigger the change + commit every chained write in one go;
+  // cancel = nothing happens), a lossless one (the chained target is already pinned to that value) applies silently.
+  // model_family never appears in any disable_when, family switching is still intercepted by the caller (Train/Presets' onFormChange) into FamilySwitchDialog.
   const setField = (name: string, v: unknown) => {
     const next = { ...values, [name]: v }
     const writes = computeRuleWrites(next, name)
@@ -129,10 +129,10 @@ export default function SchemaForm({
     })
   }
 
-  // 兜底静默 takeover：外部写路径（config 载入 / disabledFields 变化）带进来的
-  // 违反态直接修正，不弹窗（用户没有触发动作，弹窗无从「取消」）。正常交互
-  // 路径经 setField 拦截后不会走到这里。老 config 同开的互斥由后端
-  // _tolerant_validate 的 gate-first 修复 + defaulted_fields banner 处理。
+  // Fallback silent takeover: a violating state brought in via an external write path (config load / disabledFields
+  // change) is corrected directly, no dialog (the user didn't trigger an action, so a dialog would have nothing to
+  // "cancel"). The normal interaction path never reaches here once intercepted by setField. Mutual exclusion on an
+  // old config that has both set is handled by the backend's _tolerant_validate gate-first fix + the defaulted_fields banner.
   useEffect(() => {
     let nextValues = values
     let changed = false
@@ -145,13 +145,13 @@ export default function SchemaForm({
       }
     }
     if (changed) onChange(nextValues)
-    // 故意只监听 values；onChange / props 引用稳定，加进去会无限循环。
+    // Intentionally only watches values; onChange / props references are stable, adding them would cause an infinite loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [values])
 
-  // 按 group 分桶。hidden=true 的字段直接跳过：值仍由 ConfigData 透传（PUT 时不丢），
-  // 只是不在 UI 上渲染。如果一个组所有字段都 hidden，下面 `fields.length === 0`
-  // 会让整个 section 自动消失。
+  // Bucketed by group. Fields with hidden=true are skipped outright: the value still passes through via ConfigData
+  // (not lost on PUT), it's just not rendered in the UI. If every field in a group is hidden, `fields.length === 0`
+  // below makes the whole section disappear automatically.
   const buckets = new Map<string, string[]>()
   for (const [name, prop] of Object.entries(props)) {
     if (prop.hidden) continue
@@ -179,8 +179,8 @@ export default function SchemaForm({
         </div>
         {fields.map((name) => {
           const prop = props[name]
-          // disable_when（schema 驱动条件 disable，如 Prodigy → lr_scheduler）
-          // 优先级低于全局 disabledFields（项目预填）。
+          // disable_when (schema-driven conditional disable, e.g. Prodigy -> lr_scheduler)
+          // has lower priority than the global disabledFields (project pre-fill).
           const conditionallyDisabled = shouldDisableField(prop)
           const isDisabled =
             disabledSet.has(name) || conditionallyDisabled
@@ -194,9 +194,9 @@ export default function SchemaForm({
             evalShowWhen(prop.alt_description_when, values)
               ? schemaAltDescription(name, prop.alt_description, t)
               : schemaDescription(name, prop.description, t)
-          // option_show_when：按当前 values 过滤下拉选项（多模型 P4-2）。
-          // 当前已选中的值即使被门控也保留——表单如实反映 config，
-          // 越族值由后端校验报错，不在 UI 里凭空消失。
+          // option_show_when: filters the dropdown options by the current values (multi-model P4-2).
+          // The currently selected value is kept even if gated out -- the form should reflect the config as-is,
+          // cross-family values are reported by backend validation, not silently dropped from the UI.
           const gates = prop.option_show_when
           const enumOptions = gates
             ? (prop.enum ?? []).filter(
@@ -205,8 +205,8 @@ export default function SchemaForm({
                   String(opt) === String(values[name] ?? '')
               )
             : undefined
-          // option_disable_when：命中的选项灰显不可选（D4：不隐藏，
-          // 用户能看见为什么不可选——title 显示 disable_hint）。
+          // option_disable_when: matched options are grayed out and unselectable (D4: not hidden,
+          // the user can see why it's disabled -- the title shows disable_hint).
           const dGates = prop.option_disable_when
           const disabledEnumOptions = dGates
             ? Object.keys(dGates).filter((opt) =>

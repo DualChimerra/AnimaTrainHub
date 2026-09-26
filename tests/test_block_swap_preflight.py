@@ -118,7 +118,7 @@ def test_bf16_on_32g_ram_rejects_26_blocks() -> None:
     result = _evaluate(file_bytes=_BF16_BYTES, blocks_to_swap=26)
 
     assert result.checked and not result.ok
-    assert "锁定" in result.message
+    assert "pinned" in result.message
 
 
 def test_bf16_on_32g_ram_recommends_a_tight_value_and_says_so() -> None:
@@ -131,7 +131,7 @@ def test_bf16_on_32g_ram_recommends_a_tight_value_and_says_so() -> None:
     result = _evaluate(file_bytes=_BF16_BYTES, blocks_to_swap=26)
 
     assert result.recommended is not None
-    assert "刚好装下权重" in result.message
+    assert "just barely fits the weights" in result.message
     assert "fp8" in result.message
 
 
@@ -139,7 +139,7 @@ def test_fp8_recommendation_is_not_flagged_tight() -> None:
     """Control: fp8 base model has a setting with enough headroom, and shouldn't carry a "tight" warning."""
     result = _evaluate(blocks_to_swap=0)
 
-    assert "刚好装下权重" not in result.message
+    assert "just barely fits the weights" not in result.message
 
 
 def test_no_workable_swap_count_when_ram_is_small() -> None:
@@ -261,7 +261,7 @@ def test_run_raises_with_recommendation(monkeypatch) -> None:
     monkeypatch.setattr(sysmem, "gpu_free_bytes_global", lambda: _FREE_VRAM_12G)
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: _AVAIL_RAM_32G)
 
-    with pytest.raises(RuntimeError, match="建议"):
+    with pytest.raises(RuntimeError, match="Suggestion"):
         preflight.run(_ctx())
 
 

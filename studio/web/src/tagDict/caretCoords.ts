@@ -1,9 +1,9 @@
-/** 计算 input/textarea 内 caret 的像素坐标（相对元素左上角，已考虑 border / padding）。
+/** Computes the caret's pixel coordinates inside an input/textarea (relative to the element's top-left, accounting for border / padding).
  *
- * 经典 "mirror div" 算法：拿目标元素的所有相关样式建一个隐藏 div，把内容填到
- * cursor 位置 + 一个 marker span，量 span 的 offset 就是 caret 在元素内的坐标。
+ * The classic "mirror div" algorithm: build a hidden div copying all of the target element's relevant styles, fill
+ * it with content up to the cursor position plus a marker span, and the span's offset is the caret's coordinates within the element.
  *
- * 改编自 component/textarea-caret-position (MIT)。
+ * Adapted from component/textarea-caret-position (MIT).
  */
 
 const PROPS_TO_COPY = [
@@ -41,11 +41,11 @@ const PROPS_TO_COPY = [
 ] as const
 
 export interface CaretCoords {
-  /** caret 顶部 y（相对元素左上角，含 border + padding 偏移）。 */
+  /** Top y of the caret (relative to the element's top-left, including border + padding offset). */
   top: number
-  /** caret 左侧 x。 */
+  /** Left x of the caret. */
   left: number
-  /** 单行行高（让调用方知道 caret 下边在哪、popover 跳几像素合适）。 */
+  /** Single-line line height (lets the caller know where the caret's bottom edge is, for sizing the popover offset). */
   height: number
 }
 
@@ -67,17 +67,17 @@ export function getCaretCoordinates(
   style.left = '0'
 
   for (const prop of PROPS_TO_COPY) {
-    // CSSStyleDeclaration 索引签名兼容性问题：直接当 record 写
+    // CSSStyleDeclaration index-signature compatibility issue: just write to it as a plain record
     ;(style as unknown as Record<string, string>)[prop] = computed[prop as keyof CSSStyleDeclaration] as string
   }
 
-  // input：单行强制 nowrap；空白要变成 nbsp 让 div 不折叠
+  // input: single line forces nowrap; whitespace must become nbsp so the div doesn't collapse it
   let pre = element.value.substring(0, position)
   if (isInput) pre = pre.replace(/\s/g, ' ')
   div.textContent = pre
 
   const span = document.createElement('span')
-  // 用 cursor 处的字符当 marker；缺字符（cursor 在末尾）就用 '.'
+    // Uses the character at the cursor as the marker; if there's none (cursor at the end), fall back to '.'
   span.textContent = element.value.substring(position) || '.'
   div.appendChild(span)
 

@@ -1,8 +1,3 @@
-"""curation 模块：folder ops + remove/has_train_images。
-
-`copy_*` / `list_*` / 去重 等 train-scope 行为见 test_curation_train_scope.py /
-test_duplicates_train_scope.py。
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -97,7 +92,7 @@ def test_delete_folder_clears_train_copies(env) -> None:
         )
     assert not _train_dir(env, "5_concept").exists()
     pdir = projects.project_dir(env["p"]["id"], env["p"]["slug"])
-    assert (pdir / "download" / "1.png").exists()  # download 不动
+    assert (pdir / "download" / "1.png").exists()
 
 
 # ---------------------------------------------------------------------------

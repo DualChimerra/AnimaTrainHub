@@ -1,17 +1,17 @@
-"""PyTorch 装包检测 + 一键重装服务（PR-S2 / PR-S2.1）。
+"""PyTorch install detection + one-click reinstall service (PR-S2 / PR-S2.1).
 
-为什么单立一个 service：
-- requirements.txt 写 `torch>=2.0.0` 不指 `--index-url`，pip 默认装 CPU wheel —— 用户
-  有 NVIDIA GPU 的常态是 PR-4 启动期警告，但**已有 venv** 用户不会被自动修。
-- onnxruntime_setup 已有现成的 detect_cuda（nvidia-smi 探针）+ pip helper 模式，本
-  service 同构：detect_torch / recommend_index_url / reinstall。
-- UI（Settings → 训练 → PyTorch section）和 CLI 都走这套 API，单一 source of truth。
+Why this gets its own service:
+- requirements.txt writes `torch>=2.0.0` without an `--index-url`, so pip installs the CPU wheel by default -- for a
+  user with an NVIDIA GPU, the usual outcome is a PR-4 startup warning, but a user with an **existing venv** won't get auto-fixed.
+- onnxruntime_setup already has a ready-made detect_cuda (nvidia-smi probe) + pip helper pattern; this
+  service mirrors it: detect_torch / recommend_index_url / reinstall.
+- The UI (Settings -> Training -> PyTorch section) and the CLI both go through this same API, a single source of truth.
 
-设计要点：
+Design notes:
 - `pip uninstall torch torchvision -y && pip install torch torchvision --index-url <cu>`
-  —— 不带 `--upgrade`；显式 reinstall 强制走指定 index-url
-- 驱动版本 → cu wheel 映射保守取「该驱动能跑的最高 cu」（NVIDIA 向下兼容文档）
-- timeout 30 分钟（torch + cuda 依赖 ~3 GB，慢网常见）
+  -- no `--upgrade`; an explicit reinstall always forces the given index-url
+- Driver version -> cu wheel mapping conservatively takes "the highest cu that driver can run" (per NVIDIA's backward-compat docs)
+- timeout of 30 minutes (torch + cuda deps are ~3 GB, common on slow connections)
 """
 from __future__ import annotations
 
@@ -29,16 +29,16 @@ from . import onnxruntime as onnxruntime_setup
 
 logger = logging.getLogger(__name__)
 
-# PyTorch 公布的 wheel index URLs。https://download.pytorch.org/whl/<tag>
-# 顺序：从新到老，auto 选第一个驱动支持的。新 cu 加进来时插在列首。
+# Wheel index URLs published by PyTorch. https://download.pytorch.org/whl/<tag>
+# Order: newest to oldest; auto picks the first one the driver supports. New cu tags are inserted at the front.
 SUPPORTED_INDEX_TAGS: tuple[str, ...] = ("cu128", "cu126", "cu124", "cu118", "cpu")
 
-# 驱动版本 -> 该驱动能跑的 PyTorch CUDA wheel tag。NVIDIA 驱动向下兼容（新驱动跑老 cu）。
-# 阈值取 NVIDIA 官方 CUDA Toolkit Release Notes 的「Driver Required」。
-# 来源：https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id5
+# Driver version -> the PyTorch CUDA wheel tag that driver can run. NVIDIA drivers are backward compatible (a newer driver can run an older cu).
+# Thresholds taken from NVIDIA's official CUDA Toolkit Release Notes "Driver Required" column.
+# Source: https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#id5
 _DRIVER_TO_BEST_CU: tuple[tuple[float, str], ...] = (
     (555.0, "cu128"),  # CUDA 12.8 → driver R555+
-    (550.0, "cu126"),  # CUDA 12.6 → driver R550+ (12.6 ≈ 同档)
+    (550.0, "cu126"),  # CUDA 12.6 -> driver R550+ (12.6 is about the same tier)
     (545.0, "cu124"),  # CUDA 12.4 → driver R545+
     (470.0, "cu118"),  # CUDA 11.8 → driver R470+
 )
@@ -47,14 +47,14 @@ PYPI_INDEX_BASE = "https://download.pytorch.org/whl"
 
 
 def _index_url_for(tag: str) -> Optional[str]:
-    """`cu128` → `https://download.pytorch.org/whl/cu128`；`cpu` → 同；非法 → None。"""
+    """`cu128` -> `https://download.pytorch.org/whl/cu128`; `cpu` -> same; invalid -> None."""
     if tag not in SUPPORTED_INDEX_TAGS:
         return None
     return f"{PYPI_INDEX_BASE}/{tag}"
 
 
 def recommend_cu_tag(driver_version: Optional[str]) -> str:
-    """根据 NVIDIA 驱动版本返回推荐 cu tag；驱动太旧 / 没驱动 → 'cpu'。"""
+    """Returns the recommended cu tag based on the NVIDIA driver version; driver too old / no driver -> 'cpu'."""
     if not driver_version:
         return "cpu"
     try:
@@ -68,15 +68,15 @@ def recommend_cu_tag(driver_version: Optional[str]) -> str:
 
 
 def detect_torch() -> dict[str, Any]:
-    """读 dist-info + import 后探针，返回当前 torch 状态。
+    """Reads dist-info + probes after import, returning the current torch status.
 
-    `cuda_build`：
+    `cuda_build`:
     - 'cu128' / 'cu126' / 'cu124' / 'cu118' —— PyTorch CUDA wheel
-    - 'cpu' —— CPU-only wheel（torch.version.cuda is None）
-    - None —— torch 未装
+    - 'cpu' -- a CPU-only wheel (torch.version.cuda is None)
+    - None -- torch is not installed
 
-    `cuda_available` 表示 `torch.cuda.is_available()` —— 装了 CUDA wheel 也可能因驱动 /
-    WSL 问题为 False。
+    `cuda_available` reflects `torch.cuda.is_available()` -- even with a CUDA wheel installed, this can still be
+    False due to a driver / WSL issue.
     """
     try:
         installed_version = _pkg_version("torch")
@@ -94,17 +94,17 @@ def detect_torch() -> dict[str, Any]:
     device_name: Optional[str] = None
     try:
         import torch  # type: ignore[import-not-found]  # noqa: PLC0415
-        # torch.__version__ 形如 "2.5.0+cu128" / "2.5.0+cpu" / "2.5.0"
+        # torch.__version__ looks like "2.5.0+cu128" / "2.5.0+cpu" / "2.5.0"
         m = re.search(r"\+(cu\d+|cpu)$", torch.__version__)
         if m:
             cuda_build = m.group(1)
         else:
-            # 兼容旧 build 没 + 后缀的情况，靠 torch.version.cuda
+            # Compat for old builds without a + suffix, falls back to torch.version.cuda
             cuda_v = getattr(torch.version, "cuda", None)
             if cuda_v is None:
                 cuda_build = "cpu"
             else:
-                # cuda_v 形如 "12.8"；映射到 wheel tag
+                # cuda_v looks like "12.8"; map it to a wheel tag
                 clean = cuda_v.replace(".", "")
                 cuda_build = f"cu{clean}"
         cuda_available = bool(torch.cuda.is_available())
@@ -126,18 +126,18 @@ def detect_torch() -> dict[str, Any]:
 
 
 def current_status() -> dict[str, Any]:
-    """打包给 UI 用：torch 状态 + 驱动检测 + 推荐 cu tag。"""
+    """Packaged for the UI: torch status + driver detection + recommended cu tag."""
     torch_state = detect_torch()
     cuda_detect = onnxruntime_setup.detect_cuda()
     recommended = recommend_cu_tag(cuda_detect.get("driver_version"))
 
-    # 误装诊断：装了 CPU wheel 但有 NVIDIA GPU → UI 应该显著提示
+    # Misinstall diagnosis: a CPU wheel installed but there's an NVIDIA GPU -> the UI should surface this prominently
     is_cpu_with_gpu = (
         torch_state["installed"]
         and torch_state["cuda_build"] == "cpu"
         and cuda_detect["available"]
     )
-    # 装了 CUDA wheel 但 cuda.is_available()=False → 驱动 / WSL 问题，不是 pip 能修的
+    # A CUDA wheel installed but cuda.is_available()=False -> a driver / WSL issue, not something pip can fix
     is_cuda_build_unavailable = (
         torch_state["installed"]
         and torch_state["cuda_build"] not in (None, "cpu")
@@ -159,11 +159,11 @@ def current_status() -> dict[str, Any]:
 
 
 def _pip(args: list[str], timeout: int = 1800, stream: bool = False) -> tuple[int, str]:
-    """跑 `<sys.executable> -m pip <args>`；返回 (rc, combined_output)。
+    """Runs `<sys.executable> -m pip <args>`; returns (rc, combined_output).
 
-    timeout 默认 30 分钟 —— torch + cuda 依赖打包后 ~3 GB，慢网下一小时也可能。
-    stream=True：输出直接透传到终端（launch 场景用），不捕获，返回空字符串。
-    stream=False（默认）：捕获并返回文本（API 端点 / 日志用）。
+    Default timeout is 30 minutes -- torch + cuda deps packaged together are ~3 GB, which can take up to an hour on a slow connection.
+    stream=True: output is piped straight through to the terminal (used by the launch scenario), not captured, returns an empty string.
+    stream=False (default): captures and returns the text (used by the API endpoint / logs).
     """
     cmd = [sys.executable, "-m", "pip", *args]
     logger.info("[torch_setup] %s", " ".join(cmd))
@@ -179,17 +179,17 @@ def _pip(args: list[str], timeout: int = 1800, stream: bool = False) -> tuple[in
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        return 1, f"pip 超时（{timeout}s）: {exc}"
+        return 1, f"pip timed out ({timeout}s): {exc}"
     except Exception as exc:  # noqa: BLE001
-        return 1, f"pip 调用失败: {exc}"
+        return 1, f"pip call failed: {exc}"
     text = (out.stdout or "") + (out.stderr or "")
     return out.returncode, text
 
 
 def _decide_target_tag(target: str) -> str:
-    """auto / cu128 / cu126 / cu124 / cu118 / cpu → 实际 cu tag。
+    """auto / cu128 / cu126 / cu124 / cu118 / cpu -> the actual cu tag.
 
-    'auto' → 用 nvidia-smi 推荐；其它直传。非法值抛 ValueError。
+    'auto' -> uses the nvidia-smi recommendation; other values pass through as-is. An invalid value raises ValueError.
     """
     if target == "auto":
         return recommend_cu_tag(onnxruntime_setup.detect_cuda().get("driver_version"))
@@ -201,15 +201,15 @@ def _decide_target_tag(target: str) -> str:
 
 
 def _cleanup_zombie_dirs() -> list[str]:
-    """清掉 site-packages 里 pip 失败时留下的 `~*` 僵尸目录。
+    """Cleans up `~*` zombie directories left in site-packages by a failed pip run.
 
-    pip uninstall / install 失败后会留下 `~orch-...dist-info/`、`~orchvision/`
-    一类的临时目录（前缀 `~` 是 pip 的占位符表示「正在重命名中」）。这些目录会
-    导致下次 pip 装新 torch 时报 `Ignoring invalid distribution ~orch`，更严重
-    的是让 `import torch` 看到残留 dist-info 但实际 .pyd 缺失。
+    A failed pip uninstall / install can leave behind temp directories like `~orch-...dist-info/`,
+    `~orchvision/` (the `~` prefix is pip's placeholder meaning "currently being renamed").  These directories
+    can cause the next pip install of torch to report `Ignoring invalid distribution ~orch`, and worse,
+    can make `import torch` see leftover dist-info while the actual .pyd is missing.
 
-    返回清理掉的路径列表，给日志用。Linux 上 site-packages 同样可能有 `~`-prefix
-    残留（极少见但 pip 行为相同），所以不用 platform-skip。
+    Returns the list of cleaned-up paths, for logging. Linux site-packages can also have `~`-prefixed
+    leftovers (rare, but pip behaves the same way there), so this isn't platform-skipped.
     """
     site_packages = Path(sysconfig.get_path("purelib"))
     cleaned: list[str] = []
@@ -223,42 +223,42 @@ def _cleanup_zombie_dirs() -> list[str]:
                 entry.unlink()
             cleaned.append(entry.name)
         except OSError as exc:
-            logger.warning("[torch_setup] 清理僵尸目录 %s 失败: %s", entry, exc)
+            logger.warning("[torch_setup] failed to clean up zombie directory %s: %s", entry, exc)
     if cleaned:
-        logger.info("[torch_setup] 清理 pip 僵尸目录: %s", ", ".join(cleaned))
+        logger.info("[torch_setup] cleaned up pip zombie directories: %s", ", ".join(cleaned))
     return cleaned
 
 
 def reinstall(target: str = "auto", stream: bool = False) -> dict[str, Any]:
-    """卸装 torch + torchvision，按 target 重装。
+    """Uninstalls torch + torchvision, then reinstalls per target.
 
     target: "auto" | "cu128" | "cu126" | "cu124" | "cu118" | "cpu"
-    返回 `{"target", "tag", "index_url", "version", "stdout_tail",
-            "restart_required": True, "cleaned_zombies": [...]}`。
-    失败抛 RuntimeError。
+    Returns `{"target", "tag", "index_url", "version", "stdout_tail",
+            "restart_required": True, "cleaned_zombies": [...]}`.
+    Raises RuntimeError on failure.
 
-    **重要**：torch 是 C extension，pip 卸装重装后**当前进程**已 import 的 .so/.pyd
-    不会热替换。Server 进程 import 过 torch 时，pip uninstall 也会撞 [WinError 5]。
-    所以本函数应在 launcher 进程跑（pending_install.apply_pending 调用），不在 server
-    进程的 `/api/torch/reinstall` 端点里同步跑（那里只写 marker）。
+    **Important**: torch is a C extension, so after a pip uninstall/reinstall, the .so/.pyd already imported into the
+    **current process** won't hot-swap. If the server process has already imported torch, pip uninstall will also hit [WinError 5].
+    So this function should run in the launcher process (called via pending_install.apply_pending), not run synchronously
+    in the server process's `/api/torch/reinstall` endpoint (that endpoint only writes the marker).
 
-    自愈：每次都先清 site-packages 里 `~*` 僵尸目录（之前失败留下的状态）。
+    Self-healing: always cleans up `~*` zombie directories in site-packages first (leftover state from a previous failure).
     """
     tag = _decide_target_tag(target)
     index_url = _index_url_for(tag)
 
-    # 第一步：清掉之前失败可能留下的僵尸目录。即使本次本来就没状态污染，也是
-    # cheap operation（site-packages 列目录 + glob '~*'），代价微乎其微。
+    # Step 1: clean up any zombie directories a previous failure may have left behind. Even if there's no
+    # leftover state this time, it's a cheap operation (listing site-packages + globbing '~*'), so the cost is negligible.
     cleaned = _cleanup_zombie_dirs()
 
-    # 第二步：卸装 torch + torchvision（user-installed flash_attn / xformers 等不动，
-    # 跟 torch ABI 强绑定，但卸装 torch 不会自动卸它们 —— 用户重启后再 enable / 重装）
+    # Step 2: uninstall torch + torchvision (user-installed flash_attn / xformers etc. are left alone,
+    # even though they're tightly ABI-bound to torch -- uninstalling torch doesn't automatically uninstall them; the user re-enables / reinstalls them after restarting)
     rc1, log1 = _pip(["uninstall", "-y", "torch", "torchvision"], stream=stream)
 
-    # 卸装后再清一次僵尸目录（pip 卸装失败也可能留 `~`-prefix 残留）
+    # Clean zombie directories once more after uninstalling (a failed pip uninstall can also leave `~`-prefixed leftovers)
     cleaned += _cleanup_zombie_dirs()
 
-    # 第三步：安装。cu* 走 PyTorch 自家 index；cpu 也有自己的 index（不走 PyPI 默认避免歧义）
+    # Step 3: install. cu* goes through PyTorch's own index; cpu also has its own index (not the PyPI default, to avoid ambiguity)
     install_args = ["install", "torch", "torchvision"]
     if index_url:
         install_args += ["--index-url", index_url]
@@ -269,7 +269,7 @@ def reinstall(target: str = "auto", stream: bool = False) -> dict[str, Any]:
     stdout = log1 + log2
     tail = "\n".join(stdout.splitlines()[-40:])
 
-    # dist-info 视角的新版本（进程里仍是旧 .pyd / .so）
+    # The new version from dist-info's perspective (the process still has the old .pyd / .so loaded)
     try:
         new_version = _pkg_version("torch")
     except PackageNotFoundError:

@@ -1,11 +1,11 @@
-"""命令行 / 交互模式入口：parse_args + prompt_for_args。
+"""CLI / interactive mode entry point: parse_args + prompt_for_args.
 
-抽自原 runtime/anima_train.py L1963-2103（ADR 0003 PR-A）。被 test_anima_train_migration.py
-直接调 parse_args / apply_yaml_config。
+Extracted from the original runtime/anima_train.py L1963-2103 (ADR 0003 PR-A).
+Called directly by test_anima_train_migration.py via parse_args / apply_yaml_config.
 
-公开：
-- parse_args — 走 studio.argparse_bridge.build_parser，从 TrainingConfig 自动生成
-- prompt_for_args — 交互模式补缺失字段
+Public:
+- parse_args -- goes through studio.argparse_bridge.build_parser, auto-generated from TrainingConfig
+- prompt_for_args -- interactive mode, fills in missing fields
 """
 
 from __future__ import annotations
@@ -16,14 +16,16 @@ from typing import Optional
 
 
 def parse_args():
-    """从 studio.schema.TrainingConfig 自动生成 parser；额外补 schema 之外的
-    CLI-only 开关（auto-install / interactive / no-live-curve / 已弃用的
-    --repeats 和 --reg-repeats）。
+    """Auto-generates the parser from studio.schema.TrainingConfig; adds the
+    CLI-only switches that are outside the schema (auto-install / interactive /
+    no-live-curve / the deprecated --repeats and --reg-repeats).
 
-    suppress_defaults=True（config 管线刀 1 / R1）：schema 字段不填 argparse
-    默认值，parse 产物只含用户显式传入的键。完整默认值由 apply_yaml_config
-    经 TrainingConfig 构造统一补齐（迁移 / 族默认 overlay / 校验单点生效），
-    CLI-only 开关保留普通默认、始终存在于 namespace。
+    suppress_defaults=True (config pipeline cut 1 / R1): schema fields get no
+    argparse default, so the parse result only contains keys the user passed
+    explicitly. Full defaults are filled in uniformly by apply_yaml_config via
+    TrainingConfig construction (migration / family default overlay /
+    validation all happen in one place); CLI-only switches keep their normal
+    defaults and are always present in the namespace.
     """
     from studio.infrastructure.argparse_bridge import build_parser
     from studio.schema import TrainingConfig
@@ -32,27 +34,27 @@ def parse_args():
         TrainingConfig, prog="anima_train",
         description="Anima LoRA Trainer v2", suppress_defaults=True,
     )
-    # schema 之外的 CLI-only 开关
-    p.add_argument("--auto-install", action="store_true", help="自动安装缺失依赖")
-    p.add_argument("--interactive", action="store_true", help="交互模式，提示输入缺失参数")
-    p.add_argument("--no-live-curve", action="store_true", help="禁用实时 Loss 曲线刷新")
-    # PP6.1 — 监控状态文件路径；不传则默认写到 output_dir/monitor_state.json
-    # 注：旧 monitor server 的 --no-monitor / --monitor-host / --monitor-port /
-    # --no-browser 已随 TrainingConfig 字段一并删除（yaml 老键静默丢弃）。
+    # CLI-only switches outside the schema
+    p.add_argument("--auto-install", action="store_true", help="Automatically install missing dependencies")
+    p.add_argument("--interactive", action="store_true", help="Interactive mode, prompt for missing arguments")
+    p.add_argument("--no-live-curve", action="store_true", help="Disable live loss curve refresh")
+    # PP6.1 -- monitor state file path; defaults to output_dir/monitor_state.json if not given
+    # Note: the old monitor server's --no-monitor / --monitor-host / --monitor-port /
+    # --no-browser were removed along with the TrainingConfig fields (old yaml keys are silently dropped).
     p.add_argument(
         "--monitor-state-file",
         type=str,
         default=None,
-        help="训练监控 state.json 输出路径（默认 output_dir/monitor_state.json）",
+        help="Training monitor state.json output path (defaults to output_dir/monitor_state.json)",
     )
-    # 已弃用：每图重复改用文件夹名前缀（如 5_concept）
+    # Deprecated: per-image repeat now uses a folder name prefix instead (e.g. 5_concept)
     p.add_argument("--repeats", type=int, default=1, help=argparse.SUPPRESS)
     p.add_argument("--reg-repeats", type=int, default=1, help=argparse.SUPPRESS)
     return p.parse_args()
 
 
 # ============================================================================
-# 交互模式辅助函数
+# Interactive mode helper functions
 # ============================================================================
 
 def _try_rich():
@@ -100,18 +102,23 @@ def _ask_float(label, default):
 
 
 def _guess_default_paths():
-    """猜默认模型路径（仅在用户没在 yaml/CLI 显式指定时用）。
+    """Guess default model paths (used only when the user hasn't specified
+    them explicitly in yaml/CLI).
 
-    根目录：优先 `secrets.models.root`（Studio 设置页配置），否则 `REPO_ROOT/models/`
-    （与 schema.py 默认 + WD14 已用的 `models/wd14/` 对齐）。
+    Root dir: prefers `secrets.models.root` (configured on the Studio
+    settings page), otherwise `REPO_ROOT/models/` (matching the schema.py
+    default and the `models/wd14/` already used by WD14).
 
-    Transformer：用户可能装多个 Anima 版本（preview / preview2 / preview3-base / 1.0），
-    按 ANIMA_VARIANTS 顺序找第一个存在的（latest 优先）。
+    Transformer: the user may have several Anima versions installed
+    (preview / preview2 / preview3-base / 1.0); find the first one that
+    exists in ANIMA_VARIANTS order (latest first).
     """
-    # 注：原 runtime/anima_train.py 用 Path(__file__).resolve().parent 拿 runtime/；
-    # 这里 cli.py 在 runtime/training/ 下，多一层往上才能保持等价语义。
+    # Note: the original runtime/anima_train.py used Path(__file__).resolve().parent
+    # to get runtime/; here cli.py lives under runtime/training/, so one extra
+    # level up is needed to keep the same semantics.
     repo_root = Path(__file__).resolve().parent.parent
-    # secrets 不一定可 import（直接 CLI 跑训练时 studio package 可用；其他场景兜底）
+    # secrets may not be importable (the studio package is available when
+    # running training straight from the CLI; this is a fallback for other cases)
     base: Optional[Path] = None
     transformer_path: str = ""
     try:
@@ -125,7 +132,8 @@ def _guess_default_paths():
     if not base:
         base = repo_root / "models"
     if not transformer_path:
-        # services 不可用 / 都没下载 → 给最新版默认名作为提示，方便用户填路径
+        # services unavailable / nothing downloaded -> give the latest version's
+        # default filename as a hint so the user can fill in the path
         candidate = base / "diffusion_models" / "anima-base-v1.0.safetensors"
         transformer_path = str(candidate) if candidate.exists() else ""
 
@@ -139,31 +147,32 @@ def _guess_default_paths():
 
 
 def prompt_for_args(args):
-    """交互式提示输入缺失参数"""
+    """Interactively prompt for missing arguments."""
     defaults = _guess_default_paths()
-    args.data_dir = args.data_dir or _ask_str("数据集目录 (images + .txt)", "")
-    args.transformer_path = args.transformer_path or _ask_str("Transformer 路径 (.safetensors)", defaults["transformer"])
-    args.vae_path = args.vae_path or _ask_str("VAE 路径 (.safetensors)", defaults["vae"])
-    args.text_encoder_path = args.text_encoder_path or _ask_str("Qwen 模型目录", defaults["qwen"])
-    args.output_dir = _ask_str("输出目录", args.output_dir)
-    args.output_name = _ask_str("输出名称", args.output_name)
-    # resolution 现在是 list[int]。单值（含默认 [1024]）照常交互问一档；已设多分辨率
-    # （GUI / config 驱动）则不打扰。
+    args.data_dir = args.data_dir or _ask_str("Dataset directory (images + .txt)", "")
+    args.transformer_path = args.transformer_path or _ask_str("Transformer path (.safetensors)", defaults["transformer"])
+    args.vae_path = args.vae_path or _ask_str("VAE path (.safetensors)", defaults["vae"])
+    args.text_encoder_path = args.text_encoder_path or _ask_str("Qwen model directory", defaults["qwen"])
+    args.output_dir = _ask_str("Output directory", args.output_dir)
+    args.output_name = _ask_str("Output name", args.output_name)
+    # resolution is now list[int]. A single value (including the default
+    # [1024]) still gets asked interactively; if multiple resolutions are
+    # already set (GUI / config driven) we leave it alone.
     _res = args.resolution
     if not isinstance(_res, (list, tuple)):
-        args.resolution = [_ask_int("分辨率", int(_res))]
+        args.resolution = [_ask_int("Resolution", int(_res))]
     elif len(_res) <= 1:
-        args.resolution = [_ask_int("分辨率", int(_res[0]) if _res else 1024)]
+        args.resolution = [_ask_int("Resolution", int(_res[0]) if _res else 1024)]
     args.batch_size = _ask_int("Batch size", args.batch_size)
-    args.grad_accum = _ask_int("梯度累积", args.grad_accum)
-    args.learning_rate = _ask_float("学习率", args.learning_rate)
-    args.grad_checkpoint = _ask_bool("启用梯度检查点?", args.grad_checkpoint)
+    args.grad_accum = _ask_int("Gradient accumulation", args.grad_accum)
+    args.learning_rate = _ask_float("Learning rate", args.learning_rate)
+    args.grad_checkpoint = _ask_bool("Enable gradient checkpointing?", args.grad_checkpoint)
     args.epochs = _ask_int("Epochs", args.epochs)
-    args.max_steps = _ask_int("最大步数 (0=无限制)", args.max_steps)
+    args.max_steps = _ask_int("Max steps (0=unlimited)", args.max_steps)
     args.lora_rank = _ask_int("LoRA rank", args.lora_rank)
     args.lora_alpha = _ask_float("LoRA alpha", args.lora_alpha)
-    args.loss_curve_steps = _ask_int("Loss 曲线步数 (0=禁用)", args.loss_curve_steps)
-    args.auto_install = _ask_bool("自动安装缺失依赖?", args.auto_install)
-    args.save_every_epoch = _ask_bool("每个 epoch 保存?", args.save_every_epoch)
-    args.mixed_precision = _ask_str("混合精度 (bf16/fp32)", args.mixed_precision)
+    args.loss_curve_steps = _ask_int("Loss curve steps (0=disabled)", args.loss_curve_steps)
+    args.auto_install = _ask_bool("Automatically install missing dependencies?", args.auto_install)
+    args.save_every_epoch = _ask_bool("Save every epoch?", args.save_every_epoch)
+    args.mixed_precision = _ask_str("Mixed precision (bf16/fp32)", args.mixed_precision)
     return args

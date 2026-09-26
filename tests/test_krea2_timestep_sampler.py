@@ -66,9 +66,9 @@ def test_krea2_sampler_uses_logit_normal_then_dynamic_shift(monkeypatch) -> None
 @pytest.mark.parametrize(
     ("token_counts", "match"),
     [
-        (None, "需要每个样本"),
-        ([256], "数量必须等于 batch size"),
-        ([256, 0], "有限正数"),
+        (None, "needs per-sample"),
+        ([256], "count must equal batch size"),
+        ([256, 0], "finite positive numbers"),
     ],
 )
 def test_krea2_sampler_rejects_invalid_batch_context(token_counts, match) -> None:
@@ -106,7 +106,7 @@ def test_registry_selects_krea2_shift_without_schema_exposure() -> None:
 
 def test_registry_rejects_krea2_shift_with_infonoise() -> None:
     args = argparse.Namespace(timestep_sampling="krea2_shift", infonoise_enabled=True)
-    with pytest.raises(ValueError, match="不能同时启用"):
+    with pytest.raises(ValueError, match="cannot both be enabled"):
         build_timestep_sampler(args, total_steps=100)
 
 
@@ -132,7 +132,7 @@ def test_loop_keeps_ordinary_sampler_on_context_free_path(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "training.loop.latent_token_counts",
-        lambda latents: pytest.fail("普通 sampler 不应计算 token_counts"),
+        lambda latents: pytest.fail("an ordinary sampler must not compute token_counts"),
     )
     out = _sample_timesteps(
         OrdinarySampler(),
@@ -152,5 +152,5 @@ def test_loop_rejects_double_resolution_shift_before_training() -> None:
         dataloader=[],
         timestep_sampler=Krea2ShiftTimestepSampler(),
     )
-    with pytest.raises(ValueError, match="不能与自带分辨率 shift"):
+    with pytest.raises(ValueError, match="already applies its own resolution shift"):
         run(ctx)

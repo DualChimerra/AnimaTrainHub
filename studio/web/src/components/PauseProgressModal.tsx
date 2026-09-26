@@ -1,18 +1,18 @@
-// PauseProgressModal —— ADR 0006 PR-4 §4.3 暂停过程 modal。
+// PauseProgressModal -- the ADR 0006 PR-4 SS4.3 pause-in-progress modal.
 //
-// 设计动机：用户点"暂停"后 handle_interrupt 写盘要几秒到十几秒（state +
-// LoRA + wandb finish），期间 UI 必须给透明反馈、阻止误操作。点暂停就锁屏
-// modal 全程引导，看到 __EVENT__:pause_state 才算"暂停完成"（rc=0 不够 —
-// rc 在 Windows wrapper 改写场景下不可靠）。
+// Design rationale: after the user clicks "pause", handle_interrupt takes a few to a dozen seconds to write to disk
+// (state + LoRA + wandb finish); the UI must give transparent feedback and block misclicks during that window. Clicking
+// pause locks the screen with a modal that guides the whole process; only __EVENT__:pause_state counts as "pause complete"
+// (rc=0 isn't enough -- rc is unreliable when the Windows wrapper rewrites it).
 //
-// 状态机（modal 内自管，跟 task.status 解耦）：
-//   - 'saving'：发了 pause 请求，等子进程 emit pause_state
-//   - 'saved'：成功，task_state_changed → paused，关闭 modal + toast
-//   - 'timeout'：30s 还没收到事件，弹三选一（再等 / 强退保进度 / 终止）
-//   - 'failed'：子进程异常退出（rc != 0 + status='failed'）
+// State machine (self-managed inside the modal, decoupled from task.status):
+//   - 'saving': sent the pause request, waiting for the child process to emit pause_state
+//   - 'saved': success, task_state_changed -> paused, close the modal + toast
+//   - 'timeout': no event received after 30s, shows a three-way choice (wait more / force-quit keeping progress / terminate)
+//   - 'failed': the child process exited abnormally (rc != 0 + status='failed')
 //
-// SSE 订阅：用全局 useEventStream，过滤同 task_id 的 pause_state /
-// task_state_changed / pause_failed 事件。
+// SSE subscription: uses the global useEventStream, filtered to this task_id's pause_state /
+// task_state_changed / pause_failed events.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../api/client'
@@ -29,9 +29,9 @@ type PhaseState =
 
 export interface PauseProgressModalProps {
   taskId: number
-  /** 任务显示名（modal title 用） */
+  /** Task display name (used for the modal title) */
   taskName?: string
-  /** modal 关闭回调 */
+  /** Modal close callback */
   onClose: () => void
 }
 
@@ -41,11 +41,11 @@ export function PauseProgressModal({ taskId, taskName, onClose }: PauseProgressM
   const [state, setState] = useState<PhaseState>({ phase: 'saving' })
   const [elapsedSec, setElapsedSec] = useState(0)
   const startedAt = useRef(Date.now())
-  // 跨 onEvent / timer 共享 phase，避免闭包陷阱。
+  // Shares phase across onEvent / the timer, to avoid closure traps.
   const phaseRef = useRef<PhaseState['phase']>('saving')
   phaseRef.current = state.phase
 
-  // ── elapsed 计数（用于文案显示 + timeout 判定）
+  // -- elapsed counter (used for the copy display + timeout detection)
   useEffect(() => {
     const id = window.setInterval(() => {
       setElapsedSec(Math.floor((Date.now() - startedAt.current) / 1000))
@@ -53,7 +53,7 @@ export function PauseProgressModal({ taskId, taskName, onClose }: PauseProgressM
     return () => window.clearInterval(id)
   }, [])
 
-  // ── 30s 超时 → 升级到 timeout 状态（仅 saving 阶段触发）
+  // -- 30s timeout -> escalate to the timeout state (only fires during the saving phase)
   useEffect(() => {
     const id = window.setTimeout(() => {
       if (phaseRef.current === 'saving') {
@@ -63,22 +63,22 @@ export function PauseProgressModal({ taskId, taskName, onClose }: PauseProgressM
     return () => window.clearTimeout(id)
   }, [])
 
-  // ── SSE 监听
+  // -- SSE listener
   useEventStream(
     useCallback((evt: StudioEvent) => {
       if (evt.task_id !== taskId) return
       if (evt.type === 'pause_state') {
-        // 子进程已落盘 .pt + snapshot → 标 saved；step 来自 payload（PR-2 emit）
+        // The child process has persisted .pt + snapshot to disk -> mark saved; step comes from the payload (PR-2 emit)
         const step = typeof evt.step === 'number' ? evt.step : 0
         setState({ phase: 'saved', step })
         return
       }
       if (evt.type === 'task_state_changed') {
         if (evt.status === 'paused' && phaseRef.current !== 'saved') {
-          // 兜底：万一 pause_state 事件丢了，task_state_changed='paused' 也算成功
+          // Fallback: if the pause_state event got lost, task_state_changed='paused' also counts as success
           setState({ phase: 'saved', step: 0 })
         } else if (evt.status === 'failed' || evt.status === 'canceled') {
-          // 子进程异常退出 / 用户从外面 cancel 了 → 失败态
+          // The child process exited abnormally / the user canceled from elsewhere -> failed state
           if (phaseRef.current === 'saving' || phaseRef.current === 'timeout') {
             setState({ phase: 'failed', exitCode: null })
           }
@@ -87,20 +87,20 @@ export function PauseProgressModal({ taskId, taskName, onClose }: PauseProgressM
     }, [taskId]),
   )
 
-  // ── 用户操作
+  // -- user actions
   const handleClose = () => onClose()
 
   const handleWaitMore = () => {
-    // 再等 30 秒：重置 timer + 把状态回退到 saving
+    // Wait another 30 seconds: reset the timer + roll the state back to saving
     startedAt.current = Date.now()
     setElapsedSec(0)
     setState({ phase: 'saving' })
   }
 
   const handleForceCancelKeep = async () => {
-    // ADR §4.3 "强制取消保存进度"：发硬中断；如果磁盘上 pause 文件已落盘
-    // 仍标 paused，否则降级 canceled — 这条降级逻辑在 supervisor _finish_slot
-    // 三元分流里已实现，前端只需调 cancel。
+    // ADR SS4.3 "force-cancel, keep progress": sends a hard interrupt; marks paused if the pause file
+    // has already landed on disk, otherwise degrades to canceled -- that degrade logic is already implemented
+    // in supervisor's three-way _finish_slot branch, the frontend only needs to call cancel.
     try {
       await api.cancelTask(taskId)
       toast(t('queue.pauseSent'), 'info')
@@ -120,11 +120,11 @@ export function PauseProgressModal({ taskId, taskName, onClose }: PauseProgressM
   }
 
   const handleViewLogs = () => {
-    // 打开 QueueDetail 日志 tab
+    // Open the QueueDetail logs tab
     window.location.href = `/queue/${taskId}?tab=logs`
   }
 
-  // ── 渲染
+  // -- render
   return (
     <div
       role="dialog"

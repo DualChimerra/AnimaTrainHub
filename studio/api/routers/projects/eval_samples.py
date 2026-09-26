@@ -60,13 +60,13 @@ def run_task_eval_endpoint(
     """
     _version_dir_or_404(pid, vid)
     if not body.checkpoints:
-        raise HTTPException(400, "checkpoints 不能为空")
+        raise HTTPException(400, "checkpoints must not be empty")
     with db.connection_for() as conn:
         task = db.get_task(conn, int(body.task_id))
         if not task:
-            raise HTTPException(404, f"task {body.task_id} 不存在")
+            raise HTTPException(404, f"task {body.task_id} does not exist")
         if int(task.get("project_id") or 0) != pid or int(task.get("version_id") or 0) != vid:
-            raise HTTPException(400, "task 不属于该 project/version")
+            raise HTTPException(400, "task does not belong to this project/version")
         try:
             queued = eval_auto.queue_manual_task_eval(
                 conn, task, list(body.checkpoints)

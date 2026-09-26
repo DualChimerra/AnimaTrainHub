@@ -89,7 +89,7 @@ export interface PresetSummary {
   updated_at: number
 }
 
-/** PP0 之前叫 ConfigSummary —— 保留别名一段时间，避免外部代码炸掉。 */
+/** Before PP0 this was called ConfigSummary -- keeping the alias around for a while so external code doesn't break. */
 export type ConfigSummary = PresetSummary
 
 export type ConfigData = Record<string, unknown>
@@ -109,33 +109,33 @@ export interface DanbooruConfig {
 
 export interface DownloadGlobalConfig {
   exclude_tags: string[]
-  /** PP9 — Booru 并发池：worker 数量。 */
+  /** PP9 -- Booru concurrency pool: worker count. */
   parallel_workers: number
-  /** PP9 — API host (gelbooru.com / danbooru.donmai.us) 限速。 */
+  /** PP9 -- API host (gelbooru.com / danbooru.donmai.us) rate limit. */
   api_rate_per_sec: number
-  /** PP9 — CDN host (img*.gelbooru.com / cdn.donmai.us) 限速。 */
+  /** PP9 -- CDN host (img*.gelbooru.com / cdn.donmai.us) rate limit. */
   cdn_rate_per_sec: number
-  /** 图片入库处理（booru 下载 / reg / 本地上传共用）。 */
+  /** Image ingest processing (shared by booru downloads / reg / local uploads). */
   save_tags: boolean
   convert_to_png: boolean
   remove_alpha_channel: boolean
 }
 
 export interface RegConfig {
-  /** 正则集生成全局默认排除 tag；进入某个 build 且无本地选择时作种子填充。 */
+  /** Global default excluded tags for reg-set generation; seeds a new build when it has no local selection. */
   default_excluded_tags: string[]
 }
 
 export interface HuggingFaceConfig {
   token: string
-  /** PR-S3 — HF 模型下载端点 endpoint。
-   *  `""` → huggingface_hub 默认（直连 huggingface.co）；海外用户推荐
-   *  `"https://hf-mirror.com"` → 国内默认（项目主战场国内）
-   *  其它 URL → 自定义反代 / 自建镜像 */
+  /** PR-S3 -- HF model download endpoint.
+   *  `""` -> huggingface_hub default (direct to huggingface.co); recommended for overseas users
+   *  `"https://hf-mirror.com"` -> mainland China default (this project's primary market)
+   *  any other URL -> custom reverse proxy / self-hosted mirror */
   endpoint: string
 }
 
-/** 一套 WandB 账号 + 上传策略预设（0.18 预设化，对齐 LLMPreset 模式）。 */
+/** A WandB account + upload-policy preset (0.18 preset-ified, aligned with the LLMPreset pattern). */
 export interface WandBPreset {
   id: string
   label: string
@@ -144,27 +144,27 @@ export interface WandBPreset {
   entity: string
   base_url: string
   mode: 'online' | 'offline' | 'disabled'
-  /** 是否把训练采样图上传到 wandb.ai，默认开；私有 / NSFW 数据集请关掉。 */
+  /** Whether to upload training sample images to wandb.ai, on by default; turn off for private / NSFW datasets. */
   log_samples: boolean
-  /** 上传前缩到最长边像素 */
+  /** Longest side (px) to downscale to before upload */
   sample_max_side: number
-  /** step 节流：>0 时只在 global_step % N == 0 上传，0 = 不额外节流 */
+  /** Step throttling: when >0, only upload on global_step % N == 0; 0 = no extra throttling */
   sample_every_n_steps: number
-  /** 上传模型 artifact 到 wandb */
+  /** Upload the model artifact to wandb */
   upload_model: boolean
-  /** 模型 artifact 保留策略：all=全部版本 / last=仅最新 */
+  /** Model artifact retention policy: all=every version / last=latest only */
   upload_model_policy: 'all' | 'last'
-  /** 上传手动保存的训练状态 artifact */
+  /** Upload manually saved training-state artifacts */
   upload_state_manual: boolean
-  /** 手动状态 artifact 保留策略 */
+  /** Manual state artifact retention policy */
   upload_state_manual_policy: 'all' | 'last'
-  /** 上传自动保存的训练状态 artifact */
+  /** Upload auto-saved training-state artifacts */
   upload_state_auto: boolean
-  /** 自动状态 artifact 保留策略 */
+  /** Auto state artifact retention policy */
   upload_state_auto_policy: 'all' | 'last'
 }
 
-/** 全局 WandB：顶层只留总开关 + 预设切换，字段全在 preset 里。 */
+/** Global WandB: only the master switch + preset selector live at the top level; everything else is in the preset. */
 export interface WandBConfig {
   enabled: boolean
   current_preset: string
@@ -172,24 +172,24 @@ export interface WandBConfig {
 }
 
 export interface ModelScopeConfig {
-  /** 魔搭社区 token。公开模型可不填；私有 / 限速时需要。 */
+  /** ModelScope community token. Optional for public models; required for private models / rate limiting. */
   token: string
 }
 
 export interface EvalMetricModelsConfig {
-  /** CLIP-T / CLIP-I 默认模型名或本地目录。 */
+  /** CLIP-T / CLIP-I default model name or local dir. */
   clip_model_name: string
-  /** DINO-I 默认模型名或本地目录。 */
+  /** DINO-I default model name or local dir. */
   dino_model_name: string
-  /** CCIP（anime 角色身份）默认 ONNX 变体名。 */
+  /** CCIP (anime character identity) default ONNX variant name. */
   ccip_model_name: string
-  /** 启用哪些评估指标（Settings 复选框）；eval 只算勾选的。 */
+  /** Which eval metrics are enabled (Settings checkboxes); eval only computes checked ones. */
   enabled_metrics: string[]
-  /** 训练后评估额外出一组纯底模(scale=0)对照，各指标给 Δ = checkpoint − baseline。 */
+  /** Post-training eval also runs a pure-base-model (scale=0) control; each metric reports delta = checkpoint - baseline. */
   eval_baseline_enabled: boolean
 }
 
-/** 评估指标 registry 条目（catalog.eval_metric_catalog）：Settings 复选框列表用。 */
+/** Eval metric registry entry (catalog.eval_metric_catalog): used for the Settings checkbox list. */
 export interface EvalMetricCatalogItem {
   key: string
   label: string
@@ -244,9 +244,9 @@ export interface EvalMetricResult {
   metrics: Record<string, unknown>
   metric_states: Record<string, EvalMetricState>
   summary?: Record<string, number>
-  /** 纯底模(lora_scale=0)对照 run；不作为 checkpoint 展示，只供算 Δ。 */
+  /** Pure-base-model (lora_scale=0) control run; not shown as a checkpoint, only used to compute delta. */
   baseline?: boolean
-  /** 各指标相对 baseline 的净增益 Δ = checkpoint 值 − baseline 值。 */
+  /** Net gain per metric relative to baseline: delta = checkpoint value - baseline value. */
   delta?: Record<string, number>
   /** Per-metric baseline values (for reference). */
   baseline_metrics?: Record<string, number>
@@ -1779,9 +1779,9 @@ export interface Task {
   id: number
   name: string
   config_name: string
-  /** 0.17 P-D — 后端权威任务类型（_v5 migration 加，值 train/reg_ai/generate）。
-   *  老行经 `NOT NULL DEFAULT 'train'` 的 ALTER 自动 backfill；此处可选仅为兼容
-   *  未带该字段的测试 mock，运行时恒有值。 */
+  /** 0.17 P-D -- backend-authoritative task type (added in the _v5 migration, values train/reg_ai/generate).
+   *  Old rows get it via an automatic `NOT NULL DEFAULT 'train'` ALTER backfill; optional here only for
+   *  compatibility with test mocks that omit the field -- it always has a value at runtime. */
   task_type?: TaskType
   status: TaskStatus
   priority: number
@@ -1792,61 +1792,61 @@ export interface Task {
   exit_code: number | null
   output_dir: string | null
   error_msg: string | null
-  /** PP1 加；老任务为 null。 */
+  /** Added in PP1; null on old tasks. */
   project_id?: number | null
-  /** PP1 加；老任务为 null。 */
+  /** Added in PP1; null on old tasks. */
   version_id?: number | null
-  /** PP6.3 — version 私有 config 路径（旧任务 null，走 _configs_dir 兜底）。 */
+  /** PP6.3 -- per-version private config path (null on old tasks, falls back to _configs_dir). */
   config_path?: string | null
-  /** PP6.1 — per-task monitor state.json 路径。 */
+  /** PP6.1 -- per-task monitor state.json path. */
   monitor_state_path?: string | null
-  /** ADR 0006 PR-2 — paused task 的 .pt 文件路径（pause_step_<N>.pt）。 */
+  /** ADR 0006 PR-2 -- paused task's .pt file path (pause_step_<N>.pt). */
   paused_state_path?: string | null
-  /** ADR 0006 PR-2 — paused task 的 config snapshot 路径（pause_step_<N>.config.json）。 */
+  /** ADR 0006 PR-2 -- paused task's config snapshot path (pause_step_<N>.config.json). */
   paused_config_path?: string | null
-  /** ADR 0006 PR-2 — paused 时的 global_step（UI "在 step N 暂停于 …" 显示）。 */
+  /** ADR 0006 PR-2 -- global_step at pause time (shown by the UI as "paused at step N"). */
   paused_step?: number | null
-  /** ADR 0006 PR-2 — paused 时间（unix 秒）。 */
+  /** ADR 0006 PR-2 -- pause time (unix seconds). */
   paused_at?: number | null
-  /** 0.17 P-B — 计划开始时间（unix 秒）。status='scheduled' 时有值；到点提升为
-   *  pending 后保留作记录。非计划任务恒 null。 */
+  /** 0.17 P-B -- scheduled start time (unix seconds). Set when status='scheduled'; kept as a record
+   *  after promotion to pending. Always null for non-scheduled tasks. */
   scheduled_at?: number | null
-  /** R-2/_v17 — 数据作业类 task 的 kind 专属参数 JSON；train/reg_ai 恒 null。 */
+  /** R-2/_v17 -- kind-specific params JSON for data-job tasks; always null for train/reg_ai. */
   params?: string | null
-  /** 后端读路径附带解码（同旧 jobs DAO 约定）。 */
+  /** Decoded alongside the backend read path (same convention as the old jobs DAO). */
   params_decoded?: Record<string, unknown> | null
-  /** ADR 0006 PR-4 — is_pausable 信号（§8.1）：UI 用来决定是否显示暂停
-   *  按钮。supervisor 跑得起来时由 server enrich；空载默认 false。 */
+  /** ADR 0006 PR-4 -- is_pausable signal (SS8.1): tells the UI whether to show the pause
+   *  button. Enriched by the server while the supervisor is alive; defaults to false when idle. */
   is_pausable?: boolean
-  /** ADR 0006 Addendum 2 — 最近一次 epoch 末 auto backup 的 .pt 路径
-   *  （auto_epoch_state.pt，覆盖式单文件）。failed/canceled resume 的恢复点。 */
+  /** ADR 0006 Addendum 2 -- path of the most recent end-of-epoch auto backup .pt file
+   *  (auto_epoch_state.pt, a single file that gets overwritten). Resume point for failed/canceled tasks. */
   last_state_path?: string | null
-  /** ADR 0006 Addendum 2 — auto backup 配套 config snapshot 路径。 */
+  /** ADR 0006 Addendum 2 -- config snapshot path that pairs with the auto backup. */
   last_config_path?: string | null
-  /** ADR 0006 Addendum 2 — 备份点 epoch（UI "从 epoch N 继续" 提示）。 */
+  /** ADR 0006 Addendum 2 -- backup point epoch (shown by the UI as "resume from epoch N"). */
   last_state_epoch?: number | null
-  /** ADR 0006 Addendum 2 — 备份点 global_step。 */
+  /** ADR 0006 Addendum 2 -- backup point global_step. */
   last_state_step?: number | null
-  /** ADR 0006 Addendum 2 — is_resumable 信号：status ∈ paused/failed/canceled
-   *  且恢复点文件在盘上。UI 用来决定是否显示"继续训练"按钮。 */
+  /** ADR 0006 Addendum 2 -- is_resumable signal: status in paused/failed/canceled
+   *  and the resume-point file exists on disk. Tells the UI whether to show the "resume training" button. */
   is_resumable?: boolean
-  /** _v20 — 用户手写的任务备注（队列页右键写 / 详情页编辑）。空 = null。 */
+  /** _v20 -- user-written task note (written via right-click on the queue page / edited on the detail page). Empty = null. */
   note?: string | null
 }
 
-/** GET /api/queue/{id}/samples 的一行 —— 训练采样图（扫盘得到，含已结束任务）。 */
+/** One row of GET /api/queue/{id}/samples -- a training sample image (found by scanning disk, includes finished tasks). */
 export interface TaskSample {
   filename: string
-  /** 文件 mtime（unix 秒），清单按它升序 = 训练时间轴。 */
+  /** File mtime (unix seconds); the list is sorted ascending by this = the training timeline. */
   mtime: number
   size: number
-  /** 从文件名解析；`epoch_N_*.png` 才有。 */
+  /** Parsed from the filename; only present for `epoch_N_*.png`. */
   epoch: number | null
-  /** 从文件名解析；`step_N_*.png` 才有。 */
+  /** Parsed from the filename; only present for `step_N_*.png`. */
   step: number | null
 }
 
-/** 0.17 P-E — /api/queue?group=history 的分页响应。 */
+/** 0.17 P-E -- paginated response for /api/queue?group=history. */
 export interface QueueHistoryPage {
   items: Task[]
   total: number
@@ -1854,8 +1854,8 @@ export interface QueueHistoryPage {
   page_size: number
 }
 
-/** ADR 0006 PR-2 — GET /api/queue/hold 返回。`held=true` 时 UI 顶部
- *  banner sticky 显示；`pending_waiting` 是当前 pending 队列长度（提示用）。 */
+/** ADR 0006 PR-2 -- response of GET /api/queue/hold. When `held=true` the UI shows a sticky
+ *  banner at the top; `pending_waiting` is the current pending-queue length (for the banner text). */
 export interface QueueHoldState {
   held: boolean
   pending_waiting: number
@@ -1897,7 +1897,7 @@ export interface MonitorState {
   samples?: Array<{
     path: string
     step?: number
-    /** XY 模式时携带 cell 元数据（generate task 才有；训练 task 为空）。 */
+    /** Carries cell metadata in XY mode (generate tasks only; empty for training tasks). */
     xy?: { xi: number; yi: number; xv: number | string; yv: number | string | null }
   }>
   config?: Record<string, string | number | boolean>
@@ -1918,11 +1918,11 @@ export interface TaskOutputs {
   task_id: number
   output_dir: string | null
   exists: boolean
-  /** 仅 loopback 请求为 true；云端永远 false。前端按此控制「打开文件夹」按钮可见性。 */
+  /** True only for loopback requests; always false in the cloud. The frontend uses this to control the "open folder" button's visibility. */
   supports_open_folder: boolean
   files: TaskOutputFile[]
-  /** "{slug}-{label}"，用作打包下载的 zip 文件名前缀（和 train.zip 命名风格一致）。
-   * 老任务没绑 project / version → null，调用方 fallback 到 task_{id}。 */
+  /** "{slug}-{label}", used as the zip filename prefix for bundle downloads (matches train.zip's naming style).
+   * Old tasks not bound to a project / version -> null, callers fall back to task_{id}. */
   archive_basename: string | null
 }
 
@@ -1951,34 +1951,34 @@ export interface ImportResult {
 }
 
 /**
- * API 错误：除了 `message`（用于直接 toast 的字符串），额外保留 `status` 和
- * `detail`（FastAPI 端 raise HTTPException(status, detail=dict(...)) 时
- * detail 是结构化对象，调用方可以 `e.detail.error` 区分类型）。
+ * API error: besides `message` (a string suitable for a toast directly), also keeps `status` and
+ * `detail` (when the FastAPI side does `raise HTTPException(status, detail=dict(...))`,
+ * detail is a structured object; callers can branch on `e.detail.error`).
  *
- * 用 Error 而非自定义 class 是因为不少现有 callsite 是 `catch (e) { toast(String(e)) }`
- * 这种通用写法；保留 `Error.prototype.toString()` 行为不破坏它们。需要结构化
- * 处理的新 callsite 强制 cast：`(e as ApiError).detail`。
+ * Uses Error rather than a custom class because many existing callsites do the generic
+ * `catch (e) { toast(String(e)) }`; keeping `Error.prototype.toString()` behavior doesn't break them.
+ * New callsites that need structured handling cast explicitly: `(e as ApiError).detail`.
  *
- * ADR-0009 PR-3 C3: 新加 `traceId` 字段 — 后端 dual-write envelope 的
- * `body.error.trace_id` 或 X-Trace-Id response header。toast 显示 "trace ab12cd34"
- * 后缀让用户截图给开发；ErrorBoundary 上报时也带，串起前端崩前最后一次失败。
- */
+ * ADR-0009 PR-3 C3: added the `traceId` field -- the backend dual-write envelope's
+ * `body.error.trace_id` or the X-Trace-Id response header. Shown as a "trace ab12cd34"
+ * suffix in the toast so the user can screenshot it for the dev; also attached when ErrorBoundary
+ * reports, tying it to the frontend's last failure before the crash.
 export type ApiError = Error & {
   status?: number
-  /** ADR-0009 Phase 2: 后端 body.error.code（语义错误码），前端按它查 errors.* i18n。 */
+  /** ADR-0009 Phase 2: the backend's body.error.code (a semantic error code); the frontend looks up errors.* i18n by it. */
   code?: string
   detail?: unknown
   traceId?: string
 }
 
 /**
- * ADR-0009 Phase 2 统一错误解析：所有 fetch / XHR 失败路径共用，保证 toast 文案
- * 一致且可本地化。
+ * ADR-0009 Phase 2 unified error parsing: shared by every fetch / XHR failure path so toast copy
+ * stays consistent and localizable.
  *
- * 优先 `body.error`：用 `error.code` 查 `errors.<code>` i18n（带 `error.details`
- * 插值，缺词条则回退 `error.message` 英文）。`body.detail` 退为 fallback —— 结构化
- * detail（如 409 冲突的 config/suggested_name）仍挂到 `err.detail` 给 callsite；
- * 没有 error 信封时（RequestValidationError 422 list / 极老路径）才用 detail 取文案。
+ * Prefers `body.error`: looks up `errors.<code>` i18n via `error.code` (interpolating `error.details`,
+ * falling back to the English `error.message` when the key is missing). `body.detail` is a fallback --
+ * structured detail (e.g. a 409 conflict's config/suggested_name) still gets attached to `err.detail`
+ * for callers; only used for copy directly when there's no error envelope (RequestValidationError 422 list / very old paths).
  */
 export function makeApiError(
   status: number,
@@ -2005,8 +2005,8 @@ export function makeApiError(
         : {}
     message = code ? i18n.t(`errors.${code}`, { ...params, defaultValue: enMsg }) : enMsg
     if (typeof err.trace_id === 'string') traceId = err.trace_id
-    // 结构化数据现在挂在 error.details（如 409 冲突的 config/suggested_name、
-    // running_tasks 列表），callsite 经 err.detail 读到。
+     // Structured data now lives on error.details (e.g. a 409 conflict's config/suggested_name,
+     // running_tasks list); callers read it via err.detail.
     if (err.details && typeof err.details === 'object') detail = err.details
   }
   if (b && b.detail !== undefined) {
@@ -2033,12 +2033,12 @@ export function makeApiError(
 }
 
 /**
- * ADR-0009 PR-3 C3: 把 ApiError.traceId 末 8 字符格式化成 toast 后缀。
+ * ADR-0009 PR-3 C3: format the last 8 chars of ApiError.traceId into the toast suffix.
  *
- * 用户报问题时把 toast 截图给开发；开发拿这 8 字符 `jq 'select(.trace_id |
- * endswith("..."))' studio.log` 一行还原完整链路。
+ * When a user reports an issue they screenshot the toast; the dev takes these 8 chars and runs
+ * `jq 'select(.trace_id | endswith("..."))' studio.log` to reconstruct the full chain.
  *
- * 调用模式（callsite 自愿用，不强制 — 现有 toast(e.message,'error') 不破）：
+ * Call pattern (opt-in by callsites, not enforced -- doesn't break existing toast(e.message,'error') calls):
  *     toast(`${e.message}${formatErrorTraceSuffix(e)}`, 'error')
  */
 export function formatErrorTraceSuffix(err: unknown): string {
@@ -2066,17 +2066,17 @@ async function req<T>(
   return (await resp.json()) as T
 }
 
-/** 上传进度事件 — 与 XMLHttpRequestEventTarget#progress 字段一一对应。 */
+/** Upload progress event -- mirrors XMLHttpRequestEventTarget#progress fields one to one. */
 export interface UploadProgressEvent {
   loaded: number
   total: number
-  /** total === 0 时为 false（服务端没回 Content-Length 或 chunked），ETA 无法计算。 */
+  /** False when total === 0 (server didn't return Content-Length or used chunked encoding); ETA can't be computed. */
   lengthComputable: boolean
 }
 
 /**
- * XHR-based multipart upload；fetch() 没有 request body progress 事件，所以
- * 上传进度必须走 XHR。错误格式跟 `req` 对齐（ApiError + 解析 detail）。
+ * XHR-based multipart upload; fetch() has no request-body progress event, so
+ * upload progress must go through XHR. Error format matches `req` (ApiError + parsed detail).
  */
 async function xhrUpload<T>(
   url: string,
@@ -2110,7 +2110,7 @@ async function xhrUpload<T>(
       try {
         parsed = JSON.parse(text)
       } catch {
-        /* body 不是 JSON：makeApiError 用 statusText 兜底 */
+        /* body isn't JSON: makeApiError falls back to statusText */
       }
       reject(
         makeApiError(xhr.status, xhr.statusText, parsed, xhr.getResponseHeader('X-Trace-Id')),
@@ -2121,7 +2121,7 @@ async function xhrUpload<T>(
   })
 }
 
-/** studio_data 存储位置：当前/默认 + 全量扫描（迁移确认 modal 显示用）。 */
+/** studio_data storage location: current/default + full scan (used by the migration confirmation modal). */
 export interface StudioDataScanEntry {
   name: string
   is_dir: boolean
@@ -2133,7 +2133,7 @@ export interface StudioDataInfo {
   current: string
   default: string
   is_custom: boolean
-  /** 请求带 scan=false 时为 null（Settings 页仅显示路径，免扫盘） */
+  /** Null when the request has scan=false (Settings page shows the path only, skipping the disk scan) */
   scan: {
     total_files: number
     total_bytes: number
@@ -2141,8 +2141,8 @@ export interface StudioDataInfo {
   } | null
 }
 
-/** 迁移状态快照（modal 重开 / SSE 漏事件兜底；实时进度走 SSE
- *  `studio_data_migrate_progress` / `_done` 事件）。 */
+/** Migration status snapshot (used when reopening the modal / as a fallback for missed SSE events; live progress
+ *  goes through the `studio_data_migrate_progress` / `_done` events). */
 export interface StudioDataMigrateStatus {
   state: 'idle' | 'running' | 'done' | 'error'
   target: string
@@ -2154,12 +2154,12 @@ export interface StudioDataMigrateStatus {
   error: string
 }
 
-/** 模型根目录存储位置：和 studio_data 同结构（迁移确认 modal 复用展示）。 */
+/** Models-root storage location: same shape as studio_data (reused by the migration confirmation modal). */
 export interface ModelsRootInfo {
   current: string
   default: string
   is_custom: boolean
-  /** 请求带 scan=false 时为 null（Settings 页仅显示路径，免扫盘） */
+  /** Null when the request has scan=false (Settings page shows the path only, skipping the disk scan) */
   scan: {
     total_files: number
     total_bytes: number
@@ -2167,7 +2167,7 @@ export interface ModelsRootInfo {
   } | null
 }
 
-/** 模型根目录迁移状态快照（实时进度走 SSE `models_root_migrate_progress` / `_done`）。 */
+/** Models-root migration status snapshot (live progress goes through SSE `models_root_migrate_progress` / `_done`). */
 export interface ModelsRootMigrateStatus {
   state: 'idle' | 'running' | 'done' | 'error'
   target: string
@@ -2221,8 +2221,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ config }),
     }),
-  /** 端到端 yaml 文件下载直链，server FileResponse 已设 Content-Disposition。
-   *  <a href={...} download> 触发即可，不发 fetch。 */
+  /** End-to-end yaml file download link; the server FileResponse already sets Content-Disposition.
+   *  <a href={...} download> is enough to trigger it, no fetch needed. */
   presetDownloadUrl: (name: string) =>
     `/api/presets/${encodeURIComponent(name)}/download`,
   importPresetFromPath: (path: string) =>
@@ -2230,13 +2230,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
-  /** 端到端文件上传：把 .yaml/.yml/.json 文件给后端解析 + schema 校验 + 直接落盘,
-   *  返回 {name, path}。前端拿到 name 直接 refreshList + setSelected(name) 即可。
+  /** End-to-end file upload: hands a .yaml/.yml/.json file to the backend to parse + schema-validate + persist,
+   *  returns {name, path}. The frontend just does refreshList + setSelected(name) with the returned name.
    *
-   *  冲突(同名 preset 已存在)→ 抛 ApiError(status=409),err.detail =
-   *  {message, config, suggested_name},call site 据此弹 ImportConflictDialog
-   *  让用户选覆盖 / 另存为,再走 PUT /api/presets/{name}。
-   *  绕过 req() 的 JSON header,让浏览器自加 multipart boundary。 */
+   *  On conflict (a preset with the same name exists) -> throws ApiError(status=409), err.detail =
+   *  {message, config, suggested_name}; the call site pops an ImportConflictDialog based on that
+   *  so the user can choose overwrite / save-as, then goes through PUT /api/presets/{name}.
+   *  Bypasses req()'s JSON header so the browser adds the multipart boundary itself. */
   importPreset: async (file: File): Promise<{ name: string; path: string }> => {
     const fd = new FormData()
     fd.append('file', file, file.name)
@@ -2248,11 +2248,11 @@ export const api = {
     return (await resp.json()) as { name: string; path: string }
   },
 
-  /** WandB preset yaml 下载直链（**含真实 api_key**，服务端显式导出端点）。
-   *  <a href={...} download> 触发即可，不发 fetch。 */
+  /** WandB preset yaml download link (**contains the real api_key**, an explicit server-side export endpoint).
+   *  <a href={...} download> is enough to trigger it, no fetch needed. */
   wandbPresetExportUrl: (id: string) =>
     `/api/secrets/wandb/presets/${encodeURIComponent(id)}/export`,
-  /** 上传 yaml/json 导入 wandb preset；返回新 preset 标识 + 最新 masked secrets。 */
+  /** Upload a yaml/json to import a wandb preset; returns the new preset id + the latest masked secrets. */
   importWandbPreset: async (
     file: File,
   ): Promise<{ id: string; label: string; secrets: Secrets }> => {
@@ -2266,7 +2266,7 @@ export const api = {
     return (await resp.json()) as { id: string; label: string; secrets: Secrets }
   },
 
-  // 兼容别名：PP0 之前叫 listConfigs / getConfig / ...。保留一段时间。
+  // Compat aliases: before PP0 these were called listConfigs / getConfig / ... Keeping them around for a while.
   listConfigs: () =>
     req<{ items: PresetSummary[] }>('/api/presets').then((r) => r.items),
   getConfig: (name: string) => req<ConfigData>(`/api/presets/${name}`),
@@ -2287,9 +2287,9 @@ export const api = {
   getSecrets: () => req<Secrets>('/api/secrets'),
 
   // Runtime mode (Colab / Local) ---------------------------------------
-  /** 首屏拉一次：mode 为空串 → 弹模式选择框。 */
+  /** Fetched once on first load: mode='' -> pops the mode-selection dialog. */
   getRuntime: () => req<RuntimeInfo>('/api/runtime'),
-  /** 持久化用户选择。env 钉死时后端返回 409（runtime.mode_locked）。 */
+  /** Persists the user's choice. Returns 409 (runtime.mode_locked) when the env var pins the mode. */
   setRuntimeMode: (mode: RuntimeMode) =>
     req<RuntimeInfo>('/api/runtime', {
       method: 'PUT',
@@ -2297,13 +2297,13 @@ export const api = {
     }),
 
   // Tag dictionary -----------------------------------------------------
-  /** 当前词典 meta + 是否已加载。Settings UI 启动时 ping，决定显示"未初始化"还是详情。 */
+  /** Current dictionary meta + whether it's loaded. Settings UI pings on startup to decide whether to show "not initialized" or the details. */
   getTagDictionaryMeta: () =>
     req<TagDictionaryMetaResponse>('/api/tag-dictionary/meta'),
-  /** 完整 dict JSON (~600KB gzip)。store.ts 启动拉一次后缓存内存。 */
+  /** Full dict JSON (~600KB gzip). store.ts fetches it once at startup and caches it in memory. */
   getTagDictionaryData: () =>
     req<TagDictionaryPayload>('/api/tag-dictionary/data'),
-  /** 上传 csv/txt 替换当前词典。返回新 meta。 */
+  /** Upload a csv/txt to replace the current dictionary. Returns the new meta. */
   uploadTagDictionary: async (file: File): Promise<TagDictionaryMetaResponse> => {
     const fd = new FormData()
     fd.append('file', file, file.name)
@@ -2314,24 +2314,24 @@ export const api = {
     }
     return (await resp.json()) as TagDictionaryMetaResponse
   },
-  /** 重新从 GitHub 拉默认词典（首次失败 / 用户想重置都走这个）。 */
+  /** Re-fetch the default dictionary from GitHub (used both when the first fetch failed and when the user wants to reset). */
   resetTagDictionary: () =>
     req<TagDictionaryMetaResponse>('/api/tag-dictionary/reset', { method: 'POST' }),
 
   // Models management (PP7) ------------------------------------------------
   getModelsCatalog: () => req<ModelsCatalog>('/api/models/catalog'),
-  /** 当前 Settings 算出的 4 个模型字段绝对路径。预设页 reset / 新建用。 */
+  /** Absolute paths for the 4 model fields as currently computed by Settings. Used by the presets page's reset / new. */
   getModelPathDefaults: () => req<Record<string, string>>('/api/models/path-defaults'),
-  /** YAML 预览（R4）：当前表单 config → 与保存后落盘文件同一序列化路径的
-   * yaml 文本。纯计算不落盘；tolerant 修复语义与保存一致。 */
+  /** YAML preview (R4): serializes the current form config through the same path used when saving to disk,
+   * returning the yaml text. Pure computation, doesn't write to disk; tolerant-repair semantics match saving. */
   previewConfigYaml: (config: ConfigData) =>
     req<{ yaml: string }>('/api/schema/preview-yaml', {
       method: 'POST',
       body: JSON.stringify({ config }),
     }),
-  /** 训练配置切换模型族的预览计算（多模型 P4-3）。纯计算不落盘：返回
-   * 重算路径 + 重置族风味字段后的完整 config 与变更清单，前端确认后走
-   * 正常保存链路。 */
+  /** Preview computation for switching model families in a training config (multi-model P4-3). Pure computation,
+   * doesn't write to disk: returns the recomputed paths + the full config after resetting family-flavor fields,
+   * plus a changelog, and goes through the normal save flow once the frontend confirms. */
   switchModelFamily: (target: string, config: ConfigData) =>
     req<FamilySwitchResponse>('/api/models/family-switch', {
       method: 'POST',
@@ -2342,21 +2342,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  /** 删除一个已下载资产（下载的逆操作：先删除、再重新下载）。路径由
-   *  服务端解析；下载中 / 文件被占用时 409。返回删除后的 catalog。 */
+  /** Delete a downloaded asset (the reverse of downloading: delete then re-download). Path is
+   *  resolved server-side; 409 while downloading / file in use. Returns the catalog after deletion. */
   deleteModelAsset: (model_id: string, variant?: string) =>
     req<ModelsCatalog>(
       `/api/models/asset?model_id=${encodeURIComponent(model_id)}`
       + (variant ? `&variant=${encodeURIComponent(variant)}` : ''),
       { method: 'DELETE' },
     ),
-  /** 添加一条统一来源候选（下载型 / 本地文件），返回新 catalog。 */
+  /** Add a unified source candidate (download-type / local file), returns the new catalog. */
   addModelSource: (domain: string, cand: ModelSourceCandidate) =>
     req<ModelsCatalog>(`/api/model-sources/${domain}`, {
       method: 'POST',
       body: JSON.stringify(cand),
     }),
-  /** 移除一条候选（不动磁盘；移除当前选中项时服务端回退默认）。 */
+  /** Remove a candidate (doesn't touch disk; the server falls back to the default when the current selection is removed). */
   removeModelSource: (domain: string, cand: ModelSourceCandidate) =>
     req<ModelsCatalog>(`/api/model-sources/${domain}`, {
       method: 'DELETE',
@@ -2421,7 +2421,7 @@ export const api = {
     }),
   deleteProject: (pid: number) =>
     req<{ deleted: number }>(`/api/projects/${pid}`, { method: 'DELETE' }),
-  /** 归档（软隐藏，可逆）：目录 / versions / 任务全部原样。 */
+  /** Archive (soft-hide, reversible): folders / versions / tasks are all left as-is. */
   archiveProject: (pid: number) =>
     req<ProjectDetail>(`/api/projects/${pid}/archive`, { method: 'POST' }),
   unarchiveProject: (pid: number) =>
@@ -2473,7 +2473,7 @@ export const api = {
       { method: 'POST' }
     ),
 
-  // Phase cursor 推进 / 跳过 (ADR-0007 §11.5-A) --------------------------
+  // Phase cursor advance / skip (ADR-0007 SS11.5-A) --------------------------
   advanceVersionPhase: (pid: number, vid: number) =>
     req<PhaseAdvanceResult>(
       `/api/projects/${pid}/versions/${vid}/advance-phase`,
@@ -2520,12 +2520,12 @@ export const api = {
       `/api/projects/${pid}/download/status`
     ),
   /**
-   * 本地上传：单图 / zip 包 / 同名 .txt caption。走 XHR 拿 upload progress 事件
-   * （fetch 没有 request body progress）。
+   * Local upload: single image / zip bundle / same-name .txt caption. Goes through XHR to get upload progress events
+   * (fetch has no request-body progress).
    *
-   * 后端改异步：字节落盘后立刻返回一个 `upload` job（避免大 zip 同步处理触发
-   * Cloudflare 524）。真正解压 / 转码在后台 worker 跑，调用方上传完后轮询
-   * `getUploadStatus` 等 job 终态拿 added/skipped。
+   * Backend is async: returns an `upload` job right after the bytes hit disk (to avoid a big zip's synchronous processing
+   * triggering Cloudflare 524). Actual unzip / transcode runs on a background worker; the caller polls
+   * `getUploadStatus` for the job's terminal state to get added/skipped.
    */
   uploadProjectFiles: (
     pid: number,
@@ -2541,7 +2541,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
-  /** 上传 job 状态轮询：job 终态前 result 为 null；done 后含 added/skipped。 */
+  /** Upload job status polling: result is null before the job reaches a terminal state; contains added/skipped once done. */
   getUploadStatus: (pid: number) =>
     req<{ job: Job | null; log_tail: string; result: UploadResult | null }>(
       `/api/projects/${pid}/upload/status`
@@ -2550,7 +2550,7 @@ export const api = {
     req<{ items: DownloadFile[]; count: number }>(
       `/api/projects/${pid}/files?bucket=${encodeURIComponent(bucket)}`
     ),
-  /** 从 project 的 download/ 删除指定图片 + 同名 metadata（.booru.txt/.txt/.json）。 */
+  /** Delete the given image + same-name metadata (.booru.txt/.txt/.json) from the project's download/. */
   deleteProjectFiles: (pid: number, names: string[]) =>
     req<{ deleted: string[]; missing: string[] }>(
       `/api/projects/${pid}/files/delete`,
@@ -2559,20 +2559,20 @@ export const api = {
         body: JSON.stringify({ names }),
       }
     ),
-  /** `v`：文件 mtime（unix s），仅用作浏览器端 cache-buster。**服务端忽略**该参数
-   *  （后端 cache key 仍按 src+mtime+size 计算）；目的是让 in-place 覆盖后的图
-   *  （裁剪 / 放大同名输出）URL 变化，浏览器不再命中 memory image cache 复用旧
-   *  decoded 像素。`Cache-Control: no-cache` 对 disk cache 强制 revalidate，
-   *  但 CSS `background-image` 的 in-memory decoded image 不受其约束，必须
-   *  靠 URL 唯一性来失效 — 见 PreprocessCrop bug 修复。 */
+  /** `v`: file mtime (unix s), used only as a browser-side cache-buster. **The server ignores** this param
+   *  (the backend cache key is still computed from src+mtime+size); the point is to change the URL after an
+   *  in-place overwrite (crop / upscale writing to the same name) so the browser doesn't hit the memory image
+   *  cache and reuse the old decoded pixels. `Cache-Control: no-cache` forces disk-cache revalidation,
+   *  but CSS `background-image`'s in-memory decoded image isn't bound by that and can only be invalidated
+   *  via URL uniqueness -- see the PreprocessCrop bug fix. */
   projectThumbUrl: (
     pid: number,
     name: string,
     bucket = 'download',
     size = 256,
     v?: number,
-    /** raw=true（仅 bucket=download 有效）：跳过 resolve_origin，强制 download/{name}
-     *  原始字节。给「对比预览」左 pane 用 —— 不能被 preprocess 派生 hijack。 */
+    /** raw=true (only valid for bucket=download): skips resolve_origin, forces the raw bytes of download/{name}.
+     *  Used by the "compare preview" left pane -- must not be hijacked by preprocess derivatives. */
     raw?: boolean,
   ) =>
     `/api/projects/${pid}/thumb?bucket=${encodeURIComponent(bucket)}&name=${encodeURIComponent(name)}&size=${size}`
@@ -2580,7 +2580,7 @@ export const api = {
     + (raw ? '&raw=1' : ''),
 
   // ---- ADR 0010 train-scope endpoints -----------------------------------
-  // PR-3 加；PR-4 前端切到这套；后续 PR-5 删老的 (`/preprocess/*` without vid)。
+  // Added in PR-3; the frontend switched to this set in PR-4; the old ones (`/preprocess/*` without vid) will be removed in PR-5.
   startPreprocessTrain: (
     pid: number,
     vid: number,
@@ -2609,14 +2609,14 @@ export const api = {
       images: TrainImage[]
       summary: { image_count: number }
     }>(`/api/projects/${pid}/versions/${vid}/preprocess/files`),
-  /** ADR 0010 §Restore: 从 download/{entry.origin} 复制覆盖回 train/{name}；
-   *  download 缺失返 `no_origin` 列表（UI 给三选项 [拖入替换 / 保留 / 移除]）。 */
+  /** ADR 0010 SSRestore: copies download/{entry.origin} back over train/{name};
+   *  returns a `no_origin` list when the download is missing (UI offers three options [drag in a replacement / keep / remove]). */
   restorePreprocessFilesTrain: (pid: number, vid: number, names: string[]) =>
     req<TrainRestoreResult>(
       `/api/projects/${pid}/versions/${vid}/preprocess/files/restore`,
       { method: 'POST', body: JSON.stringify({ names }) },
     ),
-  /** 只清 train manifest，**不动** train/ 物理文件（train 是训练数据本身）。 */
+  /** Only clears the train manifest, **does not touch** the physical files in train/ (train is the training data itself). */
   resetPreprocessFilesTrain: (pid: number, vid: number) =>
     req<{ ok: boolean }>(
       `/api/projects/${pid}/versions/${vid}/preprocess/files/reset`,
@@ -2639,8 +2639,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ crops }),
     }),
-  /** 涂抹整图保存（同步，无 job）：canvas 导出 PNG 覆盖 train/{name}。
-   *  multipart 绕过 req() 的 JSON header，让浏览器自加 boundary。 */
+  /** Paint-over whole-image save (synchronous, no job): exports the canvas as a PNG over train/{name}.
+   *  multipart bypasses req()'s JSON header so the browser adds the boundary itself. */
   saveInpaintTrain: async (
     pid: number,
     vid: number,
@@ -2660,10 +2660,10 @@ export const api = {
     }
     return (await resp.json()) as InpaintSaveResult
   },
-  /** 训练 mask 文件 URL（灰度 PNG，尺寸=源图）。无 mask → 404。 */
+  /** Training mask file URL (grayscale PNG, same size as the source image). No mask -> 404. */
   maskUrl: (pid: number, vid: number, name: string) =>
     `/api/projects/${pid}/versions/${vid}/preprocess/mask?name=${encodeURIComponent(name)}`,
-  /** 写入训练 mask（前端 mask 层导出的灰度 PNG）。 */
+  /** Write the training mask (grayscale PNG exported from the frontend mask layer). */
   saveMaskTrain: async (
     pid: number,
     vid: number,
@@ -2683,16 +2683,16 @@ export const api = {
     }
     return (await resp.json()) as { name: string; mtime: number; size: number }
   },
-  /** 删除训练 mask（= 该图恢复全图正常学习）。 */
+  /** Delete the training mask (= restore full-image normal learning for that image). */
   deleteMaskTrain: (pid: number, vid: number, name: string) =>
     req<{ deleted: boolean }>(
       `/api/projects/${pid}/versions/${vid}/preprocess/mask?name=${encodeURIComponent(name)}`,
       { method: 'DELETE' },
     ),
 
-  // R-5 台账合并：/api/jobs* 已删，作业与任务同源 /api/queue（单一 ID 空间）。
-  // getJob / cancelJob 保留函数名给步骤页（Download/Tagging/Reg/Preprocess），
-  // 内部改指 /api/queue；kind 由 task_type 派生。
+  // R-5 ledger merge: /api/jobs* was removed; jobs and tasks share the same source /api/queue (a single ID space).
+  // getJob / cancelJob keep their names for the step pages (Download/Tagging/Reg/Preprocess);
+  // internally they point at /api/queue now; kind is derived from task_type.
   getJob: (jid: number) =>
     req<Task & { kind?: JobKind }>(`/api/queue/${jid}`).then(
       (t) => ({ ...t, kind: (t.task_type ?? 'train') as JobKind }) as unknown as Job,
@@ -2710,7 +2710,7 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/jobs/latest?kind=${kind}`,
     ),
 
-  // Tagger 就绪检查（reg 辅助打标用；自动打标步骤本 fork 已移除）------------
+  // Tagger readiness check (used by reg-assist tagging; the auto-tagging step was removed in this fork) ------------
   checkTagger: (name: TaggerName) =>
     req<TaggerStatus>(`/api/tagger/${name}/check`),
   listCaptions: (pid: number, vid: number, folder?: string) => {
@@ -2785,18 +2785,18 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/reg`,
       { method: 'DELETE' }
     ),
-  /** A1 — 批量删 reg 集中的指定图片（含同名 .txt）。
-   * `relative_paths` 是相对 reg/ 的路径列表，跨子文件夹可。
-   * 后端自动把删除的 booru ID 追加到 reg/.deleted_ids.json，
-   * 下次 incremental build 时自动排除。 */
+  /** A1 -- bulk-delete the given images from the reg set (plus same-name .txt).
+   * `relative_paths` is a list of paths relative to reg/, across subfolders is fine.
+   * The backend automatically appends the deleted booru IDs to reg/.deleted_ids.json,
+   * excluding them automatically on the next incremental build. */
   deleteRegFiles: (pid: number, vid: number, relative_paths: string[]) =>
     req<{ deleted: string[]; count: number }>(
       `/api/projects/${pid}/versions/${vid}/reg/delete-files`,
       { method: 'POST', body: JSON.stringify({ relative_paths }) }
     ),
-  /** A4 — 用 preprocess dedup 默认参数扫一遍 reg 集，自动删除每组建议删除项
-   * （不弹 review panel，"推荐删除"直接删；reg 集 quality bar 比 train 低）。
-   * 同步返回 — 大集会慢；前端要 disable 按钮 + spinner。 */
+  /** A4 -- sweeps the reg set with preprocess dedup's default params and auto-deletes each group's suggested-delete items
+   * (no review panel popup, "recommended for deletion" is deleted right away; the reg set's quality bar is lower than train's).
+   * Returns synchronously -- can be slow on a large set; the frontend must disable the button + show a spinner. */
   dedupPurgeReg: (pid: number, vid: number) =>
     req<{ scanned: number; groups: number; deleted: string[]; count: number }>(
       `/api/projects/${pid}/versions/${vid}/reg/dedup-purge`,
@@ -2806,34 +2806,34 @@ export const api = {
     req<{ path: string; tags: string[] }>(
       `/api/projects/${pid}/versions/${vid}/reg/caption?path=${encodeURIComponent(path)}`
     ),
-  /** PR-9 — 启动先验生成 task（base 模型对每张 train 图反向出对照图）。 */
+  /** PR-9 -- start a prior-generation task (the base model inverts a control image for each train image). */
   enqueueRegPrior: (pid: number, vid: number, body: RegAiRequest) =>
     req<Task>(`/api/projects/${pid}/versions/${vid}/reg/generate-prior`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  /** 回放最近一次先验生成 task + 日志，用于切页面/刷新后的日志恢复。 */
+  /** Replay the most recent prior-generation task + log, used to restore the log after switching pages / refreshing. */
   getLatestRegPriorTask: (pid: number, vid: number) =>
     req<{ task: Task | null; log: string }>(
       `/api/projects/${pid}/versions/${vid}/reg/generate-prior/latest`,
     ),
-  /** 查询先验生成 task 状态。 */
+  /** Query the prior-generation task status. */
   getRegPriorTask: (pid: number, vid: number, taskId: number) =>
     req<Task>(`/api/projects/${pid}/versions/${vid}/reg/generate-prior/${taskId}`),
 
-  /** 重命名 reg/ 子文件夹（改 Kohya repeat 前缀，如 2_data → 1_data）。 */
+  /** Rename a reg/ subfolder (changes the Kohya repeat prefix, e.g. 2_data -> 1_data). */
   renameRegFolder: (pid: number, vid: number, name: string, newName: string) =>
     req<{ path: string }>(`/api/projects/${pid}/versions/${vid}/reg/folder`, {
       method: 'POST',
       body: JSON.stringify({ name, new_name: newName }),
     }),
 
-  /** 列出 version output/ 下所有 LoRA ckpt 文件（XY ckpt 轴 + 单图模式切 ckpt）。 */
+  /** List all LoRA ckpt files under a version's output/ (used by the XY ckpt axis + single-image mode's ckpt switcher). */
   listVersionLoraCkpts: (pid: number, vid: number) =>
     req<{ items: LoraCkpt[] }>(`/api/projects/${pid}/versions/${vid}/lora_ckpts`)
       .then((r) => r.items),
 
-  /** 列出项目所有 versions 的 state.pt，按 version 分组（Train 页 resume_state picker）。 */
+  /** List state.pt for all of a project's versions, grouped by version (used by the Train page's resume_state picker). */
   listProjectStateCkpts: (pid: number) =>
     req<{ groups: VersionCkptGroup<StateCkpt>[] }>(`/api/projects/${pid}/state_ckpts`)
       .then((r) => r.groups),
@@ -2851,11 +2851,11 @@ export const api = {
 
   /** ── Checkpoint soup ────────────────────────────────────────────────── */
 
-  /** 上传的原料 + 已合成的成品（项目内 ckpt 走 listProjectLoraCkpts）。 */
+  /** Uploaded raw material + already-merged results (in-project ckpt goes through listProjectLoraCkpts). */
   listSoupSources: () =>
     req<{ uploads: SoupFile[]; outputs: SoupFile[] }>('/api/soup/sources'),
 
-  /** 上传自己的 .safetensors；服务端解析失败会 422（截断文件当场拦住）。 */
+  /** Upload your own .safetensors; a parse failure on the backend returns 422 (catches truncated files immediately). */
   uploadSoupSource: async (file: File): Promise<SoupFile> => {
     const fd = new FormData()
     fd.append('file', file, file.name)
@@ -2876,7 +2876,7 @@ export const api = {
   soupDownloadUrl: (name: string) =>
     `/api/soup/outputs/${encodeURIComponent(name)}/download`,
 
-  /** 合并前的兼容性判定（rank / 目标模块 / algo 是否一致）。 */
+  /** Pre-merge compatibility check (whether rank / target modules / algo match). */
   inspectSoupSources: (paths: string[]) =>
     req<SoupCompatibility>('/api/soup/inspect', {
       method: 'POST', body: JSON.stringify({ paths }),
@@ -2889,42 +2889,42 @@ export const api = {
     overwrite?: boolean
   }) => req<SoupMergeResult>('/api/soup/merge', { method: 'POST', body: JSON.stringify(body) }),
 
-  /** 列出项目所有 versions 的 LoRA ckpt，按 version 分组（Train 页 resume_lora picker）。 */
+  /** List LoRA ckpt for all of a project's versions, grouped by version (used by the Train page's resume_lora picker). */
   listProjectLoraCkpts: (pid: number) =>
     req<{ groups: VersionCkptGroup<LoraCkpt>[] }>(`/api/projects/${pid}/lora_ckpts`)
       .then((r) => r.groups),
 
-  /** PR-9 — 启动测试出图 task。Phase 2 起：图走 server 内存 cache，关页面即丢。 */
+  /** PR-9 -- start a test-generation task. As of Phase 2: images go through the server's in-memory cache and are lost on page close. */
   enqueueGenerate: (body: GenerateRequest) =>
     req<Task>('/api/generate', { method: 'POST', body: JSON.stringify(body) }),
-  /** 落盘历史：扫 studio_data/test/&lt;date&gt;/{single,xy}/image_N.json sidecar，
-   *  按 created_at desc 返回；用于历史栏跨会话回看已落盘的测试图。
-   *  注意路径用 disk/ 子前缀避开 `/api/generate/{task_id}` 的单段 catch-all。 */
+  /** On-disk history: scans studio_data/test/&lt;date&gt;/{single,xy}/image_N.json sidecars,
+   *  returns sorted by created_at desc; used by the history rail to look back at test images persisted across sessions.
+   *  Note: the path uses the disk/ subprefix to avoid /api/generate/{task_id}'s single-segment catch-all. */
   listDiskGenerateHistory: (limit = 500) =>
     req<{ entries: DiskGenerateHistoryEntry[] }>(`/api/generate/disk/history?limit=${limit}`),
-  /** 当前 session 加密磁盘 cache 历史（save_test_images=false 时唯一来源）。
-   *  server 重启 / SSE 断连 30s + LRU 后 entry 消失；刷新 / 切路由都拉这里。 */
+  /** Current session's encrypted disk-cache history (the only source when save_test_images=false).
+   *  Entries disappear after a server restart / 30s SSE disconnect + LRU; refreshing / switching routes both re-fetch this. */
   listCacheGenerateHistory: () =>
     req<{ entries: CacheGenerateHistoryEntry[] }>('/api/generate/cache/index'),
-  /** 查询测试 task 状态。 */
+  /** Query the test task's status. */
   getGenerateTask: (id: number) => req<Task>(`/api/generate/${id}`),
-  /** 测试出图单张 URL（task 跑中或刚完成时拉；客户端断连 30s + LRU 后 404）。 */
+  /** URL of a single test-generation image (fetched while the task is running or just finished; 404 after a 30s client disconnect + LRU). */
   generateSampleUrl: (taskId: number, filename: string) =>
     `/api/generate/${taskId}/sample/${encodeURIComponent(filename)}`,
-  /** Phase 2 — daemon 状态查询（前端 DaemonControls）。 */
+  /** Phase 2 -- daemon status query (used by the frontend's DaemonControls). */
   getDaemonStatus: () => req<DaemonStatus>('/api/generate/daemon/status'),
-  /** Phase 2 — 手动卸载 daemon 模型（busy 时 409）。 */
+  /** Phase 2 -- manually unload the daemon model (409 if busy). */
   unloadDaemon: () => req<{ ok: boolean; noop?: boolean }>(
     '/api/generate/daemon/unload', { method: 'POST' }
   ),
-  /** daemon stderr ring buffer。since_seq>0 时只返增量。 */
+  /** daemon stderr ring buffer. Returns only the increment when since_seq>0. */
   getDaemonLogs: (sinceSeq = 0, limit = 2000) =>
     req<{ entries: Array<{ ts: number; seq: number; line: string }>; next_seq: number }>(
       `/api/generate/daemon/logs?since_seq=${sinceSeq}&limit=${limit}`,
     ),
-  /** Phase 2 commit 14 — TAEFlux 状态。 */
+  /** Phase 2 commit 14 -- TAEFlux status. */
   getTaeFluxStatus: () => req<TaeFluxStatus>('/api/generate/taeflux/status'),
-  /** Phase 2 commit 14 — 同步下载 TAEFlux（~1.6MB，秒级）。已存在 noop。 */
+  /** Phase 2 commit 14 -- synchronously download TAEFlux (~1.6MB, sub-second). No-op if it already exists. */
   installTaeFlux: () => req<{ ok: boolean; noop?: boolean }>(
     '/api/generate/taeflux/install', { method: 'POST' }
   ),
@@ -2964,8 +2964,8 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/config/save_as_preset`,
       { method: 'POST', body: JSON.stringify({ name, overwrite }) }
     ),
-  /** 0.17 P-B — scheduledAt（unix 秒）给了则建成 scheduled（计划任务），到点
-   *  由 supervisor 提升为 pending；不给立即入队（原行为）。 */
+  /** 0.17 P-B -- when scheduledAt (unix seconds) is given, creates the task as scheduled; once due,
+   *  the supervisor promotes it to pending (doesn't enqueue immediately -- unlike the old behavior). */
   enqueueVersionTraining: (pid: number, vid: number, opts?: { scheduledAt?: number }) =>
     req<Task>(
       `/api/projects/${pid}/versions/${vid}/queue`,
@@ -3007,7 +3007,7 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/curation/folder`,
       { method: 'POST', body: JSON.stringify(body) }
     ),
-  // 验证集（held-out）手动维护——与 train curation 对称，右栏扁平无文件夹
+  // Validation set (held-out) is maintained manually -- symmetric with train curation, the right column is flat with no folders
   getCurationValidation: (pid: number, vid: number) =>
     req<CurationValidationView>(
       `/api/projects/${pid}/versions/${vid}/curation/validation`
@@ -3062,15 +3062,15 @@ export const api = {
   listQueue: (status?: TaskStatus, opts?: { includeGenerate?: boolean }) => {
     const params: string[] = []
     if (status) params.push(`status=${status}`)
-    // /api/queue 默认隐藏 generate（测试出图）task，列表里不混淆 train slot；
-    // 想看 generate 任务（如 Overview 的 "查看输出"）显式开关。
+    // /api/queue hides generate (test-generation) tasks by default so the list doesn't mix them with train slots;
+    // an explicit toggle shows generate tasks (e.g. Overview's "view output").
     if (opts?.includeGenerate) params.push('include_generate=true')
     const qs = params.length ? `?${params.join('&')}` : ''
     return req<{ items: Task[] }>(`/api/queue${qs}`).then((r) => r.items)
   },
-  // 0.17 P-A/P-C —— 队列页分区数据源。live = 进行中 + 等待（running/paused/pending），
-  // 不分页；q 搜 name/config_name。
-  // 不分页；q 搜 name/config_name；type 按 task_type 过滤（0.17 P-F）。
+  // 0.17 P-A/P-C -- data source for the queue page's sections. live = in progress + waiting (running/paused/pending),
+  // not paginated; q searches name/config_name.
+  // Not paginated; q searches name/config_name; type filters by task_type (0.17 P-F).
   listQueueLive: (q?: string, type?: TaskType, resourceClass?: QueueResourceClass) => {
     const params = new URLSearchParams({ group: 'live' })
     if (q) params.set('q', q)
@@ -3078,9 +3078,9 @@ export const api = {
     if (resourceClass) params.set('resource_class', resourceClass)
     return req<{ items: Task[] }>(`/api/queue?${params}`).then((r) => r.items)
   },
-  // 0.17 P-E —— history = 已结束（done/failed/canceled），后端分页。status 传终态
-  // 做子过滤，q 搜 name/config_name，type 按 task_type 过滤（P-F）。返回
-  // { items, total, page, page_size }。
+  // 0.17 P-E -- history = finished (done/failed/canceled), paginated on the backend. status passes a terminal state
+  // as a sub-filter, q searches name/config_name, type filters by task_type (P-F). Returns
+  // { items, total, page, page_size }.
   listQueueHistory: (opts: {
     page: number; pageSize: number; q?: string; status?: TaskStatus;
     type?: TaskType; resourceClass?: QueueResourceClass
@@ -3106,59 +3106,59 @@ export const api = {
     req<{ task_id: number; canceled: boolean }>(`/api/queue/${id}/cancel`, {
       method: 'POST',
     }),
-  /** _v20 — 写 / 清 任务备注。空串 → 清空（后端存 NULL）。任何状态都能改。 */
+  /** _v20 -- write / clear a task's note. Empty string -> clears it (stored as NULL server-side). Editable in any status. */
   setTaskNote: (id: number, note: string) =>
     req<Task>(`/api/queue/${id}/note`, {
       method: 'PUT',
       body: JSON.stringify({ note }),
     }),
-  /** 某 task 的训练采样图清单（扫盘，已结束任务也有）。队列页内联采样条用。 */
+  /** A task's training sample-image listing (found by scanning disk, also available for finished tasks). Used by the queue page's inline sample strip. */
   listTaskSamples: (id: number) =>
     req<{ items: TaskSample[]; total: number }>(`/api/queue/${id}/samples`),
-  /** 0.17 P-B — scheduled task 手动提前：立即转 pending 参与调度。非 scheduled 409。 */
+  /** 0.17 P-B -- manually bump a scheduled task: converts it to pending immediately so it joins scheduling. 409 if not scheduled. */
   startTaskNow: (id: number) =>
     req<{ task_id: number; status: string }>(`/api/queue/${id}/start_now`, {
       method: 'POST',
     }),
   retryTask: (id: number) =>
     req<Task>(`/api/queue/${id}/retry`, { method: 'POST' }),
-  /** ADR 0006 — 暂停 running task。返回时 task 还在 running，需订阅 SSE
-   *  task_state_changed 看 status 转 paused。状态不对（非 running / train_loop
-   *  未启动）抛 409。 */
+  /** ADR 0006 -- pause a running task. The task is still running when this returns; subscribe to the SSE
+   *  task_state_changed event to see status flip to paused. Throws 409 if the state is wrong (not running / train_loop
+   *  hasn't started yet). */
   pauseTask: (id: number) =>
     req<{ task_id: number; pause_pending: boolean }>(
       `/api/queue/${id}/pause`,
       { method: 'POST' },
     ),
-  /** ADR 0006 PR-3 + Addendum 2 — 恢复 paused / failed / canceled task
-   *  （从最近的 epoch 末 auto backup 续训）。恢复点文件缺失返 409 引导走
-   *  ResumeFieldPicker 起新 task。done 不可恢复（走 retry）。 */
+  /** ADR 0006 PR-3 + Addendum 2 -- resume a paused / failed / canceled task
+   *  (continues training from the most recent end-of-epoch auto backup). Returns 409 if the resume-point file is missing,
+   *  which routes to ResumeFieldPicker to start a new task. done tasks can't be resumed (use retry instead). */
   resumeTask: (id: number) =>
     req<{ task_id: number; status: string }>(
       `/api/queue/${id}/resume`,
       { method: 'POST' },
     ),
-  /** ADR 0006 PR-2 — 查队列挂起状态 + 等待恢复调度的 pending 数。 */
+  /** ADR 0006 PR-2 -- query the queue's hold state + the pending count waiting to resume scheduling. */
   getQueueHold: () => req<QueueHoldState>('/api/queue/hold'),
-  /** 挂起队列：dispatcher 不拉新 task，已 running 的不受影响。 */
+  /** Hold the queue: the dispatcher stops pulling new tasks; already-running ones are unaffected. */
   holdQueue: () =>
     req<{ held: boolean }>('/api/queue/hold', { method: 'POST' }),
-  /** 恢复调度：dispatcher 重新按优先级拉 pending。 */
+  /** Resume scheduling: the dispatcher pulls pending tasks by priority again. */
   releaseQueue: () =>
     req<{ held: boolean }>('/api/queue/release', { method: 'POST' }),
   deleteTask: (id: number) =>
     req<{ deleted: number }>(`/api/queue/${id}`, { method: 'DELETE' }),
-  /** 列 task 关联的 output 目录里所有文件（含 size/mtime/是否 lora）。
-   * `supports_open_folder` 仅在请求来自 loopback 时为 true，云端为 false。 */
+  /** List every file in a task's output directory (with size/mtime/whether it's a lora).
+   * `supports_open_folder` is true only when the request comes from loopback, false in the cloud. */
   getTaskOutputs: (id: number) =>
     req<TaskOutputs>(`/api/queue/${id}/outputs`),
-  /** 下载单个 output 文件的直链，不发请求。<a href={...} download> 即可。 */
+  /** Direct download link for a single output file, no request needed. <a href={...} download> is enough. */
   taskOutputDownloadUrl: (id: number, path: string) =>
     `/api/queue/${id}/output/${path.split('/').map(encodeURIComponent).join('/')}`,
-  /** output 目录打包 zip 下载直链。
-   * 不传 files → 全量；传相对路径数组 → 仅打包这些（后端 whitelist 校验）。
-   * 配合 <a href download> 触发，浏览器原生接管下载条；后端 zip 写完会
-   * publish task_outputs_zip_ready / task_outputs_zip_failed 事件供前端清 loading。 */
+  /** Direct download link for a zip of the output directory.
+   * No files -> the whole thing; pass an array of relative paths -> only those (validated against a backend whitelist).
+   * Trigger with <a href download>, the browser handles the download bar natively; once the backend finishes writing the
+   * zip it publishes task_outputs_zip_ready / task_outputs_zip_failed events for the frontend to clear the loading state. */
   taskOutputsZipUrl: (id: number, files?: ReadonlyArray<string>) => {
     if (!files || files.length === 0) return `/api/queue/${id}/outputs.zip`
     const q = files.map((n) => encodeURIComponent(n)).join(',')
@@ -3169,65 +3169,65 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ files: files && files.length > 0 ? Array.from(files) : null }),
     }),
-  /** 删除 output 目录下选中的文件（批量）。relative_paths 相对 output/。
-   *  任一不存在 → 后端 404 整批拒绝，前端 toast 错误后调用方 caller 应自行刷新。 */
+  /** Delete selected files under the output directory (batch). relative_paths are relative to output/.
+   *  If any doesn't exist -> the backend rejects the whole batch with 404; the frontend toasts the error and the caller should refresh itself. */
   deleteTaskOutputs: (id: number, files: ReadonlyArray<string>) =>
     req<{ deleted: string[] }>(`/api/queue/${id}/outputs`, {
       method: 'DELETE',
       body: JSON.stringify({ files: Array.from(files) }),
     }),
 
-  // PP8 — WD14 运行时 / GPU 装包 ------------------------------------------
-  /** 当前 onnxruntime 状态：包名 / 版本 / providers / nvidia-smi 检测结果。 */
+  // PP8 -- WD14 runtime / GPU package install ------------------------------------------
+  /** Current onnxruntime status: package name / version / providers / nvidia-smi detection result. */
   getWD14Runtime: () => req<WD14Runtime>('/api/wd14/runtime'),
-  /** 切换 onnxruntime（同步 pip，几分钟级；UI 必须带 loading）。 */
+  /** Switch onnxruntime (synchronous pip, takes a few minutes; UI must show loading). */
   installWD14Runtime: (target: 'auto' | 'gpu' | 'cpu' | 'directml') =>
     req<WD14InstallResult>('/api/wd14/install', {
       method: 'POST',
       body: JSON.stringify({ target }),
     }),
 
-  // PR-S2 — PyTorch 运行时 / 一键重装 ---------------------------------------
-  /** 当前 torch 状态：版本 / CUDA build / cuda.is_available / 驱动检测 / 推荐 cu tag。 */
+  // PR-S2 -- PyTorch runtime / one-click reinstall ---------------------------------------
+  /** Current torch status: version / CUDA build / cuda.is_available / driver detection / recommended cu tag. */
   getTorchStatus: () => req<TorchStatus>('/api/torch/status'),
-  /** 卸装重装 torch + torchvision；同步 pip，可能 5-30 分钟，UI 必须带 loading。
-   *  装完必须重启 Studio（C extension 不能热替换）。 */
+  /** Uninstall and reinstall torch + torchvision; synchronous pip, can take 5-30 minutes, UI must show loading.
+   *  Studio must be restarted after install (C extensions can't be hot-swapped). */
   reinstallTorch: (target: 'auto' | TorchCuTag) =>
     req<TorchReinstallResult>('/api/torch/reinstall', {
       method: 'POST',
       body: JSON.stringify({ target }),
     }),
 
-  // PR-7b — Flash Attention 运行时 / wheel 安装 ----------------------------
-  /** 当前 flash_attn 状态 + 环境检测 + GitHub 候选 wheel 列表（前 20）。
-   *  fetch_error 非 null 时 candidates=[]，UI 应提示用户改用手动 URL。 */
+  // PR-7b -- Flash Attention runtime / wheel install ----------------------------
+  /** Current flash_attn status + environment detection + candidate GitHub wheels (top 20).
+   *  When fetch_error is non-null, candidates=[] and the UI should prompt the user to use a manual URL instead. */
   getFlashAttnStatus: () => req<FlashAttnStatus>('/api/flash-attention/status'),
-  /** 安装 flash_attn wheel；url=null 走 service 自动匹配。
-   *  同步 pip install（远端 wheel ~150MB），可能几分钟；UI 按钮必须带 loading。
-   *  装完必须重启 Studio 才能切换（C extension 不能热替换）。 */
+  /** Install a flash_attn wheel; url=null lets the service auto-match one.
+   *  Synchronous pip install (remote wheel ~150MB), can take a few minutes; the UI button must show loading.
+   *  Studio must be restarted to switch after install (C extensions can't be hot-swapped). */
   installFlashAttn: (url: string | null) =>
     req<FlashAttnInstallResult>('/api/flash-attention/install', {
       method: 'POST',
       body: JSON.stringify({ url }),
     }),
 
-  // xformers 运行时（attention_backend=xformers 用） -----------------------
-  /** xformers 安装状态。比 flash_attn 简洁：xformers 走 PyPI 直装，
-   *  没有 GitHub 候选 wheel 列表的复杂选择逻辑。 */
+  // xformers runtime (used when attention_backend=xformers) -----------------------
+  /** xformers install status. Simpler than flash_attn: xformers installs directly from PyPI,
+   *  no complex selection logic over a list of candidate GitHub wheels. */
   getXformersStatus: () => req<XformersStatus>('/api/xformers/status'),
-  /** pip install xformers --index-url <torch-cu-index>。同步 pip，几分钟级。
-   *  装失败时后端把 stderr 末尾透传到 message，多数失败 = 上游 wheel 没覆盖
-   *  当前 torch+cu 组合。装完必须重启 Studio（C extension 不能热替换）。 */
+  /** pip install xformers --index-url <torch-cu-index>. Synchronous pip, takes a few minutes.
+   *  On failure the backend passes the tail of stderr through to message; most failures mean the upstream wheel doesn't cover
+   *  the current torch+cu combination. Studio must be restarted after install (C extensions can't be hot-swapped). */
   installXformers: () =>
     req<XformersInstallResult>('/api/xformers/install', { method: 'POST' }),
 
-  // PP7 — 训练集导出 / 导入 -----------------------------------------------
-  /** 当前 version 的 train/ 打包 zip 直链。<a href download> 触发即可,
-   * 后端 publish version_train_zip_ready/_failed SSE 供前端清 "打包中..." 状态。 */
+  // PP7 -- training-set export / import -----------------------------------------------
+  /** Direct download link for the current version's train/ packed as a zip. <a href download> is enough to trigger it,
+   * the backend publishes version_train_zip_ready/_failed SSE for the frontend to clear the "packing..." state. */
   versionTrainZipUrl: (pid: number, vid: number) =>
     `/api/projects/${pid}/versions/${vid}/train.zip`,
 
-  /** 当前 version 的 bundle.zip 直链。<a href download> 触发浏览器下载。 */
+  /** Direct download link for the current version's bundle.zip. <a href download> triggers the browser download. */
   versionBundleZipUrl: (
     pid: number,
     vid: number,
@@ -3282,7 +3282,7 @@ export const api = {
     }),
   listDataExports: () => req<DataExportItem[]>('/api/data-exports'),
 
-  /** 从 PathPicker 选中的 zip 路径导入 bundle（v1/v2 均支持）→ 新建 project + v1。 */
+  /** Import a bundle from a zip path chosen in PathPicker (supports both v1/v2) -> creates a new project + v1. */
   importBundleFromPath: (path: string) =>
     req<BundleImportResult>('/api/projects/import-bundle', {
       method: 'POST',
@@ -3301,7 +3301,7 @@ export const api = {
     fd.append('file', file, file.name)
     return xhrUpload<BundleImportResult>('/api/projects/import-bundle/upload', fd, onProgress)
   },
-  /** 上传训练集 zip → 新建 project + v1，返回新项目。 */
+  /** Upload a training-set zip -> creates a new project + v1, returns the new project. */
   importTrainProject: (
     file: File,
     onProgress?: (e: UploadProgressEvent) => void,
@@ -3314,7 +3314,7 @@ export const api = {
     fd.append('file', file)
     return xhrUpload('/api/projects/import-train', fd, onProgress)
   },
-  /** 在 server 主机的 OS 文件管理器里打开 output 目录（仅 loopback 可用）。 */
+  /** Open the output directory in the server host's OS file manager (loopback only). */
   openTaskFolder: (id: number) =>
     req<{ opened: string }>(`/api/queue/${id}/open-folder`, {
       method: 'POST',
@@ -3325,9 +3325,9 @@ export const api = {
       body: JSON.stringify({ ordered_ids: orderedIds }),
     }),
   getLog: (id: number) => req<LogResponse>(`/api/logs/${id}`),
-  /** 默认拉全量历史（max_points=0，server 跳过降采样）；想要降采样预览
-   *  传具体数字。cold start 是一次性 HTTP，长训练（10k+ 步）下也只是 ~500KB
-   *  payload，不值得为视觉损耗换网络节省。 */
+  /** Fetches the full history by default (max_points=0, server skips downsampling); pass a specific number
+   *  for a downsampled preview. Cold start is a one-off HTTP request, and even for a long training run (10k+ steps)
+   *  it's only ~500KB payload -- not worth trading visual fidelity to save network. */
   getMonitorState: (taskId: number, maxPoints?: number) =>
     req<MonitorState>(
       `/api/state?task_id=${taskId}` +
@@ -3342,12 +3342,12 @@ export const api = {
       (taskId ? `task_id=${taskId}&` : '') +
       `_=${Date.now()}`,
     ),
-  /** 列某 task 的训练后/手动评估 job（按 run_id 关联 checkpoint 行 + 取原始日志）。 */
+  /** List a task's post-training/manual eval jobs (joins checkpoint rows by run_id + fetches the raw log). */
   listTaskEvalJobs: (pid: number, vid: number, taskId: number) =>
     req<{ jobs: EvalJobInfo[] }>(
       `/api/projects/${pid}/versions/${vid}/eval/jobs?task_id=${taskId}`,
     ),
-  /** 手动评估完成任务的选定 checkpoint（task-scoped，绕过自动评估开关）。 */
+  /** Manually evaluate a completed task's selected checkpoint (task-scoped, bypasses the auto-eval toggle). */
   runTaskEval: (
     pid: number,
     vid: number,
@@ -3372,11 +3372,11 @@ export const api = {
     return req<BrowseResult>(`/api/browse${qs}`)
   },
 
-  // studio_data 存储位置 -------------------------------------------------
-  // withScan=true 含全量扫描，大目录可能要数秒 —— 调用方给加载态。
+  // studio_data storage location -------------------------------------------------
+  // withScan=true includes a full scan, can take seconds on a large directory -- the caller should show a loading state.
   getStudioDataInfo: (withScan = true) =>
     req<StudioDataInfo>(`/api/studio-data/info?scan=${withScan}`),
-  // 422 = 目标不合法 / 有 running task；409 = 已有迁移在跑。
+  // 422 = invalid target / a running task exists; 409 = a migration is already running.
   startStudioDataMigrate: (target: string) =>
     req<{ ok: boolean }>('/api/studio-data/migrate', {
       method: 'POST',
@@ -3385,13 +3385,13 @@ export const api = {
   getStudioDataMigrateStatus: () =>
     req<StudioDataMigrateStatus>('/api/studio-data/migrate_status'),
 
-  // 模型根目录存储位置（镜像 studio_data，但迁移完无需重启，立即生效）----------
+  // Models-root storage location (mirrors studio_data, but the migration takes effect immediately, no restart needed) ----------
   getModelsRootInfo: (withScan = true) =>
     req<ModelsRootInfo>(`/api/models-root/info?scan=${withScan}`),
-  // 422 = 目标不合法 / 有 running task；409 code models_root.migration_busy = 已有
-  // 迁移在跑；409 code models_root.target_conflict = 目标已有 models 数据（detail 带
-  // existing_files/existing_bytes/same_name_files，modal 弹「跳过/覆盖/取消」后带
-  // onConflict 重发）。
+  // 422 = invalid target / a running task exists; 409 code models_root.migration_busy = a
+  // migration is already running; 409 code models_root.target_conflict = the target already has models data (detail carries
+  // existing_files/existing_bytes/same_name_files, the modal pops [skip/overwrite/cancel] and resends with
+  // onConflict).
   startModelsRootMigrate: (target: string, onConflict?: 'skip' | 'overwrite') =>
     req<{ ok: boolean }>('/api/models-root/migrate', {
       method: 'POST',
@@ -3402,7 +3402,7 @@ export const api = {
 
 }
 
-// 本 fork：System update/announcements API 类型随 in-app updater 移除。
+// This fork: the System update/announcements API types were removed along with the in-app updater.
 
 export interface BrowseEntry {
   name: string
@@ -3413,6 +3413,6 @@ export interface BrowseResult {
   path: string
   parent: string | null
   entries: BrowseEntry[]
-  /** 若传入的是文件路径，后端会回退到父目录，并把文件名放在这里供 picker 高亮。 */
+  /** If a file path is passed in, the backend falls back to the parent directory and puts the filename here for the picker to highlight. */
   selected?: string | null
 }

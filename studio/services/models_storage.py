@@ -298,13 +298,13 @@ def _copy_atomic(src_file: Path, out: Path) -> None:
 def _run_migration(
     src: Path, dst: Path, publish: Publish, on_conflict: str | None = None
 ) -> None:
-    # 开跑前记住 dst 是否已有数据：合并模式下 dst 的既有内容是用户的（可能与
-    # 跑图工具共用目录），失败回滚绝不能整树 rmtree —— 据此选回滚策略。
+    # Before starting, remember whether dst already has data: in merge mode dst's existing
+    # content belongs to the user (may share a directory with inference tools); failure rollback must never rmtree the whole tree -- choose the rollback strategy based on this.
     dst_preexisted = dst.is_dir() and any(dst.iterdir())
     try:
         files = [f for f in sorted(src.rglob("*")) if f.is_file()]
         if on_conflict == "skip":
-            # 目标已有同名文件的不复制；进度总量只算真要复制的
+            # Skip files that already exist at the destination; the progress total only counts what actually needs copying
             files = [f for f in files if not (dst / f.relative_to(src)).exists()]
         total_bytes = 0
         for f in files:
@@ -326,8 +326,8 @@ def _run_migration(
                 size = f.stat().st_size
                 _copy_atomic(f, out)
             except FileNotFoundError:
-                # 扫描后被删（如临时文件）—— 跳过，进度可能停在 <100%，无碍
-                logger.info("迁移期间文件消失，跳过: %s", rel)
+                # Deleted after the scan (e.g. a temp file) -- skip; progress may stall below 100%, harmless
+                logger.info("File disappeared during migration, skipping: %s", rel)
                 continue
             done_files += 1
             done_bytes += size
@@ -344,7 +344,7 @@ def _run_migration(
                     "current_file": str(rel),
                 })
 
-        # 复制完整 → 切 secret（立即生效）
+        # Copy complete -> switch secret (takes effect immediately)
         _update_models_root_secret(dst)
         _set_status(state="done", done_files=done_files, done_bytes=done_bytes, current_file="")
         publish({
@@ -355,18 +355,18 @@ def _run_migration(
             "done_bytes": done_bytes,
         })
         logger.info(
-            "模型根目录迁移完成: %s → %s（%d 文件），已更新 secrets.models.root（立即生效）",
+            "Model root migration complete: %s -> %s (%d files); updated secrets.models.root (effective immediately)",
             src, dst, done_files,
         )
     except Exception as exc:
-        logger.exception("模型根目录迁移失败: %s → %s", src, dst)
+        logger.exception("Model root migration failed: %s -> %s", src, dst)
         if dst_preexisted:
-            # 合并模式：dst 的既有数据是用户的，绝不能整树删。已复制完成的文件
-            # 都是完整有效副本（_copy_atomic 保证），留下无害；skip 幂等，重跑即续传。
-            logger.info("目标目录原有数据，保留已复制文件，不回滚: %s", dst)
+            # Merge mode: dst's existing data belongs to the user, never rmtree the whole tree.
+            # Files already copied are complete, valid copies (guaranteed by _copy_atomic), so leaving them is harmless; skip is idempotent, a rerun just resumes.
+            logger.info("Destination directory had pre-existing data; keeping copied files, not rolling back: %s", dst)
         else:
-            # dst 开始前为空 / 不存在，整树清掉等于回到迁移前；
-            # secret 未动；用户的 target 父目录不受影响。
+            # dst was empty/nonexistent before starting, so clearing the whole tree just reverts to the pre-migration state;
+            # the secret wasn't touched, and the user's target parent directory is unaffected.
             shutil.rmtree(dst, ignore_errors=True)
         _set_status(state="error", error=str(exc))
         publish({"type": "models_root_migrate_done", "ok": False, "error": str(exc)})

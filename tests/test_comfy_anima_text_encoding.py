@@ -196,7 +196,6 @@ class AssertingVAEModel:
         yield torch.zeros((), dtype=torch.float32)
 
     def decode(self, latents, scale):
-        # 包它的 TrackedVAE.should_offload_for_whole_decode=True → decode 时模型应已 offload 到 CPU
         self.decode_calls += 1
         assert next(self.anima_model.parameters()).device.type == "cpu"
         assert next(self.qwen_model.parameters()).device.type == "cpu"
@@ -501,7 +500,6 @@ def test_sample_image_retries_with_sdpa_when_xformers_outputs_nan(monkeypatch) -
 
     assert image.size == (2, 2)
     assert len(model.forward_calls) == 2
-    # 采样结束后开关复位：本张图用 SDPA 跑完，下一张重新尝试 xformers
     assert cosmos._USE_XFORMERS is True
 
 
@@ -596,7 +594,6 @@ def test_sample_image_restores_offloaded_modules_when_vae_decode_fails(monkeypat
 
 
 class NoOffloadAssertingVAEModel:
-    """should_offload_for_whole_decode=False：decode 时模型必须仍在 CUDA（不应触发 offload）。"""
 
     def __init__(self, anima_model: TinyTrackedAnimaModel, qwen_model: TinyTrackedQwenModel) -> None:
         self.anima_model = anima_model
@@ -659,7 +656,6 @@ def test_sample_image_skips_offload_when_vae_declines(monkeypatch) -> None:
     assert next(model.parameters()).device.type == "cuda"
 
 
-# ---------------- tokenize_t5_comfy_literal（训练 caption 编码） ----------------
 
 def test_tokenize_t5_comfy_literal_keeps_parentheses_literal_weight_one() -> None:
     from training.families.anima.text_encoding import tokenize_t5_comfy_literal
@@ -669,11 +665,9 @@ def test_tokenize_t5_comfy_literal_keeps_parentheses_literal_weight_one() -> Non
 
     valid = attn[0].bool()
     valid_ids = ids[0][valid].tolist()
-    # 字面 tokenize：括号字符保留在 token 序列里，不做权重语法解析
     assert FakeTokenizer.token_id("(") in valid_ids
     assert FakeTokenizer.token_id(")") in valid_ids
     assert valid_ids == _ids_for_text(caption) + [FakeTokenizer.eos_token_id]
-    # 权重全 1.0
     assert torch.all(w[0][valid] == 1.0)
 
 
@@ -684,7 +678,6 @@ def test_tokenize_t5_comfy_literal_differs_from_prompt_weight_parsing() -> None:
     ids, attn, _w = tokenize_t5_comfy_literal(FakeTokenizer(), [caption], max_length=512)
     valid_ids = ids[0][attn[0].bool()].tolist()
 
-    # prompt 权重解析会吃掉括号并给 1.1 倍权重——caption 路径必须不同
     _qwen, p_ids, p_attn, p_w = build_comfy_anima_conditioning_inputs(FakeTokenizer(), caption)
     parsed_ids = p_ids[0][p_attn[0].bool()].tolist()
     assert FakeTokenizer.token_id("(") not in parsed_ids
@@ -698,11 +691,9 @@ def test_tokenize_t5_comfy_literal_batch_padding_conventions() -> None:
 
     assert ids.shape == attn.shape == w.shape
     assert ids.shape[0] == 2
-    # 短样本 padding：pad_id=0 / attn=0 / weight=0.0（下游清零 padding cross）
     short_pad = ~attn[1].bool()
     assert short_pad.any()
     assert torch.all(ids[1][short_pad] == FakeTokenizer.pad_token_id)
     assert torch.all(w[1][short_pad] == 0.0)
-    # 两行都以 EOS 结尾
     assert ids[0][attn[0].bool()][-1].item() == FakeTokenizer.eos_token_id
     assert ids[1][attn[1].bool()][-1].item() == FakeTokenizer.eos_token_id

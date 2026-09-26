@@ -1,4 +1,3 @@
-"""PP7 — 训练集导出 / 导入 round-trip + 边界。"""
 from __future__ import annotations
 
 import io
@@ -40,7 +39,6 @@ def _make_project_with_train(
 
 
 def _png(content: bytes = b"fake-png") -> bytes:
-    # 只是占位，IMAGE_EXTS 按后缀判定不读 magic
     return content
 
 
@@ -51,7 +49,6 @@ def _png(content: bytes = b"fake-png") -> bytes:
 
 def test_export_round_trip(isolated, tmp_path: Path) -> None:
     p, v, train = _make_project_with_train(isolated)
-    # 默认已有 1_data；放两张 + 1 个 caption；再加一个 2_concept 子文件夹
     (train / "1_data").mkdir(parents=True, exist_ok=True)
     (train / "1_data" / "a.png").write_bytes(_png())
     (train / "1_data" / "a.txt").write_text("1girl, solo", encoding="utf-8")
@@ -80,9 +77,7 @@ def test_export_round_trip(isolated, tmp_path: Path) -> None:
         assert "train/1_data/b.png" in names
         assert "train/2_concept/c.png" in names
 
-        # round-trip: 重新导入应该得到一个全新项目，stage=tagging
         new_zip = tmp_path / "round.zip"
-    # 重新打开（上面 with 已关）
     import shutil
 
     shutil.copy(dest, new_zip)
@@ -91,7 +86,6 @@ def test_export_round_trip(isolated, tmp_path: Path) -> None:
 
     assert imported["project"]["id"] != p["id"]
     assert imported["version"]["label"] == "v1"
-    # ADR-0007 PR-5: import 不再推 stage
     assert imported["stats"]["image_count"] == 3
     assert imported["stats"]["tagged_count"] == 2
 
@@ -107,7 +101,6 @@ def test_export_round_trip(isolated, tmp_path: Path) -> None:
 
 def test_export_empty_train_raises(isolated, tmp_path: Path) -> None:
     p, v, train = _make_project_with_train(isolated)
-    # 默认 1_data 是空的；不放任何图
     dest = tmp_path / "empty.zip"
     with db.connection_for(isolated["db"]) as conn, pytest.raises(train_io.TrainIOError):
         train_io.export_train(conn, v["id"], dest)
@@ -121,7 +114,6 @@ def test_export_missing_version(isolated, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# import — 边界
 # ---------------------------------------------------------------------------
 
 
@@ -197,8 +189,6 @@ def test_import_rejects_empty(isolated, tmp_path: Path) -> None:
 
 
 def test_import_slug_conflict_appends_suffix(isolated, tmp_path: Path) -> None:
-    """同 slug 已存在 → 自动加 -imported-{ts} 后缀。"""
-    # 先建一个 slug=cosmic-kaguya 的项目占位
     with db.connection_for(isolated["db"]) as conn:
         projects.create_project(conn, title="Cosmic Kaguya")  # slug=cosmic-kaguya
 
@@ -248,7 +238,6 @@ def test_import_bad_zip(isolated, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bundle import: 4 全局模型路径字段跨机器处理
 # ---------------------------------------------------------------------------
 
 
@@ -278,11 +267,6 @@ def test_export_bundle_records_version_and_preset_names(isolated, tmp_path: Path
 
 
 def test_export_bundle_training_caches_roundtrip(isolated, tmp_path: Path) -> None:
-    """cache=True：train/reg 的 latent + text cache 一并打包。
-
-    导入后 npz mtime ≥ 图片 mtime（_is_cache_valid 的不变量，否则缓存白搬）；
-    text cache 只按文件内指纹失效，无 mtime 要求。
-    """
     p, v, train = _make_project_with_train(isolated)
     (train / "1_data").mkdir(parents=True, exist_ok=True)
     (train / "1_data" / "a.png").write_bytes(_png())
@@ -334,7 +318,6 @@ def test_export_bundle_training_caches_roundtrip(isolated, tmp_path: Path) -> No
     assert npz.exists() and (new_dir / "train" / "1_data" / "a.r512.npz").exists()
     assert reg_npz.exists()
     assert text_cache.exists() and reg_text_cache.exists()
-    # zip 内 npz 按字典序先于图片落盘，没有 touch 修正会比图片旧
     assert npz.stat().st_mtime >= img.stat().st_mtime
     assert reg_npz.stat().st_mtime >= reg_img.stat().st_mtime
 
@@ -407,7 +390,6 @@ def test_import_bundle_restores_version_and_preset_names(isolated, tmp_path: Pat
 
 
 def test_import_bundle_skips_preset_name_when_preset_missing(isolated, tmp_path: Path) -> None:
-    """bundle 没带预设、本机也没有 → config_name 不回填，避免悬空引用。"""
     bundle = _named_bundle(tmp_path, with_preset=False)
 
     with db.connection_for(isolated["db"]) as conn:
@@ -418,8 +400,6 @@ def test_import_bundle_skips_preset_name_when_preset_missing(isolated, tmp_path:
 
 
 def test_import_bundle_rejects_dot_version_label(isolated, tmp_path: Path) -> None:
-    """manifest 不可信：纯点 label（".." == project 根）必须回退 v1，
-    否则 delete_version 时 rmtree 会带走整个项目目录。"""
     bundle = tmp_path / "dots.bundle.zip"
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as zf:
         zf.writestr(
@@ -447,10 +427,6 @@ def _build_bundle_with_config(
     *,
     transformer_path: str,
 ) -> Path:
-    """构造一个最小 v2 bundle.zip：1 张训练图 + presets/config.yaml。
-
-    transformer_path 用来塞 "源机器" 的绝对路径，模拟跨机器导入场景。
-    """
     import yaml
     from studio.schema import TrainingConfig
 
@@ -478,11 +454,6 @@ def _build_bundle_with_config(
 def test_import_bundle_config_with_auto_sync_on_overrides_model_paths(
     isolated, tmp_path: Path, monkeypatch
 ) -> None:
-    """auto_sync_paths=ON（默认）：bundle 内 4 全局模型字段被本机 globals 覆盖。
-
-    源机器（Windows）导出的 `G:/models/foo.safetensors` 在异机器不可解析；
-    fork_preset_for_version 走的就是这个语义，bundle import 必须一致。
-    """
     from studio.services import presets as preset_flow
     from studio.services import models as model_downloader
 
@@ -500,15 +471,12 @@ def test_import_bundle_config_with_auto_sync_on_overrides_model_paths(
     cfg = version_config.read_version_config(p, v)
     expected = model_downloader.default_paths_for_new_version()["transformer_path"]
     assert cfg["transformer_path"] == Path(expected).as_posix()
-    # 源路径已被覆盖，不残留
     assert cfg["transformer_path"] != src_path
 
 
 def test_import_bundle_config_with_auto_sync_off_preserves_windows_path(
     isolated, tmp_path: Path, monkeypatch
 ) -> None:
-    """auto_sync_paths=OFF：尊重 bundle 内的绝对路径；POSIX 上 Windows 盘符
-    不被 REPO_ROOT 误拼成 `<repo>/G:/...`（盘符识别在 _absolutize_model_paths 里）。"""
     from studio.services import presets as preset_flow
 
     monkeypatch.setattr(preset_flow, "_auto_sync_paths", lambda: False)
@@ -523,7 +491,6 @@ def test_import_bundle_config_with_auto_sync_off_preserves_windows_path(
     v = result["version"]
     from studio.services import version_config
     cfg = version_config.read_version_config(p, v)
-    # 路径原样保留（POSIX 形式）；关键点是不会出现 REPO_ROOT 前缀
     assert cfg["transformer_path"] == src_path
     assert "G:/" in cfg["transformer_path"]
 

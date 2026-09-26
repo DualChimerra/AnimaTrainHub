@@ -9,12 +9,12 @@ import { useSettingsDrawer } from '../lib/SettingsDrawer'
 import { useToast } from './Toast'
 import Popover, { MenuItems } from './ds/Popover'
 
-/** ADR-0007 §11.2 / §11.5: cursor 派生 step 完成态。
+/** ADR-0007 SS11.2 / SS11.5: cursor-derived step completion state.
  *
- * STEPS 顺序（ADR 0010 后）：0 download / 1 curate / 2 preprocess / 3 tag / 4 edit / 5 reg / 6 train
- * 项目级 ①：`download_image_count > 0` 派生
- * version 级 ②-⑦：`PHASE_ORDER.indexOf(STEP_KEY_TO_PHASE[key]) < cursorIdx`
- * （ADR 0010 把 preprocess 从 project scope 移到 version scope，curate 之后）
+ * STEPS order (after ADR 0010): 0 download / 1 curate / 2 preprocess / 3 tag / 4 edit / 5 reg / 6 train
+ * Project-level (1): derived from `download_image_count > 0`
+ * Version-level (2)-(7): `PHASE_ORDER.indexOf(STEP_KEY_TO_PHASE[key]) < cursorIdx`
+ * (ADR 0010 moved preprocess from project scope to version scope, after curate)
  */
 const STEP_KEY_TO_PHASE: Record<string, VersionPhase> = {
   curate:     'curating',
@@ -34,9 +34,9 @@ const PHASE_TO_STEP_KEY: Record<VersionPhase, string> = {
 import { useProjectCtx, useSelectedProject } from '../context/ProjectContext'
 import type { ProjectCtxValue } from '../context/ProjectContext'
 
-/** 侧边栏项目区数据源：在项目页内用 live ProjectContext（带版本管理回调，
- *  interactive=true）；离开后回退到只读粘性快照（interactive=false）。两者都
- *  没有 → null（不渲染项目区）。 */
+/** Sidebar project-section data source: uses the live ProjectContext inside a project page (with version-management
+ *  callbacks, interactive=true); falls back to a read-only sticky snapshot after leaving (interactive=false). If
+ *  neither is available -> null (don't render the project section). */
 type ProjectView =
   | (ProjectCtxValue & { interactive: true })
   | {
@@ -107,7 +107,7 @@ function NavItem({ to, label, icon, active, collapsed, tail }: {
   )
 }
 
-/** NavItem 的 button 变体 —— 给设置抽屉用，不走路由。 */
+/** Button variant of NavItem -- used by the settings drawer, doesn't go through routing. */
 function NavButton({ onClick, label, icon, active, collapsed }: {
   onClick: () => void; label: string; icon: React.ReactNode; active: boolean; collapsed: boolean
 }) {
@@ -131,7 +131,7 @@ function VersionBar({ collapsed }: { collapsed: boolean }) {
   const [open, setOpen] = useState(false)
   const pillRef = useRef<HTMLButtonElement | null>(null)
   if (!view) return null
-  if (collapsed) return null // 折叠态不显示（版本没有独立页面）
+  if (collapsed) return null // not shown when collapsed (versions have no standalone page)
   const { project, activeVersion } = view
 
   const pillInner = (
@@ -289,7 +289,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
   currentStep: string | null
   version: Version | null
   collapsed: boolean
-  /** 是否当前正处于该项目的路由内（决定"概览"是否高亮；离开项目页只导航不高亮）。 */
+  /** Whether the route is currently inside this project (decides whether "Overview" is highlighted; leaving the project page only navigates, doesn't highlight). */
   inRoute: boolean
   /** Training progress of the active version, when its task is running. */
   trainPct: number | null
@@ -302,7 +302,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
   const project = view?.project ?? null
   const stats = version?.stats
 
-  // version 级 phase 编号 1-5（每个 version 自己一段流水线）。
+  // Version-level phase numbering 1-5 (each version has its own pipeline).
   const STEPS = [
     { key: 'curate',     labelKey: 'nav.curate',     idx: '1', tail: stats?.train_image_count },
     { key: 'preprocess', labelKey: 'nav.preprocess', idx: '2', tail: project?.preprocess_image_count },
@@ -312,7 +312,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
   ]
 
   const overviewActive = inRoute && currentStep === null
-  // ADR-0007 §11.5 cursor 派生：cursor 之前的 phase = done。
+  // ADR-0007 SS11.5 cursor-derived: phases before the cursor = done.
   // The cursor only means something while the version is being prepared; a
   // trained / training version has every step behind it (same as Overview).
   const cursorPhase: VersionPhase = !version
@@ -326,8 +326,8 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
     return PHASE_ORDER.indexOf(phase) < cursorIdx
   }
 
-  // ADR-0007 §11.5-A: 推进 cursor 的唯一入口 —— 点击 cursor+1 那一行触发。
-  // skippable 调 skip，必经调 advance；校验失败给 warning toast。
+  // ADR-0007 SS11.5-A: the sole entry point for advancing the cursor -- triggered by clicking the cursor+1 row.
+  // Calls skip for skippable phases, advance for mandatory ones; a validation failure shows a warning toast.
   const handleAdvanceToNext = async () => {
     if (!activeVid) return
     const nextIdx = cursorIdx + 1
@@ -337,15 +337,15 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
       const res = isSkippable
         ? await api.skipVersionPhase(Number(pid), Number(activeVid))
         : await api.advanceVersionPhase(Number(pid), Number(activeVid))
-      // SSE 不可达时（如 Colab 代理）version_state_changed 不会推到前端，
-      // cursor 会永远停在旧 phase——主动 reload 兜底，成功失败都要同步。
+      // When SSE is unreachable (e.g. behind a Colab proxy), version_state_changed never reaches the frontend and
+      // the cursor would be stuck on the old phase forever -- an active reload is the fallback, needed on both success and failure.
       await ctx?.reload()
       if (!res.ok) {
         toast(res.reason || t('sidebar.advanceFailed'), 'error')
         return
       }
-      // 用后端返回的 new_phase 导航（而不是本地 cursorIdx+1 推算），防止
-      // 本地 phase 已过期时跳错页。
+      // Navigates using the new_phase returned by the backend (rather than the local cursorIdx+1 guess), to avoid
+      // landing on the wrong page when the local phase is stale.
       const landed = res.new_phase ?? PHASE_ORDER[nextIdx]
       navigate(`/projects/${pid}/v/${activeVid}/${PHASE_TO_STEP_KEY[landed]}`)
     } catch (e) {
@@ -376,10 +376,10 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
           const isActive = s.key === currentStep
           const phase = STEP_KEY_TO_PHASE[s.key]
           const phaseIdx = phase != null ? PHASE_ORDER.indexOf(phase) : -1
-          // ADR-0007 §11.5-A: sidebar 是 cursor 推进主通道。
+          // ADR-0007 SS11.5-A: the sidebar is the primary channel for advancing the cursor.
           // - phase_idx < cursorIdx  → done
-          // - phase_idx == cursorIdx → 当前 cursor
-          // - phase_idx == cursorIdx+1 → "下一步"，button，点击触发 advance/skip
+          // - phase_idx == cursorIdx -> the current cursor
+          // - phase_idx == cursorIdx+1 -> "next step", a button, click triggers advance/skip
           // - phase_idx > cursorIdx+1 → disabled
           const isCursorCurrent = phaseIdx === cursorIdx
           const isNextStep = phaseIdx === cursorIdx + 1
@@ -453,12 +453,12 @@ export default function Sidebar({
   const settingsDrawer = useSettingsDrawer()
   const queue = useQueueSnapshot()
 
-  // 路由内的 pid（用于步骤高亮）；离开项目页后回退到粘性快照的项目 id，让项目区
-  // 跨页保留用于导航。
+  // pid within the route (used for step highlighting); falls back to the sticky snapshot's project id after leaving
+  // the project page, so the project section persists across pages for navigation.
   const routePid = location.pathname.match(/^\/projects\/([^/]+)/)?.[1] ?? null
   const urlVid = location.pathname.match(/\/v\/([^/]+)/)?.[1] ?? null
   const stepMatch = location.pathname.match(/\/v\/[^/]+\/([^/]+)$/)
-  // ADR 0010: preprocess 从 project scope 移到 version scope；project scope 只剩 download
+  // ADR 0010: preprocess moved from project scope to version scope; project scope now only has download
   const projectScopeStep = location.pathname.match(/^\/projects\/[^/]+\/(download)$/)?.[1] ?? null
   const currentStep = stepMatch?.[1] ?? projectScopeStep
 
@@ -466,7 +466,7 @@ export default function Sidebar({
   const pid = routePid ?? view?.project.id?.toString() ?? null
   const activeVid = view?.activeVersion?.id?.toString() ?? urlVid
 
-  // 有项目（路由内 live 或粘性快照）就展示项目区
+  // Show the project section whenever there's a project (live in-route or a sticky snapshot)
   const inProject = view !== null && pid !== null
 
   // Training progress for the active version's step tail.

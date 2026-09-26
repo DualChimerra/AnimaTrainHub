@@ -133,13 +133,11 @@ describe('InlineLoraPicker — multi mode (default)', () => {
     const user = userEvent.setup()
     const { onPick } = renderMulti()
     await waitFor(() => expect(screen.getByText('step 2000')).toBeInTheDocument())
-    // 故意乱序点击：step 1000 → final → step 2000
     await user.click(screen.getByText('step 1000').closest('button')!)
     await user.click(screen.getByText('final').closest('button')!)
     await user.click(screen.getByText('step 2000').closest('button')!)
     await user.click(screen.getByText(/添加 3 个/))
     const [picks] = onPick.mock.calls[0]
-    // 输出跟随 ckpts 展示序（final → step↓），与点击先后无关
     expect(picks.map((p: PickedLora) => p.path)).toEqual([
       '/loras/cute_chibi/v3/final.safetensors',
       '/loras/cute_chibi/v3/step_2000.safetensors',
@@ -151,7 +149,6 @@ describe('InlineLoraPicker — multi mode (default)', () => {
     const user = userEvent.setup()
     const { onPick } = renderMulti({ live: true, showWeight: false })
     await waitFor(() => expect(screen.getByText('step 2000')).toBeInTheDocument())
-    // 乱序点击；live 模式每次 toggle 即时 commit，取最后一次（三个都选中）
     await user.click(screen.getByText('step 1000').closest('button')!)
     await user.click(screen.getByText('step 2000').closest('button')!)
     await user.click(screen.getByText('final').closest('button')!)
@@ -222,8 +219,6 @@ describe('InlineLoraPicker — multi mode (default)', () => {
   })
 
   it('切 project 不会用 (新 pid, 旧 vid) 拉 ckpt（回归：避免 404）', async () => {
-    // sample 合法 (pid:vid)：1:11 / 1:12 / 2:21。切 project 时若 pid 已变、vid 还
-    // 是旧 project 的版本就发请求，会得到 (2, 11) 这种非法组合 → 后端 404。
     const user = userEvent.setup()
     const calls: string[] = []
     const base = catalogFrom(sample, ckptsV3)
@@ -242,10 +237,9 @@ describe('InlineLoraPicker — multi mode (default)', () => {
         onPickExternal={vi.fn()}
       />,
     )
-    await waitFor(() => expect(calls).toContain('1:11'))  // 初始锚 project 1
+    await waitFor(() => expect(calls).toContain('1:11'))
     await user.selectOptions(screen.getByLabelText('选项目'), '2')
-    await waitFor(() => expect(calls).toContain('2:21'))  // 切到 project 2 的版本
-    // 关键：从没出现过 (2, 11) 这种「新 project + 旧 version」非法组合
+    await waitFor(() => expect(calls).toContain('2:21'))
     const valid = new Set(['1:11', '1:12', '2:21'])
     expect(calls.every((c) => valid.has(c))).toBe(true)
   })
@@ -262,8 +256,8 @@ describe('InlineLoraPicker — multi mode (default)', () => {
       ...base,
       fetchCkpts: () => {
         call += 1
-        if (call === 1) return Promise.resolve(ckptsV3)         // 初始版本
-        return new Promise<LoraCkpt[]>((res) => { resolveSecond = res })  // 切版本：挂起
+        if (call === 1) return Promise.resolve(ckptsV3)
+        return new Promise<LoraCkpt[]>((res) => { resolveSecond = res })
       },
     }
     render(
@@ -278,11 +272,8 @@ describe('InlineLoraPicker — multi mode (default)', () => {
       />,
     )
     await waitFor(() => expect(screen.getByText('step 2000')).toBeInTheDocument())
-    // 切版本 11→12（同项目），第二次 fetch 挂起模拟网络加载
     await user.selectOptions(screen.getByLabelText('选版本'), '12')
-    // 加载期间：旧 chips 仍在原地（没被「加载中」替换 / 没闪空）
     expect(screen.getByText('step 2000')).toBeInTheDocument()
-    // 放行 → 原地换成新版本的 chips
     resolveSecond(ckptsV2)
     await waitFor(() => expect(screen.getByText('v2-final')).toBeInTheDocument())
     expect(screen.queryByText('step 2000')).not.toBeInTheDocument()
@@ -377,8 +368,6 @@ describe('InlineLoraPicker — single mode (controlled slot)', () => {
     await waitFor(() => expect(screen.getByLabelText('LoRA 权重数值')).toBeInTheDocument())
     const weightInput = screen.getByLabelText('LoRA 权重数值') as HTMLInputElement
     expect(weightInput.value).toBe('0.8')
-    // 受控输入：用 fireEvent.change 一次性触发，不走 userEvent.type 多次 keystroke
-    // （那种方式会被 props.weight 回流覆盖）
     fireEvent.change(weightInput, { target: { value: '1.2' } })
     expect(onChange).toHaveBeenCalledWith(value, 1.2)
   })
@@ -392,7 +381,6 @@ describe('InlineLoraPicker — single mode (controlled slot)', () => {
 
   it('weight slider always visible in single mode (even without selection)', async () => {
     renderSingle({ value: null })
-    // findBy await 让自动锚第一个项目的 effect 级联结算（避免 act 警告）
     expect(await screen.findByLabelText('LoRA 权重数值')).toBeInTheDocument()
   })
 })
@@ -425,7 +413,6 @@ describe('InlineLoraPicker — controlled sync (Step 6 / 决策 #8)', () => {
       expect(projectSelect.value).toBe('1')
     })
 
-    // 模拟历史回填：props.value 切换到另一项目 (id=2)
     const newValue: PickedLora = {
       path: '/loras/noir/v1/final.safetensors',
       projectId: 2, versionId: 21,
@@ -440,7 +427,6 @@ describe('InlineLoraPicker — controlled sync (Step 6 / 决策 #8)', () => {
         onClose={onClose}
       />
     )
-    // sync useEffect 把 pid 设到 2 —— 项目下拉跟着更新
     await waitFor(() => {
       const projectSelect = screen.getAllByRole('combobox')[0] as HTMLSelectElement
       expect(projectSelect.value).toBe('2')
@@ -461,7 +447,6 @@ describe('InlineLoraPicker — controlled sync (Step 6 / 决策 #8)', () => {
         onClose={onClose}
       />
     )
-    // 没有受控 value 时仍能看到 projects[0] 的 ckpts（fallback 行为）
     await waitFor(() => expect(screen.getByText('step 2000')).toBeInTheDocument())
   })
 })

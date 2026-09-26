@@ -90,7 +90,7 @@ def test_apply_pending_runs_torch_reinstall_and_clears(
     assert captured == ["cu128"]
     assert not isolated_marker.exists()  # cleared after success
     out = capsys.readouterr().out
-    assert "torch 重装完成" in out
+    assert "torch reinstall complete" in out
 
 
 def test_apply_pending_keeps_marker_on_failure(
@@ -109,7 +109,7 @@ def test_apply_pending_keeps_marker_on_failure(
     assert isolated_marker.exists()
     assert pending_install.read_pending()["target"] == "cu128"
     err = capsys.readouterr().err
-    assert "torch 重装失败" in err
+    assert "torch reinstall failed" in err
     assert "network failed" in err
 
 
@@ -123,4 +123,4 @@ def test_apply_pending_unknown_kind_clears_marker(
     pending_install.apply_pending()
     assert not isolated_marker.exists()
     err = capsys.readouterr().err
-    assert "未知" in err
+    assert "unknown" in err

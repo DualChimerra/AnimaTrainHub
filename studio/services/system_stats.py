@@ -1,12 +1,12 @@
-"""系统资源采集 (CPU / RAM / GPU / VRAM)。
+"""System resource collection (CPU / RAM / GPU / VRAM).
 
-供 topbar 实时小组件按 2-3s 轮询使用。
+Used by the topbar's live widget, polled every 2-3s.
 
-设计：
-    - pynvml 懒初始化一次；失败 (无 NVIDIA / 驱动缺失 / 库未装) 永久标记，
-      之后所有调用直接返回 gpu=None — 不重试、不刷日志。
-    - psutil 几乎不会失败；仍 try/except 兜底，让前端轮询不会因偶发问题挂掉。
-    - 模块无状态导出，调用 collect_stats() 即可。
+Design:
+    - pynvml is lazily initialized once; on failure (no NVIDIA / missing driver / library not installed) it's
+      marked permanently -- all subsequent calls just return gpu=None, no retry, no log spam.
+    - psutil almost never fails; still wrapped in try/except as a fallback so frontend polling never crashes on a fluke.
+    - The module is stateless on export; just call collect_stats().
 """
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ import psutil
 
 logger = logging.getLogger(__name__)
 
-# psutil.cpu_percent(interval=None) 第一次调用返回 0.0 (无 baseline)，
-# 之后返回「距上次调用以来」的平均占用。模块导入时 prime 一下，让首请求
-# 就能拿到从启动到首请求的平均值，避免前端首次轮询永远显示 0%。
+# psutil.cpu_percent(interval=None) returns 0.0 on the first call (no baseline),
+# then returns the average usage since the last call. We prime it once on module import so the first
+# request already gets the average from startup to that request, instead of always showing 0%.
 psutil.cpu_percent(interval=None)
 
 
-# ── NVML 懒初始化 ─────────────────────────────────────────────────────
+# -- Lazy NVML init --------------------------------------------------------
 _nvml_lock = threading.Lock()
 _nvml_state: dict[str, Any] = {"inited": False, "ok": False}
 
@@ -45,7 +45,7 @@ def _ensure_nvml() -> bool:
         return _nvml_state["ok"]
 
 
-# ── 数据结构 ─────────────────────────────────────────────────────────
+# -- Data structures ---------------------------------------------------------
 @dataclass(frozen=True)
 class GpuStats:
     index: int
@@ -61,11 +61,11 @@ class SystemStats:
     cpu_pct: float
     ram_used_gb: float
     ram_total_gb: float
-    # None = NVML 不可用；[] = NVML 可用但 0 卡 (前端两种都隐藏 GPU pill)
+    # None = NVML unavailable; [] = NVML available but 0 GPUs (frontend hides the GPU pill in both cases)
     gpu: Optional[list[GpuStats]]
 
 
-# ── 采集 ─────────────────────────────────────────────────────────────
+# -- Collection ---------------------------------------------------------------
 def _bytes_to_gb(n: int) -> float:
     return round(n / (1024 ** 3), 2)
 
@@ -104,8 +104,8 @@ def _collect_gpu() -> Optional[list[GpuStats]]:
 
 def collect_stats() -> SystemStats:
     try:
-        # interval=None: 返回自上次调用以来的 CPU 占用；首次调用返回 0.0，
-        # 后续轮询拿到的就是 2-3s 平均值，对实时监控刚好。
+        # interval=None: returns usage since the last call; first call returns 0.0,
+        # subsequent polls get the 2-3s average, which is exactly right for live monitoring.
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
         ram_used = _bytes_to_gb(mem.total - mem.available)
@@ -134,11 +134,11 @@ def stats_to_json(s: SystemStats) -> dict[str, Any]:
 
 # ── SSE sampler ──────────────────────────────────────────────────────
 class SystemStatsSampler:
-    """后台线程：周期性采集系统资源 → callback (通常是 bus.publish)。
+    """Background thread: periodically collects system resources -> callback (usually bus.publish).
 
-    取代每个客户端独立轮询 /api/system/stats — 云部署场景下避免污染
-    server access log、DevTools Network 面板、跨公网 RTT 开销。前端只在
-    mount 时 GET 一次冷启动，之后走 SSE 持续接收。
+    Replaces each client polling /api/system/stats independently -- avoids polluting the
+    server access log, DevTools Network panel, and cross-WAN RTT overhead in cloud deployments. The frontend only
+    does one cold-start GET on mount, then receives updates via SSE.
     """
 
     def __init__(

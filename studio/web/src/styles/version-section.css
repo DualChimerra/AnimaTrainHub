@@ -1,15 +1,15 @@
-/* VersionSection 单视图升级面板（ADR 0005 重设计）
+/* VersionSection single-view upgrade panel (ADR 0005 redesign)
  *
- * 所有 class 用 vs- 前缀避免与全局 / Tailwind utility 碰撞。
- * 全部走 tokens.css 现有 CSS variable，自动适配 light/dark。
+ * All classes use a vs- prefix to avoid clashing with global / Tailwind utilities.
+ * Everything goes through tokens.css's existing CSS variables, auto-adapting to light/dark.
  *
- * 产品模型：单视图 + 通道偏好 radio（不再并排双卡，避免"两个通道纠结"问题）
- * - vs-installed-row：顶部一行展示"装了什么"（installed_label）
- * - vs-channel-toggle-row：通道偏好 radio（stable / dev，纯 UI 视图）
- * - vs-channels：当前选中通道的卡片容器（永远单列）
+ * Product model: single view + channel-preference radio (no more side-by-side dual cards, to avoid the "torn between two channels" problem)
+ * - vs-installed-row: top row showing "what's installed" (installed_label)
+ * - vs-channel-toggle-row: channel preference radio (stable / dev, a pure UI view)
+ * - vs-channels: card container for the currently selected channel (always a single column)
  */
 
-/* ==================== 卡片容器（永远单卡） ==================== */
+/* ==================== card container (always a single card) ==================== */
 .vs-channels {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -19,7 +19,7 @@
   container-type: inline-size;
 }
 
-/* ==================== 顶部：你装的是什么 ==================== */
+/* ==================== top: what you have installed ==================== */
 .vs-installed-row {
   padding: 10px 12px;
   display: flex;
@@ -41,7 +41,7 @@
   font-size: 11.5px;
 }
 
-/* ==================== 通道偏好 radio ==================== */
+/* ==================== channel-preference radio ==================== */
 .vs-channel-toggle-row {
   padding: 6px 12px 10px;
   display: flex;
@@ -53,8 +53,8 @@
 .vs-channel-toggle-label {
   color: var(--fg-tertiary);
 }
-/* 通道 radio 的 pill 样式已泛化为 tokens.css 的 .pill-radio / .pill-radio-dot
- * （显示设置的语言/主题/密度切换共用同一实现）。 */
+/* The channel radio's pill style has been generalized into tokens.css's .pill-radio / .pill-radio-dot
+ * (shared with the language/theme/density switches in Display settings). */
 .vs-channel-hint {
   margin-left: auto;
   color: var(--fg-tertiary);
@@ -62,9 +62,9 @@
   font-style: italic;
 }
 
-/* ==================== zip 安装 init banner（0.8.1 hotfix）====================
- * 出现在 vs-installed-row 上方，仅 version.is_git_repo=false 时显示。
- * accent-soft 背景区分于"上次更新失败"红色 banner。 */
+/* ==================== zip-install init banner (0.8.1 hotfix) ====================
+ * Appears above vs-installed-row, only shown when version.is_git_repo=false.
+ * The accent-soft background distinguishes it from the red "last update failed" banner. */
 .vs-zip-banner {
   margin: 0 0 12px;
   padding: 12px 14px;
@@ -100,7 +100,7 @@
   font-size: 12px;
 }
 
-/* ==================== 单卡片 ==================== */
+/* ==================== single card ==================== */
 .vs-chan {
   background: var(--bg-sunken);
   border: 1px solid var(--border-subtle);
@@ -150,7 +150,7 @@
   color: var(--warn);
 }
 
-/* master 卡 body：solo 左右分栏 / split 上下堆叠 */
+/* master card body: solo splits left/right, split stacks top/bottom */
 .vs-chan-body {
   display: flex;
   gap: 22px;
@@ -171,7 +171,7 @@
   flex-shrink: 0;
 }
 
-/* ==================== 版本块 ==================== */
+/* ==================== version block ==================== */
 .vs-ver-block {
   display: flex;
   flex-direction: column;
@@ -217,7 +217,7 @@
   line-height: 1.55;
 }
 
-/* ==================== 更新内容（release notes block） ==================== */
+/* ==================== change content (release notes block) ==================== */
 .vs-change-block {
   flex: 1;
   min-width: 0;
@@ -257,13 +257,13 @@
   min-width: 0;
   word-break: break-word;
 }
-/* release notes「更新内容」固定渲染 RN_MAX_ITEMS + 1 行：加载中是骨架行、
-   数据不足时是空占位行（&nbsp; 撑高），都与真实 entry 同行高 —— 列表高度由
-   固定行数自然撑出（不靠像素估算），点检查更新异步拉取 / 切换显示版本时都不
-   撑大。 */
+/* The release notes "changes" list always renders RN_MAX_ITEMS + 1 rows: a skeleton row while loading, an empty
+placeholder row (padded with &nbsp;) when data is short -- both match a real entry's row height, so the list's
+height is naturally set by a fixed row count (not a pixel estimate), and it never grows while checking for updates
+asynchronously or switching the displayed version. */
 .vs-change-list .vs-rn-sk {
   align-items: center;
-  min-height: 1.55em; /* = li line-height，对齐真实 entry 单行高度 */
+  min-height: 1.55em; /* = li line-height, matches a real entry's single-row height */
 }
 .vs-change-list .vs-rn-sk-pill,
 .vs-change-list .vs-rn-sk-bar {
@@ -281,7 +281,7 @@
   height: 11px;
   border-radius: 4px;
 }
-/* 文本骨架宽度错落，避免一刀切 */
+/* Staggered skeleton widths, avoids a one-size-fits-all look */
 .vs-change-list .vs-rn-sk:nth-child(2) .vs-rn-sk-bar { max-width: 82%; }
 .vs-change-list .vs-rn-sk:nth-child(3) .vs-rn-sk-bar { max-width: 66%; }
 .vs-change-list .vs-rn-sk:nth-child(4) .vs-rn-sk-bar { max-width: 90%; }
@@ -295,7 +295,7 @@
   50% { opacity: 0.45; }
 }
 
-/* ==================== 卡底操作 ==================== */
+/* ==================== card-bottom actions ==================== */
 .vs-chan-foot {
   display: flex;
   align-items: center;
@@ -345,8 +345,8 @@
 .vs-pill-here   { background: var(--accent-soft); color: var(--accent-text, var(--accent)); }
 .vs-pill-info   { background: var(--info-soft);   color: var(--info); }
 
-/* 折叠包装：master 卡底"上一版本可切回"默认仅小字提示，点开才显示
-   完整 sha + 切回按钮。回滚是潜在危险操作，UI 不应过于显眼。 */
+/* Collapsible wrapper: at the bottom of the master card, "a previous version you can roll back to" only shows a
+small hint by default; expanding reveals the full sha + rollback button. Rollback is a potentially dangerous action, so the UI shouldn't make it too prominent. */
 .vs-rollback-collapse {
   margin-top: 10px;
   padding-top: 10px;
@@ -373,15 +373,15 @@
   transform: rotate(90deg);
 }
 .vs-rollback-collapse[open] .vs-rollback-summary { margin-bottom: 10px; }
-/* 折叠包装下原 inline-row 的 margin/border 由 collapse 提供，去掉避免双重 */
+/* Under the collapsible wrapper, the original inline-row's margin/border is now provided by collapse; removed to avoid doubling up */
 .vs-rollback-collapse .vs-rollback-inline-row {
   margin-top: 0;
   padding-top: 0;
   border-top: 0;
 }
-/* status 加载中的回滚提示行占位骨架：复用 .vs-rollback-collapse 的 dashed 分隔
-   与间距、复用 .vs-rollback-summary 的字号/行高（caret 真实渲染撑出相同行框），
-   内部 bar 替代文字 —— 与真实行同高，status resolve 后平滑填入不顶下方内容。 */
+/* Skeleton placeholder for the rollback hint row while status is loading: reuses .vs-rollback-collapse's dashed
+divider and spacing, reuses .vs-rollback-summary's font-size/line-height (the real caret rendering sets the same row
+frame), with an inner bar standing in for text -- same height as the real row, fills in smoothly once status resolves without pushing down the content below. */
 .vs-rollback-summary.vs-rollback-sk { cursor: default; }
 .vs-rollback-summary.vs-rollback-sk .vs-caret { opacity: 0.4; }
 .vs-rollback-sk-bar {
@@ -396,7 +396,7 @@
   .vs-rollback-sk-bar { animation: none; }
 }
 
-/* ==================== inline rollback affordance（master 卡底） ==================== */
+/* ==================== inline rollback affordance (bottom of the master card) ==================== */
 .vs-rollback-inline-row {
   margin-top: 10px;
   padding-top: 10px;
@@ -428,14 +428,14 @@
   font-size: 10.5px;
 }
 
-/* 旧 .vs-dev-toggle-row / .vs-sw / .vs-lock-pill 已删，由
-   .vs-channel-toggle-row + .vs-channel-radio 取代（ADR 0005）。 */
+/* The old .vs-dev-toggle-row / .vs-sw / .vs-lock-pill were removed, replaced by
+.vs-channel-toggle-row + .vs-channel-radio (ADR 0005). */
 
-/* InfoButton ⓘ 弹层（之前的 .vs-info-* 类）已抽到
-   components/InfoButton.tsx + styles/info-button.css，所有 .info-btn-*
-   类供全 Settings 页面复用，本文件不再持有相关样式。 */
+/* The InfoButton (i) popover (formerly the .vs-info-* classes) was moved to
+components/InfoButton.tsx + styles/info-button.css; the .info-btn-*
+classes are shared across all Settings pages, this file no longer holds those styles. */
 
-/* ==================== meta foot 行 ==================== */
+/* ==================== meta foot row ==================== */
 .vs-meta-foot {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -468,7 +468,7 @@
 .vs-meta-foot .vs-lnk:hover { color: var(--accent-text, var(--accent)); }
 .vs-meta-foot .vs-warn-line { color: var(--warn); }
 
-/* ==================== 失败 banner（卡内顶部） ==================== */
+/* ==================== failure banner (top of card) ==================== */
 .vs-fail-banner {
   display: flex;
   flex-direction: column;
@@ -506,7 +506,7 @@
   border-radius: 3px;
 }
 
-/* ==================== dev card commits 时间线（chunk 3） ==================== */
+/* ==================== dev card commits timeline (chunk 3) ==================== */
 .vs-commits {
   list-style: none;
   padding: 0;
@@ -528,8 +528,8 @@
 }
 .vs-commit {
   display: grid;
-  /* glyph / msg / sha / pill-slot 四列。pill-slot 固定宽度让 sha 列在
-     不同 HEAD/当前/已选/切到此 label 下都对齐，不被 pill 长度挤动。 */
+  /* glyph / msg / sha / pill-slot -- four columns. pill-slot has a fixed width so the sha column stays
+aligned across the different HEAD/current/selected/switch-to-this labels, without being pushed around by pill length. */
   grid-template-columns: 14px minmax(0, 1fr) auto 60px;
   gap: 10px;
   padding: 5px 8px;
@@ -549,9 +549,9 @@
   margin-top: 4px;
   z-index: 1;
 }
-/* accent glyph 给 "current"（用户实际在的 commit），不给 dev HEAD —
-   语义是"你在这里"，对得上卡片头 "你在这里" pill。HEAD 仅在右侧 pill
-   slot 用文字 "HEAD" 标记，不动 glyph。 */
+/* The accent glyph is for "current" (the commit the user is actually on), not dev HEAD --
+the meaning is "you are here", matching the card header's "you are here" pill. HEAD is only marked with the
+text "HEAD" in the right-side pill slot, it doesn't touch the glyph. */
 .vs-commit.current .vs-glyph {
   background: var(--accent);
   border-color: var(--accent);
@@ -573,8 +573,8 @@
   white-space: nowrap;
   text-align: right;
 }
-/* pill-slot 是第 4 列，固定宽度让 sha 列在不同 row 对齐。
-   HEAD / 当前 / 已选 / 切到此 不同 label 都放这儿。 */
+/* pill-slot is the 4th column, a fixed width keeps the sha column aligned across rows.
+HEAD / current / selected / switch-to-this different labels all go here. */
 .vs-commit .vs-pill-slot {
   text-align: right;
   font-family: var(--font-mono);
@@ -620,9 +620,9 @@
 }
 .vs-commits-load-more:hover { color: var(--accent-text, var(--accent)); }
 
-/* selected commit action bar（替代 chan-foot）。
- * actions 永远固定在右侧（flex-shrink:0）；info 长内容截断 ellipsis，
- * 不会把按钮挤换行（之前 flex-wrap 会让按钮新起一行）。 */
+/* Selected-commit action bar (replaces chan-foot).
+ * actions always stay pinned to the right (flex-shrink:0); info's long content truncates with ellipsis,
+ * so it never wraps the button to a new line (flex-wrap used to push the button onto its own line). */
 .vs-selection-foot {
   display: flex;
   align-items: center;
@@ -654,7 +654,7 @@
   flex-shrink: 0;
 }
 
-/* ==================== preview / progress states（chunk 4） ==================== */
+/* ==================== preview / progress states (chunk 4) ==================== */
 .vs-preview-pane,
 .vs-progress-pane {
   display: flex;

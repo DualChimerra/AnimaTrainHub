@@ -1,8 +1,3 @@
-"""训练 mask sidecar（PR-B B1）——读写 / 变换跟随 / 删除路径联动 / bundle 往返。
-
-设计：docs/design/preprocess-inpaint-mask-design.md §2 / §7 / §9（D5 修订）。
-mask 路径 = train/{folder}/{stem}.mask（与图同目录同 stem，内容灰度 PNG 字节）。
-"""
 from __future__ import annotations
 
 import io
@@ -58,12 +53,10 @@ def _mask_bytes(size=(10, 10), value=0) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# 路径 / CRUD
 # ---------------------------------------------------------------------------
 
 
 def test_mask_path_is_stem_sidecar(isolated) -> None:
-    """mask 路径 = 同目录 {stem}.mask —— X.jpg 与 X.png 共享同一 mask。"""
     train = isolated["train"]
     p_jpg = train_masks.mask_path_for(train, _rel("X.jpg"))
     p_png = train_masks.mask_path_for(train, _rel("X.png"))
@@ -86,7 +79,6 @@ def test_mask_save_roundtrip(isolated) -> None:
     assert preprocess.mask_file_train(p, "v1", name=_rel("X.png")) == mp
     assert preprocess.mask_delete_train(p, "v1", name=_rel("X.png"))["deleted"]
     assert not mp.exists()
-    # 再删不报错
     assert preprocess.mask_delete_train(p, "v1", name=_rel("X.png"))["deleted"] is False
 
 
@@ -134,22 +126,18 @@ def test_workspace_reports_mask_mtime(isolated) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 变换跟随
 # ---------------------------------------------------------------------------
 
 
 def test_crop_mask_like_single_inplace(isolated) -> None:
-    """N=1 crop：mask 同 box 裁剪原地覆盖（stem 不变路径不变）。"""
     train = isolated["train"]
     _write_png(isolated["sub"] / "X.png", (10, 10))
-    # 上半 0 下半 255 的 mask
     m = Image.new("L", (10, 10), 255)
     m.paste(0, (0, 0, 10, 5))
     mp = train_masks.mask_path_for(train, _rel("X.png"))
     mp.parent.mkdir(parents=True, exist_ok=True)
     m.save(mp, "PNG")
 
-    # 裁下半（y 5..10）→ mask 应全 255
     train_masks.crop_mask_like(train, _rel("X.png"), [(0, 5, 10, 10)], [_rel("X.png")])
     with Image.open(mp) as im:
         assert im.size == (10, 5)
@@ -191,17 +179,14 @@ def test_resize_mask_like(isolated) -> None:
     with Image.open(mp) as im:
         assert im.size == (40, 40)
         assert im.getpixel((0, 0)) == 0
-    # 无 mask 图 no-op 不报错
     train_masks.resize_mask_like(train, _rel("Y.png"), (40, 40))
 
 
 # ---------------------------------------------------------------------------
-# 删除路径联动
 # ---------------------------------------------------------------------------
 
 
 def test_restore_deletes_mask(isolated) -> None:
-    """restore = 回 download 原点，mask 一律作废（D8）。"""
     p = isolated["project"]
     pdir = preprocess.project_root(p)
     train = isolated["train"]
@@ -252,12 +237,10 @@ def test_remove_from_train_deletes_mask(isolated) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 训练器 / studio 递归扫描：.mask 天然不命中
 # ---------------------------------------------------------------------------
 
 
 def test_trainer_scan_ignores_mask_sidecar(isolated, tmp_path: Path) -> None:
-    """.mask 后缀不在训练器 EXTS —— 同目录 sidecar 天然不会被当训练样本。"""
     from runtime.training.dataset import ImageDataset
 
     train = isolated["train"]
@@ -286,7 +269,6 @@ def test_bucket_histogram_ignores_mask_sidecar(isolated) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bundle 导出 / 导入往返
 # ---------------------------------------------------------------------------
 
 

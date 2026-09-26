@@ -1,14 +1,3 @@
-"""SOAP / Schedule-Free SOAP 测试 — 优化收敛 + SF train/eval 切换 + registry 接入。
-
-- SOAP / SOAPScheduleFree 在小回归问题上能降 loss
-- SOAPScheduleFree.eval() 切到 averaged x、train() 切回 y（且 eval 幂等）
-- precond_in_state=False 把可重算的 GG/Q 剔出 state_dict，resume 后仍能 step
-- create_optimizer / build_optimizer 派发到 soap / soap_sf
-- soap_sf.validate 在 lr_scheduler != none 时 fail-loud
-- optimizer registry 与 schema Literal 同步
-
-测试卫生：纯 CPU、无机器状态依赖、固定随机种子。
-"""
 from __future__ import annotations
 
 import types
@@ -22,7 +11,6 @@ from utils.optimizer_utils import create_optimizer, optimizer_eval_mode
 
 
 def _toy_problem(seed: int = 0):
-    """y = W·x 的最小二乘；返回 (model, 固定 batch)。"""
     torch.manual_seed(seed)
     model = nn.Linear(8, 4, bias=False)
     target = nn.Linear(8, 4, bias=False)
@@ -59,7 +47,6 @@ def test_soap_sf_reduces_loss() -> None:
 
 
 def test_soap_sf_eval_swaps_to_average_and_train_swaps_back() -> None:
-    """eval() 把 param 换成 Polyak 平均 x，train() 换回梯度点 y；y != x 训练几步后。"""
     model, x, y = _toy_problem()
     opt = SOAPScheduleFree(model.parameters(), lr=2e-2, precondition_frequency=2, max_precond_dim=64)
     _train_n_steps(model, x, y, opt, 20)
@@ -67,13 +54,12 @@ def test_soap_sf_eval_swaps_to_average_and_train_swaps_back() -> None:
     w_train = next(model.parameters()).detach().clone()  # y
     opt.eval()
     w_eval = next(model.parameters()).detach().clone()   # x (averaged)
-    assert not torch.allclose(w_train, w_eval), "eval() 没有切到 averaged 权重"
-    # eval 幂等：再调一次不应继续漂移
+    assert not torch.allclose(w_train, w_eval), "eval() did not switch to averaged weights"
     opt.eval()
-    assert torch.allclose(w_eval, next(model.parameters()).detach()), "eval() 非幂等"
+    assert torch.allclose(w_eval, next(model.parameters()).detach()), "eval() is not idempotent"
     opt.train()
     w_back = next(model.parameters()).detach().clone()   # y again
-    assert torch.allclose(w_train, w_back, atol=1e-5), "train() 没有切回梯度点 y"
+    assert torch.allclose(w_train, w_back, atol=1e-5), "train() did not switch back to the gradient point y"
 
 
 def test_soap_sf_step_in_eval_mode_raises() -> None:
@@ -86,7 +72,6 @@ def test_soap_sf_step_in_eval_mode_raises() -> None:
 
 
 def test_optimizer_eval_mode_wraps_soap_sf() -> None:
-    """trainer 的 optimizer_eval_mode 对 soap_sf 进入 eval、退出 train（duck-typed）。"""
     model, x, y = _toy_problem()
     opt = SOAPScheduleFree(model.parameters(), lr=2e-2, max_precond_dim=64)
     _train_n_steps(model, x, y, opt, 10)
@@ -96,25 +81,21 @@ def test_optimizer_eval_mode_wraps_soap_sf() -> None:
 
 
 def test_soap_precond_in_state_false_strips_and_resumes() -> None:
-    """precond_in_state=False 不存 GG/Q；新优化器 load 后能冷重建并继续收敛。"""
     model, x, y = _toy_problem()
     opt = SOAP(model.parameters(), lr=1e-2, precondition_frequency=2,
                max_precond_dim=64, precond_in_state=False)
     initial_losses = _train_n_steps(model, x, y, opt, 10)
     sd = opt.state_dict()
-    # 任一 param 的 state 都不应带可重算矩阵
     for pstate in sd["state"].values():
         assert "GG" not in pstate and "Q" not in pstate and "has_preconditioner" not in pstate
 
     opt2 = SOAP(model.parameters(), lr=1e-2, precondition_frequency=2,
                 max_precond_dim=64, precond_in_state=False)
     opt2.load_state_dict(sd)
-    # 冷重建预条件后会有短暂扰动；给足 horizon 验证仍能继续下降（净进展），
-    # 而不是断言某个收敛速率（那是 benchmark 不是 resume 正确性）。
     losses = _train_n_steps(model, x, y, opt2, 40)
     assert all(torch.isfinite(torch.tensor(losses)))
     assert losses[-1] < initial_losses[0] * 0.8, (
-        f"resume 后未继续下降: start={initial_losses[0]} -> end={losses[-1]}"
+        f"did not keep decreasing after resume: start={initial_losses[0]} -> end={losses[-1]}"
     )
 
 

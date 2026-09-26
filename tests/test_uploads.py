@@ -55,7 +55,7 @@ def test_reject_unsupported_format(tmp_path: Path) -> None:
     assert out.added == []
     assert len(out.skipped) == 1
     assert out.skipped[0]["name"] == "note.bin"
-    assert "格式不支持" in out.skipped[0]["reason"]
+    assert "unsupported format" in out.skipped[0]["reason"]
 
 
 def test_lone_caption_txt_skipped(tmp_path: Path) -> None:
@@ -64,7 +64,7 @@ def test_lone_caption_txt_skipped(tmp_path: Path) -> None:
     assert out.added == []
     assert len(out.skipped) == 1
     assert out.skipped[0]["name"] == "note.txt"
-    assert "无对应图片" in out.skipped[0]["reason"]
+    assert "no matching image" in out.skipped[0]["reason"]
     assert not (tmp_path / "note.txt").exists()
 
 
@@ -84,7 +84,7 @@ def test_skip_existing_does_not_overwrite(tmp_path: Path) -> None:
     (tmp_path / "p.png").write_bytes(b"old")
     out = uploads.accept_one("p.png", io.BytesIO(b"new"), tmp_path)
     assert out.added == []
-    assert out.skipped[0]["reason"] == "已存在，跳过"
+    assert out.skipped[0]["reason"] == "already exists, skipped"
     assert (tmp_path / "p.png").read_bytes() == b"old"
 
 
@@ -111,7 +111,7 @@ def test_zip_skip_dup_in_zip(tmp_path: Path) -> None:
     blob = _zip_bytes({"x.png": b"new"})
     out = uploads.accept_one("p.zip", io.BytesIO(blob), tmp_path)
     assert out.added == []
-    assert out.skipped[0]["reason"] == "已存在，跳过"
+    assert out.skipped[0]["reason"] == "already exists, skipped"
     assert (tmp_path / "x.png").read_bytes() == b"existing"
 
 
@@ -120,7 +120,7 @@ def test_corrupt_zip_skipped(tmp_path: Path) -> None:
         "broken.zip", io.BytesIO(b"not-a-real-zip"), tmp_path
     )
     assert out.added == []
-    assert out.skipped[0]["reason"] == "zip 损坏"
+    assert out.skipped[0]["reason"] == "corrupt zip"
 
 
 def test_zip_path_traversal_flattened(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_accept_many_aggregates(tmp_path: Path) -> None:
 def test_empty_filename_skipped(tmp_path: Path) -> None:
     out = uploads.accept_one("", io.BytesIO(b"x"), tmp_path)
     assert out.added == []
-    assert out.skipped[0]["reason"] == "文件名为空"
+    assert out.skipped[0]["reason"] == "empty filename"
 
 
 def test_dest_dir_created(tmp_path: Path) -> None:
@@ -228,7 +228,7 @@ def test_convert_corrupt_image_skipped(tmp_path: Path) -> None:
     )
     assert out.added == []
     assert len(out.skipped) == 1
-    assert "图片损坏" in out.skipped[0]["reason"]
+    assert "corrupt image" in out.skipped[0]["reason"]
 
 
 def test_convert_remove_alpha_channel_flattens(tmp_path: Path) -> None:
@@ -282,7 +282,7 @@ def test_zip_orphan_txt_skipped(tmp_path: Path) -> None:
     out = uploads.accept_one("pack.zip", io.BytesIO(blob), tmp_path)
     assert out.added == ["a.png"]
     assert any(
-        "other.txt" in s["name"] and "无对应图片" in s["reason"]
+        "other.txt" in s["name"] and "no matching image" in s["reason"]
         for s in out.skipped
     )
     assert not (tmp_path / "other.txt").exists()

@@ -3,31 +3,31 @@ import { useEffect, useRef, useState } from 'react'
 import { TagSuggestList } from './tagSuggest/TagSuggestList'
 import { useTagSuggest } from './tagSuggest/useTagSuggest'
 
-/** 逗号分隔字符串 → 规范化 tag 数组（去首尾空格 / 丢空段）。 */
+/** Comma-separated string -> normalized tag array (trims edges / drops empty segments). */
 export function parseTags(s: string): string[] {
   return s.split(',').map((t) => t.trim()).filter(Boolean)
 }
 
-/** 逗号分隔 tag 列表输入（不带 label）。两态：
+/** Comma-separated tag list input (no label). Two states:
  *
- * - **编辑态（focus）**：纯文本 `<input>`，逗号 / 空格随便打。受控的是文本而非
- *   数组，避免「每键 join 回填」把正在敲的逗号 / 尾随空格当场抹掉。autocomplete
- *   popover 在 input 下方浮出；键盘 ↑↓ + Enter/Tab 选中。
- * - **静止态（blur）**：把 tag 渲染成 chip 一眼可扫；命中翻译时显示中文。
+ * - **Editing (focus)**: a plain-text `<input>`, commas / spaces typed freely. Controlled by the text, not the
+ *   array, to avoid a "join-back on every keystroke" wiping out a comma / trailing space being typed. An autocomplete
+ *   popover pops up below the input; keyboard up/down + Enter/Tab select.
+ * - **Idle (blur)**: renders tags as chips, scannable at a glance; shows the Chinese translation when there's a match.
  *
- * blur 时文本归整成 `tags.join(', ')`，再进编辑态看到的是规范形式。
- * 给自带外层 label 的场景（Settings 的 SettingsField）直接用这个；要 140px
- * grid label 的用下面的 {@link TagsInput}。 */
+ * On blur the text is normalized to `tags.join(', ')`, so re-entering edit mode shows the canonical form.
+ * Use this directly for cases that already have their own outer label (Settings' SettingsField); for a
+ * 140px grid label use {@link TagsInput} below. */
 export function TagListInput({ value, onChange, placeholder, disabled, className = '', style, commitOnBlur = false }: {
   value: string[]
   onChange: (v: string[]) => void
   placeholder?: string
   disabled?: boolean
   className?: string
-  /** 内联样式透传（打标页 TagField 块用它对齐训练配置页控件视觉）。 */
+  /** Inline style passthrough (used by the tagging page's TagField block to align visually with the training-config page's controls). */
   style?: React.CSSProperties
-  /** true：编辑过程只更新本地文本，blur 时才上抛父一次（instant-apply 设置页用，
-   *  避免逐字 commit → 逐字 PUT）。默认 false 保持逐字上抛（打标页等本地编辑场景）。 */
+  /** true: editing only updates local text, and only reports up to the parent once on blur (used by the instant-apply
+   *  settings pages to avoid per-keystroke commit -> per-keystroke PUT). Default false keeps per-keystroke reporting (used by local-editing scenes like the tagging page). */
   commitOnBlur?: boolean
 }) {
   const [text, setText] = useState(value.join(', '))
@@ -41,14 +41,14 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
     onPick: ({ suggestion, range }) => {
       const before = text.slice(0, range.start)
       const after = text.slice(range.end)
-      // 把 token range 替换为 `tag, `；后面已有的内容紧接其后，前导空格归整一次
+      // Replace the token range with `tag, `; whatever already follows is appended right after, with leading whitespace normalized once
       const cleanAfter = after.replace(/^[,，]\s*/, '')
       const next = `${before}${suggestion.tag}, ${cleanAfter}`
       setText(next)
       if (!commitOnBlur) onChange(parseTags(next))
-      // cursor 移动到新插入 tag 后的 ", " 之后
+      // Moves the cursor to right after the ", " following the newly inserted tag
       const newCursor = before.length + suggestion.tag.length + 2
-      // 等 React 刷完再 setSelectionRange，否则受控更新会把 cursor 拉到末尾
+      // Waits for React to finish flushing before setSelectionRange, otherwise the controlled update would push the cursor to the end
       requestAnimationFrame(() => {
         const el = inputRef.current
         if (el) { el.focus(); el.setSelectionRange(newCursor, newCursor) }
@@ -56,15 +56,15 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
     },
   })
 
-  // 外部改 value（restore 默认 / 切表单）且与当前文本解析结果不一致 → 重新同步
-  // 文本。自己打字触发的 value 变化进不来（那时 parseTags(text) 恒等 value）。
+  // External value change (restoring a default / switching forms) that disagrees with the current text's parse result -> resync
+  // the text. A value change triggered by the user's own typing never reaches here (parseTags(text) always equals value then).
   useEffect(() => {
-    if (editing) return  // 编辑中不被外部 value 冲掉本地文本（commitOnBlur 下尤其必要）
+    if (editing) return  // Don't let an external value overwrite local text while editing (especially needed under commitOnBlur)
     if (JSON.stringify(parseTags(text)) !== JSON.stringify(value)) setText(value.join(', '))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, editing])
 
-  // 进入编辑态 → 把光标放进 input。
+  // Entering edit mode -> puts the cursor in the input.
   useEffect(() => {
     if (editing) inputRef.current?.focus()
   }, [editing])
@@ -88,8 +88,8 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
           onFocus={() => { suggest.notifyFocus() }}
           onBlur={() => {
             suggest.notifyBlur()
-            // blur 归整：下划线→空格（跟训练 caption 同形，后端匹配也已 _/空格不敏感），
-            // chip 统一展示空格形式。commitOnBlur 模式此时才把完整 tags 上抛父一次。
+            // Normalize on blur: underscore -> space (matches training captions' form; the backend match is already
+            // _/space-insensitive), chips always display the space form. Under commitOnBlur, this is when the full tags list is reported up to the parent.
             const source = commitOnBlur ? parseTags(text) : value
             const canon = source.map((t) => t.replace(/_/g, ' '))
             if (JSON.stringify(canon) !== JSON.stringify(value)) onChange(canon)
@@ -114,9 +114,9 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
     )
   }
 
-  // 静止态：chip 展示，点击 / 聚焦进入编辑。min-h-[1.75rem] 兜底空列表行高，
-  // 防止只渲染 nbsp 时容器塌缩到 0；与 `.input` 类的 padding 叠加后高度跟普通
-  // input 一致。
+  // Idle state: shows chips, click / focus enters editing. min-h-[1.75rem] is a fallback line height for an empty
+  // list, so the container doesn't collapse to 0 when only an nbsp renders; combined with the `.input` class's
+  // padding it matches a normal input's height.
   return (
     <div
       role="button"
@@ -127,8 +127,8 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
       style={style}
     >
       {value.length === 0
-        // nbsp 占位：撑住一行行高，空列表时容器不塌缩成一条线（必须是真实
-        // U+00A0，ASCII 空格在 flex 容器里会被压成 0 宽）
+        // nbsp placeholder: holds up one line's height, so the container doesn't collapse to a sliver when the list is
+        // empty (must be a real U+00A0 -- an ASCII space gets squashed to 0 width in a flex container)
         ? <span className="text-fg-tertiary">{placeholder || ' '}</span>
         : value.map((tag, i) => (
             <span
@@ -142,7 +142,7 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
   )
 }
 
-/** 带 140px label 的版本（打标页 grid 布局用）。 */
+/** Version with a 140px label (used by the tagging page's grid layout). */
 export default function TagsInput({ label, value, placeholder, disabled, onChange, modified, className = '' }: {
   label: string
   value: string[]

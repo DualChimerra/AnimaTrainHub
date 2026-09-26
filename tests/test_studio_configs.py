@@ -1,7 +1,3 @@
-"""Schema + /api/presets HTTP（PP0 之前是 /api/configs，保留 308 redirect）。
-
-PP0 把 IO 单元测试拆到 test_presets_io.py；这里专注 HTTP 表面 + schema + 兼容。
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,17 +43,13 @@ def test_schema_is_complete() -> None:
         "came_eps1", "came_eps2", "came_clip_threshold",
         "automagic_min_lr", "automagic_max_lr", "automagic_lr_bump",
         "automagic_beta2", "automagic_eps", "automagic_clip_threshold",
-        # ProdigyPlusScheduleFree 字段
         "ppsf_d_coef", "ppsf_prodigy_steps", "ppsf_beta1", "ppsf_beta2",
         "ppsf_split_groups", "ppsf_split_groups_mean", "ppsf_use_speed",
         "ppsf_fused_back_pass", "ppsf_use_stableadamw",
         "sample_prompt", "sample_prompts", "no_progress",
     ):
         assert name in fields, f"missing: {name}"
-    # 0.18: wandb per-config 覆盖块已移除（secrets 不进训练 yaml），schema 里不
-    # 应再出现任何 wandb_* 字段
     assert not [n for n in fields if n.startswith("wandb_")]
-    # 退役的 monitor server 字段不应回归（老 yaml 键静默丢弃，见 migrations）
     assert not {"no_monitor", "monitor_host", "monitor_port", "no_browser"} & set(fields)
     lora_annotation = fields["lora_type"].annotation
     lora_options = getattr(lora_annotation, "__args__", ())
@@ -68,9 +60,7 @@ def test_schema_is_complete() -> None:
     assert "cosine_with_warmup" in scheduler_options
     assert "cosine_cycles" in scheduler_options
     assert "constant_then_cosine" in scheduler_options
-    # optimizer_type Literal 包含 Lion / PPSF
     optimizer_annotation = fields["optimizer_type"].annotation
-    # Literal 的 __args__ 包含所有合法值
     optimizer_options = getattr(optimizer_annotation, "__args__", ())
     assert "automagic" in optimizer_options
     assert "came" in optimizer_options
@@ -121,7 +111,6 @@ def test_schema_carries_ui_metadata(client: TestClient) -> None:
     assert props["automagic_variant"]["show_when"] == "optimizer_type==automagic"
     assert props["automagic_agreement_threshold"]["show_when"] == "optimizer_type==automagic&&automagic_variant==v2"
     assert not [n for n in props if n.startswith("wandb_")]
-    # PPSF 字段都按 optimizer_type==prodigy_plus_schedulefree 显示
     for ppsf_field in (
         "ppsf_d_coef", "ppsf_prodigy_steps", "ppsf_beta1", "ppsf_beta2",
         "ppsf_split_groups", "ppsf_use_speed", "ppsf_fused_back_pass",
@@ -171,7 +160,6 @@ def test_constant_then_cosine_min_cannot_exceed_base_lr() -> None:
 
 
 def test_ppsf_rejects_non_none_scheduler() -> None:
-    """PPSF + lr_scheduler != none 应该在 pydantic 层就被拒。"""
     payload = TrainingConfig().model_dump(mode="python")
     payload["optimizer_type"] = "prodigy_plus_schedulefree"
     payload["lr_scheduler"] = "cosine"
@@ -180,7 +168,6 @@ def test_ppsf_rejects_non_none_scheduler() -> None:
 
 
 def test_ppsf_accepts_none_scheduler() -> None:
-    """PPSF + lr_scheduler=none 是合法组合。"""
     payload = TrainingConfig().model_dump(mode="python")
     payload["optimizer_type"] = "prodigy_plus_schedulefree"
     payload["lr_scheduler"] = "none"
@@ -189,11 +176,6 @@ def test_ppsf_accepts_none_scheduler() -> None:
 
 
 def test_navit_requires_xformers_backend() -> None:
-    """navit_packing 开启时 attention_backend 必须 xformers（块对角只走 xformers varlen）。
-
-    刀 2 / R2 v2 语义：缺省跟随钉值（未显式提供 → 自动落 xformers），显式提供
-    冲突值 → fail-fast 报错（取代历史 _coerce 的无差别静默改写）。
-    """
     import pytest as _pytest
     from pydantic import ValidationError as _VErr
 
@@ -206,7 +188,6 @@ def test_navit_requires_xformers_backend() -> None:
 
 
 def test_navit_off_keeps_user_attention_backend() -> None:
-    """navit 关闭时 attention_backend 保持用户选择，不被强制。"""
     payload = TrainingConfig().model_dump(mode="python")
     payload["navit_packing"] = False
     payload["attention_backend"] = "flash_attn"
@@ -215,7 +196,6 @@ def test_navit_off_keeps_user_attention_backend() -> None:
 
 
 def test_prodigy_rejects_non_none_scheduler() -> None:
-    """普通 Prodigy 也固定常数学习率，不允许外部 scheduler。"""
     payload = TrainingConfig().model_dump(mode="python")
     payload["optimizer_type"] = "prodigy"
     payload["lr_scheduler"] = "cosine"
@@ -301,12 +281,10 @@ def test_yaml_on_disk_is_human_readable(client: TestClient, presets_dir: Path) -
 
 
 # ---------------------------------------------------------------------------
-# 端到端文件 I/O: /api/presets/{name}/download + /api/presets/import
 # ---------------------------------------------------------------------------
 
 
 def test_download_returns_raw_yaml(client: TestClient, presets_dir: Path) -> None:
-    """下载端点字节级一致：磁盘上 yaml 文件原封不动透传给客户端。"""
     client.put("/api/presets/dl", json=_payload())
     on_disk = (presets_dir / "dl.yaml").read_bytes()
 
@@ -326,7 +304,6 @@ def test_download_invalid_name(client: TestClient) -> None:
 
 
 def test_import_yaml_roundtrip(client: TestClient, presets_dir: Path) -> None:
-    """上传 yaml → 直接落盘到 suggested_name,返回 {name, path}。"""
     payload = _payload()
     payload["epochs"] = 9
     yaml_bytes = yaml.safe_dump(payload, allow_unicode=True).encode("utf-8")
@@ -338,13 +315,11 @@ def test_import_yaml_roundtrip(client: TestClient, presets_dir: Path) -> None:
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["name"] == "my-run"
-    # 落盘：磁盘上应出现 my-run.yaml,内容可读回
     assert (presets_dir / "my-run.yaml").exists()
     assert client.get("/api/presets/my-run").json()["epochs"] == 9
 
 
 def test_import_json_also_works(client: TestClient, presets_dir: Path) -> None:
-    """yaml.safe_load 是 JSON superset，旧的 .json 导出也能直接 import。"""
     import json as json_mod
     payload = _payload()
     payload["epochs"] = 3
@@ -379,15 +354,13 @@ def test_import_rejects_malformed_yaml(client: TestClient) -> None:
 
 
 def test_import_sanitizes_suggested_name(client: TestClient, presets_dir: Path) -> None:
-    """文件名带空格 / 中文 / 特殊字符 → 名字走 [A-Za-z0-9_-] 白名单后落盘。"""
     yaml_bytes = yaml.safe_dump(_payload()).encode("utf-8")
     resp = client.post(
         "/api/presets/import",
-        files={"file": ("我的 preset (v2).yaml", yaml_bytes, "application/yaml")},
+        files={"file": ("my preset (v2).yaml", yaml_bytes, "application/yaml")},
     )
     assert resp.status_code == 200
     name = resp.json()["name"]
-    # 白名单：[A-Za-z0-9_-]+，非匹配字符压成 '-'，首尾 strip
     assert all(c.isalnum() or c in "_-" for c in name)
     assert "v2" in name
     assert (presets_dir / f"{name}.yaml").exists()
@@ -396,13 +369,8 @@ def test_import_sanitizes_suggested_name(client: TestClient, presets_dir: Path) 
 def test_import_returns_409_on_conflict(
     client: TestClient, presets_dir: Path
 ) -> None:
-    """同名 preset 已存在 → 409 + body 含 config / suggested_name 给前端重用。
-
-    不写盘 —— 让 ImportConflictDialog 让用户选覆盖/另存为再走 PUT /api/presets/{name}。
-    """
     yaml_bytes = yaml.safe_dump(_payload()).encode("utf-8")
 
-    # 先占名
     resp1 = client.post(
         "/api/presets/import",
         files={"file": ("clash.yaml", yaml_bytes, "application/yaml")},
@@ -410,9 +378,8 @@ def test_import_returns_409_on_conflict(
     assert resp1.status_code == 200
     on_disk_mtime = (presets_dir / "clash.yaml").stat().st_mtime
 
-    # 再上传同名 → 409
     payload2 = _payload()
-    payload2["epochs"] = 42  # 内容不同,确保识别"未覆盖"
+    payload2["epochs"] = 42
     yaml_bytes2 = yaml.safe_dump(payload2).encode("utf-8")
     resp2 = client.post(
         "/api/presets/import",
@@ -424,13 +391,11 @@ def test_import_returns_409_on_conflict(
     details = error["details"]
     assert details["suggested_name"] == "clash"
     assert details["config"]["epochs"] == 42
-    # 没覆盖原文件
     assert (presets_dir / "clash.yaml").stat().st_mtime == on_disk_mtime
     assert client.get("/api/presets/clash").json()["epochs"] != 42
 
 
 # ---------------------------------------------------------------------------
-# /api/presets/{name}?warnings=true — 兼容性警告
 # ---------------------------------------------------------------------------
 
 
@@ -453,9 +418,8 @@ def test_get_preset_with_warnings_reports_dropped(
 def test_get_preset_with_warnings_reports_defaulted(
     client: TestClient, presets_dir: Path
 ) -> None:
-    """字段值不合法时回退默认值并列入 defaulted_fields。"""
     payload = _payload()
-    payload["optimizer_type"] = "made_up_optim"  # 不在 Literal 里
+    payload["optimizer_type"] = "made_up_optim"
     yaml_bytes = yaml.safe_dump(payload, allow_unicode=True).encode("utf-8")
     (presets_dir / "badval.yaml").write_bytes(yaml_bytes)
 
@@ -480,7 +444,6 @@ def test_get_preset_without_warnings_returns_flat(
 def test_tolerant_load_invalid_values(
     client: TestClient, presets_dir: Path
 ) -> None:
-    """跨分支预设：未知字段 + 非法值 → 都能加载，不会 500。"""
     payload = _payload()
     payload["optimizer_type"] = "made_up_optim"
     payload["infonoise_K"] = 0
@@ -493,13 +456,10 @@ def test_tolerant_load_invalid_values(
 
 
 # ---------------------------------------------------------------------------
-# /api/configs/* 兼容（308 redirect → /api/presets/*）
 # ---------------------------------------------------------------------------
 
 
 def test_legacy_configs_endpoint_redirects(client: TestClient) -> None:
-    """旧 /api/configs 端点 308 跳转到 /api/presets，外部脚本不应直接断裂。"""
-    # follow_redirects=False 让我们直接看到 308 + Location
     resp = client.get("/api/configs", follow_redirects=False)
     assert resp.status_code == 308
     assert resp.headers["location"].endswith("/api/presets")
@@ -510,16 +470,12 @@ def test_legacy_configs_endpoint_redirects(client: TestClient) -> None:
 
 
 def test_automagic_v2_hidden_without_feature_flag(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """SystemConfig.enable_automagic_v2 默认 False → automagic_variant 打 hidden；
-    开启后不打。值始终透传，只影响 UI 渲染。"""
     from studio.infrastructure import secrets as secrets_infra
 
-    # 默认（flag off）：hidden=True —— monkeypatch 隔离本机 secrets.json
     monkeypatch.setattr(secrets_infra, "load", lambda: secrets_infra.Secrets())
     props = client.get("/api/schema").json()["schema"]["properties"]
     assert props["automagic_variant"].get("hidden") is True
 
-    # flag on：不打 hidden
     flagged = secrets_infra.Secrets()
     flagged.system.enable_automagic_v2 = True
     monkeypatch.setattr(secrets_infra, "load", lambda: flagged)

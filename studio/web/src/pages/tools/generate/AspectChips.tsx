@@ -1,15 +1,15 @@
-/** 画幅预设卡片（8 个常用比例 + Swap 横竖切换）。
+/** Aspect-ratio preset cards (8 common ratios + a Swap for landscape/portrait).
  *
- * 每个卡片：glyph（按比例画的小矩形）+ 比例数字 + 名称 + W×H。
- * 选中态：accent 色描边 + 比例数字 accent 色。
- * grid-cols-4 两行排，4×2=8 张；sidebar 420px 内塞得下。
+ * Each card: a glyph (a small rectangle drawn to the ratio) + the ratio number + name + WxH.
+ * Selected state: accent-colored outline + the ratio number in accent color.
+ * Laid out grid-cols-4 over two rows, 4x2=8 cards; fits within the 420px sidebar.
  *
- * Swap 按钮独立一个：物理交换 W↔H，命中预设则 aspect 跟着切（精确匹配
- * w/h 找当前 chip）；找不到时 aspect='custom'。
+ * Swap is its own button: physically swaps W<->H, and if that hits a preset the aspect switches to match
+ * (an exact w/h match finds the current chip); falls back to aspect='custom' when nothing matches.
  */
 
 export interface AspectPreset {
-  /** 唯一 key，也是显示在大字号位置的比例标签 */
+  /** Unique key, also the ratio label shown in the large font. */
   ratio: string
   /** 'Square' / 'Landscape' / 'Portrait' */
   kind: 'Square' | 'Landscape' | 'Portrait'
@@ -28,9 +28,9 @@ export const ASPECT_PRESETS: AspectPreset[] = [
   { ratio: '5:12',  kind: 'Portrait',  w: 640,  h: 1536 },
 ]
 
-export type AspectName = string  // 用 "ratio" 做 name；自定义 = 'custom'
+export type AspectName = string  // uses "ratio" as the name; custom = 'custom'
 
-/** 给定 w/h 反查匹配的预设 ratio；不命中返回 'custom'。 */
+/** Reverse-looks-up the matching preset ratio for a given w/h; returns 'custom' when nothing matches. */
 export function aspectFromDimensions(w: number, h: number): AspectName {
   for (const p of ASPECT_PRESETS) {
     if (p.w === w && p.h === h) return p.ratio

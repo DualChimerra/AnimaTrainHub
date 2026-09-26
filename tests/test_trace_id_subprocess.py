@@ -1,12 +1,3 @@
-"""PR-1 C6 — trace_id 跨进程贯穿验证。
-
-覆盖：
-  - migration v10 加 tasks.request_trace_id 列
-  - db.create_task 自动写当前 ContextVar trace_id
-  - 直接 INSERT INTO tasks (training.py:583) 同样写
-  - supervisor._spawn_task 注入 ANIMA_TRACE_ID + ANIMA_PROCESS_NAME env
-  - worker bootstrap 读 env bind_trace_id
-"""
 from __future__ import annotations
 
 import sqlite3
@@ -39,16 +30,14 @@ def test_migration_v10_adds_request_trace_id_column(tmp_path: Path) -> None:
 
 
 def test_migration_v10_is_idempotent(tmp_path: Path) -> None:
-    """两次 init_db 不应崩 — ALTER TABLE ADD COLUMN 已存在时容错。"""
     dbfile = tmp_path / "studio.db"
     db.init_db(dbfile)
-    db.init_db(dbfile)  # 第二次跑
+    db.init_db(dbfile)
     with db.connection_for(dbfile) as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
         assert "request_trace_id" in cols
 
 
-# ── db.create_task 自动写 trace_id ────────────────────────────────────────
 
 
 def test_create_task_writes_bound_trace_id(tmp_path: Path) -> None:
@@ -68,7 +57,6 @@ def test_create_task_writes_bound_trace_id(tmp_path: Path) -> None:
 
 
 def test_create_task_uses_bg_prefix_when_no_trace(tmp_path: Path) -> None:
-    """无 contextvar bind（直接 CLI / 测试 / 后台触发）→ bg-{uuid}。"""
     dbfile = tmp_path / "studio.db"
     db.init_db(dbfile)
     _reset_for_tests()
@@ -106,12 +94,10 @@ def test_create_task_isolates_trace_ids_between_calls(tmp_path: Path) -> None:
     assert rows[1]["request_trace_id"] == "trace-id-dddd3333eeee4444ffff"
 
 
-# ── supervisor._spawn_task 注入 env ─────────────────────────────────────
 
 
 def test_spawn_task_injects_trace_env_to_subprocess(tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
-    """_spawn_task 调 _popen 时 extra_env 必须含 TRACE_ENV + PROCESS_ENV。"""
     from studio.supervisor.core import Supervisor
 
     captured_env = {}
@@ -139,11 +125,9 @@ def test_spawn_task_injects_trace_env_to_subprocess(tmp_path: Path,
                         lambda *a, **kw: MagicMock(start=lambda: None))
     monkeypatch.setattr("studio.supervisor.core._resolve_monitor_state_path",
                         lambda t: tmp_path / "monitor.json")
-    # task_log_path 走 paths.TASKS_DIR；改到 tmp 不污染 studio_data/
     from studio.infrastructure import paths as _paths
     monkeypatch.setattr(_paths, "TASKS_DIR", tmp_path / "tasks")
 
-    # 假 config 文件存在
     (tmp_path / "cfg.yaml").write_text("dummy", encoding="utf-8")
 
     sup = Supervisor(on_event=lambda evt: None)
@@ -167,7 +151,6 @@ def test_spawn_task_injects_trace_env_to_subprocess(tmp_path: Path,
 def test_spawn_task_generates_bg_trace_when_task_has_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """task.request_trace_id 是 None（老 task / 测试）→ bg-{uuid} 兜底。"""
     from studio.supervisor.core import Supervisor
 
     captured_env = {}
@@ -193,20 +176,18 @@ def test_spawn_task_generates_bg_trace_when_task_has_none(
                         lambda *a, **kw: MagicMock(start=lambda: None))
     monkeypatch.setattr("studio.supervisor.core._resolve_monitor_state_path",
                         lambda t: tmp_path / "monitor.json")
-    # task_log_path 走 paths.TASKS_DIR；改到 tmp 不污染 studio_data/
     from studio.infrastructure import paths as _paths
     monkeypatch.setattr(_paths, "TASKS_DIR", tmp_path / "tasks")
     (tmp_path / "cfg.yaml").write_text("dummy", encoding="utf-8")
 
     sup = Supervisor(on_event=lambda evt: None)
     sup._logs_dir = tmp_path
-    task = {"id": 7, "config_name": "cfg"}  # 无 request_trace_id
+    task = {"id": 7, "config_name": "cfg"}
     sup._spawn_task(MagicMock(name="TRAIN"), task)
 
     assert captured_env[TRACE_ENV].startswith("bg-"), (
         f"无 task.request_trace_id 应兜底 bg-，实际 {captured_env[TRACE_ENV]!r}"
     )
-    # task_type 缺省 → train
     assert captured_env[PROCESS_ENV] == "worker:train/7"
 
 
@@ -224,7 +205,6 @@ def test_worker_main_binds_trace_id_from_env(monkeypatch: pytest.MonkeyPatch) ->
         _slog._CONFIGURED_PROCESSES.add(process)
 
     def fake_run(job_id):
-        # 在 run 内部检查 contextvar 是否已经 bind
         captured["trace_in_run"] = get_trace_id()
         return 0
 
@@ -245,7 +225,6 @@ def test_worker_main_binds_trace_id_from_env(monkeypatch: pytest.MonkeyPatch) ->
 def test_worker_main_generates_trace_when_env_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无 ANIMA_TRACE_ID env（独立测 worker）→ new_trace_id 兜底，不 crash。"""
     from studio.workers import _base
     from studio.infrastructure import logging as _slog
 

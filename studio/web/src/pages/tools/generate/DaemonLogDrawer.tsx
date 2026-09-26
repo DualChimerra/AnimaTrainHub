@@ -10,12 +10,12 @@ interface LogEntry {
   line: string
 }
 
-/** daemon stderr ring buffer 抽屉。
+/** Drawer for the daemon's stderr ring buffer.
  *
- * - 从底部向上滑出 40vh，z-index 高，挡住下方 Generate 页表面但 layout 不占空间
- * - 隐藏时 translateY(100%) 完全不可见（不只是 visibility:hidden，整块抽屉离开视口）
- * - 首次打开 GET /api/generate/daemon/logs 拉历史，之后靠 SSE daemon_log_line 增量
- * - 关闭后再开：只显示历史 + 此后增量；不会丢内容（ring buffer maxlen=2000）
+ * - Slides up 40vh from the bottom, high z-index, covers the Generate page surface below it without taking up layout space
+ * - translateY(100%) when hidden, fully invisible (not just visibility:hidden -- the whole drawer leaves the viewport)
+ * - Fetches history via GET /api/generate/daemon/logs on first open, then increments via SSE daemon_log_line
+ * - Closing and reopening: only shows the history + whatever's arrived since; nothing is lost (ring buffer maxlen=2000)
  */
 export default function DaemonLogDrawer({
   open, onClose,
@@ -30,7 +30,7 @@ export default function DaemonLogDrawer({
   const seqRef = useRef(0)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
-  // 打开时拉历史；关闭不清空（保留下次打开时立即可见）
+  // Fetches history on open; doesn't clear on close (stays visible immediately next time it opens)
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -42,15 +42,15 @@ export default function DaemonLogDrawer({
       } else if (seqRef.current === 0) {
         seqRef.current = r.next_seq
       }
-    }).catch(() => { /* 不阻塞 */ })
+    }).catch(() => { /* non-blocking */ })
     return () => { cancelled = true }
   }, [open])
 
-  // SSE 增量
+  // SSE increments
   useEventStream(useCallback((evt) => {
     if (evt.type !== 'daemon_log_line') return
     const seq = typeof evt.seq === 'number' ? evt.seq : seqRef.current
-    if (seq < seqRef.current) return  // 老事件忽略
+    if (seq < seqRef.current) return  // ignore stale events
     seqRef.current = seq + 1
     setEntries((prev) => {
       const next = [...prev, {
@@ -58,12 +58,12 @@ export default function DaemonLogDrawer({
         seq,
         line: String(evt.line ?? ''),
       }]
-      // 保护内存：客户端也限 2000 行
+      // Guard memory: the client also caps it at 2000 lines
       return next.length > 2000 ? next.slice(-2000) : next
     })
   }, []))
 
-  // auto-scroll 到底
+  // Auto-scroll to the bottom
   useEffect(() => {
     if (!autoScroll || !open) return
     const el = scrollRef.current

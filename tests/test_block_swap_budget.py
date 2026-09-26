@@ -50,7 +50,7 @@ def test_vram_discount_lets_small_card_pass(fake_env):
     fake_env(ram_gb=64, vram_gb=15.0, file_gb=25.8)
 
     # no discount: rejected
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
         sysmem.check_load_budget(True, weight_paths=["x"], stage="test")
 
     # discount the 94.8% swapped out (all 28 layers swapped): resident 1.3GB + base 3GB < 15GB, passes
@@ -70,12 +70,12 @@ def test_vram_discount_is_ratio_so_fp8_is_not_over_discounted(fake_env):
     fake_env(ram_gb=64, vram_gb=3.0, file_gb=13.0)  # fp8 file is 13GB, the card only has 3.0GB left
 
     # proportional discount: needs 0.7+3=3.7GB > 3.0GB available -> correctly rejected
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
         sysmem.check_load_budget(
             True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
         )
     # the ratio is clamped to [0,1], so a bogus input value can't blow the guardrail's discount through
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
         sysmem.check_load_budget(
             True, weight_paths=["x"], stage="test", vram_discount_ratio=-5.0,
         )
@@ -84,7 +84,7 @@ def test_vram_discount_is_ratio_so_fp8_is_not_over_discounted(fake_env):
 def test_vram_discount_still_rejects_when_genuinely_short(fake_env):
     """The discount isn't a free pass: it still rejects when the resident part alone doesn't fit."""
     fake_env(ram_gb=64, vram_gb=4.0, file_gb=25.8)
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
         sysmem.check_load_budget(
             True, weight_paths=["x"], stage="test", vram_discount_ratio=0.5,
         )
@@ -93,7 +93,7 @@ def test_vram_discount_still_rejects_when_genuinely_short(fake_env):
 def test_vram_discount_does_not_relax_ram_side(fake_env):
     """The discount only applies to the VRAM side -- swapped-out layers still occupy RAM, so the RAM budget is computed as usual."""
     fake_env(ram_gb=8, vram_gb=80, file_gb=25.8)
-    with pytest.raises(RuntimeError, match="系统可用内存不足"):
+    with pytest.raises(RuntimeError, match="Not enough available system RAM"):
         sysmem.check_load_budget(
             True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
         )
@@ -150,7 +150,7 @@ def test_pinned_budget_rejects_over_safe_fraction(monkeypatch):
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 40 * _GIB)
     # safe cap = min(40 x 0.8, 40 - 4) = min(32, 36) = 32GB
     sysmem.check_pinned_budget(int(31 * _GIB), blocks=28)
-    with pytest.raises(RuntimeError, match="内存不足以换出"):
+    with pytest.raises(RuntimeError, match="Not enough memory to swap out"):
         sysmem.check_pinned_budget(int(33 * _GIB), blocks=28)
 
 
@@ -164,7 +164,7 @@ def test_pinned_budget_absolute_floor_protects_small_ram(monkeypatch):
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 10 * _GIB)
     # safe cap = min(10 x 0.8, 10 - 4) = min(8, 6) = 6GB
     sysmem.check_pinned_budget(int(5.5 * _GIB), blocks=14)
-    with pytest.raises(RuntimeError, match="内存不足以换出"):
+    with pytest.raises(RuntimeError, match="Not enough memory to swap out"):
         sysmem.check_pinned_budget(int(7 * _GIB), blocks=14)
 
 
@@ -187,7 +187,7 @@ def test_pinned_budget_message_is_actionable(monkeypatch):
     msg = str(exc.value)
     assert "28" in msg
     assert "blocks_to_swap" in msg
-    assert "锁定" in msg
+    assert "pinned" in msg
 
 
 def test_pinned_budget_silent_when_query_fails(monkeypatch):

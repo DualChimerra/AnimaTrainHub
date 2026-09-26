@@ -1,6 +1,3 @@
-"""Daemon GPU 让位（commit 12）：train/reg_ai/tag/reg_build pending 时
-触发 daemon unload，模型未卸载前不派 GPU 任务。
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -32,7 +29,6 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def fake_daemon():
-    """替换全局 daemon 实例为 MagicMock。"""
     fake = MagicMock()
     fake.is_model_loaded = False
     fake.is_busy = False
@@ -44,9 +40,8 @@ def fake_daemon():
 
 @pytest.fixture
 def fake_secrets(monkeypatch):
-    """把 secrets.load() 替换成可调的 fake，避免读真实 secrets 文件。"""
     cfg = MagicMock()
-    cfg.queue.light_tasks_during_train = True  # R-1 新默认：light 档并行开
+    cfg.queue.light_tasks_during_train = True
     monkeypatch.setattr(
         "studio.supervisor._secrets.load", lambda: cfg
     )
@@ -61,7 +56,6 @@ def _make_train_task(env: dict) -> int:
 
 
 def _make_tag_job(env: dict, *, slug: str = "p") -> int:
-    """造一个 tag job pending。"""
     with db.connection_for(env["db"]) as conn:
         from studio.services.projects import projects, versions
         p = projects.create_project(conn, title="P", slug=slug)
@@ -76,7 +70,6 @@ def _make_tag_job(env: dict, *, slug: str = "p") -> int:
         return int(job["id"])
 
 
-# ---------- _maybe_yield_daemon 单元行为 -------------------------------------
 
 
 def test_yield_no_daemon_loaded(env, fake_daemon, fake_secrets):
@@ -90,7 +83,6 @@ def test_yield_no_daemon_loaded(env, fake_daemon, fake_secrets):
 
 
 def test_yield_daemon_idle_but_loaded(env, fake_daemon, fake_secrets):
-    """daemon 加载了模型但 idle → 触发 unload，返回 True。"""
     fake_daemon.is_model_loaded = True
     fake_daemon.is_busy = False
     sup = Supervisor(
@@ -102,7 +94,6 @@ def test_yield_daemon_idle_but_loaded(env, fake_daemon, fake_secrets):
 
 
 def test_yield_daemon_busy_no_unload(env, fake_daemon, fake_secrets):
-    """daemon 在跑 generate → 等它跑完，不强中断。"""
     fake_daemon.is_model_loaded = True
     fake_daemon.is_busy = True
     sup = Supervisor(
@@ -114,10 +105,6 @@ def test_yield_daemon_busy_no_unload(env, fake_daemon, fake_secrets):
 
 
 def test_yield_ignores_light_switch(env, fake_daemon, fake_secrets):
-    """R-1：light 开关不豁免 exclusive 让位——开关开着照样吊销 daemon 租约。
-
-    （老 allow_gpu_during_train 会放行「训练 + 常驻底模」并存，是 L3 的一部分。）
-    """
     fake_daemon.is_model_loaded = True
     fake_daemon.is_busy = False
     fake_secrets.queue.light_tasks_during_train = True
@@ -129,11 +116,9 @@ def test_yield_ignores_light_switch(env, fake_daemon, fake_secrets):
     fake_daemon.request_unload.assert_called_once()
 
 
-# ---------- _dispatch_exclusive_tasks 集成 -------------------------------------------
 
 
 def test_dispatch_train_skipped_while_daemon_loaded(env, fake_daemon, fake_secrets):
-    """daemon 占 GPU 时 _dispatch_train 不应 spawn train task。"""
     fake_daemon.is_model_loaded = True
     fake_daemon.is_busy = False
 
@@ -146,7 +131,6 @@ def test_dispatch_train_skipped_while_daemon_loaded(env, fake_daemon, fake_secre
     sup._spawn_task = lambda slot, task: spawned.append(task)  # type: ignore
 
     _make_train_task(env)
-    # 取 SLOT_TRAIN slot 调 dispatch_train
     train_slot = next(s for s in sup._slots if s.name == "train")
     sup._dispatch_exclusive_tasks(train_slot)
     assert spawned == [], "train task should not be spawned while daemon holds GPU"
@@ -154,7 +138,6 @@ def test_dispatch_train_skipped_while_daemon_loaded(env, fake_daemon, fake_secre
 
 
 def test_dispatch_train_proceeds_after_daemon_unloaded(env, fake_daemon, fake_secrets):
-    """daemon unload 完成后，下一次 _dispatch_train 应该 spawn train。"""
     fake_daemon.is_model_loaded = False
     fake_daemon.is_busy = False
 
@@ -172,13 +155,11 @@ def test_dispatch_train_proceeds_after_daemon_unloaded(env, fake_daemon, fake_se
     fake_daemon.request_unload.assert_not_called()
 
 
-# ---------- _dispatch_data 集成 --------------------------------------------
 
 
 def test_dispatch_data_tag_job_yields_to_daemon_load_when_disabled(
     env, fake_daemon, fake_secrets,
 ):
-    """开关关闭（保守模式）：tag job pending + daemon 占 GPU → 让位，不 spawn。"""
     fake_daemon.is_model_loaded = True
     fake_daemon.is_busy = False
     fake_secrets.queue.light_tasks_during_train = False
@@ -200,7 +181,6 @@ def test_dispatch_data_tag_job_yields_to_daemon_load_when_disabled(
 def test_dispatch_data_tag_job_runs_alongside_daemon_by_default(
     env, fake_daemon, fake_secrets,
 ):
-    """R-1 新默认（light 并行开）：tag job 与 idle 常驻 daemon 共存，不吊销租约。"""
     fake_daemon.is_model_loaded = True
     fake_daemon.is_busy = False
 
@@ -219,7 +199,6 @@ def test_dispatch_data_tag_job_runs_alongside_daemon_by_default(
 
 
 def test_dispatch_data_download_not_blocked_by_daemon(env, fake_daemon, fake_secrets):
-    """download 是 IO-only，不应被 daemon 让位逻辑阻塞。"""
     fake_daemon.is_model_loaded = True
     fake_daemon.is_busy = False
 
@@ -230,7 +209,6 @@ def test_dispatch_data_download_not_blocked_by_daemon(env, fake_daemon, fake_sec
     )
     sup._spawn_job = lambda slot, job: spawned_jobs.append(job)  # type: ignore
 
-    # 造 download job
     with db.connection_for(env["db"]) as conn:
         from studio.services.projects import projects, versions
         p = projects.create_project(conn, title="P2", slug="p2")

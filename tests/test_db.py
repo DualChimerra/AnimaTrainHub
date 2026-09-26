@@ -1,4 +1,3 @@
-"""任务队列 SQLite DAO 测试。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,7 +33,6 @@ def test_list_ordering(dbfile: Path) -> None:
         b = db.create_task(conn, name="b", config_name="x", priority=10)
         c = db.create_task(conn, name="c", config_name="x", priority=10)
         items = db.list_tasks(conn)
-    # b、c 优先级高，b 早于 c；a 排最后
     assert [t["id"] for t in items] == [b, c, a]
 
 
@@ -80,21 +78,18 @@ def test_delete_task(dbfile: Path) -> None:
 
 
 def test_reorder_only_pending(dbfile: Path) -> None:
-    """完成的任务不应被 reorder 影响 priority。"""
     with db.connection_for(dbfile) as conn:
         a = db.create_task(conn, name="a", config_name="x")
         b = db.create_task(conn, name="b", config_name="x")
         c = db.create_task(conn, name="c", config_name="x")
-        # c 已完成
         db.update_task(conn, c, status="done", priority=100)
         c_priority_before = db.get_task(conn, c)["priority"]
-        # 把 a、b 重排，b 优先
         db.reorder(conn, [b, a])
         a_after = db.get_task(conn, a)
         b_after = db.get_task(conn, b)
         c_after = db.get_task(conn, c)
     assert b_after["priority"] > a_after["priority"]
-    assert c_after["priority"] == c_priority_before  # 已完成的不变
+    assert c_after["priority"] == c_priority_before
 
 
 def test_invalid_status_constants() -> None:

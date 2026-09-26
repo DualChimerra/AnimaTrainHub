@@ -1,28 +1,28 @@
-"""reg dataset 分析 / 评分原语（PR-3.9 从 builder.py 1108 行抽出）。
+"""reg dataset analysis / scoring primitives (extracted from builder.py's 1108 lines in PR-3.9).
 
-只做"看 + 算"，不动盘 / 不写 meta / 不串主循环。builder.py 的主流程
-（_build_for_subfolder / _build_inner / build）从本模块调进来组合出"贪心搜
-+ 评分挑图 + 落盘"的端到端逻辑。
+Only "looks + computes" -- doesn't touch disk / doesn't write meta / doesn't drive the main loop. builder.py's main flow
+(_build_for_subfolder / _build_inner / build) calls into this module to compose the end-to-end "greedy search
++ score-based picking + write to disk" logic.
 
-公开（builder.py 主流程用）：
-    analyze_dataset_structure   扫 train_dir 出 tag 频率 / 分辨率 / 长宽比统计
-    collect_source_image_ids    扫源数据集 post_id（避免与 train 撞图）
-    collect_existing_reg_per_subfolder  扫已存在 reg / 增量模式用
-    calculate_tag_similarity    评分：负 MSE（tag 频率向量距离）
-    calculate_resolution_similarity  评分：aspect 0.6 + resolution 0.4
-    calculate_missing_tags      算"还差什么 tag" 的优先级队列
-    check_aspect_ratio          单图长宽比是否在过滤器允许范围
-    find_best_match             一批 posts 里挑最高分（综合 tag + 分辨率）
+Public (used by builder.py's main flow):
+    analyze_dataset_structure   scans train_dir for tag frequency / resolution / aspect ratio stats
+    collect_source_image_ids    scans the source dataset's post_id (avoids clashing images with train)
+    collect_existing_reg_per_subfolder  scans existing reg / used for incremental mode
+    calculate_tag_similarity    scoring: negative MSE (tag frequency vector distance)
+    calculate_resolution_similarity  scoring: aspect 0.6 + resolution 0.4
+    calculate_missing_tags      computes the priority queue of "which tags are still missing"
+    check_aspect_ratio          whether a single image's aspect ratio is within the filter's allowed range
+    find_best_match             picks the highest score (tag + resolution combined) among a batch of posts
 
-半公开（builder.py + tests 用）：
-    _normalize_tags             小写 + 空格→_ + 去重保序
-    analyze_tags_in_file        读单图 caption + 归一化
-    _search_with_filters        search_posts + 本地黑名单 / id 排除过滤
-    _IMAGE_EXT_NODOT            datasets.IMAGE_EXTS 去点版（与 booru file_ext 比对）
+Semi-public (used by builder.py + tests):
+    _normalize_tags             lowercase + space->_ + dedup while preserving order
+    analyze_tags_in_file        reads a single image's caption + normalizes
+    _search_with_filters        search_posts + local blacklist / id exclusion filtering
+    _IMAGE_EXT_NODOT            datasets.IMAGE_EXTS with the dot stripped (for comparison against booru file_ext)
 
-所有阈值 / 公式与源脚本 regex_dataset_builder.py 一致：
-- 标签相似度 sigmoid 0.1 系数；分辨率打分 aspect 0.6 + resolution 0.4
-- 最终分数 = tag_score + resolution_score * 0.1（resolution 作 tie-breaker）
+All thresholds / formulas match the source script regex_dataset_builder.py:
+- tag similarity sigmoid coefficient 0.1; resolution scoring aspect 0.6 + resolution 0.4
+- final score = tag_score + resolution_score * 0.1 (resolution acts as a tie-breaker)
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from ..dataset import tagedit
 
 ProgressFn = Callable[[str], None]
 
-# IMAGE_EXTS 在 datasets.py 用 ".xxx" 形式；这里需要不带点的形式（与 file_ext 比对）
+# IMAGE_EXTS uses the ".xxx" form in datasets.py; here we need the dotless form (for comparison against file_ext)
 _IMAGE_EXT_NODOT = {e.lstrip(".") for e in IMAGE_EXTS}
 
 
@@ -51,7 +51,7 @@ _IMAGE_EXT_NODOT = {e.lstrip(".") for e in IMAGE_EXTS}
 
 
 def _normalize_tags(raw: list[str]) -> list[str]:
-    """小写 + 空格→下划线 + 去重保序。"""
+    """Lowercase + space->underscore + dedup while preserving order."""
     seen: set[str] = set()
     out: list[str] = []
     for t in raw:
@@ -63,9 +63,9 @@ def _normalize_tags(raw: list[str]) -> list[str]:
 
 
 def analyze_tags_in_file(image_path: Path) -> list[str]:
-    """读图片对应 caption（.txt 或 .json），返回标准化 tag 列表。
+    """Reads an image's corresponding caption (.txt or .json), returns the normalized tag list.
 
-    复用 `tagedit.read_tags`，再做大小写 / 空格 / 去重标准化。
+    Reuses `tagedit.read_tags`, then normalizes case / spaces / dedup.
     """
     raw = tagedit.read_tags(image_path)
     return _normalize_tags(raw)
@@ -74,9 +74,9 @@ def analyze_tags_in_file(image_path: Path) -> list[str]:
 def analyze_dataset_structure(
     dataset_path: Path, on_progress: ProgressFn = print
 ) -> dict[str, Any]:
-    """扫子文件夹 + 根目录，统计 tag 频率 / 分辨率 / 长宽比。
+    """Scans sub-folders + the root directory, computing tag frequency / resolution / aspect ratio stats.
 
-    返回结构与源脚本一致：
+    The returned structure matches the source script:
     ```
     {
         "subfolders": {name: {"images": [...], "tag_freq": Counter, "image_count": int}},
@@ -117,7 +117,7 @@ def analyze_dataset_structure(
                     if h > 0:
                         ar = w / h
             except Exception as exc:
-                on_progress(f"    警告：无法读取图片尺寸 {img.name}: {exc}")
+                on_progress(f"    Warning: could not read image size {img.name}: {exc}")
             data["images"].append({
                 "image": img.name,
                 "tags": tags,
@@ -136,11 +136,11 @@ def analyze_dataset_structure(
         if data["image_count"] > 0:
             structure["subfolders"][key] = data
             on_progress(
-                f"  [{key or '<root>'}] {data['image_count']} 张图片，"
-                f"{len(data['tag_freq'])} tag 种类"
+                f"  [{key or '<root>'}] {data['image_count']} images, "
+                f"{len(data['tag_freq'])} distinct tags"
             )
 
-    # 根目录直接图
+    # Images directly at the root
     has_root_imgs = any(
         f.is_file() and f.suffix.lower() in IMAGE_EXTS
         for f in dataset_path.iterdir()
@@ -148,19 +148,19 @@ def analyze_dataset_structure(
     if has_root_imgs:
         _scan_folder(dataset_path, "")
 
-    # 子文件夹
+    # Sub-folders
     for sub in sorted(dataset_path.iterdir()):
         if sub.is_dir():
             _scan_folder(sub, sub.name)
 
-    # 全局权重
+    # Global weights
     if structure["total_images"] > 0:
         for tag, count in structure["global_tag_freq"].items():
             structure["global_tag_weights"][tag] = (
                 count / structure["total_images"]
             )
 
-    # 分辨率统计（中位数 + 标准差）
+    # Resolution stats (median + std dev)
     if structure["resolutions"]:
         res_arr = np.array(structure["resolutions"])
         structure["median_resolution"] = (
@@ -182,9 +182,9 @@ def analyze_dataset_structure(
 
 
 def collect_source_image_ids(source_path: Path) -> set[str]:
-    """递归收集源数据集所有图片的文件 stem（= post_id）。
+    """Recursively collects the file stem (= post_id) for every image in the source dataset.
 
-    源脚本约定：booru 下载的文件名是 `{post_id}.{ext}`，所以 stem 就是 ID。
+    Source script convention: booru-downloaded filenames are `{post_id}.{ext}`, so the stem is the ID.
     """
     ids: set[str] = set()
     for img in source_path.rglob("*"):
@@ -199,10 +199,10 @@ def collect_source_image_ids(source_path: Path) -> set[str]:
 def collect_existing_reg_per_subfolder(
     output_dir: Path,
 ) -> dict[str, dict[str, Any]]:
-    """PP5.1 — 扫已存在 reg 图，按子文件夹聚合 (ids, tags, count)。
+    """PP5.1 -- scans existing reg images, aggregating (ids, tags, count) per sub-folder.
 
-    返回 {subfolder_name: {"ids": set[str], "tags": list[list[str]], "count": int}}
-    subfolder_name == "" 表示 output_dir 根。
+    Returns {subfolder_name: {"ids": set[str], "tags": list[list[str]], "count": int}}
+    subfolder_name == "" means the root of output_dir.
     """
     out: dict[str, dict[str, Any]] = {}
     if not output_dir.exists():
@@ -219,7 +219,7 @@ def collect_existing_reg_per_subfolder(
         if img.suffix.lower() not in IMAGE_EXTS:
             continue
         rel = img.relative_to(output_dir)
-        # 子文件夹 = 路径第一段（如果存在）
+        # sub-folder = first path segment (if present)
         sub_key = rel.parts[0] if len(rel.parts) > 1 else ""
         bucket = _ensure(sub_key)
         bucket["ids"].add(img.stem)
@@ -239,24 +239,24 @@ def calculate_tag_similarity(
     current_weights: dict[str, float],
     target_count: int,
 ) -> float:
-    """与源脚本一致：负 MSE。
+    """Matches the source script: negative MSE.
 
-    `target_weights` 和 `current_weights` 都按 **文档频率**（doc frequency）测量：
-    某个 tag 出现在多少张图里 / 总图数 ∈ [0, 1]。`target_weights` 来自 train caption
-    分析；`current_weights` 来自 reg 集已下图，跟 `target_weights` 同公式（每图每
-    tag 累加 `1/target_count`）—— 拉够 `target_count` 张后，含某 tag 的 K 张图会让
-    `current_weights[tag]` 累加到 `K / target_count`，恰好等于该 tag 在 reg 集里的
-    doc frequency，跟 `target_weights` 的量级对称匹配。
+    Both `target_weights` and `current_weights` are measured as **document frequency** (doc frequency):
+    how many images a given tag appears in / total image count, in [0, 1]. `target_weights` comes from analyzing
+    train captions; `current_weights` comes from images already downloaded into reg, using the same formula as
+    `target_weights` (each image accumulates `1/target_count` per tag) -- once enough images have been pulled to reach
+    `target_count`, K images containing a given tag will accumulate `current_weights[tag]` to `K / target_count`,
+    exactly the doc frequency of that tag within the reg set, symmetric in magnitude with `target_weights`.
 
-    这**不是** reverse-IDF：它跟 target 测的量级一致，所以累加没有非对称偏向。
-    副作用：密集打标的图（如 50-tag 的 booru post）单图贡献的 MSE 项更多，候选
-    选择会略偏向 tag 数多的图 —— 但这跟 train 的 doc frequency 分布一致，所以
-    没产生失配（target 也是按 doc frequency 算的）。
+    This is **not** reverse-IDF: it's measured at the same magnitude as target, so accumulation has no asymmetric bias.
+    Side effect: a densely-tagged image (e.g. a 50-tag booru post) contributes more MSE terms by itself, so candidate
+    selection is slightly biased toward images with more tags -- but this matches train's doc frequency distribution, so it
+    doesn't create a mismatch (target is also computed by doc frequency).
 
-    若改成「归一化分布匹配」（候选侧用 `1/(target_count * len(post_tags))`），
-    `target_weights` 也必须按同样方式重算 —— 否则会产生不对称的 IDF 偏置。
-    本 PR 不动 contract，仅文档化（见 `tmp/reg_algorithm_research.md` Smell D
-    + 用户讨论 2026-05-30）。
+    If changed to "normalized distribution matching" (candidate side using `1/(target_count * len(post_tags))`),
+    `target_weights` would also have to be recomputed the same way -- otherwise it would create an asymmetric IDF bias.
+    This PR doesn't touch the contract, just documents it (see `tmp/reg_algorithm_research.md` Smell D
+    + owner discussion 2026-05-30).
     """
     new_weights = dict(current_weights)
     for tag in candidate_tags:
@@ -275,7 +275,7 @@ def calculate_resolution_similarity(
     target_aspect_ratio: float,
     resolution_std: Optional[tuple[float, float]] = None,
 ) -> float:
-    """与源脚本一致：长宽比 0.6 + 分辨率 0.4。"""
+    """Matches the source script: aspect ratio 0.6 + resolution 0.4."""
     if not post_w or not post_h or not target_resolution or not target_aspect_ratio:
         return 0.0
     post_ar = post_w / post_h if post_h > 0 else 1.0
@@ -327,16 +327,16 @@ def check_aspect_ratio(
     return min_ar <= ar <= max_ar
 
 
-# PR-3 (Smell C 修法)：tag_score 跟 res_score 归一到同量级再加权。
-# - tag_score = -MSE，量级 ~ [-len(target_weights), 0]
+# PR-3 (Smell C fix): normalize tag_score and res_score to the same magnitude before weighting.
+# - tag_score = -MSE, magnitude ~ [-len(target_weights), 0]
 # - res_score ∈ [0, 1]
-# 旧公式 `tag_score + res_score * 0.1` 让 tag 主导但又给 res 一个无依据
-# 0.1 系数 —— 实际行为：tag 差 0.001 即可被 res 反转，跟 docstring 的
-# "tie-breaker" 不一致。新公式把 tag_score / len(target_weights) 归一到
-# ~[-1, 0]，跟 res_score 同量级，按 0.7:0.3 加权。0.7 沿用 tag 主导，
-# 0.3 让 res 真能影响排序（用户在意 ARB 桶一致性）。
-# 见 `tmp/reg_algorithm_research.md` Smell C + 用户 caption-disentanglement
-# 讨论决策（2026-05-30）。
+# The old formula `tag_score + res_score * 0.1` let tag dominate but gave res an unjustified
+# 0.1 coefficient -- actual behavior: a tag difference of 0.001 could already be flipped by res, inconsistent with the
+# docstring's "tie-breaker". The new formula normalizes tag_score / len(target_weights) to
+# ~[-1, 0], the same magnitude as res_score, weighted 0.7:0.3. 0.7 keeps tag dominant,
+# 0.3 lets res actually influence ranking (the owner cares about ARB bucket consistency).
+# See `tmp/reg_algorithm_research.md` Smell C + owner's caption-disentanglement
+# discussion decision (2026-05-30).
 TAG_SCORE_WEIGHT = 0.7
 RES_SCORE_WEIGHT = 0.3
 
@@ -364,9 +364,9 @@ def find_best_match(
     best_post = None
     best_score = float("-inf")
 
-    # tag_score 归一化分母：参与 MSE 的 tag 集大小近似为 target_weights 的
-    # 大小（candidate_tags 在不重叠部分占小头）。除以它把 tag_score 归一到
-    # ~[-1, 0]，再跟 [0, 1] 的 res_score 加权。
+    # tag_score normalization denominator: the size of the tag set participating in MSE is approximately
+    # target_weights's size (candidate_tags contributes only a small non-overlapping part). Dividing by it normalizes
+    # tag_score to ~[-1, 0], to then weight against res_score's [0, 1].
     tag_denom = max(1, len(target_weights))
 
     for post in candidates:
@@ -399,7 +399,7 @@ def find_best_match(
 
 
 # ---------------------------------------------------------------------------
-# search wrapper（带本地过滤）
+# search wrapper (with local filtering)
 # ---------------------------------------------------------------------------
 
 
@@ -416,9 +416,9 @@ def _search_with_filters(
     limit: int = 100,
     client: Optional[booru_pool.BooruClient] = None,
 ) -> list[dict[str, Any]]:
-    """搜索 + 本地过滤（黑名单 / 已排除 ID / 缺 id 或 url）。
+    """Search + local filtering (blacklist / already-excluded IDs / missing id or url).
 
-    PP9: `client` 走统一池子（API token bucket）；不传则直接调底层（旧测兼容）。
+    PP9: `client` goes through the unified pool (API token bucket); if not passed, calls the underlying layer directly (compat with old tests).
     """
     norm = _normalize_tags(tags)
     query = " ".join(norm)
@@ -453,7 +453,7 @@ def _search_with_filters(
             continue
         if pid in exclude_ids:
             continue
-        # 本地黑名单过滤
+        # Local blacklist filtering
         if blacklist_tags:
             ptags = booru_api.post_tag_list(post, api_source)
             if any(t in blacklist_tags for t in ptags):

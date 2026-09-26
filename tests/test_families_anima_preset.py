@@ -1,8 +1,3 @@
-"""families/anima/preset.py — ANIMA_PRESET 内容稳定 + preset 注入契约（多模型 PR-2b）。
-
-自 tests/test_lokr_preset.py 迁入：preset 从 utils/lokr_preset.py 移居
-families/anima/，apply() helper 退役改为构造期显式注入。
-"""
 from __future__ import annotations
 
 import pytest
@@ -31,13 +26,11 @@ def test_preset_uses_fnmatch():
 
 
 def test_preset_prefix_matches_spec():
-    """lora_prefix=lora_unet 是 ComfyUI 加载流程兼容的关键，且必须与 ModelSpec 一致"""
     assert ANIMA_PRESET["lora_prefix"] == "lora_unet"
     assert ANIMA_PRESET["lora_prefix"] == ANIMA_SPEC.lora.prefix
 
 
 def test_lycoris_adapter_requires_explicit_preset():
-    """族知识不再内置：不传 preset 的 inject 必须 fail-fast，防静默打错层"""
     from utils.lycoris_adapter import LycorisAdapter
 
     adapter = LycorisAdapter(algo="lokr", rank=4, alpha=4.0, factor=8)

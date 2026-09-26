@@ -67,7 +67,7 @@ def test_advance_fails_with_empty_train(client: TestClient) -> None:
     body = resp.json()
     assert body["advanced"] is False
     assert body["ok"] is False
-    assert "训练集" in body["reason"]
+    assert "Training set" in body["reason"]
     assert body["new_phase"] is None
 
 
@@ -97,7 +97,7 @@ def test_advance_editing_fails_with_missing_caption(client: TestClient) -> None:
     resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/advance-phase")
     body = resp.json()
     assert body["advanced"] is False
-    assert "1 张" in body["reason"]
+    assert "1 image" in body["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ def test_skip_fails_when_phase_not_skippable(client: TestClient) -> None:
     resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/skip-phase")
     body = resp.json()
     assert body["advanced"] is False
-    assert "不可跳过" in body["reason"]
+    assert "cannot be skipped" in body["reason"]
 
 
 def test_skip_regularizing_jumps_to_ready(client: TestClient) -> None:
@@ -143,4 +143,4 @@ def test_skip_regularizing_blocked_by_running_job(client: TestClient) -> None:
     resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/skip-phase")
     body = resp.json()
     assert body["advanced"] is False
-    assert "正则" in body["reason"]
+    assert "regularization" in body["reason"]

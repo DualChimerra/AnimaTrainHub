@@ -1,9 +1,3 @@
-"""commit 15 P0-2：/api/queue 默认过滤 generate task；可加 ?include_generate=true 兜底。
-
-测 db.filter_out_task_types 纯函数 + 通过 db.list_tasks 验证默认 task_type
-回退（fallback="train"）。fastapi endpoint 集成测留 fastapi env 装好的环境
-跑（当前 dev env 没装）。
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -42,7 +36,6 @@ def test_filter_out_excludes_generate(env):
 
 
 def test_filter_out_default_train_fallback() -> None:
-    """task_type 字段缺省时应当作 'train'（旧 task 兼容）。"""
     items = [
         {"id": 1, "task_type": None, "name": "old"},
         {"id": 2, "task_type": "generate", "name": "new"},

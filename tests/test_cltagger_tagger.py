@@ -1,4 +1,3 @@
-"""CLTagger tagger：mock onnx + mapping 解析、阈值过滤。"""
 from __future__ import annotations
 
 import json
@@ -19,8 +18,6 @@ from studio.services.tagging import cltagger as cltagger_tagger
 def isolated_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     sf = tmp_path / "secrets.json"
     monkeypatch.setattr(secrets, "SECRETS_FILE", sf)
-    # 隔离 models_root：默认回退到 REPO_ROOT/models，dev 机上可能真有
-    # cl_tagger_1_02，导致 is_available 误判 True。
     monkeypatch.setattr(model_downloader, "models_root", lambda: tmp_path / "models")
     return tmp_path
 
@@ -78,11 +75,6 @@ def test_v2_legacy_root_paths_resolve_versioned_files(isolated_secrets: Path) ->
 
 
 def test_v2_missing_external_data_reports_not_ready(isolated_secrets: Path) -> None:
-    """v2 权重在 model.onnx.data sidecar 里；缺它必须报"未就绪"，
-
-    否则 onnx 图就绪会让 is_available 误报"可用"，等到 prepare 加载 external
-    data 时才在 onnxruntime 层黑盒炸。
-    """
     base = model_downloader.cltagger_target_root(
         model_downloader.models_root(),
         "cella110n/cl_tagger_v2",
@@ -94,7 +86,6 @@ def test_v2_missing_external_data_reports_not_ready(isolated_secrets: Path) -> N
         json.dumps({"idx_to_tag": {"0": "1girl"}}),
         encoding="utf-8",
     )
-    # 故意不写 model.onnx.data —— 模拟部分下载
     secrets.update({
         "cltagger": {
             "model_id": "cella110n/cl_tagger_v2",
@@ -124,7 +115,7 @@ def test_is_available_does_not_download_when_model_missing(
     t = cltagger_tagger.CLTagger()
     ok, msg = t.is_available()
     assert ok is False
-    assert "需下载模型" in msg
+    assert "needs downloading" in msg
     assert called["download"] is False
 
 
@@ -157,15 +148,13 @@ def test_postprocess_uses_character_threshold_and_optional_categories(
 def test_postprocess_default_gates_copyright_on_meta_quality_off(
     isolated_secrets: Path,
 ) -> None:
-    """默认勾 General / Character / Copyright 三类；Artist / Meta / Quality / Model /
-    Rating 默认关。保证老 secrets 升级后用户能直接拿到"干净"的 caption。"""
     secrets.update({"cltagger": {"threshold_general": 0.1, "threshold_character": 0.1}})
     t = cltagger_tagger.CLTagger()
     t._labels = cltagger_tagger._LabelData(
         names=["1girl", "hero_name", "fate_series", "some_artist", "highres", "best_quality", "model_tag", "explicit"],
         categories=["General", "Character", "Copyright", "Artist", "Meta", "Quality", "Model", "Rating"],
     )
-    logits = np.array([4.0] * 8, dtype=np.float32)  # sigmoid≈0.98，全部超阈值
+    logits = np.array([4.0] * 8, dtype=np.float32)
     tags, _ = t._postprocess_one(logits)
     assert set(tags) == {"1girl", "hero name", "fate series"}
 
@@ -211,8 +200,6 @@ def test_postprocess_meta_and_quality_gates_can_be_enabled(
 
 
 def test_postprocess_blacklist_underscore_and_case_insensitive(isolated_secrets: Path) -> None:
-    """cltagger 的 tag 是下划线形式；blacklist 填空格 'cat girl' / 大写
-    'BLUE_EYES' 也能屏蔽（_/空格、大小写不敏感，与 wd14 一致）。"""
     secrets.update({
         "cltagger": {
             "threshold_general": 0.1, "threshold_character": 0.1,
@@ -254,13 +241,12 @@ def test_tag_iterator_runs_onnx_batch(isolated_secrets: Path, tmp_path: Path) ->
 
 
 def test_load_tag_mapping_supports_inline_object_schema(tmp_path: Path) -> None:
-    """支持 {idx: {tag, category}} 这种内联 schema —— cella110n 老版本 mapping 格式。"""
     mapping_path = tmp_path / "tag_mapping.json"
     mapping_path.write_text(
         json.dumps({
             "0": {"tag": "general_tag", "category": "General"},
             "1": {"tag": "hero_name", "category": "Character"},
-            "3": {"tag": "explicit"},  # category 缺省 → "General"
+            "3": {"tag": "explicit"},
         }),
         encoding="utf-8",
     )

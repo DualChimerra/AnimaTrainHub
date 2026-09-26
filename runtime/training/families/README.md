@@ -1,38 +1,54 @@
-# families/ —— 模型族 registry（第 8 套 plugin registry，架构级）
+# families/ -- model family registry (plugin registry #8, architecture-level)
 
-设计权威口径：`docs/design/multi-model/04-synthesis.md`（接口冻结面在 03 §4.1 + 04 §3）。
+Authoritative design reference: `docs/design/multi-model/04-synthesis.md` (frozen
+interface surface in 03 SS4.1 + 04 SS3).
 
-## 一个族的三个居所
+## A family's three homes
 
-| 层 | 位置 | 内容 |
+| Layer | Location | Contents |
 |---|---|---|
-| 结构定义 | `modeling/<fam>/` | DiT/包装层（只依赖 torch/einops） |
-| 行为适配 | `runtime/training/families/<fam>/` | ModelFamily 实现：loader / forward / preset / sampling / text_encoding |
-| 资产清单 | `studio/services/models/families/<fam>.py` | 权重 repo / 下载 target / 默认路径（PR-4 落地） |
+| Structure definition | `modeling/<fam>/` | DiT / wrapper layers (depends only on torch/einops) |
+| Behavior adapter | `runtime/training/families/<fam>/` | ModelFamily implementation: loader / forward / preset / sampling / text_encoding |
+| Asset manifest | `studio/services/models/families/<fam>.py` | weight repo / download target / default paths (landed in PR-4) |
 
-族名字符串（`anima` / `krea2`）是贯穿三层的唯一 join key。
+The family name string (`anima` / `krea2`) is the single join key running through all three layers.
 
-## 边界纪律
+## Boundary discipline
 
-- 共享循环只消费 `(latents, noise, t, pred, target, loss, mask, loss_weight)`；
-  凡这些之外的模型知识（文本编码、pad_mask、检查点展开、采样栈）归族内。
-- **共享代码禁止 `if family == "..."` 分支**——一律查 `spec.capabilities` 或 spec 字段。
-- 缓存指纹是 latent 空间身份（`wan21-f8c16`）而非族名：同空间的族自动共享缓存。
-- **族无关共享事实不挂族名下**：latent 空间定义在 `latent_spaces.py`（如
-  `WAN21_F8C16`，两族 spec 引用同一实例）；studio 侧共享资产（Qwen-Image VAE
-  落点）在 `services/models/paths.py`。判据：多个族同用的外部事实，既不抄
-  副本、也不让后来的族 import 先来的族——放中立层。
-- Krea2 的 `text_encoder_cache=true` 先预缓存并释放 Qwen3-VL、再加载 DiT；关闭时
-  完全不读写文本 sidecar，TE 与 DiT 常驻，供大显存/小磁盘云端逐 batch 编码。
-- 演化：方法追加参数一律 keyword-only 带默认值；禁止 `**kwargs`。
+- The shared loop only consumes `(latents, noise, t, pred, target, loss, mask, loss_weight)`;
+  any model knowledge outside of that (text encoding, pad_mask, checkpoint
+  unpacking, sampling stack) belongs inside the family.
+- **Shared code must never branch on `if family == "..."`** -- always check
+  `spec.capabilities` or a spec field instead.
+- The cache fingerprint is the latent-space identity (`wan21-f8c16`), not the
+  family name: families that share a latent space automatically share the cache.
+- **Family-agnostic shared facts don't live under any one family's name**:
+  latent spaces are defined in `latent_spaces.py` (e.g. `WAN21_F8C16`, with
+  both family specs referencing the same instance); shared studio-side assets
+  (where the Qwen-Image VAE lives) go in `services/models/paths.py`. Rule of
+  thumb: an external fact used by multiple families is placed in a neutral
+  layer -- never copied, and never imported from one family into another.
+- Krea2's `text_encoder_cache=true` pre-caches and releases Qwen3-VL before
+  loading the DiT; when disabled, it never reads/writes the text sidecar at
+  all, and TE + DiT stay resident, for high-VRAM/low-disk cloud setups that
+  encode batch by batch.
+- Evolution: new method parameters are always keyword-only with a default;
+  `**kwargs` is forbidden.
 
-## 加第 3 个族的步骤
+## Steps to add a 3rd family
 
-1. `modeling/<fam>/` 放结构定义（模块命名对齐 ComfyUI 内部命名——kohya 键名编码模块路径）。
-2. 本目录建 `<fam>/`：`__init__.py`（SPEC）+ `family.py` + `loader.py` + `preset.py` + `sampling.py`（+ 文本缓存族加 `text_encoding.py`）。latent 空间与既有族相同 → SPEC 直接引用 `latent_spaces.py` 的现成实例；新空间 → 在那里加一个。
-3. 注册：`families/__init__.py` 的 `_register(SPEC)` + `get_family()` 分支各一行。
-4. schema：`model_family` Literal 加值 + 能力门控 `show_when`（PR-3 机制）。
-5. studio：`FAMILY_ASSETS` 加清单（PR-4 机制）。
-6. 测试：`tests/test_families_<fam>_*.py`（spec 常量 / preset / 扁平键样本）。
+1. Put the structure definition in `modeling/<fam>/` (module naming aligned
+   with ComfyUI's internal naming -- kohya key names encode the module path).
+2. Create `<fam>/` in this directory: `__init__.py` (SPEC) + `family.py` +
+   `loader.py` + `preset.py` + `sampling.py` (+ `text_encoding.py` for
+   families with a text cache). If the latent space matches an existing
+   family, have the SPEC reference the existing instance in
+   `latent_spaces.py` directly; for a new space, add one there.
+3. Register: one line each in `families/__init__.py`'s `_register(SPEC)` and
+   the `get_family()` branch.
+4. Schema: add the value to the `model_family` Literal + capability gating via
+   `show_when` (PR-3 mechanism).
+5. Studio: add the manifest to `FAMILY_ASSETS` (PR-4 mechanism).
+6. Tests: `tests/test_families_<fam>_*.py` (spec constants / preset / flat key samples).
 
-共享循环（masked loss / InfoNoise / losses / optimizer / eval / 暂停恢复）零修改。
+The shared loop (masked loss / InfoNoise / losses / optimizer / eval / pause-resume) needs zero changes.

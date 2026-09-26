@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next'
 
-/** 单图 / XY 矩阵 模式切换（页头 segmented control）。
- *  compare 是 xy 内部 sub-view（选 2 张自动进入），不在此列出。 */
+/** Single-image / XY-grid mode switch (the page header's segmented control).
+ *  compare is an internal xy sub-view (entered automatically when 2 are selected), not listed here. */
 export type ViewMode = 'single' | 'xy'
 
 export default function ViewModeTabs({

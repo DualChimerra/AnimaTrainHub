@@ -1,7 +1,7 @@
-"""tag + captions + reg + version_config + 入队训练 + version thumb
-（PR-6.5 commit 5 从 server.py 抽出）。
+"""tag + captions + reg + version_config + enqueue training + version thumb
+(extracted from server.py in PR-6.5 commit 5).
 
-23 routes：
+23 routes:
 
   tagging (1)
     POST /api/projects/{pid}/versions/{vid}/tag
@@ -87,8 +87,8 @@ from ....services.dataset import curation as dataset_curation
 
 router = APIRouter()
 
-# 打标 scope 取单个 train 文件夹时的合法名（Kohya 风格，挡 path traversal），
-# 与 dataset.curation._FOLDER_PATTERN 同规则。
+# Valid name when tagging scope picks a single train folder (Kohya style, blocks path
+# traversal); same rule as dataset.curation._FOLDER_PATTERN.
 _TAG_SCOPE_FOLDER_RE = re.compile(r"^([0-9]+_)?[A-Za-z][A-Za-z0-9_-]*$")
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def delete_caption_snapshot(pid: int, vid: int, sid: str) -> dict[str, Any]:
 
 @router.post("/api/projects/{pid}/versions/{vid}/captions/commit")
 def commit_captions(pid: int, vid: int, body: CommitRequest) -> dict[str, Any]:
-    """一次性写入多个 caption；写之前自动生成快照作还原点。"""
+    """Write multiple captions in one shot; auto-creates a snapshot restore point before writing."""
     _, _, vdir = _version_dir_or_404(pid, vid)
     train = vdir / "train"
     snap = caption_snapshot.create_snapshot(vdir)
@@ -230,7 +230,7 @@ def batch_caption_endpoint(
 
 @router.get("/api/projects/{pid}/versions/{vid}/reg/preview-tags")
 def reg_preview_tags(pid: int, vid: int, top: int = 20) -> dict[str, Any]:
-    """返回 train 的 tag 频率 top N（不真生成 reg）。给 UI「排除 tag」勾选用。"""
+    """Return the top-N tag frequency for train (doesn't actually build reg). Used by the UI's "exclude tag" checkboxes."""
     _, _, vdir = _version_dir_or_404(pid, vid)
     train = vdir / "train"
     items = reg_builder.preview_train_tag_distribution(train, top=max(1, top))
@@ -239,7 +239,7 @@ def reg_preview_tags(pid: int, vid: int, top: int = 20) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/versions/{vid}/reg")
 def get_reg_status(pid: int, vid: int) -> dict[str, Any]:
-    """返回 reg 集状态（meta + 图片数 + 文件名列表）。"""
+    """Return the reg set's status (meta + image count + filename list)."""
     _, _, vdir = _version_dir_or_404(pid, vid)
     rdir = _reg_dir(vdir)
     if not rdir.exists():
@@ -264,9 +264,10 @@ def get_reg_status(pid: int, vid: int) -> dict[str, Any]:
     }
 
 
-# A3 — reg auto-tag 本轮只在 UI 暴露 wd14 / cltagger。底层 VALID_TAGGER_NAMES
-# 含 LLM / JoyCaption，但它们对 reg 体积（>train）慢/贵，留单独 PR；422 校验
-# 兜底防 contributor 误传。
+# A3 -- this round of reg auto-tag only exposes wd14 / cltagger in the UI. The underlying
+# VALID_TAGGER_NAMES includes LLM / JoyCaption, but they're slow/expensive at reg's volume
+# (>train), left for a separate PR; the 422 check is a safety net against a contributor
+# passing them by mistake.
 _REG_TAGGER_ALLOWED = {"wd14", "cltagger"}
 
 
@@ -302,7 +303,7 @@ def start_reg_build(pid: int, vid: int, body: RegBuildRequest) -> dict[str, Any]
             code="reg.auto_tag_kind_invalid", details={"allowed": _allowed},
             http_status=422,
         )
-    # B1 — build_mode + target_count 校验
+    # B1 -- validate build_mode + target_count
     if body.build_mode not in {"mirror", "flat"}:
         raise ValidationError(
             "Build mode must be mirror or flat",
@@ -355,12 +356,13 @@ def start_reg_build(pid: int, vid: int, body: RegBuildRequest) -> dict[str, Any]
 
 @router.get("/api/projects/{pid}/versions/{vid}/reg/caption")
 def get_reg_caption(pid: int, vid: int, path: str) -> dict[str, Any]:
-    """读 reg 集中单张图的 caption。`path` 是相对 reg/ 的路径（含子文件夹）。"""
+    """Read the caption for a single image in the reg set. `path` is relative to reg/ (may include subfolders)."""
     if not path:
         raise InvalidPathError("Invalid path", code="path.invalid")
     _, _, vdir = _version_dir_or_404(pid, vid)
     rdir = _reg_dir(vdir)
-    # path 允许含 `/` 子目录；按分隔符拆成片段交给 safe_join 做组件校验 + containment
+    # path may contain `/` subdirectories; split on the separator and hand the parts to
+    # safe_join for component validation + containment
     parts = [p for p in path.replace("\\", "/").split("/") if p]
     img = _safe_join_or_400(rdir, *parts)
     if not img.exists() or img.suffix.lower() not in datasets.IMAGE_EXTS:
@@ -372,10 +374,12 @@ def get_reg_caption(pid: int, vid: int, path: str) -> dict[str, Any]:
 
 @router.post("/api/projects/{pid}/versions/{vid}/reg/generate-prior")
 def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]:
-    """启动先验生成 task —— base 模型给每张 train 图的 tag 反向出对照图。
+    """Start a prior-generation task -- the base model generates a reference image for each
+    train image's tags, inverted from the caption.
 
-    模型族跟随该 version 的训练配置（先验生成是 version 级操作，不是请求级
-    选择）：无 config 或未声明时按 anima。
+    The model family follows this version's training config (prior generation is a
+    version-level operation, not a per-request choice): defaults to anima if there's no
+    config or it isn't declared.
     """
     project, ver = _project_and_version_or_404(pid, vid)
     family = "anima"
@@ -384,7 +388,7 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
             vc = version_config.read_version_config(project, ver)
             family = str(vc.get("model_family") or "anima")
         except version_config.VersionConfigError:
-            pass  # 坏 config 不阻塞先验生成，按 anima 兜底
+            pass  # a broken config doesn't block prior generation; falls back to anima
     model_paths = _resolve_model_paths(body.base_model, family=family)
     _, _, vdir = _version_dir_or_404(pid, vid)
     train = vdir / "train"
@@ -398,16 +402,20 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
             code="train.no_images", http_status=400,
         )
 
-    # 「最新一次点击优先」：再点生成 = 放弃同 version 所有旧 reg_ai（pending + running），
-    # 只跑这次新建的。否则 UI badge 卡住时（SSE 死，见 anima-phase-cursor-sse-desync）
-    # 用户连点会堆一摞 reg_ai task，supervisor 串行逐个跑（created_at ASC），新点的排在
-    # 队尾 → 表现为「新建的 queued、日志空，而旧任务还在出图」。先取消旧的再建新的：
-    #   - pending → supervisor.cancel 直接标 canceled
-    #   - running → 异步 SIGTERM，slot 退出后 supervisor 自然 pick up 新 task
+    # "Most recent click wins": clicking generate again abandons all older reg_ai tasks
+    # (pending + running) for this same version and only runs the newly created one.
+    # Otherwise, when the UI badge gets stuck (SSE dies, see anima-phase-cursor-sse-desync),
+    # repeated clicks pile up a stack of reg_ai tasks; the supervisor runs them serially
+    # (created_at ASC), so the newest click lands at the back of the queue -> looks like "the
+    # new one is queued with an empty log while the old task is still generating images".
+    # Cancel the old ones before creating the new one:
+    #   - pending -> supervisor.cancel marks it canceled directly
+    #   - running -> async SIGTERM; once the slot exits, the supervisor naturally picks up the
+    #     new task
     try:
         sup: Optional[Any] = _supervisor()
     except HTTPException:
-        sup = None  # test / 启动期无 supervisor：下面对 pending 走 db 兜底
+        sup = None  # no supervisor in tests / during startup: fall back to db for pending below
     with db.connection_for() as conn:
         stale = [
             t for t in db.list_tasks(conn)
@@ -474,7 +482,7 @@ def reg_generate_prior(pid: int, vid: int, body: RegAiRequest) -> dict[str, Any]
 
 @router.get("/api/projects/{pid}/versions/{vid}/reg/generate-prior/latest")
 def get_latest_reg_prior_task(pid: int, vid: int) -> dict[str, Any]:
-    """页面 hydrate 用：返回当前 version 最近一次 AI 先验 task + 全量日志。"""
+    """For page hydration: returns this version's most recent AI-prior task + its full log."""
     with db.connection_for() as conn:
         row = conn.execute(
             """
@@ -507,10 +515,11 @@ def get_reg_prior_task(pid: int, vid: int, task_id: int) -> dict[str, Any]:
 def reg_rename_folder(
     pid: int, vid: int, body: RegRenameFolderRequest,
 ) -> dict[str, Any]:
-    """重命名 reg/ 下子文件夹（如改 Kohya repeat 前缀 2_data → 1_data）。
+    """Rename a subfolder under reg/ (e.g. changing the Kohya repeat prefix 2_data -> 1_data).
 
-    对齐 Step 1（Curation）的 train 文件夹改名：用户在「已生成 reg 图」那步
-    想调 reg repeat，不必去 Colab 文件系统手动 rename。
+    Mirrors the train folder rename in Step 1 (Curation): lets the user tweak the reg repeat
+    count at the "reg images generated" step without manually renaming on the Colab
+    filesystem.
     """
     with db.connection_for() as conn:
         try:
@@ -524,9 +533,11 @@ def reg_rename_folder(
 
 @router.delete("/api/projects/{pid}/versions/{vid}/reg")
 def delete_reg(pid: int, vid: int) -> dict[str, Any]:
-    """清空 reg/ 内容（含 meta.json + 所有子文件夹），保留空目录本身。
+    """Clear the contents of reg/ (including meta.json + all subfolders), keeping the empty
+    directory itself.
 
-    `versions.create_version` 总会建空 reg/；判定「存在」= 有 meta 或图片。
+    `versions.create_version` always creates an empty reg/; "exists" is defined as having
+    meta or images.
     """
     import shutil as _shutil
     _, _, vdir = _version_dir_or_404(pid, vid)
@@ -547,7 +558,7 @@ def delete_reg(pid: int, vid: int) -> dict[str, Any]:
             else:
                 child.unlink()
     except OSError as exc:
-        raise HTTPException(500, f"删除失败: {exc}") from exc
+        raise HTTPException(500, f"Delete failed: {exc}") from exc
     return {"deleted": True}
 
 
@@ -555,14 +566,15 @@ def delete_reg(pid: int, vid: int) -> dict[str, Any]:
 def delete_reg_files(
     pid: int, vid: int, body: RegDeleteFilesRequest,
 ) -> dict[str, Any]:
-    """按相对路径批量删 reg 集中的图（含同名 .txt caption），更新 meta.actual_count,
-    把删除的 booru ID（文件名 stem）追加到 reg/.deleted_ids.json。
+    """Bulk-delete images from the reg set by relative path (including same-name .txt
+    captions), update meta.actual_count, and append the deleted booru IDs (filename stems)
+    to reg/.deleted_ids.json.
 
-    增量补足时 builder 会读这个文件，把 ID 加进 search exclude，避免同一张
-    booru post 又被拉回来。
+    When incrementally topping up, the builder reads this file and adds the IDs to the
+    search exclude list, so the same booru post doesn't get pulled back in.
 
-    body.relative_paths 是相对 reg/ 的路径列表，跨子文件夹也可以；路径越界
-    走 _safe_join_or_400 抛 400。
+    body.relative_paths is a list of paths relative to reg/, which may span subfolders;
+    an out-of-bounds path raises 400 via _safe_join_or_400.
     """
     if not body.relative_paths:
         raise ValidationError(
@@ -575,9 +587,10 @@ def delete_reg_files(
             "Regularization set not found", code="reg.not_found",
         )
 
-    # 端点入口：每条路径走 _safe_join_or_400 防 traversal；合法的转回 rdir
-    # 相对形式喂给 reg_dedup.purge_paths。worker 走 dedup.scan_for_dedup
-    # 拿到的路径必合法，所以 dedup 模块内部不再做 traversal 校验。
+    # Endpoint entry point: every path goes through _safe_join_or_400 to block traversal;
+    # valid ones are converted back to a path relative to rdir and fed to
+    # reg_dedup.purge_paths. Paths coming from the worker via dedup.scan_for_dedup are
+    # guaranteed valid, so the dedup module itself doesn't re-check for traversal.
     validated_rels: list[str] = []
     for rel in body.relative_paths:
         if not rel:
@@ -593,13 +606,15 @@ def delete_reg_files(
 
 @router.post("/api/projects/{pid}/versions/{vid}/reg/dedup-purge")
 def dedup_purge_reg(pid: int, vid: int) -> dict[str, Any]:
-    """A4 — 用 preprocess dedup 默认参数扫 reg 集，自动删每组里"推荐删除"项
-    （每组保留 group[0]，其余删 + 写 .deleted_ids.json + meta 递减）。
+    """A4 -- scan the reg set with preprocess dedup's default params, automatically deleting
+    the "recommended for deletion" items in each group (group[0] is kept, the rest are
+    deleted + written to .deleted_ids.json + meta decremented).
 
-    用户手动入口；worker 在 auto_dedup=True 时 build 后会用同一套
-    reg_dedup 模块自动跑。reg 集 quality bar 比 train 低 → 不弹 review panel。
+    Manual user entry point; the worker runs the same reg_dedup module automatically after
+    build when auto_dedup=True. reg's quality bar is lower than train's, so no review panel
+    is shown.
 
-    同步返回；图量大时慢（O(n^2)）。
+    Returns synchronously; slow for large image counts (O(n^2)).
     """
     _, _, vdir = _version_dir_or_404(pid, vid)
     rdir = _reg_dir(vdir)
@@ -619,8 +634,9 @@ def dedup_purge_reg(pid: int, vid: int) -> dict[str, Any]:
     result = reg_dedup.purge_paths(rdir, to_delete)
     return {
         "scanned": scanned,
-        # groups 用「待删项数」近似（每组 >= 1 张被删）；scan_for_dedup 不
-        # 暴露 group 总数，用户也只关心删了多少。
+        # "groups" is approximated by the count of items pending deletion (each group has
+        # >= 1 image deleted); scan_for_dedup doesn't expose the total group count, and the
+        # user only cares how many were deleted anyway.
         "groups": len(to_delete),
         "deleted": result["deleted"],
         "count": result["count"],
@@ -628,18 +644,19 @@ def dedup_purge_reg(pid: int, vid: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# /api/projects/{pid}/versions/{vid}/config  (PP6.2 训练配置 — version 私有)
+# /api/projects/{pid}/versions/{vid}/config  (PP6.2 training config -- version-private)
 # ---------------------------------------------------------------------------
 
 
 @router.get("/api/projects/{pid}/versions/{vid}/config")
 def get_version_config_endpoint(pid: int, vid: int) -> dict[str, Any]:
-    """读 version 私有 config；不存在返回 has_config=false / config=null。
+    """Read the version's private config; returns has_config=false / config=null if it doesn't exist.
 
-    无论 has_config 与否都返回 `project_specific_defaults` —— fork preset 时
-    后端将自动注入的项目预填值（项目路径 + 全局模型路径 + reg 检测结果）。
-    前端「+ 新建预设」可以在 version 已有 config 的状态下被点（替换当前预设），
-    所以这个 hint 跟 has_config 状态无关，永远要返回。
+    Returns `project_specific_defaults` regardless of has_config -- the project-specific
+    values the backend auto-injects when forking a preset (project paths + global model
+    paths + reg detection results). The frontend's "+ new preset" button can be clicked even
+    when the version already has a config (replacing the current preset), so this hint must
+    always be returned, independent of has_config.
     """
     project, ver = _project_and_version_or_404(pid, vid)
     psf = sorted(version_config.PROJECT_SPECIFIC_FIELDS)
@@ -665,7 +682,8 @@ def get_version_config_endpoint(pid: int, vid: int) -> dict[str, Any]:
             code="version.config_invalid", details={"reason": str(exc)},
             http_status=422,
         ) from exc
-    # 路径 hint 跟随 version 已声明的族（krea2 版本不该收到 anima 路径预填）
+    # The path hint follows the version's declared family (a krea2 version shouldn't get
+    # anima path defaults)
     psd = _psd(str(cfg.get("model_family") or "anima"))
     return {
         "has_config": True,
@@ -679,11 +697,14 @@ def get_version_config_endpoint(pid: int, vid: int) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/versions/{vid}/train-estimate")
 def get_train_estimate_endpoint(pid: int, vid: int) -> dict[str, Any]:
-    """训练前预估：显存够不够 + 按历史实测速度算的耗时。
+    """Pre-training estimate: whether there's enough VRAM + how long it'll take based on
+    historically measured speed.
 
-    显存侧复用 training/block_swap_preflight.evaluate —— 与真正拦训练的那道
-    护栏同一条算术，面板不可能跟它打架。速度侧取本项目最近一次训练监控记下的
-    实测 it/s；没有历史就返回 None，前端什么都不显示（编出来的数字比空白糟）。
+    The VRAM side reuses training/block_swap_preflight.evaluate -- the same arithmetic as the
+    guardrail that actually blocks training, so this panel can never disagree with it. The
+    speed side takes the most recently measured it/s recorded by this project's training
+    monitor; with no history it returns None and the frontend shows nothing (a made-up number
+    is worse than a blank).
     """
     project, ver, _train_dir = _version_train_dir_or_404(pid, vid)
     cfg: dict[str, Any] = {}
@@ -702,11 +723,12 @@ def get_train_estimate_endpoint(pid: int, vid: int) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/versions/{vid}/bucket-distribution")
 def get_bucket_distribution_endpoint(pid: int, vid: int) -> dict[str, Any]:
-    """训练集 ARB 桶分布预览（用真 BucketManager 算，与实际训练逐桶一致）。
+    """Preview of the training set's ARB bucket distribution (computed with the real
+    BucketManager, matching actual training bucket-for-bucket).
 
-    按 version config 的 resolution 列表 + aspect_ratio_limit + 文件夹 px/repeat
-    把每张图落桶，返回各分辨率档的桶 + 有效样本数。无 config 用 schema 默认值，
-    空数据集返回空 groups。
+    Buckets each image using the version config's resolution list + aspect_ratio_limit +
+    per-folder px/repeat, returning the buckets and effective sample count per resolution
+    tier. Uses schema defaults with no config; an empty dataset returns empty groups.
     """
     project, ver, train_dir = _version_train_dir_or_404(pid, vid)
     resolutions: list[int] = [1024]
@@ -727,8 +749,9 @@ def get_bucket_distribution_endpoint(pid: int, vid: int) -> dict[str, Any]:
             cfg = {}
     groups = versions.compute_bucket_histogram(train_dir, resolutions, ar_limit, prefer_json)
 
-    # NaViT 打包模式：附带真打包模拟的包数预估（前端步数公式在此模式下不能用
-    # batch_size 除 —— 分批由 token 预算决定，见 NavitPackBatchSampler）。
+    # NaViT packing mode: includes a real packing-simulation estimate of pack count (the
+    # frontend's step-count formula can't just divide by batch_size in this mode -- batching
+    # is instead driven by the token budget, see NavitPackBatchSampler).
     navit: dict[str, Any] | None = None
     if cfg.get("navit_packing"):
         dirs: list[Path] = [train_dir]
@@ -746,10 +769,12 @@ def get_bucket_distribution_endpoint(pid: int, vid: int) -> dict[str, Any]:
             over_budget=str(cfg.get("navit_native_over_budget", "downscale") or "downscale"),
             seed=int(cfg.get("seed", 42) or 42),
         )
-    # 有效样本数的权威口径。前端此前自己扫文件夹数图，而 trainer 只收**有
-    # caption** 的图（compute_bucket_histogram 镜像了这条规则）——数据集里但凡
-    # 有几张没打标的，开跑前显示的步数就比实际多。两处各算一遍必然对不上，
-    # 所以这里直接给出后端算好的数，前端照抄。
+    # Authoritative source for the effective sample count. The frontend used to scan folders
+    # and count images itself, but the trainer only accepts images **with a caption**
+    # (compute_bucket_histogram mirrors this rule) -- if the dataset has even a few untagged
+    # images, the step count shown before starting would be higher than actual. Computing it
+    # twice in two places is bound to disagree, so the backend computes it here once and the
+    # frontend just copies it.
     def _effective(directory: Path | None) -> int:
         if directory is None or not directory.exists():
             return 0
@@ -779,12 +804,12 @@ def get_bucket_distribution_endpoint(pid: int, vid: int) -> dict[str, Any]:
 def put_version_config_endpoint(
     pid: int, vid: int, body: dict[str, Any],
 ) -> dict[str, Any]:
-    """直接写 version 私有 config（全量替换）。
+    """Write the version's private config directly (full replace).
 
-    PP10.4：项目特定字段（data_dir / output_dir / output_name 等）**不**强制
-    覆盖。fork_preset 时已经预填好；用户在 Train 页可以自由改（例如
-    `resume_lora` 接续训练、自定义 output_name）。改坏了再换一次预设回到
-    默认。
+    PP10.4: project-specific fields (data_dir / output_dir / output_name, etc.) are **not**
+    force-overwritten. They're already pre-filled when forking a preset; the user can freely
+    change them on the Train page (e.g. `resume_lora` to continue training, or a custom
+    output_name). If it breaks, switch presets again to get back to defaults.
     """
     project, ver = _project_and_version_or_404(pid, vid)
     try:
@@ -805,7 +830,7 @@ def put_version_config_endpoint(
 def fork_preset_for_version_endpoint(
     pid: int, vid: int, body: FromPresetRequest,
 ) -> dict[str, Any]:
-    """从全局 preset 复制一份进 version 私有 config（应用项目特定字段）。"""
+    """Copy a global preset into the version's private config (applying project-specific fields)."""
     project, ver = _project_and_version_or_404(pid, vid)
     try:
         cfg, dropped, defaulted = preset_flow.fork_preset_for_version_with_warnings(
@@ -817,7 +842,7 @@ def fork_preset_for_version_endpoint(
             code="version.config_invalid", details={"reason": str(exc)},
             http_status=400,
         ) from exc
-    # 同步 versions.config_name = 来源 preset 名（informational only）
+    # Sync versions.config_name = the source preset name (informational only)
     with db.connection_for() as conn:
         versions.update_version(conn, vid, config_name=body.name)
     return {
@@ -833,7 +858,7 @@ def fork_preset_for_version_endpoint(
 def save_version_config_as_preset_endpoint(
     pid: int, vid: int, body: SaveAsPresetRequest,
 ) -> dict[str, Any]:
-    """version 私有 config → 全局 preset（清掉项目特定字段）。"""
+    """Version's private config -> global preset (strips project-specific fields)."""
     project, ver = _project_and_version_or_404(pid, vid)
     try:
         cfg = preset_flow.save_version_config_as_preset(
@@ -894,14 +919,15 @@ def detect_trigger_endpoint(pid: int, vid: int) -> dict[str, Any]:
 def enqueue_version_training(
     pid: int, vid: int, body: Optional[ScheduleTrainingRequest] = None,
 ) -> dict[str, Any]:
-    """PP6.3 — 把 version 入队训练。
+    """PP6.3 -- enqueue a version for training.
 
-    校验：
-    - version 已配置训练参数（version_config 存在）
-    - 该 version 没有 active task（pending / running / scheduled）
+    Validation:
+    - the version has training parameters configured (version_config exists)
+    - this version has no active task (pending / running / scheduled)
 
-    0.17 P-B：body 带 scheduled_at（unix 秒）→ task 建成 scheduled，到点由
-    supervisor 提升为 pending；不带 body / 不带该字段 → 立即 pending（原行为）。
+    0.17 P-B: if body carries scheduled_at (unix seconds), the task is created as scheduled
+    and the supervisor promotes it to pending once due; with no body / no such field, it's
+    immediately pending (original behavior).
     """
     project, ver = _project_and_version_or_404(pid, vid)
     if not version_config.has_version_config(project, ver):
@@ -910,14 +936,16 @@ def enqueue_version_training(
             code="version.config_missing", http_status=400,
         )
     cfg_path = version_config.version_config_path(project, ver)
-    # auto_sync_paths=ON：入队时把全局模型路径同步落盘——trainer 子进程
-    # 直接读 yaml（不经 studio 读取面的 overlay），全局 selected /
-    # selected_te 切换后训练必须用当前值（Train 页字段锁定并承诺
-    # 「自动 · 全局设置」）。OFF 时 read 不 overlay，写回幂等。
+    # auto_sync_paths=ON: syncs the global model paths to disk at enqueue time -- the trainer
+    # subprocess reads the yaml directly (without going through studio's read-side overlay),
+    # so once global selected / selected_te changes, training must use the current value (the
+    # Train page locks these fields and promises "auto - global settings"). When OFF, read
+    # doesn't overlay, so the write-back is idempotent.
     #
-    # reset_resume=False：这是一次「读出来再写回去」，不是新建/fork —— 强制
-    # 重置 resume_lora / resume_state 会把用户刚设的接续起点在点「开始训练」
-    # 的瞬间抹掉（静默，无报错），训练从零开始。
+    # reset_resume=False: this is a "read it out and write it back" operation, not a
+    # new/fork -- force-resetting resume_lora / resume_state would silently wipe the resume
+    # point the user just set the instant they click "start training" (no error), and
+    # training would start from scratch.
     try:
         synced = version_config.read_version_config(project, ver)
         ver = _ensure_dop_trigger(project, ver, synced)
@@ -925,12 +953,13 @@ def enqueue_version_training(
             project, ver, synced, force_project_overrides=True, reset_resume=False,
         )
     except version_config.VersionConfigError:
-        pass  # 坏 config 由下游校验报错，不在此处中断
+        pass  # a broken config is reported by downstream validation, not interrupted here
     scheduled_at = body.scheduled_at if body else None
 
     with db.connection_for() as conn:
-        # 该 version 当前是否已有 active GPU task（R-5：台账合并后 tasks 也装
-        # 数据作业，pending 打标不该挡训练入队——只查 GPU 类型）
+        # Whether this version already has an active GPU task (R-5: after the ledger merge,
+        # tasks also holds data jobs; a pending tagging job shouldn't block training enqueue --
+        # only check the GPU task types)
         active = conn.execute(
             "SELECT id, status FROM tasks "
             "WHERE version_id = ? AND status IN ('pending', 'running', 'scheduled') "
@@ -946,13 +975,13 @@ def enqueue_version_training(
                 details={"task_id": active["id"], "status": active["status"]},
             )
 
-        # 创建 task
+        # Create the task
         slug = project["slug"]
         label = ver["label"]
         task_name = f"{slug}_{label}"
         config_name = ver["config_name"] or f"proj_{pid}_{label}"  # informational
         status = "scheduled" if scheduled_at is not None else "pending"
-        # ADR-0009 PR-1 C6: 同 db.create_task — 存 ContextVar trace_id
+        # ADR-0009 PR-1 C6: same as db.create_task -- stash the ContextVar trace_id
         from studio.infrastructure.logging import get_trace_id, new_trace_id
         req_tid = get_trace_id() or f"bg-{new_trace_id()}"
         cur = conn.execute(
@@ -963,16 +992,17 @@ def enqueue_version_training(
              str(cfg_path), req_tid, scheduled_at),
         )
         tid = int(cur.lastrowid)
-        # 任务的模型和其他训练参数在入队这一刻就冻结。
-        # 后续切换全局模型或编辑 version config 只影响新任务。
+        # The task's model and other training parameters are frozen the moment it's
+        # enqueued. Subsequently switching the global model or editing the version config
+        # only affects new tasks.
         frozen_cfg = task_snapshot.freeze_config(tid, cfg_path)
         conn.execute(
             "UPDATE tasks SET config_path = ? WHERE id = ?",
             (str(frozen_cfg), tid),
         )
         conn.commit()
-        # ADR-0007 PR-5: version.status 由 supervisor 在 _spawn_task 推到 training；
-        # project 无 stage；这里不再 advance。
+        # ADR-0007 PR-5: version.status is pushed to training by the supervisor in
+        # _spawn_task; project has no stage, so we no longer advance it here.
         task = db.get_task(conn, tid)
     bus.publish({
         "type": "task_state_changed",
@@ -982,7 +1012,7 @@ def enqueue_version_training(
     return task or {}
 
 
-# version 级缩略图：bucket = train | reg | samples（PP3 加 train，reg/samples 留作 PP4-5）
+# Version-level thumbnail: bucket = train | reg | samples (PP3 added train; reg/samples left for PP4-5)
 @router.get("/api/projects/{pid}/versions/{vid}/thumb")
 def version_thumb(
     pid: int,

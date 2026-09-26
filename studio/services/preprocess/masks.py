@@ -1,15 +1,15 @@
-"""训练 mask sidecar（`train/{folder}/{stem}.mask`）读写 + 预处理变换跟随。
+"""Training mask sidecar (`train/{folder}/{stem}.mask`) read/write + preprocessing transform propagation.
 
-设计：docs/design/preprocess-inpaint-mask-design.md §2 / §7 / §9。
+Design: docs/design/preprocess-inpaint-mask-design.md sections 2 / 7 / 9.
 
-- mask 与训练图**同目录同 stem**，后缀恒 `.mask`（内容是灰度 PNG 字节）。
-  与 .txt / .json caption sidecar 同构：后缀不在 IMAGE_EXTS，所有图片扫描点
-  （一级 / 递归）天然不会把它当训练图 —— 不需要任何豁免规则。
-- stem 不含扩展名 —— crop / 涂抹把 X.jpg 产物统一成 X.png 时 mask 路径不变，
-  天然免疫产物改名；同 stem sidecar 家族（.txt/.json/.mask）删除 / 导出 /
-  变换跟随共用一套心智模型。
-- 灰度 L 语义：255=正常学习、0=不学、中间值=部分权重（训练器 /255 作 loss
-  权重）。无 mask 文件 = 全 255；「清除 mask」= 删文件。
+- The mask lives in the **same directory, same stem** as the training image, always with a `.mask` suffix (contents are grayscale PNG bytes).
+  Structured like the .txt / .json caption sidecars: the suffix isn't in IMAGE_EXTS, so every image scan point
+  (flat / recursive) naturally never treats it as a training image -- no exemption rule needed.
+- The stem has no extension -- when crop / inpaint unify an X.jpg output to X.png, the mask path stays the same,
+  so it's naturally immune to output renaming; the same-stem sidecar family (.txt/.json/.mask) shares one mental model
+  for delete / export / transform propagation.
+- Grayscale L semantics: 255 = learn normally, 0 = don't learn, in-between = partial weight (the trainer uses value/255 as the loss
+  weight). No mask file = all 255; "clear mask" = delete the file.
 """
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ MASK_SUFFIX = ".mask"
 
 
 def mask_path_for(train_dir: Path, rel_name: str) -> Path:
-    """`1_data/X.jpg` → `{train_dir}/1_data/X.mask`。
+    """`1_data/X.jpg` -> `{train_dir}/1_data/X.mask`.
 
-    写入端点前置 `_validate_rel_name`（严格两段）；删除 / 查询路径还会被
-    manifest mutation 以**老式平铺 name**（无 folder 前缀，ADR 0004 兼容
-    数据）调到 —— 平铺 name 映射到 `{train_dir}/{stem}.mask`，文件不存在时
-    上层 no-op，不 crash。
+    The write endpoint runs `_validate_rel_name` first (strict two segments); the delete / query path can also be reached
+    via manifest mutation using the **legacy flat name** (no folder prefix, ADR 0004 compat
+    data) -- a flat name maps to `{train_dir}/{stem}.mask`; if the file doesn't exist,
+    the caller no-ops instead of crashing.
     """
     if "/" in rel_name:
         folder, filename = rel_name.split("/", 1)
@@ -44,17 +44,17 @@ def write_mask(
     *,
     expected_size: tuple[int, int],
 ) -> dict[str, Any]:
-    """写入 mask（灰度 PNG 字节，tmp + atomic replace）。
+    """Writes the mask (grayscale PNG bytes, tmp + atomic replace).
 
-    尺寸必须等于对应训练图当前尺寸 —— mask 是逐像素对齐的数据面，
-    不符说明前端导出对象错位，直接拒绝。
+    Size must match the corresponding training image's current size exactly -- the mask is a pixel-aligned data plane,
+    a mismatch means the frontend export target is misaligned; reject outright.
     """
     from PIL import Image
 
     try:
         img = Image.open(io.BytesIO(data))
         img.load()
-    except Exception as exc:  # PIL 解码失败抛的类型不稳定，统一翻 400
+    except Exception as exc:  # PIL raises inconsistent types on decode failure, normalize to 400
         raise ValidationError(
             "Uploaded mask is not a valid image file",
             code="preprocess.mask_image_invalid",
@@ -84,7 +84,7 @@ def write_mask(
 
 
 def delete_mask(train_dir: Path, rel_name: str) -> bool:
-    """删除 mask 文件。返回是否真的删了（不存在返回 False，不报错）。"""
+    """Deletes the mask file. Returns whether it was actually deleted (returns False if it didn't exist, doesn't raise)."""
     p = mask_path_for(train_dir, rel_name)
     if not p.is_file():
         return False
@@ -96,7 +96,7 @@ def delete_mask(train_dir: Path, rel_name: str) -> bool:
 
 
 def delete_masks_for(train_dir: Path, rel_names: Iterable[str]) -> int:
-    """批量删（restore / 去重 / 移除训练图的 sidecar 跟随清理）。"""
+    """Batch delete (sidecar cleanup that follows restore / dedup / removing a training image)."""
     n = 0
     for rel in rel_names:
         if delete_mask(train_dir, rel):
@@ -110,11 +110,11 @@ def crop_mask_like(
     boxes: list[tuple[int, int, int, int]],
     out_rels: list[str],
 ) -> None:
-    """crop 跟随：用与图片相同的像素 box 裁 mask，fan-out 到 out_rels 的
-    mask 路径；源 mask 不在输出集合时删除。
+    """Crop propagation: crops the mask with the same pixel box as the image, fanning out to the
+    mask paths of out_rels; deletes the source mask if it isn't in the output set.
 
-    源图无 mask → no-op。mask 尺寸与源图不符（外部改图漏网）→ 删源 mask
-    （几何已错位，保留只会污染训练；训练器尺寸校验是最后防线，这里主动清）。
+    No mask on the source image -> no-op. Mask size mismatched with the source image (missed by an external edit) -> delete the source mask
+    (the geometry is already misaligned; keeping it would only pollute training; the trainer's size validation is the last line of defense, so we proactively clean up here).
     """
     from PIL import Image
 
@@ -145,8 +145,8 @@ def crop_mask_like(
 def resize_mask_like(
     train_dir: Path, rel_name: str, size: tuple[int, int],
 ) -> None:
-    """upscale 跟随：mask NEAREST resize 到新尺寸（不走 RealESRGAN，
-    防灰度值被超分模型污染）。无 mask → no-op。"""
+    """Upscale propagation: NEAREST-resizes the mask to the new size (doesn't go through RealESRGAN,
+    to avoid the grayscale values being polluted by the super-resolution model). No mask -> no-op."""
     from PIL import Image
 
     p = mask_path_for(train_dir, rel_name)
@@ -164,13 +164,13 @@ def resize_mask_like(
 
 
 def mask_file(train_dir: Path, rel_name: str) -> Optional[Path]:
-    """mask 文件路径（不存在返回 None）。GET 端点用。"""
+    """Mask file path (returns None if it doesn't exist). Used by the GET endpoint."""
     p = mask_path_for(train_dir, rel_name)
     return p if p.is_file() else None
 
 
 def mask_stat(train_dir: Path, rel_name: str) -> Optional[dict[str, Any]]:
-    """mask 存在时返回 {mtime, size}，否则 None（workspace 列表 has_mask 用）。"""
+    """Returns {mtime, size} when the mask exists, else None (used by the workspace list's has_mask)."""
     p = mask_path_for(train_dir, rel_name)
     try:
         st = p.stat()

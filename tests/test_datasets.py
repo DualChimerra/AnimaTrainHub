@@ -436,7 +436,6 @@ def test_image_dataset_get_with_flip_independent_of_random_state(tmp_path: Path)
     from runtime.training.dataset import ImageDataset
 
     img_path = tmp_path / "asymmetric.png"
-    # 非对称图：左半红 右半蓝，flip 后左蓝右红
     img = Image.new("RGB", (256, 256), color=(255, 0, 0))
     for x in range(128, 256):
         for y in range(256):
@@ -448,38 +447,30 @@ def test_image_dataset_get_with_flip_independent_of_random_state(tmp_path: Path)
 
     _random.seed(0)
     item_no_flip = dataset.get_with_flip(0, flip=False)
-    _random.seed(99)  # 不同 seed
+    _random.seed(99)
     item_no_flip_2 = dataset.get_with_flip(0, flip=False)
-    # flip=False 在任何 random 状态下结果一致
     assert (item_no_flip["pixel_values"] == item_no_flip_2["pixel_values"]).all()
 
     item_flipped = dataset.get_with_flip(0, flip=True)
-    # flip=True 与 flip=False 应当左右镜像（取一行验证 pixel 顺序反过来）
-    row_no_flip = item_no_flip["pixel_values"][:, 100, :]  # CxHxW，取 H=100 行
+    row_no_flip = item_no_flip["pixel_values"][:, 100, :]
     row_flipped = item_flipped["pixel_values"][:, 100, :]
-    # flipped 的最后一列等于原图的第一列（左右翻）
     assert (row_no_flip[:, 0] == row_flipped[:, -1]).all()
     assert (row_no_flip[:, -1] == row_flipped[:, 0]).all()
 
 
 def test_image_dataset_loads_caption_utils_when_prefer_json(tmp_path: Path) -> None:
-    """Regression: dataset.py 算 caption_utils.py 路径时少回溯一层 parent 会让
-    JSON caption 模式静默 fallback 到 TXT（utils/ 在仓库根，不在 runtime/utils/）。"""
     pytest.importorskip("torch")
     from runtime.training.dataset import ImageDataset
 
     dataset = ImageDataset(tmp_path, prefer_json=True)
     assert dataset.caption_utils is not None, (
-        "prefer_json=True 应启用 JSON caption 模式 — None 说明 caption_utils.py 路径解析失败"
+        "prefer_json=True should enable JSON caption mode -- None means caption_utils.py path resolution failed"
     )
     for key in ("load_and_build", "load_json", "normalize", "build"):
         assert key in dataset.caption_utils
 
 
 def test_json_caption_list_shape_does_not_crash_issue_345(tmp_path: Path) -> None:
-    """#345: Studio 打标写出的简化 JSON（tags 为扁平 list、非分类 dict）以前被
-    误判为标准格式直接喂给 build，触发 'list' object has no attribute 'get'。
-    现在应正常构建 caption：trigger 在首位、tags 全部保留、trigger 去重。"""
     pytest.importorskip("torch")
     import json
 
@@ -495,27 +486,24 @@ def test_json_caption_list_shape_does_not_crash_issue_345(tmp_path: Path) -> Non
     dataset = ImageDataset(tmp_path, prefer_json=True)
     caption = dataset._process_caption_json(jp)
 
-    assert caption is not None, "list 形式 caption 不应崩溃 / 静默返回 None"
-    assert caption.startswith("mika_pikazo"), "trigger 应在首位（keep_tokens 保护）"
+    assert caption is not None, "list-shaped caption must not crash / silently return None"
+    assert caption.startswith("mika_pikazo"), "trigger should come first (keep_tokens protection)"
     assert "1girl" in caption and "blue hair" in caption
-    assert caption.count("mika_pikazo") == 1, "trigger 与 tags 内重复项应去重"
+    assert caption.count("mika_pikazo") == 1, "duplicate of trigger inside tags should be deduplicated"
 
 
 def test_json_caption_preflight_rejects_broken_json(tmp_path: Path) -> None:
-    """#345 follow-up: JSON 样本没有 txt 兜底（_make_sample 置 txt_path=None），
-    caption 解析失败会静默以空 caption 训练。预检应在开训前直接报错拒绝。"""
     pytest.importorskip("torch")
     from runtime.training.dataset import ImageDataset
 
     img = _touch_image(tmp_path, "a.png")
     img.with_suffix(".json").write_text("{ not valid json", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="拒绝开训"):
+    with pytest.raises(ValueError, match="rejected"):
         ImageDataset(tmp_path, prefer_json=True)
 
 
 def test_json_caption_preflight_passes_healthy_flat_json(tmp_path: Path) -> None:
-    """健康的扁平 list caption（#345 场景修复后）应通过预检正常建数据集。"""
     pytest.importorskip("torch")
     import json
 
@@ -539,21 +527,15 @@ def test_parse_repeat_kohya_prefix() -> None:
 
 
 def test_txt_caption_tag_dropout_kohya_semantics(tmp_path: Path) -> None:
-    """TXT 路径 tag_dropout（kohya 语义）：keep_tokens 前缀免 shuffle 免 dropout，
-    其余 tag 逐个独立 dropout、无保底。dropout 丢触发词是生态已知行为，保护靠
-    用户显式配 keep_tokens。"""
     pytest.importorskip("torch")
     from runtime.training.dataset import ImageDataset
 
-    # dropout=1.0 → 非保护区全部丢弃（确定性）；keep_tokens 前缀原序保留
     ds = ImageDataset(tmp_path, shuffle_caption=True, keep_tokens=2, tag_dropout=1.0)
     assert ds._process_caption_txt("trigger, quality, a, b, c") == "trigger, quality"
 
-    # keep_tokens=0 + dropout=1.0 → 全丢、无保底（kohya 同款）
     ds_all = ImageDataset(tmp_path, shuffle_caption=False, keep_tokens=0, tag_dropout=1.0)
     assert ds_all._process_caption_txt("a, b, c") == ""
 
-    # dropout=0 → 原样（不 shuffle 时顺序不变）
     ds_off = ImageDataset(tmp_path, shuffle_caption=False, keep_tokens=0, tag_dropout=0.0)
     assert ds_off._process_caption_txt("a, b, c") == "a, b, c"
 
@@ -564,7 +546,7 @@ def test_caption_kind_priority(tmp_path: Path) -> None:
     img.with_suffix(".txt").write_text("tag1, tag2", encoding="utf-8")
     assert datasets.caption_kind(img) == "txt"
     img.with_suffix(".json").write_text("{}", encoding="utf-8")
-    assert datasets.caption_kind(img) == "json"  # json 优先于 txt
+    assert datasets.caption_kind(img) == "json"
 
 
 def test_scan_folder_counts_and_samples(tmp_path: Path) -> None:
@@ -575,8 +557,6 @@ def test_scan_folder_counts_and_samples(tmp_path: Path) -> None:
             img.with_suffix(".json").write_text("{}", encoding="utf-8")
         elif i == 1:
             img.with_suffix(".txt").write_text("tag", encoding="utf-8")
-        # 第 3 张没 caption
-    # 一个非图片文件不应被计数
     (folder / "notes.md").write_text("ignore me", encoding="utf-8")
 
     result = datasets.scan_folder(folder)
@@ -609,14 +589,12 @@ def test_scan_root_with_subfolders(tmp_path: Path) -> None:
 
 
 def test_scan_root_includes_loose_root_images(tmp_path: Path) -> None:
-    """根目录直接放的图也算一个 repeat=1 的虚拟项。"""
     _touch_image(tmp_path, "loose1.png")
     _touch_image(tmp_path / "5_x", "real.png")
     result = datasets.scan_dataset_root(tmp_path)
     assert result["total_images"] == 2
     folders = result["folders"]
-    # 第一项应该是根散图
-    assert folders[0]["name"] == "(根目录)"
+    assert folders[0]["name"] == "(root directory)"
     assert folders[0]["repeat"] == 1
 
 
@@ -633,12 +611,6 @@ def test_scan_missing_root(tmp_path: Path) -> None:
 
 @pytest.fixture
 def client_with_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """为端点测试构造一个临时 dataset，并把 server 的 REPO_ROOT 指过去。
-
-    PR-5：/api/datasets/* + /api/browse 已搬到 studio.api.routers.browse，
-    handler 内引的是 `browse.REPO_ROOT` 不是 `server.REPO_ROOT`。两边一起 patch
-    防 thumbnail 403 outside-repo。
-    """
     from fastapi.testclient import TestClient
     from studio import server
     from studio.api.routers import browse as _browse_router
@@ -698,7 +670,6 @@ def test_thumbnail_blocks_traversal(client_with_dataset) -> None:
 
 
 def test_thumbnail_blocks_outside_repo(client_with_dataset, tmp_path: Path) -> None:
-    """文件实际存在但不在 REPO_ROOT 下时拒绝。"""
     client, _ = client_with_dataset
     outside_dir = tmp_path / "outside"
     outside_img = _touch_image(outside_dir, "x.png")

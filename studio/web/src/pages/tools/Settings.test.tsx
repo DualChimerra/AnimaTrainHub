@@ -11,7 +11,7 @@ import SettingsPage from './Settings'
 const initialServerState = {
   gelbooru: {
     user_id: 'alice',
-    api_key: '***', // 已保存，掩码
+    api_key: '***',
   },
   danbooru: { username: '', api_key: '', account_type: 'free' },
   download: {
@@ -277,7 +277,6 @@ const emptyModelsCatalog = {
     cltagger: { current: 'huggingface', available: ['huggingface'] },
     taeflux: { current: 'huggingface', available: ['huggingface'] },
   },
-  // 统一来源候选行（ModelSourceCard 消费；缺键会渲染 loading 文案）
   model_sources: {
     wd14: [],
     cltagger: [
@@ -443,12 +442,10 @@ describe('SettingsPage (PP0)', () => {
   it('hydrates from /api/secrets and shows masked sensitive fields as placeholder', async () => {
     const user = userEvent.setup()
     renderPage()
-    // gelbooru 凭证已挪到「密钥」tab
     await user.click(await screen.findByRole('button', { name: '密钥' }))
     await waitFor(() =>
       expect(screen.getByDisplayValue('alice')).toBeInTheDocument()
     )
-    // api_key 是 password input，placeholder 提示「已保存」
     const placeholder = screen.getByPlaceholderText(/已保存/)
     expect(placeholder).toBeInTheDocument()
     expect((placeholder as HTMLInputElement).value).toBe('')
@@ -461,7 +458,6 @@ describe('SettingsPage (PP0)', () => {
     const userInput = await screen.findByDisplayValue('alice')
     await user.clear(userInput)
     await user.type(userInput, 'bob')
-    // instant-apply：文本框失焦即提交，无显式保存按钮
     await user.tab()
 
     await waitFor(() => {
@@ -470,7 +466,6 @@ describe('SettingsPage (PP0)', () => {
       )
       expect(putCall).toBeDefined()
       const body = JSON.parse(String(putCall![1].body))
-      // 只有 user_id 被改动；api_key 仍是 *** ⇒ 不应该出现在 body 里
       expect(body).toEqual({ gelbooru: { user_id: 'bob' } })
     })
   })
@@ -480,15 +475,12 @@ describe('SettingsPage (PP0)', () => {
     renderPage()
 
     await user.click(await screen.findByRole('button', { name: '密钥' }))
-    // 下载 / 抓取类凭证聚到密钥 tab（WandB token 留在监控页跟其配置一起）
     for (const name of ['HuggingFace', 'ModelScope', 'Gelbooru', 'Danbooru']) {
       expect(screen.getByRole('heading', { name })).toBeInTheDocument()
     }
     expect(screen.queryByRole('heading', { name: 'Weights & Biases' })).not.toBeInTheDocument()
-    // gelbooru user_id 现在在密钥 tab 编辑
     expect(screen.getByDisplayValue('alice')).toBeInTheDocument()
 
-    // 原数据集 tab 的 gelbooru 不再有 user_id（凭证已挪走，无指引文案）
     await user.click(await screen.findByRole('button', { name: '数据集' }))
     expect(screen.queryByDisplayValue('alice')).not.toBeInTheDocument()
   })
@@ -497,8 +489,6 @@ describe('SettingsPage (PP0)', () => {
     const user = userEvent.setup()
     renderPage()
     await user.click(await screen.findByRole('button', { name: '打标' }))
-    // WD14 卡的源 dropdown：本 tab 唯一带 ModelScope 选项的 select
-    // （CLTagger 是固定 HF 单选，无 ModelScope 选项）。
     const msOption = await screen.findByRole('option', { name: /ModelScope/ })
     const select = msOption.closest('select') as HTMLSelectElement
     await user.selectOptions(select, 'modelscope')
@@ -522,7 +512,6 @@ describe('SettingsPage (PP0)', () => {
     expect(await screen.findByRole('heading', { name: 'Anima 模型' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Krea2 模型' })).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Krea 2 主模型' })).toBeInTheDocument()
-    // TE variant 合并卡（bf16/fp8 两行 radio，标题走 i18n）
     expect(screen.getByText('Krea 2 · Qwen3-VL 文本编码器')).toBeInTheDocument()
     expect(screen.getByText('bf16')).toBeInTheDocument()
     expect(screen.getByText('fp8')).toBeInTheDocument()
@@ -531,16 +520,12 @@ describe('SettingsPage (PP0)', () => {
     expect(screen.getByText('my-krea2.safetensors')).toBeInTheDocument()
     const customRow = screen.getByText('my-krea2.safetensors').closest('li')
     expect(customRow).not.toBeNull()
-    // 统一候选卡（D2）：local 行带「本地」徽标 + 状态 badge + × 移除（不删文件），
-    // 永远没有删除文件按钮
     expect(within(customRow!).getByText('本地')).toBeInTheDocument()
     expect(customRow!.querySelector('.bg-ok-soft')).not.toBeNull()
     expect(within(customRow!).getByTitle('从列表移除（不删除文件）')).toBeInTheDocument()
     expect(within(customRow!).queryByText(/🗑/)).not.toBeInTheDocument()
-    // 主模型 3（raw/turbo/custom）+ TE variant 卡 2（bf16/fp8）
     expect(screen.getAllByRole('radio')).toHaveLength(5)
     expect(screen.queryByText(/推荐工作流/)).not.toBeInTheDocument()
-    // purpose 徽标（C10）：krea2 variant 行标注用途（raw=训练 / turbo=推理）
     const rawRow = screen.getByText('raw').closest('li')!
     const turboRow = screen.getByText('turbo').closest('li')!
     expect(within(rawRow).getByText('训练')).toBeInTheDocument()
@@ -552,7 +537,6 @@ describe('SettingsPage (PP0)', () => {
     renderPage()
     await user.click(await screen.findByRole('link', { name: '训练' }))
     await screen.findByRole('heading', { name: 'Krea 2 主模型' })
-    // fixture：官方 variants 都未下载（radio 禁用），只有 custom 可点
     const customRow = screen.getByText('my-krea2.safetensors').closest('li')!
     await user.click(within(customRow).getByRole('radio'))
 
@@ -562,7 +546,6 @@ describe('SettingsPage (PP0)', () => {
       )
       expect(putCall).toBeDefined()
       const body = JSON.parse(String(putCall![1].body))
-      // 统一写 selected.{family} 新结构——不再有 anima 写 legacy 键的分叉
       expect(body).toEqual({
         models: { selected: { krea2: '/tmp/models/my-krea2.safetensors' } },
       })
@@ -574,13 +557,11 @@ describe('SettingsPage (PP0)', () => {
     renderPage()
 
     await user.click(await screen.findByRole('button', { name: '打标' }))
-    // 预设列表：全局默认行高亮 + 每行「编辑」action
     const defaultRow = screen.getByText('画风 LoRA JSON').closest('li')
     expect(defaultRow).not.toBeNull()
     expect(within(defaultRow as HTMLElement).getByRole('radio')).toBeChecked()
     await user.click(within(defaultRow as HTMLElement).getByRole('button', { name: /编辑/ }))
 
-    // 编辑 modal：名称字段（补上的预设改名）+ 采样限速字段都在
     const modal = await screen.findByTestId('llm-preset-editor-modal')
     expect(within(modal).getByText('预设名称')).toBeInTheDocument()
     expect(within(modal).getByText('并发数')).toBeInTheDocument()
@@ -614,7 +595,6 @@ describe('SettingsPage (PP0)', () => {
     const v2Row = screen.getByText('cl_tagger_v2_v2_01a').closest('li')
     expect(v2Row).not.toBeNull()
     await user.click(within(v2Row as HTMLElement).getByRole('radio'))
-    // instant-apply：选 variant 即时提交，无显式保存按钮
 
     await waitFor(() => {
       const putCall = fetchMock.mock.calls.find(

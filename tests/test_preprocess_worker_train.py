@@ -1,9 +1,3 @@
-"""ADR 0010 — preprocess_worker train-scope path（PR-2 step D）。
-
-直接调 `_run_crop_train` / `train_swap_entry` 行为，不通过 supervisor 子进程。
-不跑真 upscaler（torch 模型加载耗时）—— upscale 主流程由 _run_upscale_train
-仅做 path/manifest 派生测试，模型调用在端到端手测。
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,7 +12,6 @@ from studio.workers import preprocess_worker as worker
 
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
-    """最小 project + version dict + 目录结构（不依赖 db）。"""
     monkeypatch.setattr(projects, "PROJECTS_DIR", tmp_path / "projects")
     pdir = tmp_path / "projects" / "1-test"
     (pdir / "download").mkdir(parents=True)
@@ -43,16 +36,13 @@ def _make_image(path: Path, size: tuple[int, int] = (200, 100), color=(255, 0, 0
 
 
 # ---------------------------------------------------------------------------
-# train_swap_entry (Step D 配套 helper)
 # ---------------------------------------------------------------------------
 
 
 def test_swap_entry_removes_old_writes_new(env) -> None:
-    """upscale 改扩展名（X.jpg → X.png）场景：swap entry 原子替换。"""
     sub = env["sub"]
     (sub / "X.jpg").write_bytes(b"jpg")
     (sub / "X.png").write_bytes(b"png" * 100)
-    # 老 entry "1_data/X.jpg"
     pm.train_add_processed(
         env["pdir"], "v1", "1_data/X.jpg", {"origin": "X.jpg"},
     )
@@ -61,7 +51,7 @@ def test_swap_entry_removes_old_writes_new(env) -> None:
         env["pdir"], "v1",
         old_name="1_data/X.jpg",
         new_name="1_data/X.png",
-        meta={"origin": "X.jpg"},  # origin 不变（仍指向 download/X.jpg）
+        meta={"origin": "X.jpg"},
     )
 
     m = pm.train_load(env["pdir"], "v1")
@@ -71,7 +61,6 @@ def test_swap_entry_removes_old_writes_new(env) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _run_crop_train: N=1 覆盖
 # ---------------------------------------------------------------------------
 
 
@@ -86,18 +75,15 @@ def test_crop_train_single_rect_overwrites_source(env) -> None:
         _silence, _silence,
     )
     assert rc == 0
-    # 覆盖在原 path
     assert (sub / "X.png").is_file()
     with Image.open(sub / "X.png") as out:
         assert out.size == (100, 100)  # 0.5×200 = 100
-    # manifest entry 仍是 1_data/X.png，origin 保持
     entry = pm.train_get_entry(env["pdir"], "v1", "1_data/X.png")
     assert entry is not None
     assert entry["origin"] == "X.png"
 
 
 def test_crop_train_single_rect_replaces_jpg_without_doubling(env) -> None:
-    """train-only 导入/复制后没有 manifest：JPG 裁剪成 PNG 时必须删旧 JPG。"""
     sub = env["sub"]
     _make_image(sub / "X.jpg", size=(200, 100))
     (sub / "X.txt").write_text("existing caption", encoding="utf-8")
@@ -134,23 +120,18 @@ def test_crop_train_fan_out_writes_multiple(env) -> None:
         _silence, _silence,
     )
     assert rc == 0
-    # fan-out 派生 c0 / c1
     assert (sub / "Y_c0.png").is_file()
     assert (sub / "Y_c1.png").is_file()
-    # 原 Y.png 物理被删（fan-out > 1）
     assert not (sub / "Y.png").is_file()
-    # manifest 派生
     m = pm.train_load(env["pdir"], "v1")
     assert "1_data/Y.png" not in m["images"]
     assert "1_data/Y_c0.png" in m["images"]
     assert "1_data/Y_c1.png" in m["images"]
-    # 多 crop 共享 origin
     assert m["images"]["1_data/Y_c0.png"]["origin"] == "Y.png"
     assert m["images"]["1_data/Y_c1.png"]["origin"] == "Y.png"
 
 
 def test_crop_train_fan_out_removes_source_sidecars(env) -> None:
-    """fan-out 后原图不再存在，旧 caption sidecar 也要清掉。"""
     sub = env["sub"]
     _make_image(sub / "Z.jpg", size=(200, 100))
     (sub / "Z.txt").write_text("old caption", encoding="utf-8")
@@ -171,7 +152,6 @@ def test_crop_train_fan_out_removes_source_sidecars(env) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _run_crop_train: 源不存在
 # ---------------------------------------------------------------------------
 
 
@@ -181,11 +161,10 @@ def test_crop_train_skips_when_source_missing(env) -> None:
         {"crops": {"1_data/ghost.png": [{"x": 0, "y": 0, "w": 0.5, "h": 0.5}]}},
         _silence, _silence,
     )
-    assert rc == 0  # job 仍完成；单图 skip
+    assert rc == 0
 
 
 # ---------------------------------------------------------------------------
-# _run_crop_train: 拒非法 rel name
 # ---------------------------------------------------------------------------
 
 
@@ -195,18 +174,14 @@ def test_crop_train_rejects_invalid_rel_name(env) -> None:
         {"crops": {"../escape/X.png": [{"x": 0, "y": 0, "w": 0.5, "h": 0.5}]}},
         _silence, _silence,
     )
-    # 路径校验 fail → skip 该项；job 仍 return 0
     assert rc == 0
 
 
 # ---------------------------------------------------------------------------
-# _run_crop_train: multi-crop 链式 origin 保持
 # ---------------------------------------------------------------------------
 
 
 def test_crop_train_origin_inherited_from_existing_entry(env) -> None:
-    """老 entry 标 X_c0.png 的 origin=X.jpg；对 X_c0.png 再切 → 派生应继承
-    origin=X.jpg（链式不丢 root）。"""
     sub = env["sub"]
     _make_image(sub / "X_c0.png", size=(100, 100))
     pm.train_add_processed(
@@ -227,14 +202,10 @@ def test_crop_train_origin_inherited_from_existing_entry(env) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _run_upscale_train: path 派生（不调真 upscaler）
 # ---------------------------------------------------------------------------
 
 
 def test_upscale_train_in_place_overwrites_jpg(env, monkeypatch) -> None:
-    """ADR 0010 fixup（2026-06-04）：upscale 不改扩展名，in-place 覆盖
-    src（X.jpg → X.jpg）。manifest entry 加 processed=True。
-    """
     sub = env["sub"]
     (sub / "X.jpg").write_bytes(b"raw")
     pm.train_add_processed(env["pdir"], "v1", "1_data/X.jpg", {"origin": "X.jpg"})
@@ -245,7 +216,6 @@ def test_upscale_train_in_place_overwrites_jpg(env, monkeypatch) -> None:
         called["src"] = src
         called["dst"] = dst
         called["save_kwargs"] = kwargs.get("save_kwargs")
-        # 模拟 upscaler in-place 覆盖（src == dst）
         Image.new("RGB", (400, 200), (0, 255, 0)).save(dst, format="JPEG", quality=95)
         return {
             "model": "fake", "scale": 4, "action": "upscale",
@@ -266,16 +236,12 @@ def test_upscale_train_in_place_overwrites_jpg(env, monkeypatch) -> None:
         env["project"], env["version"], {"mode": "all"}, _silence, _silence,
     )
     assert rc == 0
-    # src == dst：in-place 覆盖
     assert called["src"] == sub / "X.jpg"
     assert called["dst"] == sub / "X.jpg"
-    # JPEG 扩展名 → save_kwargs format=JPEG quality=95
     assert called["save_kwargs"]["format"] == "JPEG"
     assert called["save_kwargs"]["quality"] == 95
-    # 物理文件保留同名
     assert (sub / "X.jpg").is_file()
     assert not (sub / "X.png").exists()
-    # manifest 仍是同 key + processed=True
     m = pm.train_load(env["pdir"], "v1")
     assert set(m["images"].keys()) == {"1_data/X.jpg"}
     assert m["images"]["1_data/X.jpg"]["origin"] == "X.jpg"
@@ -283,7 +249,6 @@ def test_upscale_train_in_place_overwrites_jpg(env, monkeypatch) -> None:
 
 
 def test_upscale_train_in_place_overwrites_png(env, monkeypatch) -> None:
-    """PNG 输入 → save_kwargs format=PNG。"""
     sub = env["sub"]
     (sub / "X.png").write_bytes(b"old")
     pm.train_add_processed(env["pdir"], "v1", "1_data/X.png", {"origin": "X.png"})

@@ -1,17 +1,17 @@
-// LocalModelSources.tsx —— 设置页「用自己的权重」这一条线的复用件。
+// LocalModelSources.tsx -- the shared piece for the "use your own weights" line on the Settings page.
 //
-// 后端把每类权重的候选拍平成 catalog.model_sources[domain]（见
-// studio/services/models/catalog.py 的 _source_row）：内置 preset 行 + 用户
-// 注册的 local 行同构。本文件只渲染 **local 行** 与「从文件夹选一个」的入口，
-// preset 行仍由各自的下载卡渲染（它们要显示下载按钮 / 分片进度）。
+// The backend flattens each weight category's candidates into catalog.model_sources[domain] (see
+// _source_row in studio/services/models/catalog.py): built-in preset rows and user-registered
+// local rows share the same shape. This file only renders the **local rows** and the "pick from a folder"
+// entry point; preset rows are still rendered by their own download cards (they need download buttons / chunk progress).
 //
-// domain 与选中值字段的对应关系（三处调用点各自负责写回）：
-//   anima / krea2  → secrets.models.selected[family]     主模型权重（.safetensors）
-//   vae            → secrets.models.selected_vae         VAE 权重（.safetensors）
-//   anima_te / krea2_te → secrets.models.selected_te[family]  文本编码器目录
+// Mapping between domain and the selected-value field (each of the three call sites writes back its own):
+//   anima / krea2  -> secrets.models.selected[family]     main model weights (.safetensors)
+//   vae            -> secrets.models.selected_vae         VAE weights (.safetensors)
+//   anima_te / krea2_te -> secrets.models.selected_te[family]  text encoder directory
 //
-// 路径都是**服务端机器上的绝对路径**：本地模式下就是用户这台电脑，云端模式
-// 下是容器里的盘 —— 提示语按 runtime mode 切换，避免云端用户填本机 D:\ 路径。
+// Paths are always **absolute paths on the server machine**: the user's own PC in local mode, the disk
+// inside the container in cloud mode -- copy switches by runtime mode so cloud users don't type a local D:\ path.
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -20,7 +20,7 @@ import { useToast } from './Toast'
 import { useRuntimeModeOptional } from '../lib/RuntimeMode'
 import PathPicker from './PathPicker'
 
-/** 本地权重的形态：单文件（主模型 / VAE）还是 transformers 目录（文本编码器）。 */
+/** Shape of local weights: a single file (main model / VAE) or a transformers directory (text encoder). */
 export type LocalSourceShape = 'file' | 'dir'
 
 function fmtBytes(n: number): string {
@@ -31,24 +31,24 @@ function fmtBytes(n: number): string {
 }
 
 interface RowsProps {
-  /** catalog.model_sources 的键（anima / krea2 / vae / anima_te / krea2_te）。 */
+  /** Key into catalog.model_sources (anima / krea2 / vae / anima_te / krea2_te). */
   domain: string
-  /** 该 domain 的全部候选行；本组件只渲染 kind === 'local' 的。 */
+  /** All candidate rows for this domain; this component only renders the ones with kind === 'local'. */
   rows: ModelSourceRow[]
-  /** 单选组名（同一张卡里的 preset radio 要用同一个 name 才互斥）。 */
+  /** Radio group name (the preset radio in the same card must share this name to stay mutually exclusive). */
   radioName: string
-  /** 选中一行：调用方写回自己的选中值字段（selected / selected_vae / selected_te）。 */
+  /** Select a row: the caller writes back its own selected-value field (selected / selected_vae / selected_te). */
   onSelect: (value: string) => void | Promise<void>
-  /** 注册 / 注销后刷新 catalog（选中值可能被服务端回退默认）。 */
+  /** Refresh the catalog after registering / unregistering (the selected value may have been reset by the server). */
   onChanged: () => void | Promise<void>
-  /** 主模型行额外提供「工作模式」下拉：把这条权重改挂到另一个模型族。 */
+  /** Main-model rows additionally offer a "working mode" dropdown: reassigns these weights to a different model family. */
   familyOptions?: { value: string; label: string }[]
-  /** 换模式后把这条权重在**新族**里重新选中（仅当它换之前正被选中）。
-   *  没有它的话用户改完模式还得去另一张卡再点一次单选。 */
+  /** Re-select these weights in the **new family** after switching modes (only if they were selected before the switch).
+   *  Without this the user would have to switch to the other card and click the radio again. */
   selectInDomain?: (domain: string, value: string) => void | Promise<void>
 }
 
-/** 已注册的本地权重行（单选 + 删除 + 可选的模式切换）。 */
+/** A registered local-weights row (radio select + delete + optional mode switch). */
 export function LocalModelRows({
   domain, rows, radioName, onSelect, onChanged, familyOptions, selectInDomain,
 }: RowsProps) {
@@ -72,17 +72,17 @@ export function LocalModelRows({
     }
   }
 
-  // 模式切换 = 换个 domain 重新登记同一条路径。原 domain 若正选中它，服务端
-  // 会把该族的选中值回退官方 variant（_selected_value_reset），所以切完要
-  // 重新拉 catalog 才能看到真实状态。
+  // Mode switch = re-register the same path under a different domain. If the old domain currently has it selected,
+  // the server resets that family's selected value to the official variant (_selected_value_reset), so the
+  // catalog must be re-fetched after the switch to see the real state.
   const changeFamily = async (row: ModelSourceRow, nextDomain: string) => {
     if (!row.candidate || nextDomain === domain) return
     setBusy(row.value)
     try {
       await api.addModelSource(nextDomain, row.candidate)
-      // 注销原候选时服务端会把原族的选中值回退官方 variant（那条权重已不在
-      // 该族名下）——所以「原来正选中」的语义要在注销前读，注销后补选。
-      const wasCurrent = row.is_current
+      // Unregistering the old candidate makes the server reset the old family's selected value to the official
+      // variant (since these weights are no longer under that family) -- so "was it currently selected" must be
+      // read before unregistering, and reselected after.
       await api.removeModelSource(domain, row.candidate)
       if (wasCurrent && selectInDomain) await selectInDomain(nextDomain, row.value)
       toast(t('settings.localModelFamilyChanged', {
@@ -159,14 +159,14 @@ export function LocalModelRows({
 
 interface AddProps {
   domain: string
-  /** 单文件（主模型 / VAE）还是目录（文本编码器）。 */
+  /** Single file (main model / VAE) or directory (text encoder). */
   shape: LocalSourceShape
-  /** PathPicker 的起始目录（一般传 catalog.models_root）。 */
+  /** PathPicker's starting directory (usually catalog.models_root). */
   initialPath?: string
   onChanged: () => void | Promise<void>
 }
 
-/** 「从文件夹里选一个」入口：PathPicker 选中 → 注册成 local 候选。 */
+/** "Pick one from a folder" entry point: PathPicker selection -> registered as a local candidate. */
 export function AddLocalModelButton({
   domain, shape, initialPath, onChanged,
 }: AddProps) {
@@ -184,8 +184,8 @@ export function AddLocalModelButton({
       toast(t('settings.localModelAdded', { path }), 'success')
       await onChanged()
     } catch (e) {
-      // 后端校验（后缀 / config.json 缺失 / 路径不存在）的报错原样透出，
-      // 用户据此改选。
+      // Backend validation errors (bad extension / missing config.json / path doesn't exist) are surfaced as-is
+      // so the user can adjust their selection.
       toast(String(e), 'error')
     } finally {
       setSaving(false)

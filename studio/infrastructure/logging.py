@@ -281,35 +281,35 @@ def setup_logging(
     file: bool = True,
     extra_handlers: list[logging.Handler] | None = None,
 ) -> None:
-    """安装全局 logging 配置。每个进程入口调一次（webui / cli / worker）。
+    """Install the global logging config. Called once per process entry point (webui / cli / worker).
 
-    幂等：同一 `process` 名重复调 noop（防 supervisor 重启 / 测试 reload 累加 handler）。
-
-    行为：
-      1. reconfigure_console_utf8（Windows 编码兜底）
-      2. 清 root logger 现有 handler（防累加）
-      3. （可选）装 RotatingFileHandler 到 {log_dir}/studio.log（JSON line, 50MB×5）
-      4. 装 console handler（auto/json/bool 三态，详 below）
-      5. 装 extra_handlers（worker 用来塞 jobs/<id>.log handler）
-      6. 静音第三方库（asyncio/urllib3/PIL/...）→ WARNING
-      7. 接管 uvicorn.access / uvicorn.error logger（走我们的 root handler 而非 uvicorn 默认）
-      8. 装 sys.excepthook → logger.critical 记未捕获异常
-      9. 装 threading.excepthook → 同上（仅 Python 3.8+）
+    Idempotent: repeated calls with the same `process` name are a noop (prevents handler pile-up on
+    supervisor restarts / test reloads).
+    Behavior:
+      1. reconfigure_console_utf8 (Windows encoding fallback)
+      2. clear existing root logger handlers (prevents pile-up)
+      3. (optional) install a RotatingFileHandler at {log_dir}/studio.log (JSON lines, 50MB x 5)
+      4. install the console handler (auto/json/bool tri-state, see below)
+      5. install extra_handlers (worker uses this to add a jobs/<id>.log handler)
+      6. silence third-party libraries (asyncio/urllib3/PIL/...) -> WARNING
+      7. take over uvicorn.access / uvicorn.error loggers (route through our root handler instead of uvicorn's default)
+      8. install sys.excepthook -> logger.critical logs uncaught exceptions
+      9. install threading.excepthook -> same, for threads (Python 3.8+ only)
 
     Args:
-        process: 进程标识（"webui" / "cli:run" / "worker:tag/42" / ...）
-        log_dir: studio.log 落盘目录；默认读 env ANIMA_LOG_DIR，否则 paths.LOGS_DIR
-        level: root logger level（"DEBUG" / "INFO" / "WARNING" / "ERROR"）
-        console: "auto" = stderr isatty → Human, 否则 JSON；
-                 "json" 强制 JSON；True 强制 Human；False 不装 console
-        file: 是否装 file handler 到 studio.log；webui 默认 True；
-              worker / cli 应传 False（worker 走 stdout 进 supervisor 重定向单写；
-              CLI 5s 短命周期落盘价值低）。0.13.x ADR-0009 §还的债"演进双写"后 worker 改 True
-        extra_handlers: 额外装到 root 的 handler（worker 用来塞 jobs/<id>.log）
+        process: process identifier ("webui" / "cli:run" / "worker:tag/42" / ...)
+        log_dir: directory studio.log is written to; defaults to env ANIMA_LOG_DIR, else paths.LOGS_DIR
+        level: root logger level ("DEBUG" / "INFO" / "WARNING" / "ERROR")
+        console: "auto" = Human if stderr.isatty() else JSON;
+                 "json" forces JSON; True forces Human; False installs no console handler
+        file: whether to install a file handler at studio.log; defaults to True for webui;
+              worker / cli should pass False (worker writes to stdout, single-writer via supervisor redirect;
+              CLI's ~5s lifetime makes disk logging low-value). Worker was switched to True after 0.13.x ADR-0009 §"progressive dual-write" paid off this debt
+        extra_handlers: extra handlers to add to root (worker uses this to add jobs/<id>.log)
     """
-    # pytest 全局 fixture 设 ANIMA_LOGGING_NO_BOOTSTRAP=1 让业务代码 bootstrap
-    # 调用全部 noop，避免污染 caplog / 反复装 handler；测 setup_logging 本身的
-    # tests/test_logging_setup.py 自己 monkeypatch.delenv 解除。
+    # pytest's global fixture sets ANIMA_LOGGING_NO_BOOTSTRAP=1 so that application-code bootstrap
+    # calls are all noops, avoiding caplog pollution / repeated handler installs; the test for
+    # setup_logging itself, tests/test_logging_setup.py, does its own monkeypatch.delenv to lift this.
     if os.environ.get("ANIMA_LOGGING_NO_BOOTSTRAP"):
         return
     if process in _CONFIGURED_PROCESSES:
@@ -319,12 +319,12 @@ def setup_logging(
     reconfigure_console_utf8()
 
     root = logging.getLogger()
-    # 清掉默认 / 累加的 handler（pytest fixture 反复调时关键）
+    # Clear default / accumulated handlers (matters when a pytest fixture calls this repeatedly)
     for h in list(root.handlers):
         root.removeHandler(h)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # 1. 文件 handler — JSON line 到 studio.log（worker / cli 不装）
+    # 1. file handler -- JSON lines to studio.log (not installed for worker / cli)
     if file:
         effective_log_dir = log_dir or _resolve_log_dir()
         root.addHandler(make_studio_log_handler(log_dir=effective_log_dir, process=process))
@@ -334,38 +334,38 @@ def setup_logging(
     if console_handler is not None:
         root.addHandler(console_handler)
 
-    # ContextFilter — 装到每个 handler 而非 logger。
-    # stdlib Logger.filter 只在 Logger.handle 顶层调一次；子 logger propagate
-    # 到 root 后**不**调 root.filter，只调 root.handlers[*].emit。所以 filter
-    # 必须装 handler 上，确保所有 record 经过 handler 时都有 ContextVar 注入。
+    # ContextFilter -- installed on each handler rather than the logger.
+    # stdlib Logger.filter is only called once at the top of Logger.handle; when a child logger
+    # propagates to root, root.filter is **not** called, only root.handlers[*].emit is. So the filter
+    # must be installed on the handlers, to guarantee every record gets ContextVar injection when it passes through a handler.
     _ctx_filter = ContextFilter()
     for h in root.handlers:
         h.addFilter(_ctx_filter)
 
-    # 3. extra handlers（worker job log 等）— 同样装 ContextFilter
+    # 3. extra handlers (worker job log etc.) -- also gets ContextFilter installed
     for h in extra_handlers or ():
         h.addFilter(ContextFilter())
         root.addHandler(h)
 
-    # 4. 第三方库静音（防 root=INFO 后 stderr 噪音爆 10×）
+    # 4. silence third-party libraries (prevents a 10x stderr noise spike once root=INFO)
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    # 5. uvicorn logger 接管 — 让 access log 跟业务 log 同格式同 trace_id
-    #    (B audit 跨问题 C / A round2 §4.1 盲点 2)
+    # 5. take over uvicorn loggers -- keep the access log in the same format/trace_id as application logs
+    #    (B audit cross-cutting issue C / A round2 §4.1 blind spot 2)
     for uname in ("uvicorn", "uvicorn.access", "uvicorn.error"):
         u = logging.getLogger(uname)
-        u.handlers = []        # 清掉 uvicorn 自带 StreamHandler
-        u.propagate = True     # 让 root handler 接管
+        u.handlers = []        # clear uvicorn's own StreamHandler
+        u.propagate = True     # let the root handler take over
 
-    # 6. 未捕获异常路由进 logger
+    # 6. route uncaught exceptions into the logger
     _install_excepthooks()
 
 
 def _resolve_log_dir() -> Path:
-    """优先 ANIMA_LOG_DIR env，否则 paths.LOGS_DIR。
+    """Prefer the ANIMA_LOG_DIR env var, else paths.LOGS_DIR.
 
-    pytest conftest 设 ANIMA_LOG_DIR=tmp_path_factory 隔离测试不写 repo studio_data/。
+    pytest conftest sets ANIMA_LOG_DIR=tmp_path_factory so tests don't write into the repo's studio_data/.
     """
     env = os.environ.get("ANIMA_LOG_DIR", "").strip()
     if env:
@@ -380,7 +380,7 @@ def _build_console_handler(console: str | bool, process: str) -> logging.Handler
         use_json = not sys.stderr.isatty()
     elif console == "json":
         use_json = True
-    else:  # True 或其它
+    else:  # True or anything else
         use_json = False
     h = logging.StreamHandler(sys.stderr)
     h.setFormatter(JsonLineFormatter(process) if use_json else HumanConsoleFormatter())
@@ -391,9 +391,9 @@ _EXCEPTHOOKS_INSTALLED = False
 
 
 def _install_excepthooks() -> None:
-    """注入 sys.excepthook + threading.excepthook → logger.critical。
+    """Install sys.excepthook + threading.excepthook -> logger.critical.
 
-    幂等（多次 setup_logging 调用只装一次）。
+    Idempotent (only installed once even with multiple setup_logging calls).
     """
     global _EXCEPTHOOKS_INSTALLED
     if _EXCEPTHOOKS_INSTALLED:
@@ -403,7 +403,7 @@ def _install_excepthooks() -> None:
     _orig_excepthook = sys.excepthook
 
     def _excepthook(etype, evalue, etb):
-        # KeyboardInterrupt 仍走默认，避免吞 Ctrl+C
+        # KeyboardInterrupt still goes through the default hook, so Ctrl+C isn't swallowed
         if issubclass(etype, KeyboardInterrupt):
             _orig_excepthook(etype, evalue, etb)
             return
@@ -413,7 +413,7 @@ def _install_excepthooks() -> None:
 
     sys.excepthook = _excepthook
 
-    # Python 3.8+ 有 threading.excepthook
+    # Python 3.8+ has threading.excepthook
     try:
         import threading
         _orig_thread_hook = threading.excepthook
@@ -429,23 +429,23 @@ def _install_excepthooks() -> None:
 
 
 def _reset_for_tests() -> None:
-    """测试钩子：清 sentinel + 清 ContextVar，让多个测试可独立 setup_logging。
+    """Test hook: clears the sentinel + ContextVars so multiple tests can each call setup_logging independently.
 
-    生产代码不应该调。fixture 用：
+    Should not be called from production code. Used by fixtures:
         from studio.infrastructure.logging import _reset_for_tests
         _reset_for_tests()
     """
     global _EXCEPTHOOKS_INSTALLED
     _CONFIGURED_PROCESSES.clear()
     _EXCEPTHOOKS_INSTALLED = False
-    # ContextVar 在测试间 leaky（同 thread / async ctx），显式清掉
+    # ContextVars leak across tests (same thread / async context), clear them explicitly
     _trace_id_var.set(None)
     _job_id_var.set(None)
     _task_id_var.set(None)
-    # 不还原 sys.excepthook（测试间也不应该依赖那个）
+    # sys.excepthook is not restored (tests shouldn't depend on that either)
 
 
-# 编码兜底是无条件常量，导出给 workers/_base.py 旧 import 兼容
+# The encoding fallback is an unconditional constant, exported for compat with old imports in workers/_base.py
 __all__ = [
     "STUDIO_LOG_NAME", "STUDIO_LOG_MAX_BYTES", "STUDIO_LOG_BACKUP_COUNT",
     "TRACE_HEADER", "TRACE_ENV", "PROCESS_ENV",

@@ -46,7 +46,7 @@ export default function TagEditor({
   const draftInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // PointerSensor + 6px 启动距离：拖拽手感不会跟「点 × 删除」/ 误触冲突。
+  // PointerSensor + 6px activation distance: drag feel doesn't conflict with "click x to delete" / accidental taps.
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   )
@@ -67,12 +67,12 @@ export default function TagEditor({
     const t = raw.trim().replace(/^[,，]+|[,，]+$/g, '')
     if (!t) return
     if (tags.includes(t)) { setDraft(''); return }
-    // 加到末尾：跟 chip 拖拽重排的心智一致（新东西落在底部，用户拖到想要的位置）
+    // Add to the end: matches chip drag-reorder's mental model (new items land at the bottom, user drags to the desired position)
     onChange([...tags, t])
     setDraft('')
   }
 
-  // chip 模式 input：draft 整体当一个 token；选中候选直接 addTag。
+  // Chip-mode input: treats the whole draft as one token; picking a suggestion calls addTag directly.
   const draftSuggest = useTagSuggest({
     value: draft,
     inputRef: draftInputRef,
@@ -80,7 +80,7 @@ export default function TagEditor({
     onPick: ({ suggestion }) => { addTag(suggestion.tag) },
   })
 
-  // text 模式 textarea：根据 cursor 算 token range，替换为 `tag, ` 并保持光标。
+  // Text-mode textarea: computes the token range from the cursor, replaces it with `tag, ` and keeps the cursor position.
   const textSuggest = useTagSuggest({
     value: textBuf,
     inputRef: textareaRef,
@@ -288,12 +288,12 @@ function ModeBtn({ active, onClick, children }: {
   )
 }
 
-/** 单个可拖拽 chip。dnd-kit 用 useSortable 给我们 setNodeRef / 拖拽 listeners /
- * transform / transition;CSS.Transform.toString 把 dnd-kit 算出的 (x,y,scale)
- * 翻译成 CSS transform 字符串。
+/** A single draggable chip. dnd-kit's useSortable gives us setNodeRef / drag listeners /
+ * transform / transition; CSS.Transform.toString turns dnd-kit's computed (x,y,scale)
+ * into a CSS transform string.
  *
- * × 删除按钮要 stopPropagation onPointerDown —— 否则 6px 移动阈值过后 × 也成了
- * 拖拽起点,点 × 反而触发拖拽。
+ * The x delete button needs stopPropagation on onPointerDown -- otherwise, past the 6px move threshold, the x
+ * also becomes a drag start point, so clicking x triggers a drag instead.
  */
 function SortableChip({ id, trigger, onRemove }: { id: string; trigger?: boolean; onRemove: () => void }) {
   const { t } = useTranslation()

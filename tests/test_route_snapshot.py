@@ -1,12 +1,3 @@
-"""PR-1 安全网 — 冻结 studio.server.app 的全部 route 三元组。
-
-后续重构 PR（拆 router、搬 endpoint）必须保持 (methods, path, name) 集合不变；
-任何意外丢路由 / 改路径 / 改函数名都会让本测试 fail 并给出可读 diff。
-
-snapshot 文件：tests/_snapshots/studio_routes.json
-- 首次运行（snapshot 不存在）→ 创建并 emit warning，测试通过
-- 之后每次运行 → 读出比对，不一致用 pytest.fail 列出 added/removed/changed
-"""
 from __future__ import annotations
 
 import json
@@ -35,13 +26,7 @@ def _route_entry(route: Any) -> dict[str, Any]:
 
 
 def _collect_routes() -> list[dict[str, Any]]:
-    # FastAPI 0.137+ 把 include_router 包成 `_IncludedRouter` wrapper（详
-    # tests/_route_helpers.py），递归展开后才与 0.136 行为一致 —— snapshot
-    # 文件不需要因为 fastapi 升级重新生成。
     entries = [_route_entry(r) for r in iter_leaf_routes(app.routes)]
-    # 根路径 SPA 静态 Mount 是条件挂载（server.py 仅在前端 dist/ 存在时挂，
-    # ADR 0012 起挂在 "/"，Starlette 把该 Mount 的 path 存成空串）——CI 不构建
-    # 前端，本地构建过；纳入 snapshot 会让结果依赖环境，按 name 排除。
     entries = [e for e in entries if not (e["type"] == "Mount" and e["name"] == "studio")]
     entries.sort(key=lambda e: (e["path"], ",".join(e["methods"]), e["name"]))
     return entries
@@ -85,37 +70,37 @@ def _format_diff(current: list[dict[str, Any]], saved: list[dict[str, Any]]) -> 
 
     lines: list[str] = []
     if added:
-        lines.append(f"新增 {len(added)} 个 route（snapshot 里没有）：")
+        lines.append(f"{len(added)} route(s) added (not in the snapshot):")
         for path, methods, type_ in sorted(added):
             lines.append(f"  + [{type_}] {methods or '-'} {path}")
     if removed:
-        lines.append(f"丢失 {len(removed)} 个 route（snapshot 里有但当前没有）：")
+        lines.append(f"{len(removed)} route(s) missing (in the snapshot but not currently present):")
         for path, methods, type_ in sorted(removed):
             lines.append(f"  - [{type_}] {methods or '-'} {path}")
     if changed:
-        lines.append(f"name 改了 {len(changed)} 个 route：")
+        lines.append(f"{len(changed)} route(s) had their name changed:")
         for (path, methods, type_), old_name, new_name in sorted(changed):
             lines.append(f"  ~ [{type_}] {methods or '-'} {path}: {old_name} → {new_name}")
     if not lines:
-        lines.append("（key 集合相同但 JSON 仍不一致 —— 可能是 snapshot 版本字段或排序变了）")
+        lines.append("(key sets match but JSON still differs -- maybe the snapshot version field or ordering changed)")
     lines.append("")
-    lines.append("如果你确实增删改了 route 且这是预期：删除 snapshot 文件后重跑生成新的，")
-    lines.append(f"然后 commit：{SNAPSHOT_PATH.relative_to(Path(__file__).parent.parent)}")
+    lines.append("if you did intentionally add/remove/change routes: delete the snapshot file and rerun to regenerate it, ")
+    lines.append(f"then commit: {SNAPSHOT_PATH.relative_to(Path(__file__).parent.parent)}")
     return "\n".join(lines)
 
 
 def test_route_snapshot() -> None:
     current = _collect_routes()
     assert len(current) > 100, (
-        f"app.routes 只有 {len(current)} 个，明显过少 —— 可能 server.py 装配出了问题"
+        f"app.routes only has {len(current)}, suspiciously few -- server.py wiring may be broken"
     )
 
     saved = _load_snapshot()
     if saved is None:
         _write_snapshot(current)
         warnings.warn(
-            f"snapshot 已创建：{SNAPSHOT_PATH} （{len(current)} 个 route）。"
-            "请将该文件 commit 进 git。",
+            f"snapshot created: {SNAPSHOT_PATH} ({len(current)} routes)."
+            "please commit this file to git.",
             stacklevel=1,
         )
         return
@@ -125,8 +110,8 @@ def test_route_snapshot() -> None:
 
     diff = _format_diff(current, saved.get("routes", []))
     pytest.fail(
-        f"studio.server.app.routes snapshot 不匹配。\n"
-        f"snapshot 路径：{SNAPSHOT_PATH}\n"
-        f"snapshot count = {saved.get('count')} / 当前 count = {len(current)}\n\n"
+        f"studio.server.app.routes snapshot mismatch.\n"
+        f"snapshot path: {SNAPSHOT_PATH}\n"
+        f"snapshot count = {saved.get('count')} / current count = {len(current)}\n\n"
         f"{diff}"
     )

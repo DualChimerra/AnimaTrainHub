@@ -1,16 +1,17 @@
-"""Train / Bundle 导出 + 跨项目导入（PR-6.5 commit 2 从 server.py 抽出）。
+"""Train / bundle export + cross-project import (extracted from server.py in PR-6.5 commit 2).
 
-6 routes：
-    GET  /api/projects/{pid}/versions/{vid}/train.zip           train/ + manifest.json 临时打包
-    GET  /api/projects/{pid}/versions/{vid}/bundle.zip          按选项临时打包 bundle（schema v2）
-    POST /api/projects/{pid}/versions/{vid}/export-bundle       打包到 data_exports/
-    POST /api/projects/import-bundle                            从 PathPicker 路径 / data_exports 导入
-    POST /api/projects/import-bundle/upload                     上传 zip 导入
-    POST /api/projects/import-train                             上传训练集 zip → 新建 project + v1
+6 routes:
+    GET  /api/projects/{pid}/versions/{vid}/train.zip           zip train/ + manifest.json on the fly
+    GET  /api/projects/{pid}/versions/{vid}/bundle.zip          zip a bundle on the fly per options (schema v2)
+    POST /api/projects/{pid}/versions/{vid}/export-bundle       zip into data_exports/
+    POST /api/projects/import-bundle                            import from a PathPicker path / data_exports
+    POST /api/projects/import-bundle/upload                     import via uploaded zip
+    POST /api/projects/import-train                             upload a training set zip -> new project + v1
 
-train.zip / bundle.zip / export-bundle 用 ZIP_STORED（PNG/jpg 已压缩再压浪费 CPU），
-打包完成 / 失败 publish version_train_zip_ready / _failed + version_bundle_zip_ready /
-_failed —— 前端 <a> 直链触发下载 + SSE 清 app-side "打包中..." 状态。
+train.zip / bundle.zip / export-bundle use ZIP_STORED (PNG/jpg are already compressed, re-compressing
+just wastes CPU). On success/failure they publish version_train_zip_ready / _failed +
+version_bundle_zip_ready / _failed -- the frontend's <a> direct link triggers the download, and the
+SSE event clears the app-side "zipping..." state.
 """
 from __future__ import annotations
 
@@ -43,14 +44,16 @@ router = APIRouter()
 def export_version_train_zip(
     pid: int, vid: int, background: BackgroundTasks,
 ) -> FileResponse:
-    """打包 version 的 train/ + manifest.json 为 zip 一次性下载。
+    """Zip the version's train/ + manifest.json for a one-off download.
 
-    实现：写到临时文件再 FileResponse；响应发完后 BackgroundTasks 清理。
-    与 outputs.zip 一致用 ZIP_STORED（PNG/jpg 已压缩，再压只是浪费 CPU）。
+    Implementation: write to a temp file, then FileResponse; BackgroundTasks cleans up after
+    the response is sent. Uses ZIP_STORED like outputs.zip (PNG/jpg are already compressed,
+    re-compressing just wastes CPU).
 
-    打包完成 / 失败 publish version_train_zip_ready / _failed —— 前端用 <a>
-    直链触发下载（浏览器原生进度条），SSE 事件用于清 app-side "打包中..." 状态
-    + 失败时弹 toast。和 outputs.zip 一套范式。
+    On success/failure, publishes version_train_zip_ready / _failed -- the frontend uses an
+    <a> direct link to trigger the download (native browser progress bar), and the SSE event
+    clears the app-side "zipping..." state + pops a toast on failure. Same pattern as
+    outputs.zip.
     """
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
@@ -114,7 +117,7 @@ def export_version_bundle(
     reg_latent_cache: bool = False,
     train_masks: bool = False,
 ) -> FileResponse:
-    """按选项临时打包 bundle.zip（schema_version 2）并交给浏览器下载。"""
+    """Zip a bundle.zip on the fly per options (schema_version 2) and hand it to the browser to download."""
     opts = train_io.BundleOptions(
         train=train,
         train_captions=train_captions,
@@ -165,7 +168,7 @@ def export_version_bundle_to_data_exports(
     vid: int,
     body: BundleOptionsBody,
 ) -> dict[str, Any]:
-    """按选项打包 bundle.zip 并保存到 data_exports/。"""
+    """Zip a bundle.zip per options and save it to data_exports/."""
     opts = body.to_options()
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
@@ -226,7 +229,7 @@ def _import_bundle_from_path(dest: Path, original: str) -> dict[str, Any]:
 
 @router.post("/api/projects/import-bundle")
 def import_bundle_zip(body: BundleImportBody) -> dict[str, Any]:
-    """从 PathPicker 路径或 data_exports 文件名导入 bundle（v1/v2 均支持）。"""
+    """Import a bundle from a PathPicker path or a data_exports filename (supports both v1/v2)."""
     if body.filename:
         return _import_bundle_from_path(_data_export_path(body.filename), body.filename)
     assert body.path is not None
@@ -240,10 +243,11 @@ def import_bundle_zip(body: BundleImportBody) -> dict[str, Any]:
 
 @router.post("/api/projects/import-bundle/upload")
 async def import_bundle_upload(file: UploadFile = File(...)) -> dict[str, Any]:
-    """上传 bundle zip → 新建 project + version。
+    """Upload a bundle zip -> create a new project + version.
 
-    `_import_bundle_from_path` 是同步 zip 解压 + manifest 校验 + 落盘，必须挪进
-    run_in_threadpool 否则卡死 event loop（详见 ingestion.upload_local_files）。
+    `_import_bundle_from_path` is a synchronous zip-extract + manifest-validate + write-to-disk
+    operation, so it must run in run_in_threadpool or it will stall the event loop (see
+    ingestion.upload_local_files for details).
     """
     if not file.filename:
         raise ValidationError(
@@ -274,10 +278,11 @@ async def import_bundle_upload(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @router.post("/api/projects/import-train")
 async def import_train_zip(file: UploadFile = File(...)) -> dict[str, Any]:
-    """上传训练集 zip → 新建 project + v1（stage=tagging），返回新项目。
+    """Upload a training set zip -> create a new project + v1 (stage=tagging), return the new project.
 
-    train_io.import_train() 是同步 zip 解压 + 写 db + 落图，挪进 run_in_threadpool
-    （详见 ingestion.upload_local_files 的根因说明）。
+    train_io.import_train() is a synchronous zip-extract + db-write + image-write operation,
+    so it runs in run_in_threadpool (see ingestion.upload_local_files for the root-cause
+    explanation).
     """
     if not file.filename:
         raise ValidationError(
@@ -285,7 +290,7 @@ async def import_train_zip(file: UploadFile = File(...)) -> dict[str, Any]:
         )
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     try:
-        # UploadFile 内部本就是 SpooledTemporaryFile，大文件会落临时盘
+        # UploadFile is already a SpooledTemporaryFile internally; large files spill to a temp disk file
         while True:
             chunk = await file.read(1024 * 1024)
             if not chunk:

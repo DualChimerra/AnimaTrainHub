@@ -1,8 +1,8 @@
-"""ONNX 本地 tagger 共享基础设施。
+"""Shared infrastructure for local ONNX taggers.
 
-WD14 和 CLTagger 都走本地 onnxruntime 的同一套 batch / CUDA fallback /
-preprocess 线程池逻辑；差异在模型文件结构、tag 元数据格式、preprocess 流程、
-postprocess 阈值规则。基类封住共性，子类填具体。
+WD14 and CLTagger both go through the same local-onnxruntime batch / CUDA fallback /
+preprocess thread-pool logic; the differences are in model file layout, tag metadata format, the preprocess flow,
+and postprocess threshold rules. The base class seals off what's shared; subclasses fill in the specifics.
 """
 from __future__ import annotations
 
@@ -26,12 +26,12 @@ logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def silenced_fd_stderr():
-    """临时把 fd 2 重定向到 devnull，吞掉 C++ 库直写到 fd 2 的输出。
+    """Temporarily redirects fd 2 to devnull, swallowing output that C++ libraries write directly to fd 2.
 
-    onnxruntime 在 CUDA dlopen 失败（缺 cublasLt64_12.dll / libcurand 等）时，
-    会把彩色 ANSI + Windows 下额外的 NUL 字节直接吐到 fd 2，绕过 Python
-    sys.stderr —— 我们已经接住 InferenceSession 的 Python 异常并回填到
-    Settings UI 的 cuda_load_error，这些原始字节只会污染 worker 日志。
+    When onnxruntime's CUDA dlopen fails (missing cublasLt64_12.dll / libcurand etc.), it
+    dumps colored ANSI (plus extra NUL bytes on Windows) straight to fd 2, bypassing Python's
+    sys.stderr -- we've already caught InferenceSession's Python exception and surfaced it into
+    the Settings UI's cuda_load_error, so these raw bytes would only pollute the worker log.
     """
     try:
         sys.stderr.flush()
@@ -49,15 +49,15 @@ def silenced_fd_stderr():
 
 
 class OnnxTaggerBase:
-    """ONNX 本地 tagger 共享逻辑（CUDA fallback / batch 决议 / preprocess 线程池）。
+    """Shared logic for local ONNX taggers (CUDA fallback / batch decision / preprocess thread pool).
 
-    子类需要实现：
-    - `prepare()`：解析模型文件 → 调 `_create_session(model_path)` → 装 metadata
-    - `_preprocess(img) -> ndarray`：单张图预处理
-    - `_postprocess_one(logits) -> (tags, raw_scores)`：单张后处理
-    - `_get_batch_size_cfg() -> int`：从 secrets 读 batch_size
+    Subclasses need to implement:
+    - `prepare()`: parses the model file -> calls `_create_session(model_path)` -> loads metadata
+    - `_preprocess(img) -> ndarray`: preprocesses a single image
+    - `_postprocess_one(logits) -> (tags, raw_scores)`: postprocesses a single result
+    - `_get_batch_size_cfg() -> int`: reads batch_size from secrets
 
-    子类必须设 `name`，用于日志 / 线程命名。
+    Subclasses must set `name`, used for logging / thread naming.
     """
     name: str = "onnx_base"
     requires_service = False
@@ -66,11 +66,11 @@ class OnnxTaggerBase:
         self._session = None
         self._input_name: Optional[str] = None
         self._output_names: Optional[list[str]] = None
-        # 推理期 CUDA 失败 → _fallback_to_cpu_session() 用它重建 CPU session。
-        # session 创建成功后由 _create_session 设上。
+        # Set by _fallback_to_cpu_session() and rebuilt on it when CUDA fails during inference.
+        # Set by _create_session once the session is created successfully.
         self._model_path: Optional[Path] = None
 
-    # -------------------- 子类实现 --------------------
+    # -------------------- subclass implementation --------------------
 
     def prepare(self) -> None:
         raise NotImplementedError
@@ -86,18 +86,18 @@ class OnnxTaggerBase:
     def _get_batch_size_cfg(self) -> int:
         raise NotImplementedError
 
-    # -------------------- session 创建（含 GPU EP fallback） --------------------
+    # -------------------- session creation (including GPU EP fallback) --------------------
 
     def _create_session(self, model_path: Path) -> None:
-        """创建 onnxruntime InferenceSession，GPU EP 失败自动降 CPU。
+        """Creates the onnxruntime InferenceSession, auto-falling back to CPU if the GPU EP fails.
 
-        GPU EP 选择优先级：CUDA > DirectML > CPU。装了 onnxruntime-gpu 用 CUDA，
-        装了 onnxruntime-directml 用 DirectML（Windows + DX12 后端，跨厂商），
-        CPU 包用 CPU。
+        GPU EP selection priority: CUDA > DirectML > CPU. If onnxruntime-gpu is installed, uses CUDA;
+        if onnxruntime-directml is installed, uses DirectML (Windows + DX12 backend, vendor-agnostic);
+        the CPU package uses CPU.
 
-        副作用：设 `_session` / `_input_name` / `_output_names` / `_model_path`，
-        并 stash CUDA 错给 Settings UI（成功路径同时清掉旧错记录）。DirectML
-        静默降级仅打日志，UI 不专项展示（DX12 兼容性问题极少）。
+        Side effects: sets `_session` / `_input_name` / `_output_names` / `_model_path`,
+        and stashes any CUDA error for the Settings UI (a successful path also clears the old error record). A silent
+        DirectML downgrade is only logged, without dedicated UI display (DX12 compat issues are extremely rare).
         """
         self._model_path = model_path
         try:
@@ -115,10 +115,10 @@ class OnnxTaggerBase:
             gpu_ep = "DmlExecutionProvider"
         providers = [gpu_ep, "CPUExecutionProvider"] if gpu_ep else ["CPUExecutionProvider"]
 
-        # PP9.5 — CUDA EP `get_available_providers()` 报可用 ≠ 真能 dlopen。
-        # 缺系统 CUDA runtime 时挂在 InferenceSession 创建。fd-level stderr 静默
-        # 吞掉 C 层污染日志，Python 异常已经能完整拿到原因；DirectML 错误诊断少，
-        # 不静默；CPU fallback 不静默。
+        # PP9.5 -- the CUDA EP's `get_available_providers()` reporting available doesn't mean it can actually dlopen.
+        # When the system CUDA runtime is missing, this hangs during InferenceSession creation. fd-level stderr silently
+        # swallows the polluting C-layer log; the Python exception already has the full reason. DirectML has fewer diagnostics,
+        # so it's not silenced; the CPU fallback isn't silenced either.
         silence_stderr = gpu_ep == "CUDAExecutionProvider"
         ctx = silenced_fd_stderr() if silence_stderr else contextlib.nullcontext()
         try:
@@ -131,7 +131,7 @@ class OnnxTaggerBase:
                 raise
             err = str(exc)
             logger.warning(
-                "%s %s session 创建失败，降级 CPU 重试: %s", self.name, gpu_ep, err
+                "%s %s session creation failed, retrying with a CPU downgrade: %s", self.name, gpu_ep, err
             )
             if gpu_ep == "CUDAExecutionProvider":
                 onnxruntime_setup.record_cuda_load_error(err)
@@ -139,16 +139,16 @@ class OnnxTaggerBase:
                 str(model_path), providers=["CPUExecutionProvider"]
             )
         else:
-            # onnxruntime 在 GPU EP dlopen 失败时**不抛异常** —— 内部 silently
-            # fallback 到下一个 EP（CPU）。光看 try/except 不够，必须比对实际
-            # session.get_providers()；不一致 → 用户实际跑 CPU，但 UI 看不到。
+            # onnxruntime does **not** raise an exception when a GPU EP fails to dlopen -- internally it silently
+            # falls back to the next EP (CPU). A try/except alone isn't enough; you have to compare against the actual
+            # session.get_providers() -- if it differs, the user is actually running on CPU but the UI can't see it.
             if gpu_ep:
                 actual = list(self._session.get_providers())
                 if gpu_ep not in actual:
                     msg = (
-                        f"{gpu_ep} 静默降级到 CPU（InferenceSession 未抛异常，"
-                        f"但 get_providers={actual}）。常见原因：驱动版本不够 / "
-                        f"runtime so/DLL 缺失 / cuDNN ABI 错位 / DX12 不支持。"
+                        f"{gpu_ep} silently downgraded to CPU (InferenceSession raised no exception, "
+                        f"but get_providers={{actual}}). Common causes: driver version too old / "
+                        f"missing runtime .so/.dll / cuDNN ABI mismatch / DX12 unsupported."
                     )
                     logger.warning("%s %s", self.name, msg)
                     if gpu_ep == "CUDAExecutionProvider":
@@ -160,12 +160,12 @@ class OnnxTaggerBase:
         self._output_names = [o.name for o in self._session.get_outputs()]
 
     def _fallback_to_cpu_session(self) -> bool:
-        """CUDA 推理失败后降 CPU 重建 session；成功返回 True。
+        """Falls back to CPU and rebuilds the session after a CUDA inference failure; returns True on success.
 
-        与 `_create_session` 的差别：那里是 session 创建期挂（dlopen 失败），
-        这里是创建后推理期挂（典型 cuBLAS / cuDNN ABI 错位 → CUBLAS_STATUS_*）。
-        重建后 `_session.get_providers()` 只剩 CPU，`_effective_batch_size`
-        会自动把 batch_n 降到 1，后续批次不再走 CUDA。
+        Difference from `_create_session`: that one hangs during session creation (dlopen failure);
+        this one hangs during inference after creation (typically a cuBLAS / cuDNN ABI mismatch -> CUBLAS_STATUS_*).
+        After rebuilding, `_session.get_providers()` only has CPU left, and `_effective_batch_size`
+        automatically drops batch_n to 1, so later batches no longer go through CUDA.
         """
         if self._model_path is None:
             return False
@@ -175,7 +175,7 @@ class OnnxTaggerBase:
             return False
         try:
             logger.warning(
-                "%s CUDA 推理失败，降级 CPU InferenceSession（后续批次同样走 CPU）",
+                "%s CUDA inference failed, downgrading to a CPU InferenceSession (later batches also go through CPU)",
                 self.name,
             )
             self._session = ort.InferenceSession(
@@ -184,20 +184,20 @@ class OnnxTaggerBase:
             self._input_name = self._session.get_inputs()[0].name
             self._output_names = [o.name for o in self._session.get_outputs()]
             onnxruntime_setup.record_cuda_load_error(
-                "CUDA 推理时发生 cuBLAS / CUDA 错误，已自动降级 CPU 运行"
+                "A cuBLAS / CUDA error occurred during CUDA inference; automatically downgraded to running on CPU"
             )
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.error("%s CPU session 降级失败: %s", self.name, exc)
+            logger.error("%s CPU session downgrade failed: %s", self.name, exc)
             return False
 
     @staticmethod
     def _is_cuda_inference_error(exc: BaseException) -> bool:
-        """判断推理异常是否是 CUDA 相关 → 触发 CPU fallback 重试一次。
+        """Determines whether an inference exception is CUDA-related -> triggers one CPU-fallback retry.
 
-        典型关键词：CUBLAS_STATUS_*、CUDNN_STATUS_*、CUDAExecutionProvider 报名。
-        OOM 单独识别（"out of memory" / "OOM"），降 CPU 后多半也跑不动但至少给
-        用户清晰错误而非黑盒崩。
+        Typical keywords: CUBLAS_STATUS_*, CUDNN_STATUS_*, the CUDAExecutionProvider name.
+        OOM is identified separately ("out of memory" / "OOM"); after downgrading to CPU it usually still can't run, but at least gives
+        the user a clear error instead of an opaque crash.
         """
         msg = str(exc)
         keywords = ("CUBLAS", "CUDNN", "CUDAExecutionProvider", "out of memory", "OOM")
@@ -216,10 +216,10 @@ class OnnxTaggerBase:
     def _preprocess_one_safe(
         self, indexed: tuple[int, Path]
     ) -> tuple[int, Optional[np.ndarray], Optional[str]]:
-        """`(j, path) → (j, arr_or_None, err_or_None)`，给 ThreadPool 用。
+        """`(j, path) -> (j, arr_or_None, err_or_None)`, for use with ThreadPool.
 
-        PIL.Image.open / resize / paste 在 C 层释放 GIL —— 多线程能真正并行，
-        在弱单核 + 强 GPU（云上 EPYC + RTX 5090）上把 preprocess 从瓶颈解开。
+        PIL.Image.open / resize / paste release the GIL at the C layer -- multithreading can genuinely run in parallel,
+        unblocking preprocess from being the bottleneck on a weak-single-core-but-strong-GPU setup (e.g. an EPYC + RTX 5090 in the cloud).
         """
         j, p = indexed
         try:
@@ -242,8 +242,8 @@ class OnnxTaggerBase:
         done = 0
         i = 0
 
-        # batch > 1 才开池：CPU EP 路径 batch_n 已强制 1，pool=None 走单线程
-        # 兼容路径，零回归。
+        # The pool is only opened when batch > 1: the CPU EP path already forces batch_n to 1, so pool=None goes through the single-threaded
+        # compat path with zero regression.
         pool: Optional[ThreadPoolExecutor] = None
         if batch_n > 1:
             pool = ThreadPoolExecutor(
@@ -298,7 +298,7 @@ class OnnxTaggerBase:
                         self._output_names, {self._input_name: batch}
                     )[0]
                 except Exception as exc:  # noqa: BLE001
-                    # CUDA 推理失败（cuBLAS / cuDNN / OOM）→ 降 CPU session 重试一次
+                    # CUDA inference failed (cuBLAS / cuDNN / OOM) -> retry once after downgrading to a CPU session
                     if self._is_cuda_inference_error(exc) and self._fallback_to_cpu_session():
                         try:
                             logits_batch = self._session.run(

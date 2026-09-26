@@ -1,8 +1,3 @@
-"""R-5 — /api/queue 档位视图（resource_class）：数据视图 / GPU 视图同源过滤。
-
-（本文件原是 P-G 的 GET /api/jobs 测试；R-5 删掉该端点后改测 /api/queue 的
-resource_class 参数与默认排除。）
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -51,7 +46,6 @@ def _make_project(client: TestClient, title: str = "P") -> int:
 
 
 def test_data_class_returns_light_and_io_only(client: TestClient) -> None:
-    """数据视图 = light+io 档；eval_samples（exclusive）不在其中。"""
     pid = _make_project(client)
     tag = _seed_job(pid, "tag", "running")
     dl = _seed_job(pid, "download", "pending")
@@ -63,7 +57,6 @@ def test_data_class_returns_light_and_io_only(client: TestClient) -> None:
 
 
 def test_exclusive_class_includes_eval_samples(client: TestClient) -> None:
-    """GPU 视图 = exclusive 档：train/reg_ai/generate + eval_samples（锚点 §4-2）。"""
     pid = _make_project(client)
     ev = _seed_job(pid, "eval_samples", "pending")
     tr = _seed_train("t", "running")
@@ -76,7 +69,6 @@ def test_exclusive_class_includes_eval_samples(client: TestClient) -> None:
 
 
 def test_default_group_excludes_job_kinds(client: TestClient) -> None:
-    """不带 resource_class/types：默认仍排除数据作业（旧调用方兼容）。"""
     pid = _make_project(client)
     _seed_job(pid, "tag", "pending")
     tr = _seed_train("t", "pending")
@@ -105,7 +97,6 @@ def test_types_filter_takes_precedence_over_class(client: TestClient) -> None:
 
 
 def test_q_searches_project_title_and_slug(client: TestClient) -> None:
-    """q 命中所属项目 title/slug（数据作业 name=kind 无搜索价值）。"""
     pid_a = _make_project(client, title="usashiro")
     pid_b = _make_project(client, title="other")
     a = _seed_job(pid_a, "tag", "running")

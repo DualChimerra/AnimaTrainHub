@@ -6,11 +6,11 @@ import { useTagSuggest } from '../../../components/tagSuggest/useTagSuggest'
 import { useAutoGrowTextarea } from '../../../lib/useAutoGrowTextarea'
 import { useTokenCount } from '../../../lib/useTokenCount'
 
-/** 负向提示词输入：接 tag autocomplete，跟 PromptList 同 UX。 */
+/** Negative prompt input: wired to tag autocomplete, same UX as PromptList. */
 export default function NegPromptInput({ value, onChange, modelFamily = 'anima' }: {
   value: string
   onChange: (v: string) => void
-  /** token 计数用的族（选对应 tokenizer）；不传默认 anima。 */
+  /** Family used for token counting (picks the matching tokenizer); defaults to anima when omitted. */
   modelFamily?: string
 }) {
   const { t } = useTranslation()

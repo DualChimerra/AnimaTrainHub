@@ -1,8 +1,3 @@
-"""JoyCaption backward-compat wrapper over LLM tagger preset.
-
-JoyCaption 已合并到 LLM tagger 的 builtin preset；wrapper 仅为 `get_tagger("joycaption")`
-旧调用方兜底。下面测试核对 wrapper 强制切到 joycaption preset 后调 LLMTagger 的行为。
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,7 +13,6 @@ from studio.services.tagging import joycaption as joycaption_tagger, llm as llm_
 @pytest.fixture
 def isolated_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(secrets, "SECRETS_FILE", tmp_path / "secrets.json")
-    # 改写 joycaption preset 的 endpoint+生成参数
     secrets.update(
         {
             "llm_tagger": {
@@ -92,20 +86,17 @@ def test_tag_emits_natural_caption(isolated_secrets, tmp_path: Path) -> None:
     t = joycaption_tagger.JoyCaptionTagger(session=sess)
     img = _png(tmp_path / "1.png")
     [r] = list(t.tag([img]))
-    # joycaption preset 默认 output_format=text → 整段返回直接是 caption
     assert r["tags"] == ["a sunny day"]
     args, kwargs = sess.post.call_args
     assert args[0] == "http://x/v1/chat/completions"
     body = kwargs["json"]
     assert body["model"] == "m"
     assert body["messages"][0]["content"] == "hi"
-    # messages[1] 是 image item，铺开成 user/[image_url]
     user_content = body["messages"][1]["content"]
     assert user_content[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
 
 def test_tag_retries_then_fails(isolated_secrets, tmp_path: Path, monkeypatch) -> None:
-    """所有重试都失败 → 单图返回 error，但循环继续。"""
     secrets.update(
         {
             "llm_tagger": {

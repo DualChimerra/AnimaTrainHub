@@ -1,7 +1,3 @@
-"""Krea2 fp8 底模 LoRA merge（ComfyUI merge 语义逐位复刻）。
-
-CPU 上验证公式与生命周期；CUDA generator 的 RNG 序列 parity 属真卡验收。
-"""
 
 from __future__ import annotations
 
@@ -25,7 +21,6 @@ E4M3 = torch.float8_e4m3fn
 
 
 def _comfy_string_to_seed(data: str) -> int:
-    """comfy.utils.string_to_seed 手写参考实现（对拍 zlib 等价性）。"""
     crc = 0xFFFFFFFF
     for byte in data:
         crc ^= ord(byte)
@@ -46,7 +41,7 @@ def test_string_to_seed_matches_comfy_reference():
 
 def test_string_to_seed_rejects_non_ascii():
     with pytest.raises(ValueError, match="ASCII"):
-        string_to_seed("层名")
+        string_to_seed("имя")
 
 
 # ---------------------------------------------------------------------------
@@ -67,10 +62,9 @@ def test_stochastic_round_zero_clamp_and_error_bound():
     value = torch.tensor([0.0, 448.0, 500.0, -500.0, 1.0, -3.14], dtype=torch.float16)
     out = stochastic_round_to_fp8(value, E4M3, seed=7).to(torch.float32)
     assert out[0].item() == 0.0
-    assert out[1].item() == 448.0     # e4m3 max 保持
-    assert out[2].item() == 448.0     # 超界 clamp
+    assert out[1].item() == 448.0
+    assert out[2].item() == 448.0
     assert out[3].item() == -448.0
-    # normal 域随机舍入误差 ≤ 一个 mantissa 步长（相对 2^-3）
     ref = value[4:].to(torch.float32)
     got = out[4:]
     assert torch.all((got - ref).abs() / ref.abs() <= 2 ** -3 + 1e-3)
@@ -81,21 +75,17 @@ def test_requantize_scaled_recalculates_amax_over_448():
     qdata, scale = _requantize_scaled(w16.clone(), E4M3, seed=99)
     assert scale.dtype == torch.float32
     assert scale.item() == pytest.approx(8.0 / 448.0, rel=1e-6)
-    # 归一后逐元素 |x| ≤ 448，dequant 回来近似原值
     back = qdata.to(torch.float32) * scale
     assert torch.all((back - w16.float()).abs() / w16.float().abs().clamp(min=1e-6) <= 0.13)
 
 
 def test_requantize_scaled_fp16_underflow_clamp():
-    # amax 极小 → 1/scale 超出 fp16 max → comfy 防下溢 clamp 生效
     w16 = torch.full((2, 2), 1e-7, dtype=torch.float16)
     _, scale = _requantize_scaled(w16.clone(), E4M3, seed=1)
-    # clamp 后 1/scale 顶在 fp16 max → scale 精确落在 1/65504（float32 域）
     assert scale.item() == pytest.approx(1.0 / torch.finfo(torch.float16).max, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
-# merge 端到端（scaled fp8 + 纯 cast fp8 + 非量化 bf16 三形态）
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +154,6 @@ def test_merge_three_layer_forms_and_detach_restores():
     assert adapter.network is None
     assert adapter.supports_hot_reload is False
 
-    # scaled 层：recalculate scale + 同 seed SR 重放逐位一致
     w16_q = _expected_w16_from(orig["q"], orig["q_scale"], grouped["blocks.0.q"], 0.8)
     qdata_ref, scale_ref = _requantize_scaled(
         w16_q.clone(), E4M3, string_to_seed("diffusion_model.blocks.0.q.weight"),
@@ -172,26 +161,20 @@ def test_merge_three_layer_forms_and_detach_restores():
     assert torch.equal(block.q.weight.view(torch.uint8), qdata_ref.view(torch.uint8))
     assert torch.equal(block.q.weight_scale, scale_ref)
 
-    # 纯 cast 层：无 scale 重算，直接 SR
     w16_k = _expected_w16_from(orig["k"], None, grouped["blocks.0.k"], 0.8)
     k_ref = stochastic_round_to_fp8(
         w16_k, E4M3, string_to_seed("diffusion_model.blocks.0.k.weight"),
     )
     assert torch.equal(block.k.weight.view(torch.uint8), k_ref.view(torch.uint8))
 
-    # 非量化层：cast 回 bf16，无 SR
     w16_m = _expected_w16_from(orig["m"], None, grouped["blocks.0.m"], 0.8)
     assert torch.equal(block.m.weight.detach(), w16_m.to(torch.bfloat16))
 
-    # detach 逐位还原三层 + scale
     assert adapter.detach() is True
     assert torch.equal(block.q.weight.view(torch.uint8), orig["q"].view(torch.uint8))
     assert torch.equal(block.k.weight.view(torch.uint8), orig["k"].view(torch.uint8))
     assert torch.equal(block.m.weight.detach(), orig["m"])
     assert torch.equal(block.q.weight_scale, orig["q_scale"])
-    # 还原完成后句柄不能再钉着模型：它还被 _run_generate / _run_xy 的局部
-    # adapters 变量持着，不置空则换 LoRA 重载期间旧模型整份留在显存里
-    # （XY 逐格换 LoRA 时最多三份模型同驻，上游 #499）
     assert adapter._model is None
 
 
@@ -255,7 +238,7 @@ def test_merge_lokr_matches_comfy_kron_order():
 
     w2 = torch.mm(w2_a.float(), w2_b.float())
     diff = torch.kron(w1.float(), w2).reshape(4, 4)
-    alpha = 2.0 / w2_b.shape[0]  # dim = w2_b.shape[0]（comfy lokr.py 覆盖语义）
+    alpha = 2.0 / w2_b.shape[0]
     expected = (orig_m.to(torch.float16) + ((1.0 * alpha) * diff).type(torch.float16))
     assert torch.equal(block.m.weight.detach(), expected.to(torch.bfloat16))
 
@@ -281,7 +264,7 @@ def test_merge_loha_matches_comfy_hadamard():
 
     diff = (torch.mm(w1a.float(), w1b.float())
             * torch.mm(w2a.float(), w2b.float())).reshape(4, 4)
-    alpha = 2.0 / w1b.shape[0]  # divisor = w1_b 的 rank 维（comfy loha.py）
+    alpha = 2.0 / w1b.shape[0]
     expected = orig_m.to(torch.float16) + ((0.5 * alpha) * diff).type(torch.float16)
     assert torch.equal(block.m.weight.detach(), expected.to(torch.bfloat16))
 
@@ -339,16 +322,15 @@ def test_merge_rejects_dora_t2_unknown_and_all_miss():
         merge_loras_into_fp8_model(model, [(t2, 1.0, "t")])
 
     unknown = {"lora_unet_blocks_0_q.mystery": torch.randn(2)}
-    with pytest.raises(ValueError, match="无法识别"):
+    with pytest.raises(ValueError, match="could not recognize"):
         merge_loras_into_fp8_model(model, [(unknown, 1.0, "u")])
 
     all_miss = _plain_lora_sd(["no.such.layer"])
-    with pytest.raises(ValueError, match="无法对应"):
+    with pytest.raises(ValueError, match="did not match|None of the"):
         merge_loras_into_fp8_model(model, [(all_miss, 1.0, "m")])
 
 
 # ---------------------------------------------------------------------------
-# apply_loras 集成（fp8 检测 → merge 路径）
 # ---------------------------------------------------------------------------
 
 
@@ -402,8 +384,6 @@ def test_apply_loras_fp8_rejects_dora_meta(tmp_path):
 
 
 def test_apply_loras_fp8_accepts_rs_lora_meta(tmp_path):
-    """rs_lora 产物不再拒绝：lycoris 保存时已把 √rank 校正烘进 per-layer
-    alpha 键，merge 的标准 alpha/dim 公式数值自动正确。"""
     from studio.services.inference.core import LoRASpec, apply_loras
 
     model = _make_fp8_model()
@@ -423,7 +403,6 @@ def test_apply_loras_fp8_accepts_rs_lora_meta(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 外部生态文件（civitai / PEFT / comfy 键格式，无 ss_* metadata）
 # ---------------------------------------------------------------------------
 
 
@@ -441,7 +420,6 @@ def _peft_lora_sd(layers: list[str], rank: int = 2, seed: int = 9,
 
 
 def test_merge_accepts_peft_comfy_key_format_no_alpha_means_scale_one():
-    """civitai 形态：diffusion_model.{层}.lora_A/B、无 alpha → comfy 缩放 1.0。"""
     model = _make_fp8_model()
     block = model.blocks[0]
     orig_m = block.m.weight.detach().clone()
@@ -451,7 +429,6 @@ def test_merge_accepts_peft_comfy_key_format_no_alpha_means_scale_one():
 
     down = sd["diffusion_model.blocks.0.m.lora_A.weight"].float()
     up = sd["diffusion_model.blocks.0.m.lora_B.weight"].float()
-    # 无 alpha 键 → alpha 系数 1.0（非 alpha/rank）
     expected = orig_m.to(torch.float16) + ((0.5 * 1.0) * torch.mm(up, down)).type(torch.float16)
     assert torch.equal(block.m.weight.detach(), expected.to(torch.bfloat16))
 
@@ -474,7 +451,7 @@ def test_merge_peft_with_alpha_key_uses_alpha_over_rank():
 def test_merge_rejects_unknown_comfy_suffix():
     model = _make_fp8_model()
     sd = {"diffusion_model.blocks.0.m.mystery.weight": torch.randn(2)}
-    with pytest.raises(ValueError, match="后缀"):
+    with pytest.raises(ValueError, match="suffix"):
         merge_loras_into_fp8_model(model, [(sd, 1.0, "u")])
 
 
@@ -497,15 +474,13 @@ def test_read_lora_meta_family_explicit_semantics(tmp_path):
 
 
 def test_apply_loras_untagged_peft_file_routes_to_merge(tmp_path):
-    """用户场景复现：civitai krea2 LoRA（PEFT 键、零 metadata）挂 fp8 krea2
-    底模——不再被 grandfather 判成 anima 拒绝，直接走 merge。"""
     from safetensors.torch import save_file
 
     from studio.services.inference.core import LoRASpec, apply_loras
 
     model = _make_fp8_model()
     path = tmp_path / "civit_krea2.safetensors"
-    save_file(_peft_lora_sd(["blocks.0.q"]), str(path))  # 无任何 metadata
+    save_file(_peft_lora_sd(["blocks.0.q"]), str(path))
     before = model.blocks[0].q.weight.detach().view(torch.uint8).clone()
 
     adapters = apply_loras(
@@ -518,7 +493,6 @@ def test_apply_loras_untagged_peft_file_routes_to_merge(tmp_path):
 
 
 def test_apply_loras_untagged_alien_keys_fail_fast(tmp_path):
-    """无标记 + 键全对不上（真异族/坏文件）→ merge 全 miss 报错，不静默。"""
     from safetensors.torch import save_file
 
     from studio.services.inference.core import LoRASpec, apply_loras
@@ -527,7 +501,7 @@ def test_apply_loras_untagged_alien_keys_fail_fast(tmp_path):
     path = tmp_path / "alien.safetensors"
     save_file(_plain_lora_sd(["no.such.layer"]), str(path))
 
-    with pytest.raises(ValueError, match="无法对应"):
+    with pytest.raises(ValueError, match="did not match|None of the"):
         apply_loras(
             model, [LoRASpec(path=str(path), scale=1.0)], "cpu", torch.float32,
             family_id="krea2",

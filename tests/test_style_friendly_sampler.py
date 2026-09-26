@@ -1,9 +1,3 @@
-"""Style-Friendly SNR Sampler（arXiv 2411.14793）：分布契约与接线。
-
-风格在高噪声档成形，细节在低噪声档成形。本模式直接在 log-SNR 轴按
-λ~N(mean, σ²) 采样、经 t=sigmoid(-λ/2) 映射回本仓库的 rectified flow 约定
-（t=0 数据端 / t=1 噪声端），把训练火力压在风格档。
-"""
 from __future__ import annotations
 
 import math
@@ -22,7 +16,6 @@ def _sigmoid(x: float) -> float:
 
 
 def test_maps_log_snr_to_flow_matching_t():
-    """σ→0 时 t 收敛到 sigmoid(-mean/2)：约定映射本身钉死。"""
     for mean in (-6.0, -3.0, 0.0, 2.0):
         t = sample_t_style_friendly(64, "cpu", mean=mean, sigma=1e-4)
         expected = _sigmoid(-mean / 2)
@@ -30,17 +23,14 @@ def test_maps_log_snr_to_flow_matching_t():
 
 
 def test_paper_default_sits_in_the_style_window():
-    """论文 FLUX/SD3.5 配方 mean=-6：中位 t≈0.95，绝大多数样本在高噪声端。"""
     torch.manual_seed(0)
     t = sample_t_style_friendly(20000, "cpu", mean=-6.0, sigma=2.0)
     median = float(t.median())
     assert 0.93 <= median <= 0.97, median
-    # 与当前默认 logit_normal+shift=3（中位 ≈0.75）相比明显更靠噪声端
     assert float((t > 0.75).float().mean()) > 0.85
 
 
 def test_mean_is_monotone_in_noise_level():
-    """mean 越小越偏噪声端——这是用户唯一需要理解的方向。"""
     torch.manual_seed(0)
     medians = [
         float(sample_t_style_friendly(8000, "cpu", mean=m, sigma=2.0).median())
@@ -63,7 +53,6 @@ def test_stays_in_open_interval():
 
 
 def test_sample_t_dispatches_and_ignores_timestep_shift():
-    """走 sample_t 时 shift 不参与——偏移完全由 mean 给定（schema 也隐藏该字段）。"""
     outs = []
     for shift in (0.5, 3.0, 9.0):
         torch.manual_seed(42)
@@ -76,7 +65,6 @@ def test_sample_t_dispatches_and_ignores_timestep_shift():
 
 
 def test_schedule_shift_still_composes():
-    """timestep_schedule_shift 是独立的全局旋钮，仍然叠加（1.0 = 恒等）。"""
     torch.manual_seed(7)
     plain = sample_t(512, "cpu", mode="style_friendly", timestep_schedule_shift=1.0)
     torch.manual_seed(7)
@@ -105,7 +93,6 @@ def test_registry_builds_baseline_with_style_params():
 
 
 def test_zero_mean_is_not_swallowed_by_falsy_default():
-    """mean=0.0 是合法值（中位 t=0.5），不能被 `or default` 吞成 -6。"""
     args = SimpleNamespace(
         timestep_sampling="style_friendly",
         style_snr_mean=0.0,
@@ -127,7 +114,6 @@ def test_schema_exposes_mode_and_window_fields():
     assert cfg.style_snr_mean == -6.0
     assert cfg.style_snr_sigma == 2.0
 
-    # timestep_shift 在本模式下对用户隐藏（两个偏移叠加 = 双重偏移）
     extra = TrainingConfig.model_fields["timestep_shift"].json_schema_extra
     assert "timestep_sampling!=style_friendly" in extra["show_when"]
     for name in ("style_snr_mean", "style_snr_sigma"):
@@ -136,15 +122,6 @@ def test_schema_exposes_mode_and_window_fields():
 
 
 def test_is_a_strict_generalisation_of_logit_normal_shift():
-    """现默认 `logit_normal + shift s` 恰是本模式的 (mean=-2·ln s, sigma=2) 特例。
-
-    推导：u=sigmoid(z), z~N(0,1)；Möbius shift 在 log-odds 上是平移
-    logit(t)=z+ln s；而 λ=2·ln((1-t)/t)=-2·logit(t) → λ~N(-2·ln s, 2²)。
-
-    所以本模式不是"另一个分布"，而是把同一族的均值从隐式的 -2·ln s 变成显式可调：
-    shift=3 ⇒ mean≈-2.20，而论文风格档配方是 -6 —— 差了近 4 个 log-SNR 单位，
-    这正是"默认配置离风格档有多远"的量化答案。
-    """
     for shift in (2.0, 2.5, 3.0, 4.0):
         torch.manual_seed(0)
         legacy = sample_t(100000, "cpu", mode="logit_normal", shift=shift)

@@ -1,10 +1,10 @@
-"""预设文件 I/O —— 用 pydantic 验证、用 PyYAML 落盘。
+"""Preset file I/O -- validated with pydantic, persisted with PyYAML.
 
-存储位置：`studio_data/presets/{name}.yaml`
-名字白名单：`[A-Za-z0-9_-]+`，防止路径穿越和 Windows 非法字符。
+Storage location: `studio_data/presets/{name}.yaml`
+Name whitelist: `[A-Za-z0-9_-]+`, to prevent path traversal and illegal Windows characters.
 
-历史：PP0 之前叫 configs_io / studio_data/configs/。`configs_io` 现在是
-本模块的薄壳。
+History: before PP0 this was called configs_io / studio_data/configs/. `configs_io` is now
+a thin shell over this module.
 """
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ from ...schema import TrainingConfig
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# 全局模型路径字段。yaml 写盘 + UI 显示一律绝对路径；读老 yaml 时若是相对
-# 路径，由 _absolutize_model_paths 兜底转绝对（忠于历史 CWD=REPO_ROOT 的解析
-# 语义），下游可以无脑假定 4 字段是绝对路径。
+# Global model path fields. Always absolute paths when writing to yaml + showing in the UI; when reading an old yaml with a
+# relative path, _absolutize_model_paths falls back to converting it to absolute (faithful to the historical CWD=REPO_ROOT resolution
+# semantics), so downstream code can safely assume these 4 fields are absolute paths.
 _MODEL_PATH_FIELDS = (
     "transformer_path",
     "vae_path",
@@ -38,11 +38,11 @@ from studio.domain.errors import DomainError
 
 
 class PresetError(DomainError):
-    """预设 I/O 错误。
+    """Preset I/O error.
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
-    现有 raise PresetError("xxx") 形态不变；http_status / code 由 router 或
-    C4/C5 精细化时按情况覆盖（now 用 default = 400 / preset.error）。
+    PR-2 C3 added a DomainError base -- the handler auto-translates it into the dual-write envelope.
+    The existing raise PresetError("xxx") form is unchanged; http_status / code are overridden case by case by the
+    router or when C4/C5 refine things (currently uses default = 400 / preset.error).
     """
     default_code = "preset.error"
 
@@ -51,18 +51,18 @@ _WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def _absolutize_model_paths(data: dict[str, Any]) -> dict[str, Any]:
-    """规范化 4 个模型字段：相对路径 → REPO_ROOT 绝对；分隔符统一 POSIX `/`。
+    """Normalizes the 4 model path fields: relative path -> absolute under REPO_ROOT; separators unified to POSIX `/`.
 
-    - 老 yaml 里相对路径（schema fallback）→ 转为基于 REPO_ROOT 的绝对路径
-      （忠于历史 supervisor cwd=REPO_ROOT 的解析语义）
-    - Windows 上 `str(Path)` 给反斜杠（`G:\\foo`），PathPicker 给 POSIX
-      （`G:/foo`），混存会让同一字段在不同来源下视觉不一致；统一 `as_posix()`
-      让 yaml 落盘 + UI 显示一律 `/`
-    - 跨平台 bundle import：Windows 盘符路径（`G:/...`）在 POSIX 上
-      `Path.is_absolute()` 返 False，会被误当相对路径拼到 REPO_ROOT 下变成
-      `<repo>/G:/...`。这里额外用正则识别盘符前缀视作绝对，避免静默 mangle。
-      （路径在异机器上仍然不可解析，但保持原样让 UI/日志能定位到原始来源。）
-    不动 yaml 文件；下次保存自然落规范化后的形式。
+    - A relative path in an old yaml (schema fallback) -> converted to an absolute path based on REPO_ROOT
+      (faithful to the historical supervisor cwd=REPO_ROOT resolution semantics)
+    - On Windows `str(Path)` gives backslashes (`G:\\foo`), while PathPicker gives POSIX
+      (`G:/foo`); mixing them would make the same field look inconsistent depending on its source; unifying with `as_posix()`
+      makes yaml writes + UI display always use `/`
+    - Cross-platform bundle import: a Windows drive-letter path (`G:/...`) on POSIX has
+      `Path.is_absolute()` return False, so it would be mistakenly treated as relative and joined onto REPO_ROOT, becoming
+      `<repo>/G:/...`. This uses an extra regex to recognize a drive-letter prefix as absolute, to avoid silently mangling it.
+      (The path is still unresolvable on a different machine, but keeping it as-is lets the UI/logs trace back to the original source.)
+    Doesn't touch the yaml file; the next save naturally writes the normalized form.
     """
     for f in _MODEL_PATH_FIELDS:
         v = data.get(f)
@@ -93,15 +93,15 @@ def _preset_path(name: str, base: Path | None = None) -> Path:
 
 
 def preset_path(name: str, base: Path | None = None) -> Path:
-    """公开版 `_preset_path`，给端到端文件下载用（server 不要碰 _ 私有 helper）。"""
+    """Public version of `_preset_path`, for end-to-end file downloads (server code shouldn't touch the private `_` helper)."""
     return _preset_path(name, base)
 
 
 def parse_preset_bytes(raw: bytes, filename: str) -> tuple[dict[str, Any], str]:
-    """解析 .yaml/.yml/.json 上传内容 + pydantic 校验，返回 (config_dict, suggested_name)。
+    """Parses .yaml/.yml/.json upload content + pydantic validation, returns (config_dict, suggested_name).
 
-    不写盘 —— caller 决定最终落盘名字（前端 confirm flow 让用户改名再保存）。
-    yaml.safe_load 是 JSON 的 superset，所以 .json 文件也能直接吃。
+    Doesn't write to disk -- the caller decides the final saved name (the frontend's confirm flow lets the user rename before saving).
+    yaml.safe_load is a superset of JSON, so .json files can be consumed directly too.
     """
     try:
         text = raw.decode("utf-8")
@@ -134,7 +134,7 @@ def parse_preset_bytes(raw: bytes, filename: str) -> tuple[dict[str, Any], str]:
 
 
 def list_presets(base: Path | None = None) -> list[dict[str, Any]]:
-    """返回 `[{name, path, updated_at}]`，按修改时间倒序。"""
+    """Returns `[{name, path, updated_at}]`, sorted by modified time descending."""
     base = base or USER_PRESETS_DIR
     if not base.exists():
         return []
@@ -162,7 +162,7 @@ def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], 
             data["attention_backend"] = "none"
     data.pop("flash_attn", None)
     data.pop("xformers", None)
-    # 退役的 monitor server 键：历史 dump 全都写过，静默丢弃不进 dropped 提示。
+    # Retired monitor-server keys: old dumps all wrote these at some point; silently discard them without surfacing them in the dropped notice.
     for key in RETIRED_MONITOR_KEYS:
         data.pop(key, None)
 
@@ -175,11 +175,11 @@ def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], 
 
     defaults = TrainingConfig()
     defaulted: list[str] = []
-    # disable_when 规则修复（刀 2 / R2 v2）：钉值/禁值违反按规则修（修复值 =
-    # disable_value，与前端 takeover 语义对齐；含 gate-first「优先关 InfoNoise
-    # 保住用户在 loss_weighting 等的投入」——历史 InfoNoise 专用垫片的泛化）。
-    # 先于逐字段回退跑：规则违反在 pydantic 里是 model-level 错（loc=()），
-    # 逐字段回退定位不到。
+    # disable_when rule fixup (blade 2 / R2 v2): a pinned/forbidden value that violates the rule gets fixed (fixed value =
+    # disable_value, aligned with the frontend's takeover semantics; includes gate-first "turn off InfoNoise first to
+    # preserve the user's investment in loss_weighting etc." -- a generalization of the historical InfoNoise-only shim).
+    # Runs before the per-field fallback: a rule violation is a model-level error in pydantic (loc=()),
+    # which the per-field fallback can't locate.
     data, rule_fixed = apply_disable_rule_fixes(data, TrainingConfig)
     defaulted.extend(rule_fixed)
 
@@ -193,8 +193,8 @@ def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], 
                 e["loc"][0] for e in exc.errors() if e.get("loc")
             }
             if not bad_fields:
-                # 剩余 model-level 错 = §6.4 保留手写的校验（区间 / navit 前置），
-                # 无声明式修复策略 —— 按产品语义直接拒绝。
+                # Remaining model-level errors = section 6.4's intentionally hand-kept validation (range / navit prerequisites),
+                # with no declarative fix strategy -- reject directly per product semantics.
                 raise PresetError(
                     f"Preset validation failed: {exc}",
                     code="preset.invalid",
@@ -210,7 +210,7 @@ def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], 
 
 
 def read_preset(name: str, base: Path | None = None) -> dict[str, Any]:
-    """读取并容错校验预设。未知字段丢弃，非法值回退默认。"""
+    """Reads and tolerantly validates a preset. Unknown fields are dropped, invalid values fall back to defaults."""
     path = _preset_path(name, base)
     if not path.exists():
         raise PresetError(
@@ -255,29 +255,29 @@ def read_preset_with_warnings(
 
 
 def render_config_yaml(dumped: dict[str, Any]) -> str:
-    """裁剪后 config dict → yaml 文本。落盘(write_preset / write_version_config)
-    与预览端点(POST /api/schema/preview-yaml)共用的唯一序列化出口 ——
-    R4「预览物理一致」的依据,序列化参数只此一处。"""
+    """Trimmed config dict -> yaml text. The single serialization exit point shared by
+    disk writes (write_preset / write_version_config) and the preview endpoint (POST /api/schema/preview-yaml) --
+    the basis for R4's "preview matches reality"; there is only this one place params are serialized."""
     return yaml.safe_dump(
         dumped, allow_unicode=True, sort_keys=False, default_flow_style=False
     )
 
 
 def preview_config_yaml_text(raw: dict[str, Any]) -> str:
-    """当前表单 config → 与保存后落盘文件完全同路径的 yaml 文本(R4)。
+    """Current form config -> yaml text that exactly matches the file that would be written on save (R4).
 
-    tolerant 语义与保存一致:修复 / 裁剪后的样子就是「点保存后文件的样子」。
-    纯计算不落盘。
+    The tolerant semantics match saving: the fixed/trimmed shape IS "what the file looks like after clicking save".
+    Pure computation, doesn't write to disk.
     """
     cfg, _, _ = _tolerant_validate(raw)
     return render_config_yaml(prune_inactive_fields(cfg.model_dump(mode="python")))
 
 
 def write_preset(name: str, data: dict[str, Any], base: Path | None = None) -> Path:
-    """先校验后写盘；任何未知字段或类型不匹配都会拒绝。
+    """Validates then writes to disk; any unknown field or type mismatch is rejected.
 
-    保存前 normalize 4 个模型字段：相对路径 → 绝对（基于 REPO_ROOT）。
-    保证 yaml 落盘统一绝对路径，避免老格式（相对）和新格式（绝对）混存。
+    Normalizes the 4 model fields before saving: relative path -> absolute (based on REPO_ROOT).
+    Ensures the yaml is always written with absolute paths, avoiding a mix of old-format (relative) and new-format (absolute).
     """
     path = _preset_path(name, base)
     try:
@@ -289,8 +289,8 @@ def write_preset(name: str, data: dict[str, Any], base: Path | None = None) -> P
             details={"reason": str(exc)},
             http_status=400,
         ) from exc
-    # 落盘前裁掉 show_when 为假的字段（UI 不可见 = 不生效）；read_preset 时
-    # pydantic 把缺失字段补回默认值，API 返回给前端的仍是完整 config。
+    # Fields whose show_when is false are trimmed before writing to disk (invisible in the UI = doesn't take effect); when read_preset runs,
+    # pydantic fills missing fields back in with defaults, so the API still returns a complete config to the frontend.
     dumped = prune_inactive_fields(
         _absolutize_model_paths(cfg.model_dump(mode="python"))
     )
