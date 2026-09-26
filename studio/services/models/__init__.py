@@ -1,13 +1,14 @@
-"""models 子包 —— PR-3.8 把 model_downloader.py 1068 行 4-way 拆。
+"""models subpackage -- PR-3.8 split the 1068-line model_downloader.py 4 ways.
 
-  paths.py       常量 + 本地路径解析
-  sources.py     下载源 / endpoint / 镜像 / download_flat 原语
-  downloader.py  per-model 高层下载 + async 状态
-  catalog.py     build_catalog 扫盘汇总
+  paths.py       constants + local path resolution
+  sources.py     download sources / endpoints / mirrors / download_flat primitives
+  downloader.py  per-model high-level download + async status
+  catalog.py     build_catalog disk-scan summary
 
-re-export 完整公共名供 `from studio.services.models import X` 使用。
-原 `studio.services.model_downloader` 通过 shim 文件 sys.modules 别名到 **本包**
-（不是 downloader 子模块），原 `from studio.services.models import X` 仍工作。
+Re-exports the full public API for use via `from studio.services.models import X`.
+The old `studio.services.model_downloader` is aliased via a shim file's
+sys.modules entry to **this package** (not the downloader submodule), so the
+original `from studio.services.models import X` still works.
 """
 from .catalog import build_catalog
 from .downloader import (

@@ -1,19 +1,22 @@
 /**
- * useLocalStorageState — 通用 localStorage 持久化 state hook。
+ * useLocalStorageState -- generic localStorage-backed persisted state hook.
  *
- * 项目里此前散落 4+ 处手搓 localStorage 读写 (preset-helpers / Settings /
- * Regularization / Curation / PromptFromDatasetPicker)；签名分歧导致后续
- * 不好统一加 cross-tab sync / SSR 守护。本 hook 是统一入口。
+ * The project used to have 4+ places hand-rolling localStorage reads/writes
+ * (preset-helpers / Settings / Regularization / Curation /
+ * PromptFromDatasetPicker); the differing signatures made it hard to later
+ * add cross-tab sync / SSR guards uniformly. This hook is the single entry
+ * point now.
  *
- * 行为：
- *   - mount 时从 localStorage 读初值，没读到用 defaultValue
- *   - setValue(v) 立即写回 localStorage
- *   - 监听 'storage' 事件做跨 tab 同步（参考 useAdvancedMode）
- *   - SSR 安全：typeof window === 'undefined' 时静默用 default
- *   - JSON.stringify / JSON.parse 序列化；parse 失败用 default
+ * Behavior:
+ *   - reads the initial value from localStorage on mount, falls back to defaultValue if missing
+ *   - setValue(v) writes back to localStorage immediately
+ *   - listens for the 'storage' event for cross-tab sync (modeled on useAdvancedMode)
+ *   - SSR-safe: silently uses the default when typeof window === 'undefined'
+ *   - serializes with JSON.stringify / JSON.parse; falls back to default on parse failure
  *
- * 命名约定：key 用 `studio:scope:field` 前缀（参考 useAdvancedMode 的
- * `studio:advanced_mode`），避免和其他 web app / 老版本冲突。
+ * Naming convention: keys use a `studio:scope:field` prefix (modeled on
+ * useAdvancedMode's `studio:advanced_mode`), to avoid clashing with other
+ * web apps / old versions.
  */
 import { useCallback, useEffect, useState } from 'react'
 
@@ -34,7 +37,7 @@ export function useLocalStorageState<T>(
       try {
         setValue(JSON.parse(e.newValue) as T)
       } catch {
-        // 其他 tab 写了非 JSON 值（外部脚本？）→ 忽略，本 tab 保留当前值
+        // Another tab wrote a non-JSON value (external script?) -> ignore, this tab keeps its current value
       }
     }
     window.addEventListener('storage', handler)
@@ -50,7 +53,7 @@ export function useLocalStorageState<T>(
           try {
             window.localStorage.setItem(key, JSON.stringify(resolved))
           } catch {
-            // quota exceeded / private mode → 静默；state 仍在内存里有效
+            // quota exceeded / private mode -> silent; state is still valid in memory
           }
         }
         return resolved

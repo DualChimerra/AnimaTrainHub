@@ -1,4 +1,5 @@
-// preset-helpers 纯函数单测；UI 流程改造（项目页一键新建预设）依赖这层。
+// Unit tests for preset-helpers pure functions; the UI flow (one-click new preset
+// on the project page) depends on this layer.
 import { describe, it, expect } from 'vitest'
 import { generateUniquePresetName, PRESET_NAME_RE } from './preset-helpers'
 
@@ -24,13 +25,13 @@ describe('generateUniquePresetName', () => {
   it('skips holes — picks lowest free', () => {
     const existing = [
       { name: 'myproj_v1' },
-      { name: 'myproj_v1_2' }, // _1 不存在
+      { name: 'myproj_v1_2' }, // _1 does not exist
     ]
     expect(generateUniquePresetName('myproj_v1', existing)).toBe('myproj_v1_1')
   })
 
   it('produces names that satisfy PRESET_NAME_RE — backend will reject otherwise', () => {
-    // base 本身合法时，后缀也必须保持合法
+    // The suffix must stay valid when the base itself is already valid
     const name = generateUniquePresetName('proj_v1', [{ name: 'proj_v1' }, { name: 'proj_v1_1' }])
     expect(PRESET_NAME_RE.test(name)).toBe(true)
   })

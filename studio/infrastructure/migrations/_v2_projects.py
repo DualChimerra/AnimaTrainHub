@@ -1,4 +1,4 @@
-"""v1 → v2: 加 projects / versions / project_jobs + tasks 扩 project_id/version_id。"""
+"""v1 -> v2: adds projects / versions / project_jobs + tasks gains project_id/version_id."""
 from __future__ import annotations
 
 import sqlite3
@@ -7,7 +7,7 @@ import sqlite3
 def _add_column_if_missing(
     conn: sqlite3.Connection, table: str, column: str, ddl: str
 ) -> None:
-    """SQLite 没有 ADD COLUMN IF NOT EXISTS；用 PRAGMA 自检后跳过重复添加。"""
+    """SQLite has no ADD COLUMN IF NOT EXISTS; self-check via PRAGMA and skip if already present."""
     cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")

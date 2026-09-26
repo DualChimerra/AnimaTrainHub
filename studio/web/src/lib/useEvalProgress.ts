@@ -2,28 +2,32 @@ import { useEffect, useRef, useState } from 'react'
 import { api, type EvalMetricResult, type Task } from '../api/client'
 import { useEventStream } from './useEventStream'
 
-// 训练结束后评估（after-training eval）的可见性：训练进程一退出 task 就标 done，
-// 评估作为独立 jobs（每个 checkpoint：eval_samples→eval_clip→eval_dino）在后面跑，
-// 不在 queue 列表里，用户没感知。这里靠现有 listEvalMetrics 的逐 checkpoint 状态
-// 拼出「评估中 done/total」，配合 eval_auto_after_training_queued 事件即时开始观察、
-// 刷新时也能从仍在跑的 metric 状态接上。纯前端，不依赖新后端事件。
+// Visibility for after-training eval: the moment the training process exits,
+// the task is marked done, while eval runs afterward as separate jobs (per
+// checkpoint: eval_samples -> eval_clip -> eval_dino) that don't show up in
+// the queue list, so the user has no visibility into them. This assembles an
+// "evaluating done/total" out of listEvalMetrics' per-checkpoint status,
+// starting to watch immediately on the eval_auto_after_training_queued
+// event, and can also pick up mid-flight metric state after a page refresh.
+// Purely frontend, no new backend events needed.
 
 const ACTIVE_STATUS = new Set(['pending', 'running'])
 const METRIC_KEYS = ['clip_t', 'clip_i', 'dino_i'] as const
 const POLL_MS = 4000
 
 export interface EvalProgress {
-  /** 还有 checkpoint 在出图 / 算指标 */
+  /** Whether any checkpoint is still generating samples / computing metrics */
   active: boolean
-  /** 已评完的 checkpoint 数 */
+  /** Number of checkpoints that finished evaluating */
   done: number
-  /** 本次评估的 checkpoint 总数 */
+  /** Total checkpoint count for this evaluation */
   total: number
 }
 
-/** 从 listEvalMetrics 的 results 聚合出「评估中 done/total」。
- *  一个 checkpoint「在评估」= run 级 status 或任一指标 status 为 pending/running
- *  （run pending/running 覆盖出图阶段，指标 status 覆盖算指标阶段）。 */
+/** Aggregates "evaluating done/total" from listEvalMetrics' results.
+ *  A checkpoint is "evaluating" if either its run-level status or any of its
+ *  metric statuses is pending/running (run pending/running covers the sample
+ *  generation phase, metric status covers the metric computation phase). */
 export function evalProgressFromResults(results: EvalMetricResult[]): EvalProgress {
   let active = false
   let done = 0
@@ -39,9 +43,12 @@ export function evalProgressFromResults(results: EvalMetricResult[]): EvalProgre
   return { active, done, total: results.length }
 }
 
-/** 单个 task 的评估进度（QueueDetail 头部用）。`enabled` 时首拉一次（刷新兜底），
- *  评估期间 4s 轮询，评估结束后自停（保留最终 progress，active=false 调用方不再
- *  显示徽标）；无评估则首拉后不再轮询。after-training 入队事件即时触发开始观察。 */
+/** Evaluation progress for a single task (used by the QueueDetail header).
+ *  Fetches once when `enabled` (as a refresh fallback), polls every 4s while
+ *  evaluating, and self-stops once evaluation ends (keeps the final
+ *  progress; the caller stops showing the badge once active=false). With no
+ *  evaluation running, it just fetches once and stops polling. The
+ *  after-training queued event triggers watching to start immediately. */
 export function useTaskEvalProgress(
   pid: number | null | undefined,
   vid: number | null | undefined,
@@ -64,7 +71,7 @@ export function useTaskEvalProgress(
         const r = await api.listEvalMetrics(pid, vid, taskId)
         p = evalProgressFromResults(r.results ?? [])
       } catch {
-        // 评估进度是辅助信息，拉失败不打扰；下一拍再试（若仍在 watch）
+        // Eval progress is auxiliary info; a failed fetch shouldn't be disruptive -- retry on the next tick (if still watching)
       }
       if (!mounted.current) return
       if (p) setProgress(p)
@@ -76,7 +83,7 @@ export function useTaskEvalProgress(
     return () => { mounted.current = false; clear() }
   }, [enabled, pid, vid, taskId])
 
-  // after-training 评估入队 → 即时开始观察（首拉可能早于入队而错过）
+  // After-training eval queued -> start watching immediately (the first fetch might race ahead of the enqueue and miss it)
   useEventStream((evt) => {
     if (evt.type !== 'eval_auto_after_training_queued') return
     if (evt.task_id !== taskId || !enabled || !pid || !vid || !taskId) return
@@ -91,15 +98,18 @@ export function useTaskEvalProgress(
   return progress
 }
 
-/** Queue 列表用：多 task 的评估进度 Map。观察集合靠 eval_auto_after_training_queued
- *  事件（即时）+ tasks 变化时对「最近完成的 done task」做一次兜底探测（刷新时正在
- *  评估也能接上）。只轮询观察集合里的 task（通常 0~1 个），评估结束即移出。 */
+/** For the Queue list: an eval-progress Map across multiple tasks. The watch
+ *  set is built from the eval_auto_after_training_queued event (immediate)
+ *  plus a fallback probe of the "most recently completed done task" whenever
+ *  tasks change (so it can pick back up mid-eval after a page refresh). Only
+ *  polls the tasks in the watch set (usually 0-1), removing one once its
+ *  eval ends. */
 export function useEvaluatingTasks(tasks: Task[]): Map<number, EvalProgress> {
   const [progress, setProgress] = useState<Map<number, EvalProgress>>(new Map())
   const watch = useRef<Set<number>>(new Set())
   const meta = useRef<Map<number, { pid: number; vid: number }>>(new Map())
 
-  // id → pid/vid（评估 task 都是绑定 project/version 的训练 task）
+  // id -> pid/vid (eval tasks are always training tasks bound to a project/version)
   useEffect(() => {
     const m = new Map<number, { pid: number; vid: number }>()
     for (const t of tasks) {
@@ -116,7 +126,7 @@ export function useEvaluatingTasks(tasks: Task[]): Map<number, EvalProgress> {
     }
   })
 
-  // 兜底：最近完成的 done task 探一下是否仍在评估（覆盖刷新时漏掉事件）
+  // Fallback: probe the most recently completed done task to check whether it's still evaluating (covers a missed event on refresh)
   useEffect(() => {
     const done = tasks.filter(
       (t) => t.status === 'done' && t.project_id != null && t.version_id != null,
@@ -151,7 +161,7 @@ export function useEvaluatingTasks(tasks: Task[]): Map<number, EvalProgress> {
           const p = evalProgressFromResults(r.results ?? [])
           if (!alive) return
           setProgress((prev) => new Map(prev).set(id, p))
-          if (!p.active && p.total > 0) watch.current.delete(id)  // 评估结束，停观察
+          if (!p.active && p.total > 0) watch.current.delete(id)  // evaluation ended, stop watching
         } catch { /* ignore */ }
       }))
     }

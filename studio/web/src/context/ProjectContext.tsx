@@ -6,7 +6,7 @@ export interface ProjectCtxValue {
   activeVersion: Version | null
   reload: () => Promise<void>
   onSelectVersion: (vid: number) => void
-  /** 打开"新版本"对话框。传 forkFromVid 则预填 forkFrom 下拉框（复制配置开新版本 CTA 用）。 */
+  /** Opens the "new version" dialog. Passing forkFromVid preselects the forkFrom dropdown (used by the "duplicate config into new version" CTA). */
   onCreateVersion: (forkFromVid?: number) => void
   onExportTrain: () => void
   onDeleteVersion: (vid: number) => void
@@ -20,12 +20,17 @@ export const useProjectCtx = () => useContext(ProjectContext)
 export const ProjectSetterContext = createContext<((v: ProjectCtxValue | null) => void) | null>(null)
 export const useProjectCtxSetter = () => useContext(ProjectSetterContext)
 
-// ── sticky "已选中项目" ──────────────────────────────────────────────────────
-// ProjectContext 在离开 /projects/:pid 路由（Layout 卸载）时被清空，导致切到
-// 队列 / 测试等全局页后侧边栏丢失当前项目。这份只读快照在 Layout 加载时写入、
-// 卸载时**不清**，让侧边栏跨页保留"选中项目"用于导航；版本增删/导出等需要
-// live Layout 的交互仍只在项目内（ProjectContext 存在时）可用。切换项目仍走
-// 项目列表页手动选择 —— 打开另一个项目会用新项目覆盖这份快照。
+// ── sticky "selected project" ──────────────────────────────────────────────
+// ProjectContext gets cleared when leaving the /projects/:pid route (Layout
+// unmounts), which used to make the sidebar lose the current project after
+// switching to a global page like Queue or Generate. This read-only snapshot
+// is written when Layout mounts and **not cleared** on unmount, so the
+// sidebar keeps the "selected project" for navigation across pages;
+// interactions that need a live Layout (add/remove version, export, etc.)
+// are still only available within a project (while ProjectContext exists).
+// Switching projects still goes through manual selection on the project
+// list page -- opening another project overwrites this snapshot with the
+// new one.
 export interface SelectedProjectValue {
   project: ProjectDetail
   activeVersion: Version | null

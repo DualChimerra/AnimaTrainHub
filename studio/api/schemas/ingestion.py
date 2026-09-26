@@ -1,4 +1,4 @@
-"""download / upload / preprocess BaseModel（PR-6.5 commit 3 从 server.py 抽出）。"""
+"""download / upload / preprocess BaseModels (extracted from server.py in PR-6.5 commit 3)."""
 from __future__ import annotations
 
 from typing import Optional
@@ -30,21 +30,22 @@ class PreprocessStartRequest(BaseModel):
     tile_size: int = preprocess_svc.DEFAULT_TILE_SIZE
     tile_pad: int = preprocess_svc.DEFAULT_TILE_PAD
     device: str = preprocess_svc.DEFAULT_DEVICE
-    # target_area=None 走纯 4× 模型；非 None 走智能（够大跳模型 + LANCZOS 缩到目标）
+    # target_area=None uses the plain 4x model; non-None uses smart mode (skip the model when
+    # already big enough, otherwise LANCZOS-resize to the target)
     target_area: Optional[int] = preprocess_svc.DEFAULT_TARGET_AREA
 
 
 class PreprocessRestoreRequest(BaseModel):
-    """还原已处理图：删 manifest entry + 删 preprocess/{name} PNG。
+    """Restore a processed image: removes the manifest entry + deletes preprocess/{name} PNG.
 
-    还原后该图回到「隐式 original」状态——下游 resolver 重新指向 download/。
-    见 ADR 0004。
+    After restoring, the image goes back to the "implicit original" state -- downstream
+    resolvers point back to download/. See ADR 0004.
     """
     names: list[str]
 
 
 class CropRect(BaseModel):
-    """归一化裁剪矩形 [0..1]^4。x/y = 左上角，w/h = 宽高。"""
+    """Normalized crop rect [0..1]^4. x/y = top-left corner, w/h = width/height."""
     x: float
     y: float
     w: float
@@ -53,10 +54,11 @@ class CropRect(BaseModel):
 
 
 class PreprocessCropRequest(BaseModel):
-    """裁剪 job 输入：源文件名 → 一个或多个归一化矩形。
+    """Crop job input: source filename -> one or more normalized rects.
 
-    源文件名为 preprocess/ 下当前文件名（或 download/ 文件名兜底，若 preprocess/
-    没对应）。每个矩形产出一张 PNG：N=1 覆盖 stem.png；N>1 输出 stem_c0.png /
-    stem_c1.png / ... 并删除原 stem.png。
+    The source filename is the current filename under preprocess/ (or falls back to the
+    download/ filename if preprocess/ has no matching entry). Each rect produces one PNG:
+    N=1 overwrites stem.png; N>1 outputs stem_c0.png / stem_c1.png / ... and deletes the
+    original stem.png.
     """
     crops: dict[str, list[CropRect]]

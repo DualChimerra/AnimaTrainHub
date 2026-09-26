@@ -94,11 +94,11 @@ def test_dataset_importable_without_runtime_on_sys_path() -> None:
 
 
 def test_root_and_nested_images_counted(tmp_path: Path) -> None:
-    # 根目录散图（repeat=1）+ 子文件夹深层图（rglob）都要计，跟 _scan 一致。
+    # both loose root-level images (repeat=1) and nested subfolder images (rglob) must be counted, matching _scan.
     pytest.importorskip("torch")
     from studio.services.projects.versions import compute_bucket_histogram
-    _sq(tmp_path, ["root"])                              # 根目录散图
-    _sq(tmp_path / "2_data" / "nested", ["deep"])        # 子文件夹深层
+    _sq(tmp_path, ["root"])                              # loose root-level images
+    _sq(tmp_path / "2_data" / "nested", ["deep"])        # nested subfolder images
     out = compute_bucket_histogram(tmp_path, [1024], 2.0)
     total = sum(b["count"] for g in out for b in g["buckets"])
     assert total == 1 + 2  # root×1 + deep×repeat2

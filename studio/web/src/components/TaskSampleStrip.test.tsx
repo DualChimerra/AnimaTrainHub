@@ -1,4 +1,4 @@
-/** 队列行内联采样条：清单 → 缩略图 → 点开灯箱（含前后切）。 */
+/** Queue row inline sample strip: listing -> thumbnails -> open lightbox (with prev/next). */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -36,7 +36,8 @@ it('renders one thumbnail per sample', async () => {
 
   const strip = await screen.findByTestId('sample-strip-7')
   await waitFor(() => expect(strip.querySelectorAll('img')).toHaveLength(2))
-  // 缩略图走 /samples/{file}?task_id=&w= 代理（带 task_id，否则落全局兜底目录）
+  // Thumbnails go through the /samples/{file}?task_id=&w= proxy (with task_id,
+  // otherwise it falls back to the global default directory)
   expect(strip.querySelector('img')!.getAttribute('src'))
     .toContain('/samples/epoch_1_a.png?task_id=7&w=')
 })
@@ -64,7 +65,7 @@ it('opens the lightbox on a thumbnail and steps through the feed', async () => {
   await waitFor(() => expect(strip.querySelectorAll('button')).toHaveLength(2))
   fireEvent.click(strip.querySelectorAll('button')[0])
 
-  // 灯箱：计数器 + 原图（无 w= 参数）
+  // Lightbox: counter + full-size image (no w= param)
   expect(await screen.findByText('1 / 2')).toBeInTheDocument()
   const full = screen.getByAltText(/epoch_1_a\.png/)
   expect(full.getAttribute('src')).toBe('/samples/epoch_1_a.png?task_id=7')

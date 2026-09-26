@@ -1,82 +1,86 @@
 # AnimaStudio
 
-训练流水线（抓图 → 筛选 → 打标 → 正则 → 训练 → 出图测试）的 Web 工作台。后端 FastAPI + SQLite，前端 React + Vite。
+Web workbench for the training pipeline (scrape -> curate -> tag -> regularize -> train -> sample test). Backend is FastAPI + SQLite, frontend is React + Vite.
 
-## 目录结构（ADR 0008 四层架构）
+## Directory layout (ADR 0008 four-layer architecture)
 
 ```
 studio/
-├── api/               # HTTP 表面：FastAPI app + routers + schemas + deps + exception_handlers
-├── services/          # 业务服务子包：tagging / booru / reg / inference / models（含 families/ 族资产 registry）/
+├── api/               # HTTP surface: FastAPI app + routers + schemas + deps + exception_handlers
+├── services/          # business service subpackages: tagging / booru / reg / inference / models (incl. families/ model-family asset registry) /
 │                      #   preprocess / projects / dataset / presets / runtime / data_io
-├── domain/            # pydantic 模型：TrainingConfig（含 model_family / 能力门控 / config_rules）/
+├── domain/            # pydantic models: TrainingConfig (incl. model_family / capability gating / config_rules) /
 │                      #   LoRA / XY / Generate / RegAi / family_switch + migrations
-├── infrastructure/    # 路径 / 数据库 / event bus / secrets / 日志 / argparse 桥接 / migrations
-├── supervisor/        # 任务调度守护线程
-├── workers/           # 后台子进程入口（download / tag / reg_build / preprocess）
-├── server.py          # 兼容 shim，re-export `app` / `main`（真实入口在 api/app.py / api/main.py）
-└── web/               # React + Vite 前端源码
+├── infrastructure/    # paths / database / event bus / secrets / logging / argparse bridge / migrations
+├── supervisor/        # task-scheduling daemon thread
+├── workers/           # background subprocess entry points (download / tag / reg_build / preprocess)
+├── server.py          # compatibility shim, re-exports `app` / `main` (the real entry point is api/app.py / api/main.py)
+└── web/               # React + Vite frontend source
     ├── src/
-    └── dist/          # npm run build 产物（后端挂在根路径 /，ADR 0012）
+    └── dist/          # npm run build output (backend mounts it at the root path /, ADR 0012)
 ```
 
-`schema.py` / `secrets.py` / `paths.py` 等根级文件是重构前 API 的兼容 shim，真身分别在
-`domain/training.py`、`infrastructure/secrets.py`、`services/models/paths.py`。
+Root-level files like `schema.py` / `secrets.py` / `paths.py` are compatibility shims for
+the pre-refactor API; the real implementations live in `domain/training.py`,
+`infrastructure/secrets.py`, and `services/models/paths.py` respectively.
 
-运行时数据写到仓库根目录下的 `studio_data/`（SQLite + 用户 preset + 任务档案），已加入 `.gitignore`。
+Runtime data is written to `studio_data/` at the repo root (SQLite + user presets + task
+archives), which is in `.gitignore`.
 
-## 启动
+## Starting the app
 
-### 跨平台启动器（推荐）
+### Cross-platform launcher (recommended)
 
-`python -m studio` 是统一入口，子进程由 Python 管理（Windows / macOS / Linux 都用一样的命令）：
+`python -m studio` is the unified entry point, with subprocesses managed by Python (the
+same commands work on Windows / macOS / Linux):
 
 ```bash
-python -m studio              # 默认 = run
-python -m studio run          # 构建前端（如缺）+ 起后端
-python -m studio dev          # 前后端开发模式（5173 + 8765 --reload，并行）
-python -m studio build        # 仅构建前端
-python -m studio test         # 跑 pytest + vitest
+python -m studio              # default = run
+python -m studio run          # build the frontend (if missing) + start the backend
+python -m studio dev          # frontend + backend dev mode (5173 + 8765 --reload, in parallel)
+python -m studio build        # build the frontend only
+python -m studio test         # run pytest + vitest
 ```
 
-dev 模式会同时起 Vite 和 uvicorn 两个子进程，Ctrl+C 会一起干掉（Windows 用 `CTRL_BREAK_EVENT`，POSIX 用进程组 SIGTERM）。
+dev mode starts both a Vite and a uvicorn subprocess; Ctrl+C kills them together (uses
+`CTRL_BREAK_EVENT` on Windows, process-group SIGTERM on POSIX).
 
-### Windows 快捷脚本
+### Windows shortcut script
 
-`studio.bat` 调同一份 Python 启动器，双击即可。
+`studio.bat` calls the same Python launcher; just double-click it.
 
-### 直接调后端
+### Calling the backend directly
 
 ```bash
 python -m studio.server --host 0.0.0.0 --port 8765 [--reload]
 ```
 
-### 前端
+### Frontend
 
-开发模式（热重载）：
-
-```bash
-cd studio/web
-npm install            # 首次
-npm run dev            # → http://127.0.0.1:5173/（/api、/samples 反代到后端）
-```
-
-生产构建（产物给后端挂在根路径 `/`，ADR 0012）：
+Dev mode (hot reload):
 
 ```bash
 cd studio/web
-npm run build          # 输出到 studio/web/dist/
-# 后端不用重启，刷新浏览器即可（服务端启动时检测 dist/ 是否存在）
+npm install            # first time only
+npm run dev            # -> http://127.0.0.1:5173/ (/api, /samples proxied to the backend)
 ```
 
-## 前端页面
+Production build (output is mounted by the backend at the root path `/`, ADR 0012):
 
-- **项目**（`/`）— 项目列表；进入项目后侧栏切 Stepper（下载 / 筛选 / 预处理 / 打标 / 标签编辑 / 正则集 / 训练），训练配置含模型族（Anima / Krea 2）切换
-- **队列**（`/queue`）— 全类型任务统一台账：取消 / 重试 / 删除 / 暂停恢复 / 定时；分区 + 过滤分页；SSE 实时刷新；任务详情含日志 / 监控 / 输出
-- **预设**（`/tools/presets`）— 全局训练预设池（自动保存），与 version 配置双向 fork
-- **测试**（`/tools/generate`）— 单图 / XY 矩阵 / 常驻推理 daemon；按族选底模 / TE，fp8 / 显存策略
-- **监控**（`/tools/monitor`）— 训练实时 loss / lr / 采样图
-- **设置**（`/tools/settings`）— 按 tab 分区；模型下载中心（按族分区 + variant 单选）在「训练」tab
+```bash
+cd studio/web
+npm run build          # outputs to studio/web/dist/
+# no need to restart the backend, just refresh the browser (the server checks for dist/ on startup)
+```
 
-跨步骤架构（数据模型 / SQLite / SSE / secrets / Tagger 抽象 / Preset 池）见
-[docs/architecture/studio-pipeline.md](../docs/architecture/studio-pipeline.md)。
+## Frontend pages
+
+- **Projects** (`/`) -- project list; inside a project, the sidebar switches between Stepper steps (download / curate / preprocess / tag / tag editor / regularization set / training); training config includes a model family (Anima / Krea 2) switch
+- **Queue** (`/queue`) -- unified ledger for all task types: cancel / retry / delete / pause-resume / schedule; sectioned + filtered pagination; live SSE refresh; task detail includes logs / monitoring / output
+- **Presets** (`/tools/presets`) -- global training preset pool (auto-saved), two-way fork with version config
+- **Test** (`/tools/generate`) -- single image / XY matrix / resident inference daemon; base model / TE selection by family, fp8 / VRAM strategy
+- **Monitor** (`/tools/monitor`) -- live training loss / lr / sample images
+- **Settings** (`/tools/settings`) -- sectioned by tab; the model download center (sectioned by family + single-select variant) lives under the "Training" tab
+
+For the cross-step architecture (data model / SQLite / SSE / secrets / Tagger abstraction / Preset pool) see
+[docs/architecture/studio-pipeline.md](../docs/architecture/studio-pipeline.md).

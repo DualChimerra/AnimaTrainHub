@@ -1,4 +1,4 @@
-"""files/curation/duplicates BaseModel（PR-6.5 commit 4 从 server.py 抽出）。"""
+"""files/curation/duplicates BaseModels (extracted from server.py in PR-6.5 commit 4)."""
 from __future__ import annotations
 
 from typing import Optional
@@ -23,7 +23,7 @@ class RemoveRequest(BaseModel):
 
 
 class CopyValidationRequest(BaseModel):
-    """download → validation 复制（落固定 validation/1_data/，无 dest_folder）。"""
+    """download -> validation copy (lands in the fixed validation/1_data/, no dest_folder)."""
     files: list[str]
 
 
@@ -33,7 +33,7 @@ class ValidationItem(BaseModel):
 
 
 class RemoveValidationRequest(BaseModel):
-    """按 (folder, name) 精确删 —— 多选可能跨 auto-split 的不同 repeat 文件夹。"""
+    """Exact delete by (folder, name) -- a multi-select may span different auto-split repeat folders."""
     items: list[ValidationItem]
 
 
@@ -44,7 +44,7 @@ class FolderOp(BaseModel):
 
 
 class DuplicateScanRequest(BaseModel):
-    # UI 只暴露匹配范围 + 灵敏度；其余阈值/性能参数已固化为 duplicates.DEFAULT_*。
+    # The UI only exposes match scope + sensitivity; other threshold/perf params are fixed as duplicates.DEFAULT_*.
     match_scope: str = "both"
     sensitivity: str = duplicate_finder.DEFAULT_SENSITIVITY
 

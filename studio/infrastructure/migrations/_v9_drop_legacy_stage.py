@@ -1,19 +1,22 @@
-"""v8 → v9: 物理删除 projects.stage 与 versions.stage 列 (ADR-0007 PR-5 destructive)。
+"""v8 -> v9: physically drops the projects.stage and versions.stage columns (ADR-0007 PR-5, destructive).
 
-PR-2 v8 加 status / phase / last_failure_reason；PR-3 / PR-5 commit 1/2/3 把所有
-读写 stage 的代码移除。此 migration 是 destructive 收尾，把两个老列从 DB 拔掉。
+PR-2 v8 added status / phase / last_failure_reason; PR-3 / PR-5 commits 1/2/3 removed all code
+that read/wrote stage. This migration is the destructive follow-up that pulls the two old
+columns out of the DB.
 
-**显式打破 `studio/migrations/__init__.py` 既有约定**（"不允许向后改写已有列"）。
-ADR-0007 §后果 已记录此例外。
+**Explicitly breaks the existing convention in `studio/migrations/__init__.py`** ("rewriting
+existing columns is not allowed"). This exception is documented in ADR-0007 SS Consequences.
 
-SQLite < 3.35 不支持 ``ALTER TABLE DROP COLUMN``，统一走 recreate-table 模式：
-- CREATE TABLE {t}_new （不含 stage 列）
-- INSERT _new (cols) SELECT cols FROM 原表
-- DROP 原表 / RENAME _new → 原名
-- 重建 index
+SQLite < 3.35 doesn't support ``ALTER TABLE DROP COLUMN``, so this uniformly uses the
+recreate-table pattern:
+- CREATE TABLE {t}_new (without the stage column)
+- INSERT INTO _new (cols) SELECT cols FROM the original table
+- DROP the original table / RENAME _new -> the original name
+- rebuild indexes
 
-幂等性：第二次跑时 `stage` 列已经不存在，``SELECT stage FROM`` 会 sqlite3.OperationalError，
-migration 框架不会重复跑（PRAGMA user_version 推进后跳过此函数）。
+Idempotency: on a second run the `stage` column no longer exists, so ``SELECT stage FROM``
+raises sqlite3.OperationalError; the migration framework won't rerun it anyway (this function
+is skipped once PRAGMA user_version has advanced past it).
 """
 from __future__ import annotations
 

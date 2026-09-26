@@ -52,7 +52,7 @@ interface AutoParams {
   kMax: number
 }
 
-/** Reset / clear is "未裁" (pending), having any rect is "已裁" (cropped). Status quo:
+/** Reset / clear is "uncropped" (pending), having any rect is "cropped". Status quo:
  *  the page bypasses upscale-vs-pending distinction — every workspace image is a
  *  candidate; whether it has crops drawn is the only filter dimension. */
 function genRectId(): string {
@@ -93,7 +93,7 @@ export default function PreprocessCropPage() {
     maxCropFraction: 0.10, kMin: 3, kMax: 6,
   })
   const [lastClusterK, setLastClusterK] = useState<number | null>(null)
-  // 自动聚类参数改由 header 按钮弹出的 modal 承载（不再占裁剪参数区）。
+  // Auto-cluster parameters now live in the modal popped up by the header button (no longer taking up space in the crop-params area).
   const [clusterModalOpen, setClusterModalOpen] = useState(false)
 
   // ────── Editor state ──────
@@ -120,8 +120,8 @@ export default function PreprocessCropPage() {
   const jobIdRef = useRef<number | null>(null)
   jobIdRef.current = job?.id ?? null
 
-  // 回放（issue #251）：crop 与放大共用 kind=preprocess，走同一 status 端点
-  // 恢复最近一次 preprocess job + log_tail；同一 job 本地已有 SSE 积累时不覆盖。
+  // Replay (issue #251): crop and upscale share kind=preprocess and go through the same status
+  // endpoint, restoring the most recent preprocess job + log_tail; not overwritten when it's the same job and local SSE accumulation already exists.
   const refreshJobStatus = useCallback(async () => {
     if (!vid) return
     try {
@@ -339,7 +339,7 @@ export default function PreprocessCropPage() {
   }, [cropsByImage, activeName, project.id, vid, toast, t])
 
   // ────── Render ──────
-  // ADR 0010: hooks 之后再做 vid guard
+  // ADR 0010: do the vid guard after the hooks
   if (!activeVersion) {
     return (
       <div className="p-6 text-fg-secondary">
@@ -557,8 +557,8 @@ export default function PreprocessCropPage() {
 }
 
 // ---------------------------------------------------------------------------
-// 自动聚类 modal —— header 按钮弹出。按长宽比给所有图预填裁剪框（之后可手动微调）。
-// 参数用数字 input 框（原来是左右拉 slider）。
+// Auto-cluster modal -- popped up by the header button. Pre-fills crop boxes for all images by aspect ratio (can be fine-tuned manually afterward).
+// Parameters use numeric input boxes (previously a drag slider).
 // ---------------------------------------------------------------------------
 
 function ClusterModal({

@@ -1,18 +1,18 @@
-"""线程安全的事件总线：supervisor（同步线程）→ FastAPI SSE（asyncio）。
+"""Thread-safe event bus: supervisor (sync thread) -> FastAPI SSE (asyncio).
 
-使用方式：
+Usage:
     bus = EventBus()
-    # 在 FastAPI lifespan 启动时绑定 event loop
+    # bind the event loop during FastAPI lifespan startup
     bus.attach_loop(asyncio.get_running_loop())
 
-    # SSE 连接
+    # SSE connection
     q = await bus.subscribe()
     try:
         evt = await q.get()
     finally:
         bus.unsubscribe(q)
 
-    # 任意线程发布
+    # publish from any thread
     bus.publish({"type": "task_state_changed", "task_id": 7, "status": "done"})
 """
 from __future__ import annotations
@@ -30,12 +30,12 @@ class EventBus:
         self._queues: set[asyncio.Queue[dict[str, Any]]] = set()
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        # commit 11：连接生命周期钩子（generate cache 用 last → 30s timer 清）
+        # commit 11: connection lifecycle hooks (generate cache uses "last" -> 30s timer cleanup)
         self._on_first_subscribe: Optional[Callable[[], None]] = None
         self._on_last_unsubscribe: Optional[Callable[[], None]] = None
 
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """在 FastAPI 启动时调用一次，绑定主事件循环。"""
+        """Call once on FastAPI startup to bind the main event loop."""
         self._loop = loop
 
     def set_connection_callbacks(
@@ -43,7 +43,8 @@ class EventBus:
         on_first_subscribe: Optional[Callable[[], None]] = None,
         on_last_unsubscribe: Optional[Callable[[], None]] = None,
     ) -> None:
-        """设连接首/末事件钩子。调用方应处理重入与异常 —— bus 不 catch。"""
+        """Sets the first-connect/last-disconnect hooks. The caller should handle reentrancy and
+        exceptions -- the bus does not catch them."""
         self._on_first_subscribe = on_first_subscribe
         self._on_last_unsubscribe = on_last_unsubscribe
 
@@ -68,7 +69,7 @@ class EventBus:
             self._on_last_unsubscribe()
 
     def publish(self, event: dict[str, Any]) -> None:
-        """线程安全：同步代码（如 supervisor 线程）也能调用。"""
+        """Thread-safe: sync code (e.g. the supervisor thread) can call this too."""
         loop = self._loop
         with self._lock:
             queues = list(self._queues)
@@ -78,7 +79,7 @@ class EventBus:
             try:
                 loop.call_soon_threadsafe(_safe_put, q, event)
             except RuntimeError:
-                # loop 已经停了
+                # the loop has already stopped
                 pass
 
 
@@ -86,14 +87,16 @@ def _safe_put(q: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
     try:
         q.put_nowait(event)
     except asyncio.QueueFull:
-        # B-1.5: 慢消费者：丢弃，不阻塞 publisher；但必须 log（之前是静默丢
-        # → 前端 progress/task_state_changed 看似掉帧但后端日志干净到看不出问题）。
-        # 用 module logger 走 studio.log，自带 trace_id（如果 publisher 在 request ctx 内）。
+        # B-1.5: slow consumer: drop it, don't block the publisher; but this must be logged
+        # (previously it dropped silently -> the frontend's progress/task_state_changed looked
+        # like it was dropping frames, but backend logs were clean enough to hide the problem).
+        # Uses the module logger through studio.log, which carries its own trace_id (if the
+        # publisher is within a request context).
         _drop_logger.warning(
             "event_bus slow consumer: queue full, dropped event type=%s",
             event.get("type", "?"),
         )
 
 
-# 进程内单例（server.py 用）
+# In-process singleton (used by server.py)
 bus = EventBus()

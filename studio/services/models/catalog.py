@@ -1,7 +1,9 @@
-"""模型 catalog —— 扫盘组装"哪些模型已下载、目标路径、大小"（PR-3.8 拆出 4-way 第 4 个）。
+"""Model catalog -- scans disk to assemble "which models are downloaded, their
+target paths, their sizes" (the 4th piece of PR-3.8's 4-way split).
 
-build_catalog 是 /api/models/catalog 端点的核心，前端 ModelsPage 用它展示安装状态。
-依赖 paths.py 的常量 + target 函数；不调下载（只读盘）。
+build_catalog is the core of the /api/models/catalog endpoint; the frontend's
+ModelsPage uses it to show install status. Depends on paths.py's constants +
+target functions; never triggers a download (read-only disk scan).
 """
 from __future__ import annotations
 
@@ -39,8 +41,9 @@ from .paths import (
 # ---------------------------------------------------------------------------
 
 
-# CLIP / DINO 常见模型的下载大小预估（bytes，约值）。下载前给用户一个体量参考；
-# 未知 model_id 不显示预估。已下载后 UI 用实际目录大小。
+# Download size estimates for common CLIP / DINO models (bytes, approximate).
+# Gives the user a size reference before downloading; unknown model_ids show no
+# estimate. Once downloaded, the UI uses the actual directory size instead.
 _EVAL_SIZE_ESTIMATES = {
     "openai/clip-vit-base-patch32": 605_000_000,
     "openai/clip-vit-base-patch16": 599_000_000,
@@ -49,12 +52,12 @@ _EVAL_SIZE_ESTIMATES = {
     "facebook/dinov2-base": 346_000_000,
     "facebook/dinov2-large": 1_220_000_000,
     "facebook/dinov2-giant": 4_600_000_000,
-    # CCIP（deepghs/ccip_onnx 变体）：只下 model_feat.onnx(~150MB)+metric+threshold。
+    # CCIP (deepghs/ccip_onnx variants): only model_feat.onnx (~150MB) + metric + threshold are downloaded.
     "ccip-caformer-24-randaug-pruned": 152_000_000,
     "ccip-caformer_b36-24": 384_000_000,
 }
 
-# CCIP 变体的 3 个必备文件（齐全才算已下载）。
+# The 3 required files for a CCIP variant (all must be present to count as downloaded).
 _CCIP_FILES = ("model_feat.onnx", "model_metrics.onnx", "metrics.json")
 
 
@@ -67,16 +70,18 @@ def _file_status(p: Path) -> dict[str, Any]:
 
 
 def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
-    """扫盘组装 catalog 给前端展示。
+    """Scan disk and assemble the catalog for frontend display.
 
-    每项含 `id` / `name` / `description` / 目标路径 / 已下载状态。
-    Anima 主模型多版本时返回 `variants[]`，每个独立 status。
-    `downloads` 字段返回当前活跃下载 status。
+    Each entry has `id` / `name` / `description` / target path / downloaded
+    status. When the Anima main model has multiple versions, returns
+    `variants[]`, each with its own status.
+    The `downloads` field returns the status of any currently active download.
     """
     r = root or models_root()
 
-    # 模型族区块经 FAMILY_ASSETS registry 遍历（多模型 PR-4）；单族时输出与
-    # 旧实现逐字节一致，前端零改动
+    # Model-family sections are built by iterating the FAMILY_ASSETS registry
+    # (multi-model PR-4); with a single family the output is byte-for-byte
+    # identical to the old implementation, so the frontend needs zero changes
     models_cfg = secrets.load().models
     family_sections: dict[str, Any] = {}
     for _assets in FAMILY_ASSETS.values():
@@ -89,7 +94,8 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
     src_cfg = _secrets.download_sources
     source_cfg = _secrets.model_sources
 
-    # CLIP / DINO eval 指标模型：各一行 variant，整目录有 config.json 即"已下载"。
+    # CLIP / DINO eval-metric models: one variant row each; the whole directory
+    # counts as "downloaded" once it has a config.json.
     eval_variants = []
     for kind, mid in (("clip", eval_cfg.clip_model_name), ("dino", eval_cfg.dino_model_name)):
         target = eval_model_target_dir(r, kind, mid)
@@ -106,7 +112,7 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             "size": size,
             "size_estimate": _EVAL_SIZE_ESTIMATES.get(mid, 0),
         })
-    # CCIP（anime 角色身份）：3 个文件齐全才算已下载（无 config.json）。
+    # CCIP (anime character identity): counts as downloaded only when all 3 files exist (no config.json).
     ccip_mid = eval_cfg.ccip_model_name
     ccip_dir = ccip_model_dir(r, ccip_mid)
     eval_variants.append({
@@ -121,7 +127,7 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
         "size_estimate": _EVAL_SIZE_ESTIMATES.get(ccip_mid, 0),
     })
 
-    # WD14 候选每个 model_id 一行：两文件全在才算"已下载"。
+    # One row per WD14 candidate model_id: counts as "downloaded" only when both files exist.
     wd14_variants = []
     for mid in wd14_cfg.model_ids:
         target = wd14_target_dir(r, mid)
@@ -137,7 +143,7 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             "files": files,
         })
 
-    # CLTagger 版本预设（每个 variant 可以来自不同 HF repo）。
+    # CLTagger version presets (each variant can come from a different HF repo).
     cl_root = cltagger_target_root(r, cl_cfg.model_id)
     cl_variants = []
     for label, preset in CLTAGGER_VERSIONS.items():
@@ -158,7 +164,7 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             "model_path": mp,
             "tag_mapping_path": tmp,
             "description": preset.get("description", ""),
-            # target_path = repo 本地根；version_dir = 该版本子目录（UI 提示文件落点）。
+            # target_path = the repo's local root; version_dir = this version's subdirectory (used by the UI to show where files land).
             "target_path": str(variant_root),
             "version_dir": str(version_dir),
             "is_current": (
@@ -171,12 +177,13 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             "files": files,
         })
 
-    # ── 统一来源候选行（docs/design/model-source-unification.md §6）────────
+    # -- Unified source candidate rows (docs/design/model-source-unification.md §6) --
     #
-    # 每 domain 一个平铺列表：内置 preset + 用户候选（download / local），能力
-    # 位（removable / deletable）由这里拼好，前端泛化候选卡不再各自判断。
-    # 本键当前覆盖 wd14 / eval_*；upscaler / 主模型族 / cltagger 在各自区块
-    # 迁移时并入。
+    # One flat list per domain: built-in presets + user candidates (download /
+    # local); the capability flags (removable / deletable) are assembled here so
+    # the frontend's generic candidate card no longer has to decide them itself.
+    # This currently covers wd14 / eval_*; upscaler / main model family / cltagger
+    # get folded in as their own sections migrate.
 
     def _source_row(
         *, kind: str, value: str, download_id: Optional[str],
@@ -191,16 +198,17 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
     ) -> dict[str, Any]:
         variant = download_variant or value
         return {
-            # 用户候选的原始存储记录（DELETE /api/model-sources 的身份键）；
-            # preset / scanned 行无。
+            # The user candidate's raw storage record (the identity key for
+            # DELETE /api/model-sources); absent for preset / scanned rows.
             "candidate": candidate,
             "kind": kind,               # preset | download | local | scanned
-            "value": value,             # 写进选中值字段的值（repo id / 绝对路径 / label）
+            "value": value,             # the value written into the selected-value field (repo id / absolute path / label)
             "label": label or value,
             "description": description,
-            # 触发下载：POST /api/models/download {model_id: download_id,
-            # variant: download_variant}；status key 默认拼接、可显式覆盖
-            # （upscaler custom 的 key 形如 upscaler:custom:{filename}）。local 无。
+            # Triggers a download: POST /api/models/download {model_id: download_id,
+            # variant: download_variant}; status key is built by default and can be
+            # overridden explicitly (upscaler custom's key looks like
+            # upscaler:custom:{filename}). Not set for local.
             "download_id": download_id,
             "download_variant": variant if download_id else None,
             "status_key": (
@@ -212,12 +220,13 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             "files": files,
             "size_estimate": size_estimate,
             "is_current": is_current,
-            # 内置不可移除（保护默认）；扫盘行不在候选存储里、也不可移除
+            # Built-ins can't be removed (protects the defaults); scanned rows
+            # aren't in the candidate store either, so they can't be removed
             "removable": (
                 removable if removable is not None
                 else kind not in ("preset", "scanned")
             ),
-            "deletable": kind != "local",    # 本地文件永不从 UI 删除
+            "deletable": kind != "local",    # local files are never deleted from the UI
             "extra": extra or {},
         }
 
@@ -287,10 +296,11 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             )
         )
 
-    # 放大器：预设 + 扫盘合并。
-    # - Pass 1：UPSCALER_VARIANTS 全列（即便未下载，提供"下载"入口）
-    # - Pass 2：扫 upscalers/ 目录里所有 .pth/.safetensors，把不在预设里的当
-    #   custom 加进列表（用户通过自定义 repo 下载或之后扩展的上传功能落地的文件）
+    # Upscalers: merge presets + disk scan.
+    # - Pass 1: list all of UPSCALER_VARIANTS (offers a "download" entry point even if not downloaded)
+    # - Pass 2: scan every .pth/.safetensors in upscalers/, and add any not in the
+    #   presets to the list as custom entries (files landed there by a custom repo
+    #   download or a future upload feature)
     selected_label = selected_upscaler()
     upscaler_variants = []
     seen_filenames: set[str] = set()
@@ -327,16 +337,18 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
                 "hf_repo": None,
                 "ms_repo": None,
                 "size_mb": None,
-                "description": "自定义/已下载",
+                "description": "Custom / already downloaded",
                 "target_path": str(f),
                 "is_current": f.name == selected_label or f.stem == selected_label,
                 **_file_status(f),
             })
 
-    # CLTagger 统一行：选中值是 (model_id, model_path, tag_mapping_path)
-    # 三元组，行 value 用 `|` 合成键；真实三元组放 extra，前端选中时取
-    # extra 一次写回三字段。fork repo（download 候选）自带双文件相对路径
-    # （镜像覆盖退役，D4）；local 候选 = 双绝对路径文件。
+    # Unified CLTagger row: the selected value is the (model_id, model_path,
+    # tag_mapping_path) triple; the row's value is a `|`-joined composite key;
+    # the actual triple lives in extra, and the frontend writes all three fields
+    # back from extra on selection. A fork repo (download candidate) carries its
+    # own pair of relative file paths (mirror override retired, D4); a local
+    # candidate is a pair of absolute file paths.
     def _cl_value(mid: str, mp: str, tmp: str) -> str:
         return f"{mid}|{mp}|{tmp}"
 
@@ -404,9 +416,9 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             ))
     model_source_rows["cltagger"] = cl_rows
 
-    # 放大器统一行：preset + download/local 候选 + 扫盘兜底（D6）。
-    # value 语义与 selected_upscaler 一致：preset=label / download·scanned=
-    # 文件名 / local=绝对路径。
+    # Unified upscaler rows: presets + download/local candidates + disk-scan
+    # fallback (D6). value semantics match selected_upscaler: preset=label /
+    # download and scanned=filename / local=absolute path.
     up_rows: list[dict[str, Any]] = []
     for label, info in UPSCALER_VARIANTS.items():
         target = upscaler_target(label, r)
@@ -449,7 +461,7 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
                 candidate=c.model_dump(),
             ))
     for v in upscaler_variants:
-        # 扫盘发现、但既非预设也未被 download 候选登记的文件：只能删除
+        # Files found on disk that are neither a preset nor registered as a download candidate: deletion is the only option
         if v["kind"] != "custom" or v["filename"] in _custom_filenames:
             continue
         up_rows.append(_source_row(
@@ -461,8 +473,9 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
         ))
     model_source_rows["upscaler"] = up_rows
 
-    # 主模型族统一行：官方 variants（preset）+ download 候选（第三方微调，
-    # value=落盘绝对路径，与 local/selected 同语义）+ local（PathPicker 注册）。
+    # Unified main-model-family rows: official variants (preset) + download
+    # candidates (third-party finetunes, value=absolute path on disk, same
+    # semantics as local/selected) + local (registered via PathPicker).
     for family_id in FAMILY_ASSETS:
         main = family_sections.get(f"{family_id}_main")
         if not main:
@@ -502,8 +515,9 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
                 ))
         model_source_rows[family_id] = fam_rows
 
-    # VAE（族无关共享资产）：官方落点 preset（value="" = 跟随官方）+ 用户
-    # 注册的本地 .safetensors。选中值 = models_cfg.selected_vae。
+    # VAE (a family-agnostic shared asset): the official location as a preset
+    # (value="" = follows official) + user-registered local .safetensors files.
+    # Selected value = models_cfg.selected_vae.
     vae_selected = str(models_cfg.selected_vae or "")
     vae_official = qwen_image_vae_target(r)
     official_st = _file_status(vae_official)
@@ -512,7 +526,8 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
         download_id="anima_vae", download_variant=None,
         status_key="anima_vae",
         exists=official_st["exists"], size=official_st["size"],
-        # 空 = 官方；老配置里显式存着官方绝对路径的也算选中官方
+        # Empty = official; an old config that explicitly stored the official
+        # absolute path also counts as selecting official
         is_current=vae_selected in ("", str(vae_official)),
         description=str(vae_official),
     )]
@@ -530,8 +545,9 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
         ))
     model_source_rows[secrets.VAE_DOMAIN] = vae_rows
 
-    # 按族文本编码器（"clip"）：族官方 variant preset + 用户注册的本地
-    # transformers 目录。选中值 = models_cfg.selected_te[family]。
+    # Per-family text encoder ("clip"): the family's official variant presets +
+    # user-registered local transformers directories. Selected value =
+    # models_cfg.selected_te[family].
     for family_id, _assets in FAMILY_ASSETS.items():
         te_domain = secrets.te_domain(family_id)
         te_selected = str((models_cfg.selected_te or {}).get(family_id) or "")
@@ -549,8 +565,10 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
                 exists=all(f["exists"] for f in files),
                 size=sum(f["size"] for f in files),
                 files=files,
-                # 选中值不在官方 variant 里（本地目录 / 非法）→ 只有默认
-                # variant（列表首项，各族的兜底）在没选过时高亮
+                # If the selected value isn't among the official variants (a
+                # local directory / invalid) -> only the default variant (the
+                # list's first entry, each family's fallback) is highlighted
+                # when nothing has been selected yet
                 is_current=(
                     te_selected == str(preset["value"])
                     or (
@@ -585,7 +603,7 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
         "wd14": {
             "id": "wd14",
             "name": "WD14",
-            "description": "SmilingWolf 系列 ONNX 打标",
+            "description": "SmilingWolf ONNX tagger family",
             "repo": "SmilingWolf/*",
             "current_model_id": wd14_cfg.model_id,
             "variants": wd14_variants,
@@ -602,26 +620,27 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
         },
         "eval_metrics": {
             "id": "eval_metrics",
-            "name": "评估指标模型",
-            "description": "CLIP / DINO，用于 LoRA 训练后指标评估",
+            "name": "Eval metric models",
+            "description": "CLIP / DINO, used for post-training LoRA metric evaluation",
             "variants": eval_variants,
         },
-        # 评估指标 registry（Settings 复选框列表用）：每个指标的 key/label/说明/默认。
+        # Eval metric registry (used by the Settings checkbox list): each metric's key/label/description/default.
         "eval_metric_catalog": eval_registry.public_catalog(),
         "upscalers": {
             "id": "upscalers",
-            "name": "放大器",
-            "description": "预处理阶段的 super-resolution 模型",
+            "name": "Upscalers",
+            "description": "Super-resolution models used during preprocessing",
             "default": DEFAULT_UPSCALER,
             "current": selected_label,
             "target_dir": str(upscaler_dir(r)),
             "variants": upscaler_variants,
         },
-        # 统一来源候选行（前端泛化候选卡消费；键 = domain）。
+        # Unified source candidate rows (consumed by the frontend's generic candidate card; key = domain).
         "model_sources": model_source_rows,
-        # 按类型的下载源选择：双源类型给 dropdown，固定 HF 的给单选指示。
-        # current 来自 secrets.download_sources（已迁移种子）；available 决定前端
-        # 渲染真 dropdown 还是 1-option 禁用框。
+        # Download-source selection by type: dual-source types get a dropdown,
+        # HF-only types get a single-choice indicator. current comes from
+        # secrets.download_sources (already migrated seed); available decides
+        # whether the frontend renders a real dropdown or a disabled 1-option box.
         "download_source_options": {
             "training": {"current": src_cfg.get("training", "huggingface"),
                          "available": ["huggingface", "modelscope"]},

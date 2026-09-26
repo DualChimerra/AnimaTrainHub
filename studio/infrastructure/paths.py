@@ -1,4 +1,4 @@
-"""Studio 内部使用的路径常量与目录初始化。"""
+"""Path constants and directory initialization used internally by Studio."""
 from __future__ import annotations
 
 import json
@@ -6,43 +6,49 @@ import logging
 import os
 from pathlib import Path
 
-# PR-7：本文件从 studio/paths.py 搬到 studio/infrastructure/paths.py，多嵌一层；
-# REPO_ROOT 要再上跳一层（__file__ → infrastructure/ → studio/ → repo root）。
+# PR-7: this file moved from studio/paths.py to studio/infrastructure/paths.py, one extra
+# level of nesting; REPO_ROOT needs to go up one more level (__file__ -> infrastructure/ ->
+# studio/ -> repo root).
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-# 训练侧已有。`OUTPUT_DIR` 仅给 `/samples/{name}` 端点（无 task_id 时）兜底用，
-# CLI 用户用 `./output/samples/...`；Studio 模式样本落到
-# `studio_data/projects/{id}-{slug}/versions/{label}/output/samples/`。
-# PP6.1 后全局 `monitor_data/` 已退役（监控状态走 per-task），不再保留常量 / 创建目录。
+# Already exists on the training side. `OUTPUT_DIR` is only a fallback for the `/samples/{name}`
+# endpoint (when there's no task_id); CLI users get `./output/samples/...`, while Studio-mode
+# samples land in `studio_data/projects/{id}-{slug}/versions/{label}/output/samples/`.
+# After PP6.1 the global `monitor_data/` was retired (monitoring state is per-task now), so the
+# constant / directory creation for it is no longer kept.
 OUTPUT_DIR = REPO_ROOT / "output"
 
-# 用户显式选择「导出到本机目录」时的落地目录。
+# Landing directory when the user explicitly chooses "export to a local directory".
 DATA_EXPORTS = REPO_ROOT / "data_exports"
 
 
-# Studio 持久化（SQLite + 用户保存的 preset + 任务日志）。
+# Studio persistence (SQLite + user-saved presets + task logs).
 #
-# 位置可自定义：仓库根的指针文件 `studio_data_location.json`（{"path": "..."}）
-# 指向自定义目录。指针必须在 studio_data **外面** —— secrets.json / db 都在
-# studio_data 里，位置本身的配置存里面就成了鸡生蛋。指针在模块 import 时读
-# 一次，进程内不变；迁移（/api/studio-data/migrate）写完指针后需重启 server
-# 生效（cli.py 重启循环用 subprocess 拉新进程，paths 会重新求值）。
+# The location is customizable: a pointer file at the repo root, `studio_data_location.json`
+# ({"path": "..."}), points to a custom directory. The pointer must live **outside**
+# studio_data -- secrets.json / the db both live inside studio_data, so storing the location's
+# own config inside it would be a chicken-and-egg problem. The pointer is read once at module
+# import time and stays fixed for the process; after a migration (/api/studio-data/migrate)
+# writes the pointer, the server needs a restart to pick it up (cli.py's restart loop spawns a
+# new process via subprocess, and paths gets re-evaluated).
 DEFAULT_STUDIO_DATA = REPO_ROOT / "studio_data"
 STUDIO_DATA_POINTER = REPO_ROOT / "studio_data_location.json"
 
 
 def resolve_studio_data(pointer_file: Path | None = None) -> Path:
-    """解析 studio_data 位置：env override → 指针文件 → 默认位置。
+    """Resolves the studio_data location: env override -> pointer file -> default location.
 
-    本 fork：环境变量 `ALS_STUDIO_DATA`（绝对路径）优先级最高 —— 云端
-    （Colab / Kaggle）notebook 注入，把工作目录放本机快速盘再单独同步到
-    Google Drive（studio_data 直接软链到 Drive FUSE 会让 SQLite 与小文件
-    写入不可靠：项目 / 预设丢失、zip 损坏等，详见 docs / Colab notebook 注释）。
+    This fork: the `ALS_STUDIO_DATA` env var (an absolute path) has the highest priority --
+    injected by cloud (Colab / Kaggle) notebooks, to put the working directory on the local
+    fast disk and sync to Google Drive separately (symlinking studio_data directly onto the
+    Drive FUSE mount makes SQLite and small-file writes unreliable: lost projects/presets,
+    corrupted zips, etc -- see the docs / Colab notebook comments for details).
 
-    指针文件（上游 /api/studio-data/migrate 机制）：目标必须是已存在的绝对
-    路径目录 —— 盘符未挂载 / 目录被删时回退默认（默认位置仍保留迁移前的旧
-    数据，可用），只 log warning 不抛错。
+    Pointer file (the upstream /api/studio-data/migrate mechanism): the target must be an
+    existing absolute-path directory -- if the drive letter isn't mounted / the directory was
+    deleted, falls back to the default location (which still retains the old pre-migration
+    data and remains usable), only logging a warning rather than raising.
     """
     env = os.environ.get("ALS_STUDIO_DATA", "").strip()
     if env:
@@ -55,11 +61,11 @@ def resolve_studio_data(pointer_file: Path | None = None) -> Path:
             if target.is_absolute() and target.is_dir():
                 return target
             logging.getLogger(__name__).warning(
-                "studio_data 指针目标无效（不存在或非绝对路径），回退默认位置: %s", target,
+                "studio_data pointer target is invalid (missing or not an absolute path), falling back to the default location: %s", target,
             )
     except Exception:
         logging.getLogger(__name__).warning(
-            "studio_data 指针文件解析失败，回退默认位置: %s", ptr, exc_info=True,
+            "Failed to parse the studio_data pointer file, falling back to the default location: %s", ptr, exc_info=True,
         )
     return DEFAULT_STUDIO_DATA
 
@@ -67,41 +73,43 @@ def resolve_studio_data(pointer_file: Path | None = None) -> Path:
 STUDIO_DATA = resolve_studio_data()
 STUDIO_DB = STUDIO_DATA / "studio.db"
 USER_PRESETS_DIR = STUDIO_DATA / "presets"
-USER_CONFIGS_DIR = USER_PRESETS_DIR  # 兼容别名（PP0 后将随 configs_io 一起移除）
-# LOGS_DIR：pre-task-scoped layout 时所有 task 日志的扁平目录。
-# 新 task 走 `tasks/<id>/run.log`（见 task_log_path）；这个目录仅保留给
-# 老 task 兼容读取（不写新）。
+USER_CONFIGS_DIR = USER_PRESETS_DIR  # compat alias (to be removed along with configs_io after PP0)
+# LOGS_DIR: the flat directory holding all task logs from the pre-task-scoped layout.
+# New tasks use `tasks/<id>/run.log` (see task_log_path); this directory is kept only for
+# reading old tasks (nothing new is written here).
 LOGS_DIR = STUDIO_DATA / "logs"
 THUMB_CACHE_DIR = STUDIO_DATA / "thumb_cache"
 
-# Task-scoped 档案根目录。每个 task 独立子目录，跟 version 解耦，
-# 删 version 不会带走 task 历史（loss / 参数 / sample / 日志）。
-# 子目录约定（snapshot/ 已由 task_snapshot.py 引入 ADR-0007 §11.7）：
-#   tasks/<id>/snapshot/config.yaml   ← task 入队时 freeze 的 config
-#   tasks/<id>/monitor/state.json     ← 训练监控状态（loss/LR/sample 索引）
-#   tasks/<id>/samples/*.png          ← 训练采样图
-#   tasks/<id>/run.log                ← worker 子进程 stdout/stderr
+# Root of the task-scoped archive. Each task gets its own subdirectory, decoupled from version,
+# so deleting a version doesn't take the task's history (loss / params / samples / logs) with it.
+# Subdirectory conventions (snapshot/ was introduced by task_snapshot.py, ADR-0007 SS11.7):
+#   tasks/<id>/snapshot/config.yaml   <- config frozen when the task was enqueued
+#   tasks/<id>/monitor/state.json     <- training monitor state (loss/LR/sample index)
+#   tasks/<id>/samples/*.png          <- training sample images
+#   tasks/<id>/run.log                <- worker subprocess stdout/stderr
 TASKS_DIR = STUDIO_DATA / "tasks"
 
-# React 前端
+# React frontend
 WEB_DIR = REPO_ROOT / "studio" / "web"
 WEB_DIST = WEB_DIR / "dist"
 
-# 公告栏数据源（docs/announcements/<id>.md + <id>.en.md），见
-# docs/todo/announcement-center.md。仓库内 docs/ 下，随版本一起 git 更新到达。
+# Announcement board data source (docs/announcements/<id>.md + <id>.en.md), see
+# docs/todo/announcement-center.md. Lives under docs/ in the repo, shipped via git along with
+# each release.
 ANNOUNCEMENTS_DIR = REPO_ROOT / "docs" / "announcements"
 
 
 def migrate_configs_to_presets() -> None:
-    """旧版本把 yaml 放在 studio_data/configs/，这里把目录原地重命名为 presets/。
-    只在 presets/ 不存在时执行；不会覆盖用户的新数据。"""
+    """Older versions put yaml files in studio_data/configs/; this renames that directory to
+    presets/ in place. Only runs when presets/ doesn't already exist; never overwrites the
+    user's newer data."""
     old = STUDIO_DATA / "configs"
     if old.exists() and not USER_PRESETS_DIR.exists():
         old.rename(USER_PRESETS_DIR)
 
 
 def ensure_dirs() -> None:
-    """首次运行时创建必要目录。"""
+    """Creates the required directories on first run."""
     STUDIO_DATA.mkdir(parents=True, exist_ok=True)
     migrate_configs_to_presets()
     for d in (USER_PRESETS_DIR, LOGS_DIR, DATA_EXPORTS):
@@ -109,84 +117,88 @@ def ensure_dirs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task-scoped 路径 helper
+# Task-scoped path helpers
 # ---------------------------------------------------------------------------
 #
-# 所有 helper 都不 mkdir —— 调用方按需 mkdir(parents=True, exist_ok=True)。
-# 跟 task_snapshot.snapshot_dir 已有约定保持一致：snapshot_dir(id) 也是
-# `tasks/<id>/snapshot/` 一个子目录，本组 helper 提供 monitor/samples/log 三个
-# sibling，组合起来就是 task 完整档案。
+# None of these helpers mkdir -- callers mkdir(parents=True, exist_ok=True) as needed.
+# Kept consistent with the existing convention in task_snapshot.snapshot_dir: snapshot_dir(id)
+# is also just a subdirectory of `tasks/<id>/snapshot/`; this group of helpers provides the
+# three sibling dirs monitor/samples/log, which together make up a task's full archive.
 
 def task_dir(task_id: int) -> Path:
-    """`studio_data/tasks/<task_id>/` —— task 档案根。"""
+    """`studio_data/tasks/<task_id>/` -- root of the task's archive."""
     return TASKS_DIR / str(int(task_id))
 
 
 def task_monitor_state_path(task_id: int) -> Path:
-    """`tasks/<task_id>/monitor/state.json` —— 训练监控状态文件。
+    """`tasks/<task_id>/monitor/state.json` -- the training monitor state file.
 
-    取代旧路径：
-    - `versions/<v>/monitor/task_<id>/state.json`（PP6.1，v0.5.0+，仍兼容读）
-    - `versions/<v>/monitor_state.json`（pre-PP6.1，仍兼容读）
-    - `studio_data/monitors/task_<id>/state.json`（无 version_id 兜底，仍兼容读）
+    Replaces the old paths:
+    - `versions/<v>/monitor/task_<id>/state.json` (PP6.1, v0.5.0+, still read for compat)
+    - `versions/<v>/monitor_state.json` (pre-PP6.1, still read for compat)
+    - `studio_data/monitors/task_<id>/state.json` (fallback for no version_id, still read for compat)
     """
     return task_dir(task_id) / "monitor" / "state.json"
 
 
 def task_samples_dir(task_id: int) -> Path:
-    """`tasks/<task_id>/samples/` —— 训练采样图。
+    """`tasks/<task_id>/samples/` -- training sample images.
 
-    runtime 写：`runtime/training/phases/bootstrap.py` 把 ctx.sample_dir 指向这里。
-    API 读：`studio/api/routers/samples.py` 候选首位。
+    Written by runtime: `runtime/training/phases/bootstrap.py` points ctx.sample_dir here.
+    Read by the API: first candidate in `studio/api/routers/samples.py`.
     """
     return task_dir(task_id) / "samples"
 
 
 def task_eval_dir(task_id: int) -> Path:
-    """`tasks/<task_id>/eval/` —— training task scoped LoRA eval artifacts."""
+    """`tasks/<task_id>/eval/` -- training task scoped LoRA eval artifacts."""
     return task_dir(task_id) / "eval"
 
 
 def task_log_path(task_id: int) -> Path:
-    """`tasks/<task_id>/run.log` —— worker 子进程 stdout/stderr。
+    """`tasks/<task_id>/run.log` -- worker subprocess stdout/stderr.
 
-    取代旧路径 `studio_data/logs/<task_id>.log`（仍兼容读）。
-    `project_jobs` 的日志（`studio_data/jobs/<job_id>.log`）是另一套，不动。
+    Replaces the old path `studio_data/logs/<task_id>.log` (still read for compat).
+    `project_jobs`' logs (`studio_data/jobs/<job_id>.log`) are a separate system, untouched here.
     """
     return task_dir(task_id) / "run.log"
 
 
 # ---------------------------------------------------------------------------
-# Path traversal 防护
+# Path traversal protection
 # ---------------------------------------------------------------------------
 #
-# 历史教训：早期端点只用字面量黑名单（`"/" in name or "\\" in name or ".." in name`）
-# 防穿越。`..` 字面量检查会误杀含 ASCII 省略号的合法文件名（Pixiv 标题 `「これ...」`），
-# 删掉又会让 defense-in-depth 单薄。统一走 resolve() + relative_to() containment check：
-# 既允许 `..` 作为文件名字符出现，又保证拼出来的最终路径不能逃出 base。
+# Lesson learned: early endpoints only used a literal blacklist
+# (`"/" in name or "\\" in name or ".." in name`) to guard against traversal. A literal `..`
+# check false-positives on legitimate filenames containing an ASCII ellipsis (a Pixiv title like
+# `"kore..."`), but removing it would make defense-in-depth too thin. This is unified around a
+# resolve() + relative_to() containment check instead: it both allows `..` to appear as ordinary
+# filename characters and guarantees the final joined path can never escape base.
 
 def validate_path_component(name: str) -> None:
-    """校验单个路径片段：拒绝空串 / 含路径分隔符 / 绝对路径前缀。
+    """Validates a single path component: rejects empty strings / path separators / an
+    absolute-path prefix.
 
-    `..` 字面量本身放行（containment check 是真正防线），所以
-    `「これでいっすか...」.txt` 这种合法文件名能通过。
+    A literal `..` is allowed through on its own (the containment check is the real defense),
+    so a legitimate filename containing an ellipsis, like `"cafe..."`.txt`, can still pass.
     """
     if not name:
         raise ValueError("path component is empty")
     if "/" in name or "\\" in name:
         raise ValueError(f"path component contains separator: {name!r}")
-    # Windows 盘符（C:\...）和 POSIX 绝对路径（/foo）一律视作非法片段
+    # A Windows drive letter (C:\...) or a POSIX absolute path (/foo) is always treated as an
+    # invalid component
     if Path(name).is_absolute():
         raise ValueError(f"path component is absolute: {name!r}")
 
 
 def safe_join(base: Path, *parts: str) -> Path:
-    """把 parts 拼到 base 下并做 containment 校验。
+    """Joins parts under base and runs a containment check.
 
-    每个 part 走 `validate_path_component`；拼接 + resolve() 后必须仍在
-    `base.resolve()` 子树内，否则 raise ValueError。
+    Each part goes through `validate_path_component`; after joining + resolve(), the result
+    must still be within `base.resolve()`'s subtree, otherwise raises ValueError.
 
-    返回 resolve() 后的绝对 Path。调用方按需做 exists() / is_file() 检查。
+    Returns the resolved absolute Path. The caller does exists() / is_file() checks as needed.
     """
     for p in parts:
         validate_path_component(p)

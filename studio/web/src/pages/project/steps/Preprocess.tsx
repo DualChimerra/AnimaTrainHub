@@ -30,23 +30,23 @@ interface Status {
 }
 
 interface FilesView {
-  /** ADR 0010: train 集合所有图（替代老 pending+processed 二元）。 */
+  /** ADR 0010: all images in the train set (replaces the old pending+processed binary). */
   images: import('../../../api/client').TrainImage[]
   summary: Status['summary']
 }
 
-/** 单图视图：从 train manifest 派生的带状态列表（ADR 0010）。
+/** Single-image view: a status-tagged list derived from the train manifest (ADR 0010).
  *
- *  ADR 0010：用户视角只有一份图，「未处理 / 已处理」是图上的徽章而非分组；
- *  状态从 entry 字段差异推断（rel path 末段 ≠ origin → processed；相同 →
- *  pending/原样）。
+ *  ADR 0010: from the user's perspective there is one set of images; "unprocessed / processed" is
+ *  a badge on the image rather than a grouping. Status is inferred from a diff in entry fields
+ *  (rel path's last segment ≠ origin → processed; same → pending/unchanged).
  */
 interface ImageRow {
-  /** train rel path "1_data/X.png"（用作 selection key + manifest entry key）。 */
+  /** train rel path "1_data/X.png" (used as the selection key + manifest entry key). */
   name: string
-  /** name 末段文件名（restore/crop 操作 + thumb URL 用）。 */
+  /** the final filename segment of name (used for restore/crop actions + the thumb URL). */
   filename: string
-  /** name 的 folder 段（thumb URL 用）。 */
+  /** the folder segment of name (used for the thumb URL). */
   folder: string
   status: 'pending' | 'processed'
   processed?: import('../../../api/client').TrainImage
@@ -56,16 +56,16 @@ interface ImageRow {
   mtime: number
 }
 
-/** Pixel-area histogram bins — 共享于 sidebar histogram + grid filter chips +
- *  Overview 详情 tab。定义/逻辑移到 lib/pixelBins.ts。 */
+/** Pixel-area histogram bins — shared by the sidebar histogram + grid filter chips +
+ *  the Overview detail tab. Definition/logic lives in lib/pixelBins.ts. */
 type FilterMode = 'all' | PxBinId
 
 const FALLBACK_MODEL = '4x-AnimeSharp'
 const TILE_OPTIONS = [128, 192, 256, 384, 512] as const
 type Device = 'auto' | 'cuda' | 'cpu'
 
-// 目标分辨率预设 — LoRA 训练桶常用面积。
-// value=null 是「关闭智能」模式，直接 4× 模型输出（老路径，盘费高）。
+// Target resolution presets -- areas commonly used by LoRA training buckets.
+// value=null is "smart off" mode: take the model's raw 4x output directly (the old path, costly on disk).
 const DEFAULT_TARGET_EDGE = 1024
 
 export default function PreprocessPage() {
@@ -80,19 +80,19 @@ export default function PreprocessPage() {
   const [busy, setBusy] = useState(false)
   const [tileSize, setTileSize] = useState<number>(256)
   const [device, setDevice] = useState<Device>('auto')
-  // targetEdge: 边长（像素），平方就是面积；null = 关闭智能；0 = 自定义中
+  // targetEdge: edge length in pixels, squared gives the area; null = smart off; 0 = custom in progress
   const [targetEdge, setTargetEdge] = useState<number | null>(DEFAULT_TARGET_EDGE)
   const [customEdge, setCustomEdge] = useState<string>(String(DEFAULT_TARGET_EDGE))
   const [filter, setFilter] = useState<FilterMode>('all')
   const [folderFilter, setFolderFilter] = useState<string>('all')
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [selAnchor, setSelAnchor] = useState<string | null>(null)
-  // 大图预览：index 引用 visibleRows[]（filter 当前的可见 ImageRow 列表）
+  // Large preview: index refers into visibleRows[] (the currently visible ImageRow list under filter)
   const [previewIdx, setPreviewIdx] = useState<number | null>(null)
 
-  // 模型权重就绪状态（catalog 取一次，下载完成后用户手动刷新或 SSE 更新）
+  // Model weight readiness (fetched once from the catalog; updated by manual refresh or SSE after download completes)
   const [allUpscalers, setAllUpscalers] = useState<UpscalerVariant[]>([])
-  // 当前选中的放大器 label。初值 fallback；refreshUpscaler 拉 catalog.upscalers.current 覆盖
+  // Currently selected upscaler label. Starts as the fallback; refreshUpscaler overwrites it from catalog.upscalers.current
   const [selectedModel, setSelectedModel] = useState<string>(FALLBACK_MODEL)
   const [downloadingModel, setDownloadingModel] = useState(false)
   const upscaler = useMemo<UpscalerVariant | null>(
@@ -115,8 +115,8 @@ export default function PreprocessPage() {
     try {
       const r = await api.getPreprocessStatusTrain(project.id, vid)
       setStatus(r)
-      // 回放（issue #251）：进页面 / SSE 重连时用 log_tail 恢复日志；
-      // 同一 job 且本地已有 SSE 积累时不覆盖（tail 只有 50 行，比本地短）。
+      // Replay (issue #251): restore logs from log_tail on page entry / SSE reconnect;
+      // don't overwrite when it's the same job and we already have local SSE accumulation (tail is only 50 lines, shorter than local).
       const rid = r.job?.id ?? null
       setLogs((prev) =>
         rid !== null && rid === jobIdRef.current && prev.length > 0
@@ -184,13 +184,13 @@ export default function PreprocessPage() {
   const summary = files?.summary ?? status?.summary ?? { image_count: 0 }
   const modelReady = !!upscaler?.exists
 
-  // ADR 0010: TrainImage[] → ImageRow[]。processed 用 backend `_is_processed`
-  // 推断（扩展名变 / _cN 后缀 / train size != download size），前端不自己算。
+  // ADR 0010: TrainImage[] → ImageRow[]. processed is inferred by the backend's `_is_processed`
+  // (extension change / _cN suffix / train size != download size); the frontend doesn't compute it itself.
   const rows = useMemo<ImageRow[]>(() => {
     if (!files) return []
     const out: ImageRow[] = []
     for (const img of files.images) {
-      if (img.duplicate_removed) continue // 软删除不进 grid
+      if (img.duplicate_removed) continue // soft-deleted, doesn't enter the grid
       const lastSlash = img.name.lastIndexOf('/')
       const folder = lastSlash >= 0 ? img.name.slice(0, lastSlash) : ''
       const filename = lastSlash >= 0 ? img.name.slice(lastSlash + 1) : img.name
@@ -220,13 +220,13 @@ export default function PreprocessPage() {
     return m
   }, [rows])
 
-  // 数据集子文件夹列表（多分辨率：一次放大一个文件夹，目标分辨率可跟随 px 前缀）。
+  // Dataset subfolder list (multi-resolution: upscale one folder at a time; the target resolution can follow the px prefix).
   const folders = useMemo(
     () => Array.from(new Set(rows.map((r) => r.folder).filter(Boolean))).sort(),
     [rows],
   )
-  // 选中某文件夹时「全部放大」的范围 = 该文件夹全部图（忽略像素档 filter）；
-  // 'all' 时为 null → 走全局 'all' 模式。
+  // When a folder is selected, the "upscale all" scope = every image in that folder (ignoring the pixel-bin filter);
+  // when 'all', this is null → falls back to global 'all' mode.
   const folderScopedNames = useMemo(
     () =>
       folderFilter === 'all'
@@ -245,7 +245,7 @@ export default function PreprocessPage() {
     [rows, filter, folderFilter],
   )
 
-  // 选中带 px 前缀的文件夹 → 目标分辨率自动跟随该文件夹（如 1024px_xxx → 1024）。
+  // Selecting a folder with a px prefix → the target resolution automatically follows that folder (e.g. 1024px_xxx → 1024).
   useEffect(() => {
     if (folderFilter === 'all') return
     const reso = parseFolderMeta(folderFilter).reso
@@ -254,7 +254,7 @@ export default function PreprocessPage() {
       setCustomEdge(String(reso))
     }
   }, [folderFilter])
-  // ADR 0010: grid key = rel path (manifest entry key)，跨 sub-folder 唯一。
+  // ADR 0010: grid key = rel path (manifest entry key), unique across sub-folders.
   const visibleNames = useMemo(
     () => visibleRows.map((r) => r.name),
     [visibleRows],
@@ -264,26 +264,26 @@ export default function PreprocessPage() {
     () =>
       visibleRows.map((r) => ({
         name: r.name,
-        // train bucket thumb：folder + filename
+        // train bucket thumb: folder + filename
         thumbUrl: api.versionThumbUrl(
           project.id, vid, 'train', r.filename, r.folder, 256,
         ) + `&_=${r.mtime}`,
-        // ADR 0010: processed entry 显示 action 角标（继承自老 schema 透传）
+        // ADR 0010: processed entries show an action badge (carried over from the old schema passthrough)
         meta: r.status === 'processed' ? (r.processed?.action ?? undefined) : undefined,
         badge: r.status === 'processed' ? (r.processed?.scale ? `${r.processed.scale}× ✓` : '✓') : undefined,
       })),
     [visibleRows, project.id, vid],
   )
 
-  // ADR 0010: 选中传给 start_job_train 的 names 直接用 rel path
-  // （resolve_targets_train 接受 rel path，跟 manifest entry key 一致）。
+  // ADR 0010: the selected names passed to start_job_train use rel path directly
+  // (resolve_targets_train accepts rel path, matching the manifest entry key).
   const selectedTargets = useMemo(() => {
     const names: string[] = []
     for (const k of sel) names.push(k)
     return { count: names.length, names }
   }, [sel])
 
-  // ----- 操作 ---------------------------------------------------------------
+  // ----- actions ---------------------------------------------------------------
   const downloadModel = async () => {
     if (downloadingModel) return
     if (upscaler?.kind === 'custom') {
@@ -359,10 +359,10 @@ export default function PreprocessPage() {
     }
   }
 
-  // 撤销 (restore) 流程已迁移到「总览」tab (PreprocessOverview)，作为
-  // 跨工具统一入口，避免每个工具页都有自己的撤销按钮。
+  // The undo (restore) flow has moved to the "Overview" tab (PreprocessOverview), as a single
+  // cross-tool entry point, so each tool page doesn't need its own undo button.
 
-  // ADR 0010: hooks 之后再做 vid guard（hooks 顺序不能被早 return 打断）
+  // ADR 0010: do the vid guard after the hooks (hook order must not be interrupted by an early return)
   if (!activeVersion) {
     return (
       <div className="p-6 text-fg-secondary">
@@ -371,7 +371,7 @@ export default function PreprocessPage() {
     )
   }
 
-  // 放大操作数量：有文件夹筛选时按筛选范围算，否则全部
+  // Upscale operation count: scoped to the folder filter when one is active, otherwise everything
   const upscaleTotal = folderScopedNames ? folderScopedNames.length : rows.length
   const upscaleBusy = busy || isLive
 

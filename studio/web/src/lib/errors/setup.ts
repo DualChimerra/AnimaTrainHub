@@ -1,14 +1,16 @@
 /**
- * 全局 JS 错误监听安装（ADR-0009 §5.1 / PR-3 C2）。
+ * Installs global JS error listeners (ADR-0009 §5.1 / PR-3 C2).
  *
- * 在 main.tsx 启动时调一次 installGlobalErrorHandlers()。装两个 listener：
- *   - window.addEventListener('error', ...)             同步脚本 / resource load
- *   - window.addEventListener('unhandledrejection', ...)  未 catch 的 Promise
+ * Call installGlobalErrorHandlers() once at startup in main.tsx. It installs
+ * two listeners:
+ *   - window.addEventListener('error', ...)              sync scripts / resource loads
+ *   - window.addEventListener('unhandledrejection', ...)  uncaught Promises
  *
- * **不**全代理 console.error（开发期 React warnings / devtools msg 太多噪音）。
- * 只接 React 外的未捕获错误；React 内部 ErrorBoundary 单独 hook（PR-3 C3）。
+ * It does **not** proxy console.error wholesale (too noisy in dev with React
+ * warnings / devtools messages). It only catches errors outside React;
+ * React's own errors go through ErrorBoundary separately (PR-3 C3).
  *
- * 装一次即可 — 重复调 noop（_installed sentinel）。
+ * Safe to call more than once -- repeat calls are a no-op (_installed sentinel).
  */
 import { reportClientError } from './report'
 
@@ -23,7 +25,7 @@ export function installGlobalErrorHandlers(): void {
   }
 
   globalThis.addEventListener('error', (ev: ErrorEvent) => {
-    // ev.error 可能是 null（cross-origin script error / resource 404）
+    // ev.error can be null (cross-origin script error / resource 404)
     const err = ev.error as Error | null
     reportClientError({
       kind: 'window.error',
@@ -59,7 +61,7 @@ export function installGlobalErrorHandlers(): void {
   })
 }
 
-/** 测试钩子 — 清 sentinel 让单测可重复 install。 */
+/** Test hook -- clears the sentinel so unit tests can reinstall repeatedly. */
 export function _resetInstalledForTests(): void {
   _installed = false
 }

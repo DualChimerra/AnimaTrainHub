@@ -1,16 +1,16 @@
 import i18n from '../../i18n'
-/** 数据作业共享工具（DataJobsPanel + QueueDetail 共用）。
- *  R-5 台账合并后作业就是 task（task_type = kind），工具全部按 Task 形状取字段。 */
+/** Shared utilities for data jobs (used by both DataJobsPanel + QueueDetail).
+ *  After the R-5 ledger merge, a job is just a task (task_type = kind); every utility reads fields off the Task shape. */
 import type { Task, TaskType } from '../../api/client'
 
-/** 数据视图（light + io 档）的 kind 全集。eval_samples 是 exclusive 档，
- *  归 GPU 视图（锚点 §4-2），不在此列。 */
+/** The full set of kinds for the data view (light + io tiers). eval_samples is an exclusive
+ *  tier, belonging to the GPU view (anchor §4-2), and is not included here. */
 export const DATA_VIEW_KINDS: TaskType[] = [
   'download', 'preprocess', 'tag', 'reg_build',
   'eval_clip', 'eval_dino', 'eval_tag', 'eval_ccip',
 ]
 
-/** 全部作业 kind（i18n 标签遍历用，含 eval_samples）。 */
+/** All job kinds (for iterating over i18n labels; includes eval_samples). */
 export const JOB_KINDS: TaskType[] = ['eval_samples', ...DATA_VIEW_KINDS]
 
 export const JOB_STATUS_TONE: Record<string, string> = {
@@ -40,8 +40,8 @@ export function fmtJobTime(ts: number | null | undefined): string {
   return new Date(ts * 1000).toLocaleString(i18n.language, { hour12: false })
 }
 
-/** 作业 kind → 原生步骤页深链（download 是 project 级，其余 version 级；
- *  eval_* 落训练页）。非作业类型返回 null（train/generate 的跳转另有专链）。 */
+/** Job kind → deep link to the native step page (download is project-level, the rest are
+ *  version-level; eval_* lands on the Train page). Non-job types return null (train/generate have their own separate jump link). */
 export function jobJumpPath(task: Task): string | null {
   const kind = task.task_type ?? 'train'
   const pid = task.project_id
@@ -57,7 +57,7 @@ export function jobJumpPath(task: Task): string | null {
   }
 }
 
-/** params 值 → 人话字符串。布尔走 field.yes/no，数组逗号连接，对象 JSON 截断。 */
+/** params value → human-readable string. Booleans go through field.yes/no, arrays join with commas, objects truncate as JSON. */
 export function fmtParamValue(
   v: unknown, t: (key: string) => string,
 ): string {
@@ -72,7 +72,7 @@ export function fmtParamValue(
   return s.length > 200 ? `${s.slice(0, 200)}…` : s
 }
 
-/** param key → 人话标签；没建映射的退回原 key（全字段显示，一个不藏）。 */
+/** param key → human-readable label; falls back to the raw key when no mapping exists (every field is shown, none hidden). */
 export function paramLabel(key: string, t: (k: string) => string): string {
   const i18nKey = `queue.jobs.param.${key}`
   const label = t(i18nKey)

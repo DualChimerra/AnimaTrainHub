@@ -1,17 +1,18 @@
 /**
- * 前端错误上报（ADR-0009 §5 / PR-3 C2）。
+ * Frontend error reporting (ADR-0009 §5 / PR-3 C2).
  *
- * 三个 caller：
- *   - window.addEventListener('error')           同步脚本 / resource load 错
- *   - window.addEventListener('unhandledrejection')  Promise.reject 没 catch
- *   - ErrorBoundary.componentDidCatch            React 渲染 / lifecycle 抛错
+ * Three callers:
+ *   - window.addEventListener('error')               sync script / resource load errors
+ *   - window.addEventListener('unhandledrejection')   an uncaught Promise.reject
+ *   - ErrorBoundary.componentDidCatch                 React render / lifecycle throws
  *
- * 全部进 `POST /api/client-errors` → 后端 logger.error → studio.log。
+ * All of them go to `POST /api/client-errors` -> backend logger.error -> studio.log.
  *
- * 强约束：
- *   - **silent swallow on fail** — 上报失败不能再 throw（防级联到 ErrorBoundary 死循环）
- *   - 用 keepalive：tab 关闭瞬间也尽量发出去
- *   - 不阻塞主流程（async fire-and-forget）
+ * Hard constraints:
+ *   - **silent swallow on fail** -- a failed report must never throw again
+ *     (to avoid cascading into an ErrorBoundary infinite loop)
+ *   - uses keepalive: tries to send even as the tab is closing
+ *   - never blocks the main flow (async fire-and-forget)
  */
 
 export type ClientErrorKind =
@@ -24,11 +25,11 @@ export interface ClientErrorReport {
   kind: ClientErrorKind
   message: string
   stack?: string
-  componentStack?: string  // react.boundary 专属
+  componentStack?: string  // react.boundary only
   source?: string          // window.error script URL
   line?: number
   col?: number
-  /** 调用时**不**用填；report() 自动注入 location.href / userAgent 等。 */
+  /** Callers do **not** need to fill this in; report() injects location.href / userAgent etc. automatically. */
 }
 
 interface InternalReportBody extends ClientErrorReport {
@@ -40,8 +41,9 @@ interface InternalReportBody extends ClientErrorReport {
   trace_id_last_4xx?: string
 }
 
-// 由 client.ts 在 4xx/5xx 时 set；report() 上报时读出来。让开发者
-// 在 server log 能 join "用户 toast 看到的错" 跟 "前端崩前最后一次 API 失败"。
+// Set by client.ts on a 4xx/5xx; read back when report() sends. Lets
+// developers join "the error shown in the user's toast" with "the last API
+// failure before the frontend crashed" in the server log.
 let _lastApiTraceId: string | undefined
 
 export function setLastApiTraceId(traceId: string | undefined): void {
@@ -53,23 +55,23 @@ export function getLastApiTraceId(): string | undefined {
 }
 
 /**
- * 上报。fire-and-forget — 不返 Promise（防 caller await 阻塞）。
+ * Sends the report. Fire-and-forget -- doesn't return a Promise (so a caller can't accidentally block on await).
  *
- * 失败 silently swallow（log to console.warn 防完全失明）。
+ * Failures are swallowed silently (logged to console.warn so it isn't completely invisible).
  */
 export function reportClientError(input: ClientErrorReport): void {
-  // 防 listener 注册前的早期错误：globalThis 检查
+  // Guard against errors that occur before listeners are registered: check globalThis
   if (typeof globalThis === 'undefined' || typeof fetch === 'undefined') return
 
   let buildHash: string | undefined
   let appVersion = '0.0.0'
   try {
-    // Vite 的 build-time 注入；缺失时 silently 兜底
+    // Injected by Vite at build time; falls back silently if missing
     const env = (import.meta as ImportMeta & { env?: Record<string, string> }).env
     buildHash = env?.VITE_BUILD_HASH
     appVersion = env?.VITE_APP_VERSION || appVersion
   } catch {
-    // import.meta 不可用（很罕见），兜底
+    // import.meta unavailable (very rare); fall back
   }
 
   const body: InternalReportBody = {
@@ -82,7 +84,7 @@ export function reportClientError(input: ClientErrorReport): void {
     trace_id_last_4xx: _lastApiTraceId,
   }
 
-  // fire-and-forget；keepalive 让 tab 关闭也尽量送出
+  // fire-and-forget; keepalive tries to send even as the tab closes
   try {
     void fetch('/api/client-errors', {
       method: 'POST',
@@ -90,14 +92,14 @@ export function reportClientError(input: ClientErrorReport): void {
       body: JSON.stringify(body),
       keepalive: true,
     }).catch(() => {
-      // silently swallow — 上报失败不能再 throw 进 ErrorBoundary
+      // silently swallow -- a failed report must never throw into ErrorBoundary
     })
   } catch {
-    // fetch 都抛了（极罕见）也吞
+    // swallow even if fetch itself throws (extremely rare)
     try {
       console.warn('[reportClientError] failed silently')
     } catch {
-      // even console.warn 不能用了，放弃
+      // even console.warn is unusable at this point; give up
     }
   }
 }

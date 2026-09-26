@@ -1,87 +1,105 @@
 # tools/
 
-仓库根的一次性脚本、bootstrap helper、诊断和 release / migration 工具集。所有脚本均在 **仓库根目录** 跑（`python tools/xxx.py ...`），多数需要先激活 venv。
+One-off scripts, bootstrap helpers, diagnostics, and release / migration tools for the repo
+root. All scripts run from the **repo root** (`python tools/xxx.py ...`), and most need the
+venv activated first.
 
-> 不属于这里：训练 / 推理代码（在 `runtime/`）、Studio 服务（在 `studio/`）、生产时调用的子进程（在 `studio/services/`）。
+> Not here: training / inference code (in `runtime/`), Studio services (in `studio/`),
+> subprocesses invoked at production time (in `studio/services/`).
 
 ---
 
-## Bootstrap helpers（被 studio.bat / studio.sh 调用，stdlib only）
+## Bootstrap helpers (called by studio.bat / studio.sh, stdlib only)
 
 ### `check_requirements_changed.py`
-启动期检测 `requirements.txt` 内容 hash 是否变了，决定是否补装新依赖。用 content hash 不用 mtime，避免 `git checkout` 后误判 stale。
+Detects at startup whether `requirements.txt`'s content hash has changed, to decide
+whether new dependencies need installing. Uses a content hash rather than mtime, to avoid
+false "stale" reads after a `git checkout`.
 
 ```
-python tools/check_requirements_changed.py             # 输出 stale / current / missing
-python tools/check_requirements_changed.py --update-marker   # 同步成功后写新 hash
+python tools/check_requirements_changed.py             # prints stale / current / missing
+python tools/check_requirements_changed.py --update-marker   # writes the new hash after a successful sync
 ```
 
 ### `select_torch_index.py`
-venv **首装**时按 `nvidia-smi` 检测的驱动版本输出对应的 PyTorch wheel index URL，让 caller 用对应的 CUDA wheel 装 torch（而不是 PyPI 默认 CPU 版）。
+On the venv's **first install**, detects the driver version via `nvidia-smi` and prints
+the matching PyTorch wheel index URL, so the caller installs torch with the right CUDA
+wheel (instead of the PyPI default CPU build).
 
 ```
-python tools/select_torch_index.py     # 检测到 → 输出 URL；否则静默 exit 0
+python tools/select_torch_index.py     # detected -> prints the URL; otherwise silently exits 0
 ```
 
-驱动 → cu wheel 映射跟 `studio/services/torch_setup.py:_DRIVER_TO_BEST_CU` 双向同步。
+The driver -> cu wheel mapping is kept in sync both ways with
+`studio/services/torch_setup.py:_DRIVER_TO_BEST_CU`.
 
-### `launcher.py`（本 fork 新增）
-本机一键启动器的源码 —— 编成 `AnimaLoraStudio.exe` 后双击即用。做的事跟 `studio.bat` 一样
-（找仓库 → 建/复用 venv → 按 GPU 装 torch → 装 requirements → 起 `python -m studio run`），
-区别是不需要用户先会开终端，且错误路径一律停住窗口让人读完。**只用标准库**：它要在 venv
-还不存在的时候跑。
+### `launcher.py` (added in this fork)
+Source for the one-click local launcher -- compiled into `AnimaLoraStudio.exe` and just
+double-clicked. Does the same thing as `studio.bat` (find the repo -> create/reuse the
+venv -> install torch for the GPU -> install requirements -> start
+`python -m studio run`), except the user doesn't need to know how to open a terminal
+first, and every error path stops and keeps the window open so it can be read.
+**Stdlib only**: it has to run before the venv even exists.
 
 ```
-python tools/launcher.py                 # 等同双击 exe
-python tools/launcher.py --check         # 自查报告（文件夹 / Python / venv / 显卡），不装任何东西
-python tools/launcher.py --reinstall     # 删 venv 重建（studio_data/ 不动）
-python tools/launcher.py --port 8800     # 未识别参数原样透传给 `python -m studio run`
+python tools/launcher.py                 # equivalent to double-clicking the exe
+python tools/launcher.py --check         # self-check report (folders / Python / venv / GPU), installs nothing
+python tools/launcher.py --reinstall     # delete and rebuild the venv (studio_data/ untouched)
+python tools/launcher.py --port 8800     # unrecognized args are passed through as-is to `python -m studio run`
 ```
 
-### `build_launcher.py`（本 fork 新增）
-用 PyInstaller 把上面那个编成单文件可执行程序（~7 MB，不含 torch / 前端）。
+### `build_launcher.py` (added in this fork)
+Uses PyInstaller to compile the above into a single-file executable (~7 MB, doesn't
+include torch / the frontend).
 
 ```
 pip install pyinstaller
-python tools/build_launcher.py           # → dist/AnimaLoraStudio(.exe)
+python tools/build_launcher.py           # -> dist/AnimaLoraStudio(.exe)
 ```
 
-PyInstaller 不能交叉编译，Windows 的 exe 只能在 Windows 上出 ——
-CI 走 `.github/workflows/build-launcher.yml`（两平台构建 + `--check` 冒烟 + 打 tag 时传 release）。
+PyInstaller can't cross-compile, so the Windows exe can only be produced on Windows --
+CI handles it via `.github/workflows/build-launcher.yml` (builds on both platforms +
+`--check` smoke test + ships a release when a tag is pushed).
 
 ---
 
-## 模型 / 环境 setup
+## Model / environment setup
 
 ### `download_models.py`
-下载 Anima / Krea 2 训练所需模型 + tokenizer（CLI 薄壳，逻辑在 `studio.services.model_downloader`，跟 Studio 设置页 UI 共用）。
+Downloads the models + tokenizers needed for Anima / Krea 2 training (a thin CLI shell;
+the logic lives in `studio.services.model_downloader`, shared with the Studio settings
+page UI).
 
 ```
 python tools/download_models.py
 python tools/download_models.py --family krea2
 python tools/download_models.py --family krea2 --variant turbo
-python tools/download_models.py --family krea2 --variant raw_fp8    # 官方 fp8（turbo_fp8 同理）
+python tools/download_models.py --family krea2 --variant raw_fp8    # official fp8 (same for turbo_fp8)
 python tools/download_models.py --variant preview3-base
-python tools/download_models.py --no-mirror              # 强制 HF 官方源
-python tools/download_models.py --modelscope             # 走魔搭社区（ModelScope）
+python tools/download_models.py --no-mirror              # force the official HF source
+python tools/download_models.py --modelscope             # use ModelScope instead
 python tools/download_models.py --skip-main --skip-vae
 python tools/download_models.py --output /data/anima
 ```
 
 ### `install_flash_attn.py`
-flash_attn prebuild wheel 安装 CLI（跟 Settings UI 共享 `studio.services.flash_attention_setup` 的 wheel 选择逻辑）。
+CLI for installing prebuilt flash_attn wheels (shares wheel-selection logic with the
+Settings UI via `studio.services.flash_attention_setup`).
 
 ```
-python tools/install_flash_attn.py            # 自动选最优 wheel
-python tools/install_flash_attn.py --url URL  # 手动指定
-python tools/install_flash_attn.py --dry-run  # 只列环境 + 候选不真装
-python tools/install_flash_attn.py --force    # 已装也重装
+python tools/install_flash_attn.py            # auto-selects the best wheel
+python tools/install_flash_attn.py --url URL  # manually specify one
+python tools/install_flash_attn.py --dry-run  # only lists the environment + candidates, installs nothing
+python tools/install_flash_attn.py --force    # reinstall even if already installed
 ```
 
-退出码：0 成功 / 1 安装失败 / 2 环境不支持。
+Exit codes: 0 success / 1 install failure / 2 environment unsupported.
 
 ### `validate_local_models.py`
-离线验证本地模型可正常加载（设 `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1`，分别测 T5 tokenizer / Qwen tokenizer + model；Anima 族口径，Krea 2 的 Qwen3-VL 不在覆盖内）。默认从 `tools/models/` 找权重。
+Verifies offline that local models load correctly (sets `HF_HUB_OFFLINE=1` +
+`TRANSFORMERS_OFFLINE=1`, tests the T5 tokenizer and the Qwen tokenizer + model
+separately; covers the Anima family only, Krea 2's Qwen3-VL is not covered). Looks for
+weights under `tools/models/` by default.
 
 ```
 python tools/validate_local_models.py
@@ -89,79 +107,110 @@ python tools/validate_local_models.py
 
 ---
 
-## 诊断 / benchmark
+## Diagnostics / benchmarks
 
 ### `diagnose_onnx_gpu.py`
-WD14 打标遇到 "CUDA EP 静默降级到 CPU" 警告时跑这个定位根因。在 studio 同一个 venv 里执行，把 stdout 全文贴到 PR / issue。
+Run this to find the root cause when WD14 tagging shows a "CUDA EP silently fell back to
+CPU" warning. Run it inside the same venv as studio, and paste the full stdout into the
+PR / issue.
 
 ```
 python tools/diagnose_onnx_gpu.py
 ```
 
 ### `bench_wd14.py`
-WD14 打标性能诊断：分阶段计时（preprocess / session.run / postprocess）+ EP / preload / 模型 / 线程数自检。同时回答：CPU vs GPU 实测吞吐差几倍。
+WD14 tagging performance diagnostics: staged timing (preprocess / session.run /
+postprocess) + EP / preload / model / thread-count self-check. Also answers: how many
+times faster is measured GPU throughput vs CPU.
 
 ```
-python tools/bench_wd14.py [<图目录>] [--n 10] [--model <hf_id>]
+python tools/bench_wd14.py [<image_dir>] [--n 10] [--model <hf_id>]
 ```
 
-不传图目录时默认扫 `studio_data/projects/*/raw_*` 找最近一批图取前 N 张。日志同时打 stdout 与 `bench_wd14.log`。
+If no image directory is given, defaults to scanning `studio_data/projects/*/raw_*` for
+the most recent batch of images and takes the first N. Logs go to both stdout and
+`bench_wd14.log`.
 
 ### `bench_gelbooru.py`
-三步定位 gelbooru 下载速度瓶颈：网络 / 上游限速 / Studio 代码。
+Locates gelbooru download speed bottlenecks in three steps: network / upstream rate
+limiting / Studio code.
 
 ```
 python tools/bench_gelbooru.py
 ```
 
-凭证自动从 `studio_data/secrets.json` 读；缺失时回退环境变量 `GELBOORU_USER_ID` / `GELBOORU_API_KEY`。日志同时打 stdout 与 `bench_gelbooru.log`。
+Credentials are read automatically from `studio_data/secrets.json`; falls back to the
+`GELBOORU_USER_ID` / `GELBOORU_API_KEY` environment variables if missing. Logs go to both
+stdout and `bench_gelbooru.log`.
 
 ### `infonoise_e2e_verify.py`
-InfoNoise 端到端算法 verify：纯 numpy mock 训练 loop + closed-form toy mmse 函数跑 `InfoNoiseScheduler`，对照 4 个 pivot 配置（`current` / `fix_last_above` / `fix_paper_c015` / `oracle`）输出 paper-aligned 指标（c 时间序列 / mass 分布 / KL→target ρ / gate entropy）。**不依赖 GPU、不真训模型**；用于：算法 bug 端到端复现、修法 PR 前的回归 verify、跟 paper §5 报告值对照。
+End-to-end algorithm verification for InfoNoise: runs `InfoNoiseScheduler` through a pure
+numpy mock training loop + a closed-form toy mmse function, comparing 4 pivot
+configurations (`current` / `fix_last_above` / `fix_paper_c015` / `oracle`) and printing
+paper-aligned metrics (c time series / mass distribution / KL-to-target rho / gate
+entropy). **No GPU dependency, doesn't train a real model**; used for: end-to-end repro of
+algorithm bugs, regression verification before a fix PR, and comparison against the
+values reported in paper §5.
 
 ```
-python tools/infonoise_e2e_verify.py                                # 全 96 组合（4 config × 4 mmse × 3 ga × 2 baseline），5-15 分钟
-python tools/infonoise_e2e_verify.py --quick                        # CI smoke (<1 分钟)，4 个核心组合
+python tools/infonoise_e2e_verify.py                                # all 96 combinations (4 config x 4 mmse x 3 ga x 2 baseline), 5-15 minutes
+python tools/infonoise_e2e_verify.py --quick                        # CI smoke (<1 minute), 4 core combinations
 python tools/infonoise_e2e_verify.py --mmse-shape paper_fig4 \
-        --config fix_last_above --grad-accum 1                      # 单组合
+        --config fix_last_above --grad-accum 1                      # a single combination
 python tools/infonoise_e2e_verify.py --out-dir tmp/my_run --no-plots
 ```
 
-输出 `<out>/report.md`（对照表 + finding + 推荐）+ 每组合 `log.csv` + `plots.png` 4-panel（c 时间序列 / mass 分布演化 / sampled t hist / final gate 形状）。设计文档见脚本顶部 docstring；不要 monkey-patch 源码（脚本通过动态 override `_refresh` 实现 fix 配置）。
+Outputs `<out>/report.md` (comparison table + findings + recommendation) + a `log.csv`
+per combination + a 4-panel `plots.png` (c time series / mass distribution evolution /
+sampled t histogram / final gate shape). See the script's top-of-file docstring for the
+design doc; don't monkey-patch the source code (the script implements fix configs by
+dynamically overriding `_refresh`).
 
 ---
 
-## Release / schema 维护
+## Release / schema maintenance
 
 ### `bump_version.py`
-`docs/announcements/` 的 `tag: release` post 校验 + 版本号同步 + `CHANGELOG.md` 派生（ADR 0013）。格式见 `docs/announcements/README.md`，写作规范见 `docs/announcements/CONTENT-GUIDE.md`。**不创建 post**，那是维护者发版时写 markdown 的事。
+Validates `tag: release` posts under `docs/announcements/`, syncs version numbers, and
+derives `CHANGELOG.md` (ADR 0013). Format is in `docs/announcements/README.md`, writing
+guidelines are in `docs/announcements/CONTENT-GUIDE.md`. **Does not create posts** --
+that's the maintainer's job when writing the release markdown.
 
 ```
-python tools/bump_version.py validate          # schema 校验整个 yaml
-python tools/bump_version.py bump              # 读 yaml top version，同步 3 处版本文件
+python tools/bump_version.py validate          # schema-validates the whole yaml
+python tools/bump_version.py bump              # reads the yaml's top version, syncs 3 version files
 python tools/bump_version.py bump --version 0.6.1
-python tools/bump_version.py render-changelog  # 只重写 CHANGELOG.md，不动版本号
-python tools/bump_version.py verify-versions   # __init__.py / package.json / package-lock.json drift 检查 (CI 用)
+python tools/bump_version.py render-changelog  # only rewrites CHANGELOG.md, doesn't touch the version number
+python tools/bump_version.py verify-versions   # checks __init__.py / package.json / package-lock.json drift (used in CI)
 ```
 
 ---
 
-## 一次性 migration
+## One-off migrations
 
 ### `preset_toml_to_yaml.py`
-救活 **2026-05-21 ~ 2026-05-24** 期间前端 `downloadCurrentPreset` bug 导出的"假 yaml 真 toml"预设文件。新版前端已改走 server `/api/presets/{name}/download` 端点直发原 yaml，本工具仅用于回收历史下载。
+Recovers preset files that were "fake yaml, really toml" due to a frontend
+`downloadCurrentPreset` bug that shipped between **2026-05-21 and 2026-05-24**. The
+current frontend now serves the original yaml directly via the server's
+`/api/presets/{name}/download` endpoint; this tool exists only to recover historical
+downloads.
 
 ```
-python tools/preset_toml_to_yaml.py broken.yaml          # 输出 broken.fixed.yaml
-python tools/preset_toml_to_yaml.py --in-place x.yaml    # 覆盖 + 备份 .toml-bak
+python tools/preset_toml_to_yaml.py broken.yaml          # outputs broken.fixed.yaml
+python tools/preset_toml_to_yaml.py --in-place x.yaml    # overwrites + backs up as .toml-bak
 python tools/preset_toml_to_yaml.py --output o.yaml x.yaml
-python tools/preset_toml_to_yaml.py --no-validate x.yaml # 跳 schema 校验
+python tools/preset_toml_to_yaml.py --no-validate x.yaml # skip schema validation
 ```
 
-处理 3 类破损：多行 `{...}` → inline table、空值 key → drop、TOML → tomllib 解析 + TrainingConfig 校验 → yaml 落盘。py 3.11+ 走 stdlib `tomllib`，3.10 及更早需 `pip install tomli`。
+Handles 3 kinds of corruption: multi-line `{...}` -> inline table, empty-value keys ->
+dropped, TOML -> parsed with tomllib + validated against TrainingConfig -> written back
+as yaml. Python 3.11+ uses the stdlib `tomllib`; 3.10 and earlier need
+`pip install tomli`.
 
 ---
 
 ## `spike/`
 
-ADR 验证用的临时脚本（验证完会随 cleanup PR 删）。当前内容是 ADR 0006 暂停/恢复的信号链路 spike，独立 README 见 [`spike/README.md`](spike/README.md)。
+Temporary scripts used to validate ADRs (deleted in a cleanup PR once validated).
+Currently contains the ADR 0006 pause/resume signal-chain spike; see its own README at
+[`spike/README.md`](spike/README.md).

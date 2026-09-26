@@ -1,4 +1,4 @@
-/** 队列页：行内联采样条 + 右键备注菜单（_v20 tasks.note）。 */
+/** Queue page: row inline sample strip + right-click note menu (_v20 tasks.note). */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -68,14 +68,14 @@ it('right-click opens the menu and saves a note', async () => {
 
   fireEvent.contextMenu(await screen.findByText('lora run'))
   const menu = await screen.findByTestId('queue-context-menu')
-  // 没备注时是「添加备注」，没有「删除备注」项
-  expect(menu).toHaveTextContent('添加备注')
-  expect(menu).not.toHaveTextContent('删除备注')
+  // When there's no note yet it's "Add note", with no "Remove note" item
+  expect(menu).toHaveTextContent('Add note')
+  expect(menu).not.toHaveTextContent('Remove note')
 
-  fireEvent.click(screen.getByText('添加备注'))
+  fireEvent.click(screen.getByText('Add note'))
   const input = await screen.findByRole('textbox')
   fireEvent.change(input, { target: { value: 'dataset v3' } })
-  fireEvent.click(screen.getByText('保存'))
+  fireEvent.click(screen.getByText('Save'))
 
   await waitFor(() => expect(setNote).toHaveBeenCalledWith(1, 'dataset v3'))
   expect(await screen.findByTestId('task-note-1')).toHaveTextContent('dataset v3')
@@ -87,7 +87,7 @@ it('removes a note straight from the menu', async () => {
   renderQueue()
 
   fireEvent.contextMenu(await screen.findByText('lora run'))
-  fireEvent.click(await screen.findByText('删除备注'))
+  fireEvent.click(await screen.findByText('Remove note'))
 
   await waitFor(() => expect(setNote).toHaveBeenCalledWith(1, ''))
   await waitFor(() => expect(screen.queryByTestId('task-note-1')).not.toBeInTheDocument())
@@ -104,11 +104,11 @@ it('opens the row samples on request and hides them again', async () => {
   // Cards carry no strip until asked (the mockup's queue cards).
   fireEvent.contextMenu(await screen.findByText('lora run'))
   expect(screen.queryByTestId('sample-strip-1')).not.toBeInTheDocument()
-  fireEvent.click(await screen.findByText('显示采样图'))
+  fireEvent.click(await screen.findByText('Show samples'))
   expect(await screen.findByTestId('sample-strip-1')).toBeInTheDocument()
 
   fireEvent.contextMenu(screen.getByText('lora run'))
-  fireEvent.click(await screen.findByText('隐藏采样图'))
+  fireEvent.click(await screen.findByText('Hide samples'))
   await waitFor(() => expect(screen.queryByTestId('sample-strip-1')).not.toBeInTheDocument())
 })
 

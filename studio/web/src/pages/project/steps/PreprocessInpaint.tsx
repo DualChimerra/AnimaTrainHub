@@ -28,7 +28,7 @@ interface Ctx {
 
 type Filter = 'all' | 'pending' | 'edited'
 
-/** 统一编辑历史条目：涂抹与 mask 笔画共用一条时间线。 */
+/** Unified edit-history entry: paint and mask strokes share a single timeline. */
 interface HistoryEntry {
   kind: InpaintMode
   stroke: InpaintStroke
@@ -50,16 +50,17 @@ function splitRel(name: string): { folder: string; filename: string } {
   }
 }
 
-/** 状态模型对齐裁剪页：双数据面双桶（strokesByImage / maskStrokesByImage），
- *  随便切图改动都留在内存，保存按当前模式分发（§9 决策 2）。只有活动图挂
- *  真实 canvas，「保存全部」对非活动图走离屏重放。 */
+/** The state model mirrors the crop page: two data planes, two buckets (strokesByImage /
+ *  maskStrokesByImage). Switching images freely keeps changes in memory; saving dispatches
+ *  based on the current mode (§9 decision 2). Only the active image mounts a real canvas;
+ *  "save all" replays off-screen for inactive images. */
 export default function PreprocessInpaintPage() {
   const { t } = useTranslation()
   const { project, activeVersion, reload } = useOutletContext<Ctx>()
   const { toast } = useToast()
   const vid = activeVersion?.id ?? 0
 
-  // ────── Workspace data（复用 crop workspace：name + w/h + mtime + mask_mtime）──────
+  // ────── Workspace data (reuses the crop workspace: name + w/h + mtime + mask_mtime) ──────
   const [images, setImages] = useState<CropWorkspaceItem[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -78,10 +79,10 @@ export default function PreprocessInpaintPage() {
   useEffect(() => { void refreshWorkspace() }, [refreshWorkspace])
 
   // ────── Editor state ──────
-  // 统一编辑历史：涂抹与 mask 笔画混合入同一时间线 —— 模式只是笔刷，
-  // dirty / undo / 保存都跨模式共用，切模式不改变页面状态语义。
+  // Unified edit history: paint and mask strokes are mixed into the same timeline -- mode is just
+  // the brush; dirty / undo / save are all shared across modes, so switching modes doesn't change the page's state semantics.
   const [mode, setMode] = useState<InpaintMode>('paint')
-  // 画笔 / 橡皮跨模式共用：涂抹橡皮擦未保存笔画，遮罩橡皮擦 mask
+  // Brush / eraser shared across modes: paint eraser removes unsaved strokes, mask eraser erases the mask
   const [erase, setErase] = useState(false)
   const [activeName, setActiveName] = useState<string | null>(null)
   const [historyByImage, setHistoryByImage] = useState<Record<string, HistoryEntry[]>>({})
@@ -124,7 +125,7 @@ export default function PreprocessInpaintPage() {
     [activeHistory],
   )
 
-  /** dirty 图集合 = 任一数据面有未保存笔画（保存全部 / filter / 计数共用）。 */
+  /** dirty image set = any data plane has unsaved strokes (shared by save-all / filter / count). */
   const editedNames = useMemo(
     () => Object.entries(historyByImage)
       .filter(([, h]) => h.length > 0)
@@ -155,7 +156,7 @@ export default function PreprocessInpaintPage() {
     return api.maskUrl(project.id, vid, im.name) + `&_=${im.mask_mtime}`
   }, [project.id, vid])
 
-  // ────── Stroke mutations（统一时间线，undo/redo 跨模式）──────
+  // ────── Stroke mutations (unified timeline, undo/redo shared across modes) ──────
   const pushRecentColor = useCallback((hex: string) => {
     setRecentColors((prev) => [hex, ...prev.filter((c) => c !== hex)].slice(0, 8))
   }, [setRecentColors])
@@ -235,8 +236,8 @@ export default function PreprocessInpaintPage() {
     pushRecentColor(hex)
   }, [setBrush, pushRecentColor])
 
-  // ────── Save（保存 = 该图全部未保存改动，两个数据面一次写完）──────
-  /** 保存成功后从历史滤掉对应数据面的 entries（redo 时间线随之作废）。 */
+  // ────── Save (save = all unsaved changes for this image, both data planes written in one go) ──────
+  /** After a successful save, filter the corresponding data plane's entries out of history (invalidating the redo timeline). */
   const clearSavedKind = useCallback((name: string, kind: InpaintMode) => {
     setHistoryByImage((prev) => ({
       ...prev,
@@ -245,9 +246,10 @@ export default function PreprocessInpaintPage() {
     setRedoByImage((prev) => ({ ...prev, [name]: [] }))
   }, [])
 
-  /** 单图两面保存。涂抹先行 —— 产物可能改名（X.jpg→X.png），mask 的 PUT
-   *  必须用新 name（旧源文件已删，服务端按 name 校验源图存在）。
-   *  返回保存后的 name（无涂抹改动时原样）。 */
+  /** Saves both planes for a single image. Paint goes first -- the result may be renamed
+   *  (X.jpg→X.png), so the mask's PUT must use the new name (the old source file is already
+   *  deleted; the server validates the source image exists by name).
+   *  Returns the post-save name (unchanged if there were no paint edits). */
   const saveImageBoth = useCallback(async (
     im: CropWorkspaceItem,
     paintStrokes: InpaintStroke[],
@@ -286,7 +288,7 @@ export default function PreprocessInpaintPage() {
     if (activeHistory.length === 0) return
     setBusy(true)
     try {
-      // 活动图用挂载中的 canvas 导出（所见即所得），非活动图才走离屏重放
+      // The active image exports from its mounted canvas (WYSIWYG); only inactive images go through off-screen replay
       const newName = await saveImageBoth(
         activeImage, activePaintStrokes, activeMaskStrokes,
         {
@@ -404,7 +406,7 @@ export default function PreprocessInpaintPage() {
             disabled={!activeName || activeHistory.length === 0}
             className="ds-ctl"
           >{t('preprocessInpaint.clearActive')}</button>
-          {/* 保存 = 两个数据面的全部未保存改动；文案 / 可用性不随模式变 */}
+          {/* Save = all unsaved changes across both data planes; label / availability don't change with mode */}
           <button
             type="button"
             onClick={() => void saveAll()}

@@ -1,14 +1,16 @@
-"""下载 worker 子进程入口（pp2）。
+"""Download worker subprocess entry point (pp2).
 
-由 supervisor 启动：`python -m studio.workers.download_worker --job-id N`。
-读 `project_jobs` 行 + `secrets.gelbooru` → 调
-`studio.services.downloader.download()` → 写日志 → 退出码反映成败。
-状态字段（running / done / failed）由 supervisor 在子进程结束时统一回写。
+Launched by supervisor: `python -m studio.workers.download_worker --job-id N`.
+Reads the `project_jobs` row + `secrets.gelbooru` -> calls
+`studio.services.downloader.download()` -> writes logs -> exit code reflects success/failure.
+Status fields (running / done / failed) are written back uniformly by supervisor when the
+subprocess exits.
 
-日志只走 stdout：supervisor 在 `subprocess.Popen(stdout=log_fp,
-stderr=STDOUT)` 把整个子进程输出重定向到 task log 文件，worker 自己**不能**
-再 open 同一个 log 直接 write —— 否则同一行会落盘两次，LogTailer 读两次，
-前端就看到每条日志重复一次。
+Logging goes through stdout only: supervisor's `subprocess.Popen(stdout=log_fp,
+stderr=STDOUT)` redirects the whole subprocess's output into the task log file; the
+worker itself must **not** open that same log and write to it directly -- otherwise each
+line would be written to disk twice, LogTailer would read it twice, and the frontend
+would show every log line duplicated.
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from studio.services.booru import downloader
 
 
 def run(job_id: int) -> int:
-    """主体：返回退出码（0 成功 / 1 失败）。"""
+    """Body: returns the exit code (0 success / 1 failure)."""
     with db.connection_for() as conn:
         job = project_jobs.get_job(conn, job_id)
     if not job:
@@ -76,13 +78,13 @@ def run(job_id: int) -> int:
             opts,
             dest,
             on_progress=progress,
-            cancel_event=threading.Event(),  # supervisor 走 SIGTERM
+            cancel_event=threading.Event(),  # supervisor cancels via SIGTERM
         )
         progress(f"[done] saved={saved}")
         return 0
     except Exception as exc:
-        # PR-1 C7: 同 tag_worker — logger.exception 带 trace_id 进 stderr，
-        # progress 给人读短摘要。
+        # PR-1 C7: same as tag_worker -- logger.exception carries the trace_id into
+        # stderr, progress gives the human-readable short summary.
         logger.exception("download worker crashed (job_id=%s)", job_id)
         progress(f"[error] {exc}")
         return 1

@@ -1,6 +1,6 @@
-"""bootstrap_phase：args + yaml + 交互 + seed + device/dtype + 输出目录 + wandb + monitor_state。
+"""bootstrap_phase: args + yaml + interactive mode + seed + device/dtype + output dir + wandb + monitor_state.
 
-抽自 main() L113-185（ADR 0003 PR-B）。
+Extracted from main() L113-185 (ADR 0003 PR-B).
 """
 
 from __future__ import annotations
@@ -23,34 +23,35 @@ logger = logging.getLogger(__name__)
 
 
 def _maybe_apply_pause_snapshot(args, resume_state_path: Path) -> None:
-    """读 pause snapshot 覆盖 args（ADR 0006 PR-3 / §5.7）。
+    """Read a pause snapshot and override args with it (ADR 0006 PR-3 / §5.7).
 
-    args.resume_state = `…/pause_step_<N>.pt` → snapshot = `…/pause_step_<N>.config.json`。
-    snapshot 不存在 → 静默跳过（用户走 ResumeFieldPicker 选周期 save 文件
-    起新 task 的旧路径）。
+    args.resume_state = `.../pause_step_<N>.pt` -> snapshot = `.../pause_step_<N>.config.json`.
+    Snapshot doesn't exist -> silently skip (the old path where the user picks a
+    periodic save file via ResumeFieldPicker to start a new task).
 
-    覆盖规则：
-    - snapshot["args"] 内所有字段写到 args namespace，**例外**：
-      - `resume_state` 不覆盖（snapshot 记录的是 pause 前的 args，那时 resume_state
-        是空；现在我们才用它续训）
-      - `config` 不覆盖（snapshot 记录的是用户当时的 yaml 路径，用户可能已删/改名）
-    - snapshot["sample_prompts"] → args.sample_prompts（resume_phase 会读这个）
+    Override rules:
+    - Every field in snapshot["args"] is written to the args namespace, **except**:
+      - `resume_state` is not overridden (the snapshot recorded args from before the
+        pause, when resume_state was empty; we're only using it now to resume)
+      - `config` is not overridden (the snapshot recorded the user's yaml path at the
+        time, which may have since been deleted/renamed)
+    - snapshot["sample_prompts"] -> args.sample_prompts (resume_phase reads this)
     """
     snapshot_path = resume_state_path.with_suffix(".config.json")
     if not snapshot_path.exists():
-        return  # 不是 pause state，沿用现有 args
+        return  # not a pause state, keep the existing args
     try:
         raw = snapshot_path.read_text(encoding="utf-8")
         snapshot = json.loads(raw)
     except Exception as exc:
         logger.warning(
-            f"读取 pause snapshot 失败，沿用现有 args: {snapshot_path} ({exc})"
+            f"failed to read pause snapshot, keeping existing args: {snapshot_path} ({exc})"
         )
         return
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("args"), dict):
-        logger.warning(f"pause snapshot schema 不识别，沿用现有 args: {snapshot_path}")
+        logger.warning(f"unrecognized pause snapshot schema, keeping existing args: {snapshot_path}")
         return
-    logger.info(f"加载 pause snapshot 覆盖训练参数: {snapshot_path}")
+    logger.info(f"loaded pause snapshot, overriding training params: {snapshot_path}")
     snap_args: dict = snapshot["args"]
     skipped = {"resume_state", "config"}
     for k, v in snap_args.items():
@@ -63,29 +64,34 @@ def _maybe_apply_pause_snapshot(args, resume_state_path: Path) -> None:
 
 
 def _resolve_sample_seed(args) -> None:
-    """sample_seed=0 → 训练开始时随机抽一次写回 args，并 log。
+    """sample_seed=0 -> draw one random value at training start, write it back to args, and log it.
 
-    Why：sample_seed=0 走 sample_runner 时不调 torch.manual_seed，整批
-    采样跟着 global RNG 漂移，跨 epoch 同 prompt 出图不同 → 看不出是
-    模型收敛还是噪声变了。抽一次固定下来，整轮训练同 prompt 同 seed。
+    Why: when sample_seed=0, sample_runner never calls torch.manual_seed, so the
+    whole batch's sampling drifts with the global RNG -- the same prompt produces
+    a different image across epochs, making it impossible to tell whether the
+    model converged or the noise just changed. Drawing it once and fixing it
+    means the same prompt gets the same seed for the whole training run.
 
-    与 pause snapshot 协作：snapshot 写整份 args.dict()，resolved 值会
-    被 freeze；resume 经 _maybe_apply_pause_snapshot 灌回，跨 pause 仍
-    用同一 seed。用户重新起 task 时若 yaml 还是 0，启动重抽一次新随机。
+    Interaction with the pause snapshot: the snapshot writes the full args.dict(),
+    so the resolved value gets frozen; on resume, _maybe_apply_pause_snapshot
+    restores it, so the same seed carries across a pause. If the user starts a
+    fresh task and the yaml still has 0, a new random value is drawn at startup.
     """
     if int(getattr(args, "sample_seed", 0) or 0):
         return
     args.sample_seed = random.randint(1, 2**31 - 1)
-    logger.info(f"sample_seed=0 → 训练用随机种子: {args.sample_seed}")
+    logger.info(f"sample_seed=0 -> using random seed for training: {args.sample_seed}")
 
 
 def _prepend_trigger_to_sample_prompts(args) -> None:
-    """trigger_word 非空 → prepend 到 sample_prompt / sample_prompts 每条。
+    """trigger_word non-empty -> prepend it to every sample_prompt / sample_prompts entry.
 
-    与 caption 端行为一致（tag_worker 也把 trigger 写为第一个 tag）：训练
-    采样图必带 trigger，能直观验证 LoRA 是否激活。判定"已含 trigger"用 token
-    级匹配（按逗号 split 后等值比较，不区分大小写），避免被 substring 误判。
-    空 prompt 不注入，防止生成残缺的 ``"trigger, "`` 字符串。
+    Matches the caption side's behavior (tag_worker also writes the trigger as the
+    first tag): training sample images always carry the trigger, giving a direct
+    visual check of whether the LoRA is active. "Already contains the trigger" is
+    determined via token-level matching (split on comma, compare case-insensitively),
+    avoiding false positives from substring matches. Empty prompts are not injected,
+    to avoid producing a broken ``"trigger, "`` string.
     """
     trigger = (getattr(args, "trigger_word", "") or "").strip()
     if not trigger:
@@ -107,17 +113,17 @@ def _prepend_trigger_to_sample_prompts(args) -> None:
 
 
 def run(ctx: TrainingContext) -> None:
-    """完成训练前一切非模型/数据的准备：
+    """Finish all pre-training prep that isn't model/data related:
 
-    - 加载 yaml config（如有）+ 交互模式补缺字段
+    - Load the yaml config (if any) + fill missing fields in interactive mode
     - ensure_dependencies
-    - 设种子 / 选 device / dtype
-    - 建 output_dir + sample_dir
-    - 初始化 wandb_monitor + monitor_state.json 写入器
+    - Set the seed / pick device / dtype
+    - Create output_dir + sample_dir
+    - Initialize wandb_monitor + the monitor_state.json writer
     """
     args = ctx.args
 
-    # PR-C：启动期校验所有 plugin 子包 schema 一致性，避免运行半天才发现配错
+    # PR-C: validate schema consistency across all plugin subpackages at startup, so a misconfig doesn't surface halfway through a run
     from training.adapters import validate_schema_consistency as _validate_adapters
     from training.losses import validate_schema_consistency as _validate_losses
     from training.optimizers import validate_schema_consistency as _validate_optimizers
@@ -127,69 +133,76 @@ def run(ctx: TrainingContext) -> None:
     _validate_schedulers()
     _validate_losses()
 
-    # 加载 YAML 配置文件 + TrainingConfig 归一（刀 1 / R1）。无 yaml 的纯 CLI
-    # 路径同样要走：parse_args 的 sparse namespace 缺 schema 默认值，由
-    # apply_yaml_config 经 pydantic 构造统一补齐（迁移 / 族 overlay / 校验一并生效）
+    # Load the YAML config file + normalize into TrainingConfig (cut 1 / R1). The
+    # plain-CLI path with no yaml also goes through this: parse_args's sparse
+    # namespace is missing the schema defaults, which apply_yaml_config fills in
+    # uniformly via pydantic construction (migration / family overlay / validation all apply at once).
     config = {}
     if args.config:
-        logger.info(f"加载配置文件: {args.config}")
+        logger.info(f"loading config file: {args.config}")
         ctx.config_path = Path(args.config).resolve()
         ctx.config_dir = ctx.config_path.parent
         config = load_yaml_config(args.config)
     ctx.args = apply_yaml_config(args, config)
     args = ctx.args
 
-    # bridge 已为 prefer_json bool 自动产生 --prefer-json / --no-prefer-json，
-    # 此处无需再做兼容处理。
+    # The bridge already auto-generates --prefer-json / --no-prefer-json for the
+    # prefer_json bool; no extra compat handling needed here.
 
-    # ADR 0006 PR-3：pause 文件旁边的 .config.json snapshot 覆盖 args。
-    # 触发条件：args.resume_state 指向的 .pt 旁边有同前缀的 .config.json。
-    # 仅 pause 触发的 state 会带 snapshot（PR-2 handle_interrupt 写）；周期
-    # save 没有 snapshot，ResumeFieldPicker 起新 task 走原路径（用户当前
-    # yaml config）。Snapshot freeze 是 ADR §5.7 的核心 — resume 时 task 的
-    # 训练参数严格用暂停那一刻的值，跟用户后续改 version / preset / yaml
-    # 完全解耦。
+    # ADR 0006 PR-3: a .config.json snapshot next to the pause file overrides args.
+    # Trigger condition: the .pt pointed to by args.resume_state has a same-prefix
+    # .config.json next to it. Only pause-triggered state carries a snapshot
+    # (written by PR-2's handle_interrupt); a periodic save has no snapshot, and
+    # starting a new task via ResumeFieldPicker takes the original path (the
+    # user's current yaml config). Snapshot freezing is the core of ADR §5.7 --
+    # on resume, the task's training params strictly use the values from the
+    # moment it was paused, fully decoupled from any later version/preset/yaml changes by the user.
     if getattr(args, "resume_state", None):
         _maybe_apply_pause_snapshot(args, Path(args.resume_state))
         ctx.args = args
 
-    # 交互模式检查
+    # Interactive mode check
     required = [args.data_dir, args.transformer_path, args.vae_path, args.text_encoder_path]
     if args.interactive or any(not x for x in required):
         ctx.args = prompt_for_args(args)
         args = ctx.args
 
-    # 多模型 PR-2b：族解析 fail-fast（args 定稿后、任何权重加载前；未知
-    # model_family 即死。pause snapshot 已 freeze args → 跨 pause 族一致性免费）
-    # 能力校验不再单独做（刀 1 / R1）：apply_yaml_config 的 TrainingConfig
-    # 构造已跑 _validate_family_capabilities，CLI 直达路径与 Studio 同一防线。
+    # Multi-model PR-2b: fail-fast family resolution (after args are finalized,
+    # before any weight loading; an unknown model_family is fatal here. Since the
+    # pause snapshot already froze args, family consistency across a pause comes for free.)
+    # Capability validation isn't done separately anymore (cut 1 / R1):
+    # apply_yaml_config's TrainingConfig construction already runs
+    # _validate_family_capabilities, so the direct-CLI path shares the same guard as Studio.
     from training.families import resolve_family
 
     ctx.family = resolve_family(args)
 
-    # 审计 #2（设计文档 §10.1）：T-LoRA rank mask 按 batch 均值 timestep 生成，
-    # batch>1 时 per-sample「高噪声低 rank」退化为批均值近似 —— 不拦（硬拦会
-    # 误伤想跑小 batch 的用户），启动期显式提示
+    # Audit #2 (design doc §10.1): T-LoRA's rank mask is generated from the
+    # batch-mean timestep, so at batch>1 the per-sample "high noise -> low rank"
+    # behavior degrades into a batch-mean approximation -- not blocked (a hard
+    # block would unfairly hit users who want small batches), just an explicit startup warning.
     if getattr(args, "lora_type", "") == "tlora" and int(getattr(args, "batch_size", 1)) > 1:
         logger.warning(
-            "T-LoRA 与 batch_size=%s 同用：rank mask 按 batch 均值 timestep 生成，"
-            "per-sample 掩码退化为批均值近似；要获得论文行为请用 batch_size=1",
+            "T-LoRA combined with batch_size=%s: the rank mask is generated from the batch-mean "
+            "timestep, so the per-sample mask degrades into a batch-mean approximation; "
+            "use batch_size=1 to get the paper's exact behavior",
             args.batch_size,
         )
 
-    # 触发词注入：caption 端 tag_worker 把 trigger 写为第一个 tag，这里同步
-    # 注入 sample_prompt(s)，让采样图天然带 trigger。pause snapshot 已 freeze
-    # trigger_word（写在 args 里），resume 也照此 normalize 一次幂等。
+    # Trigger word injection: the caption side's tag_worker writes the trigger as
+    # the first tag; here we inject it into sample_prompt(s) the same way, so
+    # sample images naturally carry the trigger. The pause snapshot already froze
+    # trigger_word (stored in args), and resume normalizes it again idempotently the same way.
     _prepend_trigger_to_sample_prompts(args)
     ctx.args = args
 
-    # 依赖检测
+    # Dependency check
     ensure_dependencies(auto_install=args.auto_install)
 
-    # 延迟导入：保留原 main() 顺序 —— ensure_dependencies 之后才能 import numpy/PIL
+    # Deferred import: preserves the original main() order -- numpy/PIL can only be imported after ensure_dependencies
     import numpy as np
 
-    # 设置随机种子
+    # Set the random seed
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -204,47 +217,52 @@ def run(ctx: TrainingContext) -> None:
         ctx.scaler = torch.cuda.amp.GradScaler()
     else:
         ctx.dtype = torch.float32
-    # VAE 精度与训练精度解耦：fp16 路径下 VAE 仍用 fp32（见 TrainingContext.vae_dtype）；
-    # bf16/fp32 时 VAE 跟随主精度不变。
+    # VAE precision is decoupled from training precision: under fp16, the VAE still uses
+    # fp32 (see TrainingContext.vae_dtype); under bf16/fp32, the VAE follows the main precision unchanged.
     ctx.vae_dtype = torch.float32 if ctx.dtype == torch.float16 else ctx.dtype
 
-    # 创建输出目录
+    # Create the output directory
     ctx.output_dir = Path(args.output_dir)
     ctx.output_dir.mkdir(parents=True, exist_ok=True)
-    # 采样图落到 task 档案根的 samples/。supervisor 按 task 注入
-    # `--monitor-state-file <studio_data>/tasks/<id>/monitor/state.json`，
-    # sample_dir 取其上跳一层的 `samples/` —— `tasks/<id>/samples/`，跟 monitor/
-    # 同级，整组（snapshot/ monitor/ samples/ run.log）就是 task 完整档案。
-    # 没传 --monitor-state-file（纯 CLI 训练 / 兼容老版本注入路径）退回
-    # output_dir/samples，samples.py 仍可在 monitor_dir 周围多候选搜回。
+    # Sample images land under the task archive root's samples/. The supervisor
+    # injects `--monitor-state-file <studio_data>/tasks/<id>/monitor/state.json`
+    # per task; sample_dir takes its `samples/` sibling one level up --
+    # `tasks/<id>/samples/`, alongside monitor/ -- so the whole set
+    # (snapshot/ monitor/ samples/ run.log) forms the task's complete archive.
+    # If --monitor-state-file wasn't passed (plain CLI training / compat with an
+    # older injection path), falls back to output_dir/samples; samples.py can
+    # still search several candidate locations around monitor_dir.
     _msf = getattr(args, "monitor_state_file", None)
     ctx.task_archive_dir = Path(_msf).parent.parent if _msf else None
     ctx.sample_dir = (ctx.task_archive_dir / "samples") if ctx.task_archive_dir else (ctx.output_dir / "samples")
     ctx.sample_dir.mkdir(parents=True, exist_ok=True)
-    # ADR 0006 Addendum 2：auto_epoch_state.pt 同样归 task 档案 —— tasks/<id>/state/，
-    # 跟 samples/ 同根。没传 --monitor-state-file（纯 CLI）→ None，
-    # ctx.auto_state_dir() fallback 到 output_dir/state/task_<id>/（行为不变）。
+    # ADR 0006 Addendum 2: auto_epoch_state.pt is likewise part of the task
+    # archive -- tasks/<id>/state/, sharing a root with samples/. If
+    # --monitor-state-file wasn't passed (plain CLI) -> None, and
+    # ctx.auto_state_dir() falls back to output_dir/state/task_<id>/ (unchanged behavior).
     ctx.task_archive_state_dir = (ctx.task_archive_dir / "state") if ctx.task_archive_dir else None
-    # supervisor 启动训练时通过 env LORA_TASK_ID 注入 queue task id（ADR 0006）。
-    # 用于 ctx.state_dir() 计算 per-task state 子目录；env 不存在时 fallback unknown。
+    # The supervisor injects the queue task id via the LORA_TASK_ID env var when
+    # starting training (ADR 0006). Used by ctx.state_dir() to compute the
+    # per-task state subdirectory; falls back to "unknown" if the env var is absent.
     _env_tid = os.environ.get("LORA_TASK_ID")
     if _env_tid:
         try:
             ctx.lora_task_id = int(_env_tid)
         except ValueError:
-            logger.warning(f"LORA_TASK_ID={_env_tid!r} 不是 int，按 unknown 处理")
+            logger.warning(f"LORA_TASK_ID={_env_tid!r} is not an int, treating as unknown")
     ctx.wandb_monitor = init_wandb_monitor(args, ctx.output_dir, ctx.config_path)
 
-    # Loss 函数（mse / huber；通过 losses/ plugin registry 派发）
-    # 不依赖 total_steps，跟 timestep_sampler/scheduler 不同；放 bootstrap 而非
-    # optimizer phase 避免架构错位。
+    # Loss function (mse / huber; dispatched through the losses/ plugin registry)
+    # Doesn't depend on total_steps, unlike timestep_sampler/scheduler; placed in
+    # bootstrap rather than the optimizer phase to avoid an architectural mismatch.
     from training.losses import build_loss
     ctx.loss_fn = build_loss(args)
 
-    # 训练监控状态写入（PP6.1）：永远开启，文件路径优先来自 --monitor-state-file，
-    # 否则落到 output_dir/monitor_state.json。Studio 前端通过 /api/state?task_id=
-    # 读这个文件，不再启动训练侧 HTTP server（Studio 自己是 monitor）。
-    ctx.monitor_server = True  # 兼容下方分支判断；实际代表「写状态文件」
+    # Training monitor state writer (PP6.1): always on; the file path comes
+    # preferentially from --monitor-state-file, otherwise falls back to
+    # output_dir/monitor_state.json. The Studio frontend reads this file via
+    # /api/state?task_id=, so the training side no longer starts an HTTP server (Studio itself is the monitor).
+    ctx.monitor_server = True  # kept for the branch check below; actually means "write the state file"
     try:
         from train_monitor import set_state_file, update_monitor
         state_path = (
@@ -267,7 +285,7 @@ def run(ctx: TrainingContext) -> None:
                 "data_dir": str(args.data_dir),
             },
         )
-        logger.info(f"📊 训练监控状态文件: {state_path}")
+        logger.info(f"📊 training monitor state file: {state_path}")
     except Exception as e:
-        logger.warning(f"监控状态写入初始化失败: {e}")
+        logger.warning(f"monitor state writer init failed: {e}")
         ctx.monitor_server = None

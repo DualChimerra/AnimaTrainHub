@@ -1,24 +1,28 @@
-"""InfoNoise 端到端算法 verify 工具（无 GPU、无真模型，纯 numpy）。
+"""InfoNoise end-to-end algorithm verification tool (no GPU, no real model, pure numpy).
 
-通过 mock 训练 loop + closed-form toy mmse 函数跑 InfoNoiseScheduler，
-对比 4 个 pivot 选取配置（current / fix_last_above / fix_paper_c015 / oracle），
-log paper-aligned 指标（c 时间序列 / mass 分布 / KL to target_ρ / gate shape entropy）。
+Runs InfoNoiseScheduler through a mock training loop + a closed-form toy mmse function,
+comparing 4 pivot-selection configurations (current / fix_last_above / fix_paper_c015 /
+oracle), logging paper-aligned metrics (c time series / mass distribution / KL to
+target_rho / gate shape entropy).
 
-用途：
-1. 建议 1 (gate pivot bug) 端到端 verify
-2. 算法回归测试（修改 _refresh 后跑一遍看是否回归）
-3. paper §5 报告值对照（c≈0.15 / info_window 占比）
-4. X1 协同效应 (N_warm + Jacobian) 检验
+Uses:
+1. End-to-end verify for Recommendation 1 (gate pivot bug)
+2. Algorithm regression testing (run once after modifying _refresh to check for regressions)
+3. Comparison against paper §5 reported values (c ~= 0.15 / info_window fraction)
+4. X1 synergy effect (N_warm + Jacobian) check
 
-设计：
-- mmse(σ) 是 toy 闭式函数，不真训模型 — 跑得快且不混淆模型质量与算法行为
-- 4 配置共享同一 mock loop，只改 pivot 选取或 sampler 类
-- 输出 csv + matplotlib plot + 自动生成 markdown report
+Design:
+- mmse(sigma) is a toy closed-form function, no real model is trained -- runs fast and
+  doesn't conflate model quality with algorithm behavior
+- all 4 configs share the same mock loop, only pivot selection or the sampler class changes
+- outputs csv + matplotlib plot + auto-generated markdown report
 
-不当用法：
-- 不是性能基准（toy mmse 跟真模型 mmse 形状仍有 gap）
-- 不是 paper 论文复现（论文用真数据集；这里仅 verify InfoNoise 算法实现）
-- 不要在生产 CI 跑全 96 组合（用 --quick）
+Misuse warnings:
+- this is not a performance benchmark (the toy mmse still has a shape gap vs a real
+  model's mmse)
+- this is not a paper reproduction (the paper uses real datasets; this only verifies the
+  InfoNoise algorithm implementation)
+- don't run all 96 combinations in production CI (use --quick)
 """
 from __future__ import annotations
 
@@ -32,7 +36,7 @@ import os
 import sys
 import time
 
-# Windows cp932 / cp1252 控制台不能渲染中文 —— 强制 stdout/stderr 走 UTF-8
+# The Windows cp932 / cp1252 console can't render non-ASCII -- force stdout/stderr to UTF-8
 if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "buffer"):
@@ -43,24 +47,24 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# 静音 matplotlib + warnings —— 报告里再单独 surface
+# Silence matplotlib + warnings -- surfaced separately in the report instead
 import warnings
 warnings.filterwarnings("ignore")
 logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
-# 让脚本无需安装就能 import runtime.training
+# Lets the script import runtime.training without an install
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME_DIR = _REPO_ROOT / "runtime"
 if str(_RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(_RUNTIME_DIR))
 
-import torch  # noqa: E402  仅用于 sample.sample / sample.record 接口
+import torch  # noqa: E402  only used for the sample.sample / sample.record interface
 from training.timestep_samplers.infonoise import InfoNoiseScheduler  # noqa: E402
 
 # Paper §5 reported values (CIFAR experiment, arxiv 2602.18647)
 PAPER_C_CIFAR = 0.15
 # Paper §5 / Figure 4: information window roughly σ ∈ [0.05, 1.5] for CIFAR
-# 我们用对照表中 paper-aligned "info window" 估计的范围
+# We use the range estimated as the paper-aligned "info window" in the comparison table
 PAPER_INFO_WINDOW_SIGMA = (0.05, 1.5)
 
 
@@ -70,30 +74,31 @@ PAPER_INFO_WINDOW_SIGMA = (0.05, 1.5)
 
 
 def mmse_paper_fig4(sigma: np.ndarray) -> np.ndarray:
-    """论文 Fig 4 经验形状：宽 Gaussian-in-log-σ（无 floor），peak at σ=0.5。
+    """Paper Fig 4's empirical shape: a wide Gaussian-in-log-sigma (no floor), peak at sigma=0.5.
 
-    设计让 paper c=0.15 落在峰左肩。宽度 σ_log=1.5 让 r_norm>=p_onset 在 log-σ 上
-    跨越广泛区域（这样 last_above 选到峰右肩附近）。R3 verify_pivot.py Scenario C
-    用同样形状（无 floor）。**有 floor 的实验单独放在 mmse=paper_fig4_with_floor**
-    用于诊断"floor 让 fix_last_above 退化"的 stress test。
+    Designed so paper c=0.15 falls on the peak's left shoulder. Width sigma_log=1.5 makes
+    r_norm>=p_onset span a wide region in log-sigma (so last_above picks somewhere near
+    the peak's right shoulder). R3 verify_pivot.py Scenario C uses the same shape (no
+    floor). **The floor experiment lives separately under mmse=paper_fig4_with_floor**,
+    used as a stress test to diagnose "floor makes fix_last_above degenerate".
     """
     return 1.0 * np.exp(-((np.log(sigma) - np.log(0.5)) ** 2) / (2 * 1.5 ** 2))
 
 
 def mmse_unimodal_log(sigma: np.ndarray) -> np.ndarray:
-    """单峰在中段（peak 在 σ=2.0 而不是 0.5，robustness check）。"""
+    """Single peak in the middle (peak at sigma=2.0 instead of 0.5, robustness check)."""
     return 1.0 * np.exp(-((np.log(sigma) - np.log(2.0)) ** 2) / (2 * 1.2 ** 2))
 
 
 def mmse_bimodal_log(sigma: np.ndarray) -> np.ndarray:
-    """双峰：低 σ + 高 σ 各有 information mass，stress test 是否 gate 把两端都保留。"""
+    """Bimodal: low sigma + high sigma each carry information mass, stress-tests whether the gate keeps both ends."""
     peak_lo = 0.6 * np.exp(-((np.log(sigma) - np.log(0.2)) ** 2) / (2 * 0.8 ** 2))
     peak_hi = 0.6 * np.exp(-((np.log(sigma) - np.log(5.0)) ** 2) / (2 * 0.8 ** 2))
     return peak_lo + peak_hi
 
 
 def mmse_monotone_decay(sigma: np.ndarray) -> np.ndarray:
-    """mmse 从低 σ 单调降到高 σ（极端 case；模拟 signal washed out 模型）。"""
+    """mmse decays monotonically from low to high sigma (extreme case; simulates a signal-washed-out model)."""
     return 0.005 + 0.995 / (1.0 + sigma)
 
 
@@ -114,7 +119,7 @@ CONFIGS = ["current", "fix_last_above", "fix_paper_c015", "oracle"]
 
 
 def _build_refresh_override(config: str) -> Callable[[InfoNoiseScheduler], None]:
-    """返回一个 monkey-patch 版的 _refresh —— 跟源码只差 pivot 选取那 2 行。"""
+    """Returns a monkey-patched version of _refresh -- differs from the source only in the 2 pivot-selection lines."""
 
     def _refresh_with_pivot(self: InfoNoiseScheduler) -> None:
         self._refresh_attempts += 1

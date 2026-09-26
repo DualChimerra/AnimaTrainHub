@@ -4,7 +4,7 @@ import { api, type BrowseResult } from '../api/client'
 
 interface Props {
   initialPath?: string
-  /** true: 只允许选目录；false: 文件也能选 */
+  /** true: directories only; false: files can be picked too */
   dirOnly?: boolean
   onPick: (path: string) => void
   onClose: () => void
@@ -38,8 +38,8 @@ export default function PathPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // initialPath 是文件时后端会回退到父目录并返回 selected，把那个文件
-  // 滚到可见区域，让用户能直接看到"刚才点开的文件在这里"。
+  // When initialPath is a file, the backend falls back to the parent dir and
+  // returns `selected`; scroll that entry into view so the user can see it.
   useEffect(() => {
     if (data?.selected && selectedRef.current) {
       selectedRef.current.scrollIntoView({ block: 'nearest' })
@@ -95,8 +95,9 @@ export default function PathPicker({
 
         <div className="flex-1 overflow-y-auto">
           {data?.entries.map((e) => {
-            // 后端统一返回 POSIX 路径，前端拼接直接用 `/`。根目录（Linux `/`、
-            // Windows `C:/`）trim 尾 slash 后仍合法（`C:` / 空串），再补 `/` 即可。
+            // The backend always returns POSIX paths, so the frontend just
+            // joins with `/`. Root dirs (Linux `/`, Windows `C:/`) stay valid
+            // after trimming the trailing slash (`C:` / empty string).
             const base = data.path.replace(/\/+$/, '')
             const childPath = (base || '') + '/' + e.name
             const enterable = e.type === 'dir'

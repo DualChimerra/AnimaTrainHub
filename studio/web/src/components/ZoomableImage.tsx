@@ -2,15 +2,18 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useZoomPan } from '../lib/useZoomPan'
 
-/** 可缩放单图查看器（useZoomPan 的查看器包装）。
+/** Zoomable single-image viewer (a viewer wrapper around useZoomPan).
  *
- *  填满父容器（父决定总尺寸），结构与涂抹 / 裁剪页统一：
- *  视口（rounded border bg-sunken，滚轮指针中心缩放 / 左键拖拽平移 /
- *  双击 fit↔100%）+ 底部 readout 细条（zoom% / 适应窗口 / 100% /
- *  图片尺寸 / 操作提示）。src 切换自动重新 fit。
+ *  Fills the parent container (the parent decides overall size), with the
+ *  same structure used by the inpaint / crop pages: a viewport (rounded
+ *  border, bg-sunken, wheel = zoom around the pointer, left-drag = pan,
+ *  double-click = toggle fit<->100%) plus a bottom readout strip (zoom% /
+ *  fit / 100% / image size / usage hint). Refitting happens automatically
+ *  when src changes.
  *
- *  适用纯查看场景（FullscreenViewer / ImagePreviewModal / TagEdit 单图 /
- *  测试页出图预览）；画笔类（InpaintCanvas）直接用 useZoomPan 组合。
+ *  For pure viewing scenarios (FullscreenViewer / ImagePreviewModal / the
+ *  TagEdit single image / the test page's output preview); brush-style
+ *  tools (InpaintCanvas) compose useZoomPan directly instead.
  */
 export default function ZoomableImage({
   src,
@@ -25,7 +28,7 @@ export default function ZoomableImage({
   alt?: string
   className?: string
   style?: React.CSSProperties
-  /** img 加载失败回调（调用方切换占位 UI 用）。 */
+  /** Called when the img fails to load (for the caller to switch to a placeholder UI). */
   onError?: () => void
   /** Called with the natural pixel size once the image has loaded. */
   onNaturalSize?: (w: number, h: number) => void
@@ -77,7 +80,7 @@ export default function ZoomableImage({
         />
       </div>
 
-      {/* readout 细条（与涂抹 / 裁剪页统一版式） */}
+      {/* readout strip (same layout as the inpaint / crop pages) */}
       {readout && (
       <div className="shrink-0 flex items-center gap-2 text-[11px] font-mono text-fg-tertiary px-1">
         <span>{zp.zoomPct}%</span>

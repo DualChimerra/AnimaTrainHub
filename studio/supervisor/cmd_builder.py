@@ -75,23 +75,24 @@ def _default_cmd_builder(task: dict[str, Any], config_path: Path) -> list[str]:
 
 
 def _resolve_monitor_state_path(task: dict[str, Any]) -> Path:
-    """决定 task 的 monitor_state.json 落盘路径。
+    """Decide where a task's monitor_state.json is written on disk.
 
-    一律落 `studio_data/tasks/<id>/monitor/state.json`，跟 version 解耦：
-    - 删 version 不再带走 task 历史（loss 曲线 / 采样图）
-    - 同一 version 多次跑的 task 各自独立档案，用户可以拉出来对比
+    Always writes to `studio_data/tasks/<id>/monitor/state.json`, decoupled from version:
+    - deleting a version no longer takes task history (loss curve / sample images) with it
+    - multiple task runs against the same version get their own independent files, so users
+      can pull them up and compare
 
-    历史路径仅保留**读**兼容（老 task DB monitor_state_path 列保留旧值，
-    读端按值取，新 task 不再写这些路径）：
-    - `versions/<label>/monitor/task_<id>/state.json` —— PP6.1（v0.5.0+）
-    - `versions/<label>/monitor_state.json` —— pre-PP6.1
-    - `studio_data/monitors/task_<id>/state.json` —— 无 version_id 兜底
+    Legacy paths are kept for **read** compatibility only (old tasks' DB monitor_state_path
+    column keeps its old value, read paths use it as-is; new tasks never write these paths):
+    - `versions/<label>/monitor/task_<id>/state.json` -- PP6.1 (v0.5.0+)
+    - `versions/<label>/monitor_state.json` -- pre-PP6.1
+    - `studio_data/monitors/task_<id>/state.json` -- fallback when there's no version_id
     """
     return task_monitor_state_path(task["id"])
 
 
 def _default_job_cmd_builder(job: dict[str, Any]) -> list[str]:
-    """默认按 kind 选 worker 模块。"""
+    """Default: pick the worker module based on kind."""
     kind = job["kind"]
     return [
         sys.executable,

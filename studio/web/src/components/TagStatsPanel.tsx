@@ -15,11 +15,11 @@ interface Props {
   triggerWord?: string
   /** Tag picked in the list; the footer actions work on it. */
   pickedTag: string | null
-  /** 点 tag 文字 = 选中所有含该 tag 的图（保留旧行为，仍是 tag 浏览的主路径）。 */
+  /** Clicking the tag text selects every image with that tag (keeps the old behavior; still the main way to browse tags). */
   onPickTag: (tag: string) => void
-  /** 从当前选中图中删除该 tag。 */
+  /** Removes this tag from the currently selected images. */
   onRemoveTag: (tag: string) => void
-  /** 从当前选中图中把 oldTag 替换为 newTag。 */
+  /** Replaces oldTag with newTag on the currently selected images. */
   onReplaceTag: (oldTag: string, newTag: string) => void
 }
 
@@ -39,8 +39,8 @@ export default function TagStatsPanel({
   const { t } = useTranslation()
   const [filter, setFilter] = useState('')
   const [sort, setSort] = useState<Sort>('count_desc')
-  // inline replace state：editingTag = 正在 inline 改名的 tag；editValue 是
-  // input 当前值。按回车提交；Esc / 失焦取消。
+  // inline replace state: editingTag = the tag currently being renamed inline;
+  // editValue holds the input's current value. Enter commits; Esc / blur cancels.
   const [editingTag, setEditingTag] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -73,7 +73,7 @@ export default function TagStatsPanel({
 
   const maxCount = countedKeys.length || 1
 
-  // 进入 edit mode 时 focus + select 输入框
+  // Focus + select the input when entering edit mode
   useEffect(() => {
     if (editingTag && editInputRef.current) {
       editInputRef.current.focus()
@@ -182,8 +182,9 @@ export default function TagStatsPanel({
   )
 }
 
-/** Inline tag rename input + 翻译 autocomplete。抽出来是为了能放 useTagSuggest hook —
- *  父组件 .map 内部不能调 hook。 */
+/** Inline tag rename input + translation autocomplete. Extracted so it can
+ *  hold the useTagSuggest hook -- a hook can't be called inside the parent's
+ *  .map(). */
 function EditTagInput({ editInputRef, value, setValue, onCommit, onCancel }: {
   editInputRef: RefObject<HTMLInputElement>
   value: string

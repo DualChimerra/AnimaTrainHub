@@ -18,7 +18,7 @@ import { useToast } from '../../../components/Toast'
 import { parseFolderMeta } from '../../../lib/folderMeta'
 import { useEventStream } from '../../../lib/useEventStream'
 
-// ---------- 排序 ----------
+// ---------- sorting ----------
 type SortMode =
   | 'id-asc'
   | 'id-desc'
@@ -30,7 +30,7 @@ type SortMode =
 const SORT_STORAGE_KEY = 'curation:sort'
 const DEFAULT_SORT: SortMode = 'id-asc'
 
-// 右栏目标桶：训练集（默认，现行为）/ 验证集（held-out，扁平无文件夹）
+// Right-column target bucket: training set (default, current behavior) / validation set (held-out, flat, no folders)
 type Bucket = 'train' | 'validation'
 const BUCKET_STORAGE_KEY = 'curation:bucket'
 
@@ -205,8 +205,9 @@ export default function CurationPage() {
     }
   }, [project.id, versionId])
 
-  // 切换 bucket 只在目标视图没缓存时拉一次：左栏 download−train−validation 两个
-  // bucket 完全一致，纯来回切不该重拉、不该整页 loading（左栏用已有数据兜底）。
+  // Switching buckets only refetches once, if the target view has no cache: the left column's
+  // download−train−validation set is identical across the two buckets, so toggling back and
+  // forth shouldn't refetch or trigger a full-page loading state (the left column falls back to existing data).
   useEffect(() => {
     if (versionId == null) return
     if (bucket === 'validation') {
@@ -216,8 +217,9 @@ export default function CurationPage() {
     }
   }, [bucket, versionId, view, valView, fetchTrain, fetchValidation])
 
-  // 改动后刷新当前 bucket + 作废另一个的缓存：跨 bucket 增删会改共享的左栏候选
-  // 池 / 另一侧右栏，下次切过去自动重拉，保证不显示陈旧的左栏。
+  // After a change, refresh the current bucket + invalidate the other one's cache: an add/remove
+  // across buckets changes the shared left-column candidate pool / the other side's right column,
+  // so switching there next time refetches automatically, guaranteeing the left column is never stale.
   const refresh = useCallback(async () => {
     if (bucket === 'validation') {
       await fetchValidation()
@@ -242,8 +244,9 @@ export default function CurationPage() {
   const isVal = bucket === 'validation'
   const folderNames = view?.folders ?? []
 
-  // 左栏候选 download − train − validation，两个 bucket 共用同一池 —— 目标视图
-  // 尚未加载时回退到另一视图的（内容相同的）左栏，切换时左栏不空屏、不闪。
+  // Left-column candidates are download − train − validation, and the two buckets share the same
+  // pool -- while the target view hasn't loaded yet, fall back to the other view's (same-content)
+  // left column so it never goes blank or flickers on switch.
   const currentLeft = useMemo(
     () => (isVal ? valView?.left ?? view?.left ?? [] : view?.left ?? valView?.left ?? []),
     [isVal, valView, view]
@@ -253,7 +256,7 @@ export default function CurationPage() {
     [currentLeft, sortMode]
   )
 
-  // train 右栏：当前文件夹的 entries（带 origin）。validation 右栏：全量扁平。
+  // train right column: entries for the current folder (with origin). validation right column: everything, flat.
   const trainEntries = useMemo(
     () => (view && rightFolder ? view.right[rightFolder] ?? [] : []),
     [view, rightFolder]
@@ -264,11 +267,11 @@ export default function CurationPage() {
     [isVal, valEntries, trainEntries, sortMode]
   )
 
-  // ADR 0010 fixup: train 区 thumb 走 download bucket + manifest.origin，
-  // 显示"预处理前的样子"。trainEntries 已带 origin（backend list_train 加）。
-  // 用 raw=1 跳过 resolve_origin —— 否则老 ADR 0004 设计会 hijack 到
-  // preprocess/{派生} 派生（X.jpg → preprocess/X_c0.png），但 ADR 0010
-  // 后 preprocess/ 不再被 worker 写 → 404 裂图。
+  // ADR 0010 fixup: thumbnails in the train area go through the download bucket + manifest.origin,
+  // showing "what it looked like before preprocessing". trainEntries already carries origin (added
+  // by the backend's list_train). We use raw=1 to skip resolve_origin -- otherwise the old ADR 0004
+  // design would hijack it to a preprocess/{derivative} (X.jpg → preprocess/X_c0.png), but after
+  // ADR 0010 the worker no longer writes to preprocess/ → broken 404 image.
   const rightOriginByName = useMemo(() => {
     const m = new Map<string, string>()
     for (const e of trainEntries) {
@@ -276,8 +279,8 @@ export default function CurationPage() {
     }
     return m
   }, [trainEntries])
-  // validation 图无 manifest / 无 origin：按 name → 物理 folder 反查，供
-  // 缩略图寻址（version thumb 的 validation bucket 需 folder）+ 精确删除。
+  // Validation images have no manifest / no origin: look up name → physical folder instead, for
+  // thumbnail addressing (the version-thumb validation bucket needs a folder) + precise deletion.
   const valFolderByName = useMemo(() => {
     const m = new Map<string, string>()
     for (const e of valEntries) m.set(e.name, e.folder)
@@ -352,13 +355,14 @@ export default function CurationPage() {
       </div>
     )
   }
-  // 整页 loading 只在首次（两个视图都没数据）出现；切换 bucket 时另一视图已有
-  // 数据，页面照常渲染，只有右栏在等自己那侧的数据。
+  // The full-page loading state only appears the first time (when neither view has data yet);
+  // when switching buckets the other view already has data, so the page renders as normal and
+  // only the right column waits on its own side's data.
   if (view == null && valView == null) {
     return <p className="text-fg-tertiary p-6">{t('curate.loading')}</p>
   }
 
-  // 当前 bucket 自己那侧的右栏数据是否还在加载（切到一个从没看过的 bucket 时）
+  // Whether the current bucket's own right-column data is still loading (when switching to a bucket never viewed before)
   const rightLoading = isVal ? valView == null : view == null
   const downloadTotal = isVal
     ? valView?.download_total ?? view?.download_total ?? 0

@@ -1,17 +1,19 @@
-"""预处理 worker 子进程入口（放大 + 裁剪）。
+"""Preprocess worker subprocess entry point (upscale + crop).
 
-由 supervisor 启动：`python -m studio.workers.preprocess_worker --job-id N`。
+Launched by supervisor: `python -m studio.workers.preprocess_worker --job-id N`.
 
-读 project_jobs 行 → 按 `params['stage']` 分发：
-  - stage='upscale' (默认)：串行调 `studio.services.upscaler.upscale_file()`
-  - stage='crop'：用 PIL 把 preprocess/ 下的图按归一化 rect 切成 N 张产物
+Reads the project_jobs row -> dispatches by `params['stage']`:
+  - stage='upscale' (default): calls `studio.services.upscaler.upscale_file()` serially
+  - stage='crop': uses PIL to cut the images under preprocess/ into N output pieces
+    according to normalized rects
 
-日志规范：只走 stdout（supervisor 重定向到 log 文件），不要再 open 同一个
-log 文件，避免 LogTailer 读两次。
+Logging convention: stdout only (supervisor redirects it to the log file); don't open
+that same log file again, to avoid LogTailer reading it twice.
 
-取消：worker 主体在每张图前检测 SIGTERM/CTRL_BREAK 信号（Python 解释器
-默认对 SIGTERM 抛 KeyboardInterrupt 在 main thread 里）；当前轮的图处理完
-后干净退出，已写盘的产物保留（增量）。
+Cancellation: the worker body checks for a SIGTERM/CTRL_BREAK signal before each image
+(the Python interpreter's default behavior is to raise KeyboardInterrupt on the main
+thread for SIGTERM); it exits cleanly after finishing the current image, keeping whatever
+output has already been written to disk (incremental).
 """
 from __future__ import annotations
 
@@ -61,7 +63,7 @@ def _unlink_image_and_sidecars(path: Path, *, keep_sidecars: bool = False) -> No
         path.with_suffix(ext).unlink(missing_ok=True)
 
 
-def run(job_id: int) -> int:  # noqa: PLR0912, PLR0915 - 主流程线性可读
+def run(job_id: int) -> int:  # noqa: PLR0912, PLR0915 - main flow is linear and readable
     _install_signal_handlers()
 
     with db.connection_for() as conn:
@@ -74,18 +76,19 @@ def run(job_id: int) -> int:  # noqa: PLR0912, PLR0915 - 主流程线性可读
         return 1
 
     params = job.get("params_decoded") or {}
-    # 缺 stage 字段视为老 upscale job（向后兼容）
+    # missing stage field is treated as a legacy upscale job (backward compat)
     stage = params.get("stage", preprocess.STAGE_UPSCALE)
 
     def log(line: str) -> None:
         print(line, flush=True)
 
     def emit_event(evt_type: str, **payload) -> None:
-        """通过 stdout 标记行 → supervisor 解析 → SSE。供前端实时更新用，
-        不会进 job 日志。supervisor 端常量见 `studio/supervisor.py:_EVENT_MARKER`。"""
+        """Marked stdout line -> parsed by supervisor -> SSE. Used for real-time frontend
+        updates, does not go into the job log. Supervisor-side constant is
+        `studio/supervisor.py:_EVENT_MARKER`."""
         try:
             print(f"__EVENT__:{evt_type}:{json.dumps(payload, ensure_ascii=False)}", flush=True)
-        except Exception:  # noqa: BLE001 — 推事件失败不影响主流程
+        except Exception:  # noqa: BLE001 -- a failed event emit shouldn't affect the main flow
             pass
 
     try:
@@ -97,7 +100,7 @@ def run(job_id: int) -> int:  # noqa: PLR0912, PLR0915 - 主流程线性可读
 
         version_id = job.get("version_id")
         if version_id is None:
-            log("[error] preprocess job 缺 version_id（ADR 0010 train scope）")
+            log("[error] preprocess job is missing version_id (ADR 0010 train scope)")
             return 1
         with db.connection_for() as conn:
             version = versions.get_version(conn, version_id)
@@ -110,11 +113,11 @@ def run(job_id: int) -> int:  # noqa: PLR0912, PLR0915 - 主流程线性可读
             return _run_upscale_train(
                 project, version, params, log, emit_event,
             )
-        log(f"[error] 未知 stage: {stage!r}")
+        log(f"[error] unknown stage: {stage!r}")
         return 1
     except Exception as exc:  # noqa: BLE001
-        # PR-1 C7: 同 tag_worker — logger.exception 带 trace_id 进 stderr，
-        # log 给人读短摘要。
+        # PR-1 C7: same as tag_worker -- logger.exception carries the trace_id into
+        # stderr, log gives the human-readable short summary.
         logger.exception("preprocess worker crashed (job_id=%s)", job_id)
         log(f"[error] {exc}")
         return 1
@@ -127,14 +130,15 @@ def _run_upscale_train(
     log: Callable[[str], None],
     emit_event: Callable[..., None],
 ) -> int:
-    """ADR 0010 train-scope upscale。
+    """ADR 0010 train-scope upscale.
 
-    源 + 产物都在 `versions/{label}/train/{folder}/`，manifest 写到
-    `versions/{label}/train/manifest.json`。ADR 0010 fixup（2026-06-04）：
-    **不改扩展名** —— 同名 in-place 覆盖（X.jpg → X.jpg / X.png → X.png），
-    避免 caption 对应关系断裂 / dataset_config 扩展名 glob 失效。upscaler
-    按 src 扩展名 save（JPEG quality=95 / PNG 无压缩 / WebP quality=95）；
-    manifest entry 加 `processed=True` 标记给 UI 推断徽章用。
+    Source + output both live in `versions/{label}/train/{folder}/`, the manifest is
+    written to `versions/{label}/train/manifest.json`. ADR 0010 fixup (2026-06-04):
+    **doesn't change the extension** -- overwrites in place under the same name
+    (X.jpg -> X.jpg / X.png -> X.png), to avoid breaking caption correspondence /
+    dataset_config extension globs. upscaler saves using the src extension (JPEG
+    quality=95 / PNG uncompressed / WebP quality=95); the manifest entry gets a
+    `processed=True` flag for the UI's badge inference.
     """
     mode = params.get("mode", "all")
     names = params.get("names") or None
@@ -152,7 +156,7 @@ def _run_upscale_train(
     model_path = model_downloader.upscaler_target(model_label)
     if not model_path.exists():
         log(
-            f"[error] 模型权重不存在：{model_path}（请先在设置页下载 {model_label}）"
+            f"[error] model weights not found: {model_path} (download {model_label} on the settings page first)"
         )
         return 1
 
@@ -161,17 +165,17 @@ def _run_upscale_train(
             project, version["label"], mode=mode, names=names
         )
     except DomainError as exc:
-        log(f"[error] 解析目标失败: {exc}")
+        log(f"[error] failed to resolve targets: {exc}")
         return 1
 
     total = len(sources)
     if total == 0:
-        log("[done] 没有需要处理的图")
+        log("[done] no images to process")
         return 0
 
     target_desc = (
         f"{int(math.sqrt(target_area))}²={target_area}px"
-        if target_area else "off (直接 4×)"
+        if target_area else "off (direct 4x)"
     )
     log(
         f"[start] mode={mode} model={model_label} tile={tile_size}+{tile_pad} "
@@ -185,16 +189,16 @@ def _run_upscale_train(
         gpu_name = (
             torch.cuda.get_device_name(0)
             if resolved_dev.type == "cuda" and torch.cuda.is_available()
-            else "—"
+            else "-"
         )
         log(
             f"[device] resolved={resolved_dev} dtype={str(resolved_dtype).replace('torch.', '')} "
             f"gpu={gpu_name} cuda_available={torch.cuda.is_available()}"
         )
         upscaler.load_model(model_path, device=resolved_dev, dtype=resolved_dtype)
-        log(f"[model] {model_label} loaded → {resolved_dev}")
+        log(f"[model] {model_label} loaded -> {resolved_dev}")
     except Exception as exc:  # noqa: BLE001
-        log(f"[device] diagnostic failed: {exc}（继续，但可能跑在 CPU 上）")
+        log(f"[device] diagnostic failed: {exc} (continuing, but it may run on CPU)")
 
     succeeded = 0
     failed = 0
@@ -202,11 +206,11 @@ def _run_upscale_train(
 
     for idx, src_rel in enumerate(sources, start=1):
         if _stop_requested:
-            log(f"[cancel] 收到取消信号，已处理 {idx - 1}/{total}")
+            log(f"[cancel] cancellation signal received, processed {idx - 1}/{total}")
             break
         src_path = train_dir / src_rel
         if not src_path.exists():
-            log(f"[skip] ({idx}/{total}) {src_rel}: 源已不存在")
+            log(f"[skip] ({idx}/{total}) {src_rel}: source no longer exists")
             skipped += 1
             emit_event(
                 "preprocess_progress",
@@ -215,8 +219,9 @@ def _run_upscale_train(
             )
             continue
 
-        # origin 沿用 manifest 已有 entry（multi-crop 派生 root），否则用 rel
-        # path 末段（curate 复制图时写的就是 file name == origin）
+        # origin follows the manifest's existing entry (multi-crop derived root),
+        # otherwise use the last segment of the rel path (curate writes the copied
+        # image's file name == origin)
         existing = preprocess_manifest.train_get_entry(
             project_dir, version["label"], src_rel
         )
@@ -226,9 +231,10 @@ def _run_upscale_train(
         else:
             origin_name = src_filename
 
-        # ADR 0010 fixup：dst == src，in-place 覆盖。upscaler 按 src 扩展名
-        # save（JPEG 95 / WebP 95 / PNG 无压缩），保 caption + dataset_config 对
-        # 扩展名的依赖；manifest entry 加 processed=True 标记。
+        # ADR 0010 fixup: dst == src, overwritten in place. upscaler saves using the src
+        # extension (JPEG 95 / WebP 95 / PNG uncompressed), preserving caption +
+        # dataset_config's dependency on the extension; manifest entry gets a
+        # processed=True flag.
         dst_path = src_path
         src_ext = Path(src_filename).suffix.lower()
         if src_ext in (".jpg", ".jpeg"):
@@ -258,12 +264,12 @@ def _run_upscale_train(
             preprocess_manifest.train_add_processed(
                 project_dir, version["label"], src_rel, meta,
             )
-            # mask sidecar 跟随：NEAREST resize 到放大后尺寸（无 mask 时 no-op）
+            # mask sidecar follows along: NEAREST resize to the upscaled size (no-op if no mask)
             try:
                 with Image.open(dst_path) as up_img:
                     train_masks.resize_mask_like(train_dir, src_rel, up_img.size)
             except Exception as exc:  # noqa: BLE001
-                log(f"   ⚠ mask 跟随放大失败: {exc}")
+                log(f"   Warning: mask failed to follow upscale: {exc}")
             succeeded += 1
             emit_event(
                 "preprocess_progress",
@@ -292,12 +298,13 @@ def _run_crop_train(
     log: Callable[[str], None],
     emit_event: Callable[..., None],
 ) -> int:
-    """ADR 0010 train-scope crop。
+    """ADR 0010 train-scope crop.
 
-    `params['crops']` = `{rel_path: [rects]}`，rel_path 形如 `1_data/X.png`。
-    crop 产物输出到同 folder 内：N=1 产出 `folder/stem.png`，N>1 fan-out
-    成 `folder/stem_c0.png` / `folder/stem_c1.png` / ...；成功后清理不再
-    属于 outputs 的旧源图，再用 train_replace_with_crops 原子替换 manifest。
+    `params['crops']` = `{rel_path: [rects]}`, rel_path looks like `1_data/X.png`.
+    crop output goes into the same folder: N=1 produces `folder/stem.png`, N>1 fans out
+    into `folder/stem_c0.png` / `folder/stem_c1.png` / ...; on success, old source images
+    that are no longer part of the outputs are cleaned up, then train_replace_with_crops
+    atomically replaces the manifest.
     """
     project_dir = projects.project_dir(project["id"], project["slug"])
     train_dir = preprocess.version_train_dir(project, version["label"])
@@ -305,7 +312,7 @@ def _run_crop_train(
 
     crops_param = params.get("crops") or {}
     if not crops_param:
-        log("[done] crops 为空，无事可做")
+        log("[done] crops is empty, nothing to do")
         return 0
     sources = sorted(crops_param.keys())
 
@@ -327,7 +334,7 @@ def _run_crop_train(
 
     for idx, src_rel in enumerate(sources, start=1):
         if _stop_requested:
-            log(f"[cancel] 收到取消信号，已处理 {idx - 1}/{total}")
+            log(f"[cancel] cancellation signal received, processed {idx - 1}/{total}")
             break
         is_last = idx == total
         try:
@@ -344,7 +351,7 @@ def _run_crop_train(
 
         src_path = train_dir / src_rel
         if not src_path.is_file():
-            log(f"[skip] ({idx}/{total}) {src_rel}: 源不存在")
+            log(f"[skip] ({idx}/{total}) {src_rel}: source doesn't exist")
             skipped += 1
             emit_throttled(
                 force=True,
@@ -353,7 +360,7 @@ def _run_crop_train(
             )
             continue
 
-        # origin 沿用 manifest 已有 entry root，否则用 src filename
+        # origin follows the manifest's existing entry root, otherwise use the src filename
         existing = preprocess_manifest.train_get_entry(
             project_dir, version["label"], src_rel
         )
@@ -372,7 +379,7 @@ def _run_crop_train(
             else [f"{folder}/{src_stem}_c{i}.png" for i in range(n)]
         )
 
-        log(f"[crop] ({idx}/{total}) {src_rel} → {n} 个产物")
+        log(f"[crop] ({idx}/{total}) {src_rel} -> {n} outputs")
         try:
             t0 = time.monotonic()
             with Image.open(src_path) as raw:
@@ -408,11 +415,13 @@ def _run_crop_train(
                     "mtime": mt,
                 })
 
-            # 输出可能换成 .png 或 fan-out 成多张；源不再属于 outputs 时必须删，
-            # 否则从 bundle/版本复制来的 train-only 数据会同时保留原图 + 裁剪图。
-            # 已知边界（沿袭旧行为）：`{stem}.png` 进 stale 集是为了清掉历史
-            # N=1 crop 的产物；若 train 里恰好有同 stem 的两张独立图
-            # （X.jpg + X.png），对 X.jpg fan-out 会把无关的 X.png 一并删掉。
+            # The output may switch to .png or fan out into several files; when the source
+            # is no longer one of the outputs it must be deleted, otherwise train-only
+            # data copied in from a bundle/version would keep both the original and the
+            # cropped images. Known edge case (carried over from old behavior): `{stem}.png`
+            # is included in the stale set to clean up outputs from historical N=1 crops;
+            # if train happens to have two separate images with the same stem (X.jpg +
+            # X.png), fanning out X.jpg will also delete the unrelated X.png.
             stale_rels = {src_rel, f"{folder}/{src_stem}.png"} - set(out_rels)
             output_stems = {Path(rel).stem for rel in out_rels}
             for stale_rel in sorted(stale_rels):
@@ -428,15 +437,15 @@ def _run_crop_train(
                             keep_sidecars=Path(stale_rel).stem in output_stems,
                         )
                     except OSError as exc:
-                        log(f"   ⚠ 删旧 {stale_rel} 失败: {exc}")
+                        log(f"   Warning: failed to delete old {stale_rel}: {exc}")
 
-            # mask sidecar 跟随：同 box 裁剪 + fan-out（源无 mask 时 no-op）
+            # mask sidecar follows along: same box crop + fan-out (no-op if source has no mask)
             try:
                 train_masks.crop_mask_like(
                     train_dir, src_rel, crop_boxes, out_rels,
                 )
             except Exception as exc:  # noqa: BLE001
-                log(f"   ⚠ mask 跟随裁剪失败: {exc}")
+                log(f"   Warning: mask failed to follow crop: {exc}")
 
             preprocess_manifest.train_replace_with_crops(
                 project_dir, version["label"],
@@ -457,8 +466,8 @@ def _run_crop_train(
             elapsed = time.monotonic() - t0
             succeeded += 1
             log(
-                f"   ✓ {src_rel} → {', '.join(out_rels)}  "
-                f"({sw}×{sh} → {n} 块, {elapsed:.2f}s)"
+                f"   OK {src_rel} -> {', '.join(out_rels)}  "
+                f"({sw}x{sh} -> {n} piece(s), {elapsed:.2f}s)"
             )
             emit_throttled(
                 force=(idx == 1 or is_last),

@@ -1,14 +1,15 @@
-"""v11 → v12: 移除 VersionPhase 的 `tagging` 值（自动打标步骤已删除）。
+"""v11 -> v12: removes the `tagging` value from VersionPhase (the auto-tagging step was removed).
 
-VersionPhase 从 6 → 5：
+VersionPhase goes from 6 -> 5:
 
-    curating → preprocessing → editing → regularizing → ready
+    curating -> preprocessing -> editing -> regularizing -> ready
 
-phase 列是 TEXT（_v8 加的），无需改 schema；只把存量数据里仍停在
-`tagging` 的 version 平移到下一个必经 phase `editing`（旧 tagging 可跳过，
-跳过即进 editing —— 与历史语义一致，用户不丢进度）。
+phase is a TEXT column (added in _v8), no schema change needed; this just moves any existing
+version still sitting at `tagging` forward to the next mandatory phase, `editing` (the old
+tagging step was skippable, and skipping it led straight into editing -- consistent with the
+old semantics, so users don't lose progress).
 
-幂等：没有 phase='tagging' 行时 UPDATE 影响 0 行，无副作用。
+Idempotent: when there are no phase='tagging' rows, the UPDATE affects 0 rows, no side effects.
 """
 from __future__ import annotations
 

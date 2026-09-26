@@ -1,11 +1,12 @@
-"""NaViT / Patch-n-Pack 训练步骤单测：navit_packed_forward_and_loss + pack_cross_embeddings。
+"""Unit tests for the NaViT / Patch-n-Pack training step: navit_packed_forward_and_loss +
+pack_cross_embeddings.
 
-验证：
-  1) pack_cross_embeddings：trim / no-trim 两路径的拼接长度与 text_seqlens 正确。
-  2) navit_packed_forward_and_loss：loss 有限、带梯度、per_image_loss 形状 [G]。
-  3) grad_checkpoint 路径输出 ≡ 非检查点路径，且仍可反向。
+Verifies:
+  1) pack_cross_embeddings: the trim / no-trim paths produce correct concat length and text_seqlens.
+  2) navit_packed_forward_and_loss: loss is finite, carries gradients, per_image_loss has shape [G].
+  3) grad_checkpoint path output == non-checkpoint path, and still backprops.
 
-Needs CUDA + xformers（varlen kernels GPU-only）；缺则 skip。
+Needs CUDA + xformers (varlen kernels are GPU-only); skipped otherwise.
 """
 from __future__ import annotations
 
@@ -47,7 +48,7 @@ def _model(dtype):
 
 @requires_cuda
 def test_pack_cross_embeddings_no_trim():
-    """Legacy 512-pad: 每图带完整 caption，ΣL = G × 512。"""
+    """Legacy 512-pad: every image carries its full caption, sum(L) = G * 512."""
     G, L, D = 3, 512, 128
     cross = torch.randn(G, L, D)
     t5_attn = torch.ones(G, L)
@@ -59,10 +60,10 @@ def test_pack_cross_embeddings_no_trim():
 
 @requires_cuda
 def test_pack_cross_embeddings_trim():
-    """Trim padding: 只拼有效 token，ΣL = sum(valid per image)。"""
+    """Trim padding: only valid tokens are concatenated, sum(L) = sum(valid per image)."""
     G, L, D = 3, 512, 128
     cross = torch.randn(G, L, D)
-    # 每图不同有效长度
+    # different valid length per image
     valid_lens = [10, 77, 256]
     t5_attn = torch.zeros(G, L)
     for i, n in enumerate(valid_lens):
@@ -70,13 +71,13 @@ def test_pack_cross_embeddings_trim():
     packed, seqlens = pack_cross_embeddings(cross, t5_attn, navit_text_trim_padding=True)
     assert seqlens == valid_lens
     assert sum(seqlens) == packed.shape[1]
-    # 验证拼接顺序：第一段 == cross[0, :10]
+    # verify concat order: the first segment == cross[0, :10]
     torch.testing.assert_close(packed[0, :10, :], cross[0, :10, :])
 
 
 @requires_cuda
 def test_navit_forward_and_loss_basic():
-    """navit_packed_forward_and_loss: loss 有限、带梯度、per_image 形状 [G]。"""
+    """navit_packed_forward_and_loss: loss is finite, carries gradients, per_image shape is [G]."""
     set_xformers_enabled(True)
     dtype = torch.float16
     model = _model(dtype)
@@ -103,10 +104,10 @@ def test_navit_forward_and_loss_basic():
     assert loss.requires_grad
     assert info["per_image_loss"].shape == (len(latent_shapes),)
     assert all(torch.isfinite(v) for v in info["per_image_loss"])
-    # 预测 token 数 == ΣN
+    # predicted token count == sum(N)
     assert pred.shape[1] == sum(info["visual_seqlens"])
 
-    # 梯度可反向
+    # gradients backprop successfully
     loss.backward()
     grads = [p.grad for p in model.parameters() if p.grad is not None]
     assert len(grads) > 0
@@ -115,7 +116,7 @@ def test_navit_forward_and_loss_basic():
 
 @requires_cuda
 def test_navit_checkpoint_equivalence():
-    """grad_checkpoint 路径 ≡ 非检查点路径，且仍可反向。"""
+    """grad_checkpoint path == non-checkpoint path, and still backprops."""
     set_xformers_enabled(True)
     dtype = torch.float16
     model = _model(dtype)
@@ -147,7 +148,7 @@ def test_navit_checkpoint_equivalence():
         )
     torch.testing.assert_close(pred_ckpt, pred_plain, rtol=2e-3, atol=2e-3)
 
-    # 检查点路径仍可反向
+    # checkpoint path still backprops
     torch.manual_seed(42)
     loss, _, _ = navit_packed_forward_and_loss(
         model, latents_list, t, cross_packed, text_lens, loss_fn,
@@ -162,10 +163,11 @@ def test_navit_checkpoint_equivalence():
 
 @requires_cuda
 def test_navit_per_image_weights():
-    """per_image_weights（正则集 loss_weight × loss_weighting）按 per-image 缩放 loss。
+    """per_image_weights (regularization set loss_weight x loss_weighting) scales the loss per image.
 
-    覆盖 navit 路径补全的两项加权：传入 [G] 权重后，per-image loss 与总 loss 均按权重
-    缩放（与标准路径 per-sample 加权对称）。
+    Covers the two weighting factors filled in on the navit path: after passing a [G] weight
+    vector, both the per-image loss and the total loss are scaled by the weights (symmetric
+    with per-sample weighting on the standard path).
     """
     set_xformers_enabled(True)
     dtype = torch.float16
@@ -184,25 +186,25 @@ def test_navit_per_image_weights():
     t = torch.tensor(timesteps, device="cuda", dtype=dtype)
     loss_fn = MseLoss()
 
-    # 基线（无 per-image 权重）
+    # baseline (no per-image weights)
     torch.manual_seed(42)
     _, _, info0 = navit_packed_forward_and_loss(
         model, latents_list, t, cross_packed, text_lens, loss_fn,
     )
     base = info0["per_image_loss"].clone().to(torch.float32)  # [G]
 
-    # per-image 权重 [2.0, 0.5]
+    # per-image weights [2.0, 0.5]
     w = torch.tensor([2.0, 0.5], device="cuda", dtype=torch.float32)
     torch.manual_seed(42)
     loss_w, _, info_w = navit_packed_forward_and_loss(
         model, latents_list, t, cross_packed, text_lens, loss_fn,
         per_image_weights=w,
     )
-    # per-image loss 被权重缩放
+    # per-image loss is scaled by the weights
     torch.testing.assert_close(
         info_w["per_image_loss"].to(torch.float32), base * w, rtol=2e-3, atol=2e-3,
     )
-    # 总 loss = mean(per_image × weights)
+    # total loss = mean(per_image x weights)
     torch.testing.assert_close(
         loss_w.detach().to(torch.float32), (base * w).mean(), rtol=2e-3, atol=2e-3,
     )

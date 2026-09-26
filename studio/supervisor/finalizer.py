@@ -1,8 +1,9 @@
-"""task 终态 → version.status 映射（PR-4 从 supervisor.py 抽出）。
+"""task terminal state -> version.status mapping (extracted from supervisor.py in PR-4).
 
-ADR-0007 §11.3-B：task 终态独立映射，不撒谎。done/failed/canceled 三种
-task_status 各映射到对应 VersionStatus；paused 不进此函数（§11.3-A：
-task=paused 时 version 仍 training，UI 派生显示）。
+ADR-0007 §11.3-B: task terminal states are mapped independently, no lying about status.
+The three task_status values done/failed/canceled each map to their VersionStatus;
+paused doesn't go through this function (§11.3-A: while task=paused the version stays
+"training", the UI derives its own display state).
 """
 from __future__ import annotations
 
@@ -14,14 +15,15 @@ from .. import db
 def _maybe_finalize_version(
     conn: Any, task_id: int, task_status: str = "done"
 ) -> None:
-    """task 终态 → 推 version.status（ADR-0007 §11.3-B）。
+    """task terminal state -> push version.status (ADR-0007 §11.3-B).
 
-    task_status 映射：
-    - done → completed（+ output_lora_path 回填）
-    - failed → failed（+ last_failure_reason 写入 task.error_msg）
-    - canceled → canceled
+    task_status mapping:
+    - done -> completed (+ backfill output_lora_path)
+    - failed -> failed (+ write last_failure_reason from task.error_msg)
+    - canceled -> canceled
 
-    paused 不进此函数（§11.3-A：task=paused 时 version 仍 training，UI 派生显示）。
+    paused doesn't go through this function (§11.3-A: while task=paused the version stays
+    "training", the UI derives its own display state).
     """
     from ..services.projects import versions as _versions
     task_row = db.get_task(conn, task_id)
@@ -39,7 +41,7 @@ def _maybe_finalize_version(
     if not p:
         return
 
-    # ADR-0007 §11.3-B：task 终态独立映射，不撒谎
+    # ADR-0007 §11.3-B: task terminal states are mapped independently, no lying about status
     new_status_map = {
         "done":     _versions.VersionStatus.COMPLETED,
         "failed":   _versions.VersionStatus.FAILED,
@@ -47,7 +49,7 @@ def _maybe_finalize_version(
     }
     new_status = new_status_map.get(task_status)
     if new_status is None:
-        return  # 未知 task_status（如 paused / running）不动 version
+        return  # unknown task_status (e.g. paused / running) -- leave version untouched
 
     fields: dict[str, Any] = {"status": new_status}
 

@@ -1,9 +1,9 @@
-"""Log file tailer：把追加到 log 文件的字节流增量推到 callback。
+"""Log file tailer: pushes bytes appended to a log file incrementally to a callback.
 
-用于 supervisor 跟踪 worker 子进程的日志，按行 publish 到 SSE。
+Used by the supervisor to track worker subprocess logs, publishing line by line to SSE.
 
-PP6.4：增加 MonitorStatePoller —— 监听 monitor_state.json mtime，
-变化时 publish 整个 state 给 SSE 订阅者（取代前端 1Hz 轮询 /api/state）。
+PP6.4: adds MonitorStatePoller -- watches monitor_state.json's mtime and, on change,
+publishes the whole state to SSE subscribers (replaces the frontend's 1Hz polling of /api/state).
 """
 from __future__ import annotations
 
@@ -14,17 +14,18 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-# C++ 库（典型如 onnxruntime）有时直接往 worker 进程的 fd 2 写带 ANSI 颜色码
-# 的日志，前端 <pre> 不解析 ANSI，会渲染成 `日[1;31m...` 之类的乱码。Windows
-# 上还会塞 UTF-16 风格的 NUL 字节，让一行 ASCII 看起来字间夹空格。统一在
-# tail 阶段剥掉，让前端拿到的就是干净文本。
+# C++ libraries (onnxruntime being a typical example) sometimes write ANSI-colored logs
+# directly to the worker process's fd 2; the frontend's <pre> doesn't parse ANSI, so it renders
+# garbage like `[1;31m...`. On Windows it can also stuff in UTF-16-style NUL bytes, making an
+# ASCII line look like it has spaces between every character. Strip both uniformly at the tail
+# stage so the frontend gets clean text.
 _ANSI_CSI_RE = re.compile(r"\x1b\[[\d;?]*[A-Za-z]")
 
 
 class LogTailer:
-    """轮询 log 文件，把新增字节按行送给 `on_line(line)`。
+    """Polls a log file and sends newly appended bytes to `on_line(line)`, line by line.
 
-    线程安全；start/stop 各调一次；不抛错（IO 失败静默重试）。
+    Thread-safe; call start/stop once each; never raises (IO failures retry silently).
     """
 
     def __init__(
@@ -55,7 +56,7 @@ class LogTailer:
         if self._thread:
             self._thread.join(timeout=timeout)
             self._thread = None
-        # 收尾：flush 残余 buffer 作为最后一行
+        # Wrap-up: flush the remaining buffer as the last line
         if self._buffer.strip():
             try:
                 self._on_line(self._buffer.rstrip("\r\n"))
@@ -67,10 +68,10 @@ class LogTailer:
             try:
                 self._read_chunk()
             except Exception:
-                # IO 异常不向上抛，避免拖死 supervisor
+                # IO exceptions are swallowed here to avoid stalling the supervisor
                 pass
             self._stop.wait(self._poll)
-        # 退出前再 flush 一次，捕获结束瞬间的输出
+        # One more flush before exiting, to catch output written right at the end
         try:
             self._read_chunk()
         except Exception:
@@ -86,10 +87,11 @@ class LogTailer:
                 return
             self._offset += len(chunk)
         raw = chunk.decode("utf-8", errors="replace")
-        # 剥 ANSI CSI 转义 + NUL 字节（onnxruntime 等 C++ 库直写 fd 2 的副产物）
+        # Strip ANSI CSI escapes + NUL bytes (a side effect of C++ libraries like onnxruntime
+        # writing directly to fd 2)
         cleaned = _ANSI_CSI_RE.sub("", raw).replace("\x00", "")
         text = self._buffer + cleaned
-        # 拆行；最后一段不完整就留在 buffer 里下次拼
+        # Split into lines; keep an incomplete trailing segment in the buffer to join next time
         lines = text.split("\n")
         self._buffer = lines.pop()
         for line in lines:
@@ -97,31 +99,34 @@ class LogTailer:
 
 
 class MonitorStatePoller:
-    """轮询 monitor_state.json 的 mtime，变化时**构造增量 delta** 推给 callback。
+    """Polls monitor_state.json's mtime and, on change, **builds an incremental delta** to
+    push to the callback.
 
-    协议（PR #37 改造）：早期版本每次推全量 state（losses/lr 数组每步都全
-    量重传，2000 步训练单次推 ~200KB）。云部署跨公网时这是 O(N²) 浪费。
+    Protocol (reworked in PR #37): earlier versions pushed the full state every time (the
+    losses/lr arrays were retransmitted in full at every step -- a single push for a 2000-step
+    training run could be ~200KB). That's O(N^2) waste over a WAN in cloud deployments.
 
-    新设计：poller 维护 last_step / last_loss_count / last_lr_count /
-    last_optimizer_metrics_count / last_sample_count，每次只把「自上次发布以来的新增」打成 delta：
+    New design: the poller keeps last_step / last_loss_count / last_lr_count /
+    last_optimizer_metrics_count / last_sample_count, and each time only packages "what's new
+    since the last publish" into a delta:
 
         {
           "step": 234, "total_steps": 2000,
           "epoch": 3, "total_epochs": 10,
           "speed": 1.2, "start_time": 1234567890.0,
-          "appended_losses": [{step, loss, time}],   # 可能为空数组
+          "appended_losses": [{step, loss, time}],   # may be an empty array
           "appended_lr":     [{step, lr}],
           "appended_optimizer_metrics": [{step, actual_lr, d, ...}],
           "appended_samples":[{path, step, time, xy?}],
-          "config": {...},        # 仅在变化时携带（首次推送 / config 改）
+          "config": {...},        # only included when changed (first push / config change)
         }
 
-    Throttle 规则（混合 step + 时间）：
-    - poll_interval 0.5s 探测 mtime
-    - min_publish_interval 1.0s 强制下界 — 即使训练每 100ms 一步，也不会推
-      超过 1Hz；累积的 loss 点会在下次推送里 batch 一起送
-    - 「step 没变 + 没新 sample + config 没变」时跳过推送，避免空 delta
-      （例如训练只更新了 speed 这种衍生指标）
+    Throttle rules (a mix of step + time):
+    - poll_interval 0.5s to probe mtime
+    - min_publish_interval 1.0s hard floor -- even if training does a step every 100ms, this
+      never pushes faster than 1Hz; accumulated loss points get batched into the next push
+    - skips the push when "step unchanged + no new samples + config unchanged", to avoid an
+      empty delta (e.g. training only updated a derived metric like speed)
     """
 
     def __init__(
@@ -141,7 +146,7 @@ class MonitorStatePoller:
         self._last_mtime: float = 0.0
         self._last_publish_at: float = 0.0
 
-        # 增量追踪
+        # Incremental tracking
         self._last_step: int = -1
         self._last_loss_count: int = 0
         self._last_lr_count: int = 0
@@ -168,10 +173,11 @@ class MonitorStatePoller:
             try:
                 self._check_once()
             except Exception:
-                # IO/解析异常静默重试，避免拖死 supervisor
+                # IO/parse exceptions retry silently, to avoid stalling the supervisor
                 pass
             self._stop.wait(self._poll)
-        # 退出前再读一次，捕获结束瞬间的最终 state；带 force=True 绕过 throttle
+        # Read once more before exiting, to catch the final state right at the end; force=True
+        # bypasses the throttle
         try:
             self._check_once(force=True)
         except Exception:
@@ -186,16 +192,17 @@ class MonitorStatePoller:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            # 写一半的 JSON / 临时锁住 → 下一轮再试
+            # Half-written JSON / temporarily locked -> try again next round
             return
         self._last_mtime = mtime
 
-        # ── 节流：未到最小发布间隔时退出，下一轮再检查（含新累积的数据） ──
+        # -- throttle: bail out before the min publish interval, check again next round
+        # (picking up anything accumulated meanwhile) --
         now = time.time()
         if not force and (now - self._last_publish_at) < self._min_pub:
             return
 
-        # ── 计算 delta ──
+        # -- compute the delta --
         step = int(data.get("step", 0) or 0)
         losses = data.get("losses") or []
         lr_hist = data.get("lr_history") or []
@@ -235,7 +242,7 @@ class MonitorStatePoller:
         if config_changed:
             delta["config"] = config
 
-        # 推送 + 更新游标
+        # Push + advance the cursor
         self._last_step = step
         self._last_loss_count = len(losses)
         self._last_lr_count = len(lr_hist)

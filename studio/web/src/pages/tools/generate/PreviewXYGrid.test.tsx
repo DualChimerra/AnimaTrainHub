@@ -27,8 +27,8 @@ describe('PreviewXYGrid', () => {
         yDraft={yDraft}
       />
     )
-    // 3 × 2 = 6 张
-    expect(screen.getByText(/3 × 2 = 6 张/)).toBeInTheDocument()
+    // 3 × 2 = 6 images
+    expect(screen.getByText(/3 × 2 = 6 images/)).toBeInTheDocument()
   })
 
   it('shows partial count when generation in progress', () => {
@@ -36,15 +36,15 @@ describe('PreviewXYGrid', () => {
     render(
       <PreviewXYGrid samples={samples} taskId={99} xDraft={xDraft} yDraft={yDraft} />
     )
-    expect(screen.getByText(/3 × 2 = 6 张/)).toBeInTheDocument()
-    expect(screen.getByText(/已出 2/)).toBeInTheDocument()
+    expect(screen.getByText(/3 × 2 = 6 images/)).toBeInTheDocument()
+    expect(screen.getByText(/Generated 2/)).toBeInTheDocument()
   })
 
   it('renders 1D layout (y=null) with single header row', () => {
     render(
       <PreviewXYGrid samples={[]} taskId={99} xDraft={xDraft} yDraft={null} />
     )
-    expect(screen.getByText(/3 张/)).toBeInTheDocument()
+    expect(screen.getByText(/3 images/)).toBeInTheDocument()
   })
 
   it('renders cell images at the right (yi, xi) positions', () => {
@@ -55,15 +55,15 @@ describe('PreviewXYGrid', () => {
     render(
       <PreviewXYGrid samples={samples} taskId={99} xDraft={xDraft} yDraft={yDraft} />
     )
-    // 已出 cell 显示 img；未出 cell 显示 …
+    // A generated cell shows the img; a pending cell shows …
     const imgs = screen.getAllByRole('img')
     expect(imgs.length).toBe(2)
-    // 占位灰格至少 4 个（6 总 - 2 已出）
+    // At least 4 placeholder gray cells (6 total - 2 generated)
     const placeholders = screen.getAllByText('…')
     expect(placeholders.length).toBe(4)
   })
 
-  it('calls onCellClick only with Ctrl+click (普通点击让位给 pan 拖动)', async () => {
+  it('calls onCellClick only with Ctrl+click (a plain click is reserved for pan-drag)', async () => {
     const user = userEvent.setup()
     const onCellClick = vi.fn()
     const samples = [makeSample(0, 0, 20, null), makeSample(1, 0, 25, null)]
@@ -77,10 +77,10 @@ describe('PreviewXYGrid', () => {
       />
     )
     const imgs = screen.getAllByRole('img')
-    // 普通点击 → 不触发（让位 pan）
+    // A plain click -> does not fire (reserved for pan)
     await user.click(imgs[1])
     expect(onCellClick).not.toHaveBeenCalled()
-    // Ctrl+点击 → 触发
+    // Ctrl+click -> fires
     await user.keyboard('{Control>}')
     await user.click(imgs[1])
     await user.keyboard('{/Control}')
@@ -92,7 +92,7 @@ describe('PreviewXYGrid', () => {
     render(
       <PreviewXYGrid samples={samples} taskId={99} xDraft={xDraft} yDraft={null} />
     )
-    // 默认 100%
+    // Defaults to 100%
     const zoomBtn = screen.getByRole('button', { name: '100%' })
     expect(zoomBtn).toBeInTheDocument()
   })
@@ -126,16 +126,16 @@ describe('PreviewXYGrid', () => {
     )
 
     await user.dblClick(screen.getAllByRole('img')[0])
-    expect(screen.getByText(/步数=20 .* CFG Scale=3/)).toBeInTheDocument()
+    expect(screen.getByText(/Steps=20 .* CFG Scale=3/)).toBeInTheDocument()
 
     await user.keyboard('{ArrowRight}')
-    expect(screen.getByText(/步数=25 .* CFG Scale=3/)).toBeInTheDocument()
+    expect(screen.getByText(/Steps=25 .* CFG Scale=3/)).toBeInTheDocument()
 
     await user.keyboard('{ArrowDown}')
-    expect(screen.getByText(/步数=25 .* CFG Scale=5/)).toBeInTheDocument()
+    expect(screen.getByText(/Steps=25 .* CFG Scale=5/)).toBeInTheDocument()
   })
 
-  it('uses sample.imageUrl when provided (disk 回看路径)', () => {
+  it('uses sample.imageUrl when provided (disk replay path)', () => {
     const sample: Sample = {
       ...makeSample(0, 0, 20, null),
       imageUrl: '/api/generate/disk/image/2026-06-08/xy/xy%20plot%201/cell%20x0%20y0.png',
@@ -145,15 +145,17 @@ describe('PreviewXYGrid', () => {
     )
     const img = screen.getAllByRole('img')[0] as HTMLImageElement
     expect(img.src).toContain('/api/generate/disk/image/2026-06-08/xy/')
-    expect(img.src).not.toContain('/sample/')  // 不走 generateSampleUrl 兜底
+    expect(img.src).not.toContain('/sample/')  // does not fall back to generateSampleUrl
   })
 
-  it('compositeUrl set → 导出 PNG 走 anchor download, 不调 composeXYMatrix', async () => {
-    // composeXYMatrix 需要 canvas + fetch，jsdom 都没 → 若 fallback 走它必然抛错。
-    // 这里点 export 按钮，断言能拿到 exportDownloaded 文案 = 走了 compositeUrl 直下载分支。
+  it('with compositeUrl set, Export PNG goes through anchor download, not composeXYMatrix', async () => {
+    // composeXYMatrix needs canvas + fetch, neither exists in jsdom -> if the
+    // fallback went through it, it would necessarily throw.
+    // Here we click the export button and assert we get the exportDownloaded
+    // text = it took the compositeUrl direct-download branch.
     const user = userEvent.setup()
     const samples = [makeSample(0, 0, 20, null)]
-    // 拦截 anchor click（避免真的下载窗口）
+    // Intercept the anchor click (to avoid a real download prompt)
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     render(
       <PreviewXYGrid
@@ -161,7 +163,7 @@ describe('PreviewXYGrid', () => {
         compositeUrl="/api/generate/disk/image/2026-06-08/xy/xy%20plot%201/xy%20plot.png"
       />
     )
-    const exportBtn = screen.getByRole('button', { name: /导出 PNG|Export/ })
+    const exportBtn = screen.getByRole('button', { name: /Export PNG|Export/ })
     await user.click(exportBtn)
     expect(clickSpy).toHaveBeenCalledTimes(1)
     clickSpy.mockRestore()

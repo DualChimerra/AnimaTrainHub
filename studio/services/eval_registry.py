@@ -1,52 +1,57 @@
-"""评估指标 registry —— 所有 eval 指标的单一真相。
+"""Eval metric registry -- the single source of truth for all eval metrics.
 
-给三处共用一份定义：① Settings 复选框列表（用户勾选启用哪些指标）；② eval 编排
-（`eval_auto` 只跑「启用集合」对应的 runner）；③ 前端指标说明 / 展示。
+Shared by three consumers: (1) the Settings checkbox list (which metrics the user
+enables); (2) eval orchestration (`eval_auto` only runs the runner matching the
+"enabled set"); (3) frontend metric descriptions / display.
 
-一个 **runner** = 一个 metric job（同一次推理产出一个或多个指标）：
-- `clip` runner 产出 clip_t + clip_i（共享 CLIP 编码）
-- `dino` runner 产出 dino_i
-- `ccip` runner 产出 ccip_i（角色身份）
-- `tag`  runner 产出 tag_recall（prompt 跟随，复用 WD14）
+A **runner** = one metric job (a single inference pass that produces one or more
+metrics):
+- the `clip` runner produces clip_t + clip_i (shared CLIP encoding)
+- the `dino` runner produces dino_i
+- the `ccip` runner produces ccip_i (character identity)
+- the `tag`  runner produces tag_recall (prompt following, reuses WD14)
 
-runner 级门控：只要它的任一指标被启用就跑该 runner（同 runner 的指标共享推理，
-单独关其中一个不省算力，只影响展示）。`models` 是该指标依赖的下载中心条目 key。
+Gating is at the runner level: a runner runs if any of its metrics is enabled
+(metrics on the same runner share inference, so disabling just one doesn't save
+compute -- it only affects what's displayed). `models` lists the download-center
+entry keys that metric depends on.
 """
 from __future__ import annotations
 
 from typing import Any, Iterable
 
-# 顺序即前端展示顺序。default=True 的进默认启用集合（保持现有行为）。
+# Order is the frontend display order. default=True items go into the default
+# enabled set (preserves existing behavior).
 METRICS: list[dict[str, Any]] = [
     {
         "key": "clip_t", "label": "CLIP-T", "runner": "clip",
         "models": ["clip"], "default": True,
-        "desc": "生成图与 prompt 文本的 CLIP 相似度（prompt following）",
-        "note": "CLIP 文本塔不认 booru tag，tag caption 下分低、噪声大",
+        "desc": "CLIP similarity between generated image and prompt text (prompt following)",
+        "note": "The CLIP text tower doesn't understand booru tags -- tag-style captions score low and noisy",
     },
     {
         "key": "clip_i", "label": "CLIP-I", "runner": "clip",
         "models": ["clip"], "default": True,
-        "desc": "生成图与参考图的 CLIP 图像相似度（整体语义）",
-        "note": "自然图域、偏粗；非动漫适配",
+        "desc": "CLIP image similarity between generated and reference images (overall semantics)",
+        "note": "Natural-image domain, fairly coarse; not anime-tuned",
     },
     {
         "key": "dino_i", "label": "DINO-I", "runner": "dino",
         "models": ["dino"], "default": True,
-        "desc": "生成图与参考图的 DINOv2 特征相似度（主体/结构保真）",
-        "note": "非动漫适配；small 版区分力弱",
+        "desc": "DINOv2 feature similarity between generated and reference images (subject/structure fidelity)",
+        "note": "Not anime-tuned; the small variant has weak discriminative power",
     },
     {
         "key": "ccip_i", "label": "CCIP-I", "runner": "ccip",
         "models": ["ccip"], "default": False,
-        "desc": "生成图被参考集判为同一动漫角色的比例（角色身份保真，动漫域）",
-        "note": "仅单角色的角色 LoRA；弱发色/肤色",
+        "desc": "Fraction of generated images judged as the same anime character as the reference set (character identity fidelity, anime domain)",
+        "note": "Only for single-character character LoRAs; weak on hair color/skin tone",
     },
     {
         "key": "tag_recall", "label": "Tag-Recall", "runner": "tag",
         "models": ["wd14"], "default": False,
-        "desc": "对生成图回标，prompt 里 booru tag 的召回率（动漫原生 prompt following）",
-        "note": "仅 booru-tag caption 适用",
+        "desc": "Re-tags the generated image and measures recall of the prompt's booru tags (anime-native prompt following)",
+        "note": "Only applies to booru-tag captions",
     },
 ]
 
@@ -60,7 +65,7 @@ def metric(key: str) -> dict[str, Any] | None:
 
 
 def normalize_enabled(enabled: Iterable[str] | None) -> set[str]:
-    """过滤出合法的指标 key；None / 空 → 默认集合（保持现有行为）。"""
+    """Filter down to valid metric keys; None / empty -> default set (preserves existing behavior)."""
     if not enabled:
         return set(DEFAULT_ENABLED)
     out = {k for k in enabled if k in _BY_KEY}
@@ -68,8 +73,8 @@ def normalize_enabled(enabled: Iterable[str] | None) -> set[str]:
 
 
 def enabled_runners(enabled: Iterable[str] | None) -> list[str]:
-    """启用集合 → 需要跑的 runner（按 METRICS 顺序去重）。一个 runner 只要它的
-    任一指标被启用就在列。"""
+    """Enabled set -> runners that need to run (deduped, in METRICS order). A
+    runner is included as soon as any one of its metrics is enabled."""
     active = normalize_enabled(enabled)
     out: list[str] = []
     for m in METRICS:
@@ -83,7 +88,8 @@ def runner_metrics(runner: str) -> list[str]:
 
 
 def public_catalog() -> list[dict[str, Any]]:
-    """给前端 Settings 复选框 + 指标说明用（不含内部 runner 字段以外的实现细节）。"""
+    """For the frontend Settings checkboxes + metric descriptions (no internal
+    implementation details beyond the runner field)."""
     return [
         {
             "key": m["key"], "label": m["label"], "runner": m["runner"],

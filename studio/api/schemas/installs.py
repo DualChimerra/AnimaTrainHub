@@ -1,6 +1,6 @@
-"""安装 / runtime 类 endpoint 请求 BaseModel（PR-6 commit 3 从 server.py 抽出）。
+"""Install / runtime endpoint request BaseModels (extracted from server.py in PR-6 commit 3).
 
-涵盖 wd14 / torch / flash-attention / llm-tagger 域。xformers 无请求 body。
+Covers the wd14 / torch / flash-attention / llm-tagger domains. xformers has no request body.
 """
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ class TorchReinstallRequest(BaseModel):
 
 
 class FlashAttnInstallRequest(BaseModel):
-    url: Optional[str] = None  # None = 自动从 GitHub Releases 选最优
+    url: Optional[str] = None  # None = auto-pick the best match from GitHub Releases
 
 
 class LLMModelsRefreshRequest(BaseModel):
-    # preset_id 指定要更新的 preset；不传则用当前 current_preset
+    # preset_id specifies which preset to update; if omitted, uses the current current_preset
     preset_id: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None

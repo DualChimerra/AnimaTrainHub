@@ -1,12 +1,15 @@
-// SettingsDrawer.tsx —— Settings 抽屉的全局打开/关闭 store。
+// SettingsDrawer.tsx -- the global open/close store for the Settings drawer.
 //
-// 路由化的旧设置页（/tools/settings）已删除，现在所有"打开设置"动作都走
-// useSettingsDrawer().open({ section? })。状态在内存，刷新页面默认关闭，
-// 跟用户对"抽屉"的心智模型一致。
+// The old routed settings page (/tools/settings) has been removed; every
+// "open settings" action now goes through useSettingsDrawer().open({
+// section? }). State lives in memory and defaults to closed on page
+// refresh, matching the user's mental model of a "drawer".
 //
-// dirty guard：SettingsPage 通过 registerDirtyGuard 注册一个查询函数，
-// drawer 关闭前调用它决定是否弹 confirm。这样守护逻辑住在表单侧（它本来就知道
-// 自己 dirty 不 dirty），drawer 侧只负责询问用户。
+// dirty guard: SettingsPage registers a query function via
+// registerDirtyGuard; the drawer calls it before closing to decide whether
+// to pop a confirm. This keeps the guard logic on the form's side (which
+// already knows whether it's dirty), while the drawer's job is just to ask
+// the user.
 import {
   createContext,
   useCallback,
@@ -20,18 +23,19 @@ import { useTranslation } from 'react-i18next'
 import { useDialog } from '../components/Dialog'
 
 interface OpenOptions {
-  /** 跳转到指定 section（对应 SettingsPage 内的 DOM id）；不传则维持上次 tab。 */
+  /** Jumps to the given section (matches a DOM id inside SettingsPage); keeps the last tab if omitted. */
   section?: string
 }
 
 interface SettingsDrawerApi {
   isOpen: boolean
-  /** 上一次 open 调用带的 section；SettingsPage 内 effect 监听它做 scrollIntoView。
-   *  每次 open 哪怕同一 section 也会换引用，便于触发 effect。 */
+  /** The section passed to the last open() call; an effect inside
+   *  SettingsPage watches it to scrollIntoView. Every open() gets a new
+   *  reference even for the same section, so the effect always fires. */
   sectionRequest: { section: string; nonce: number } | null
   open: (opts?: OpenOptions) => void
   close: () => void
-  /** SettingsPage mount 时注册「当前 draft 是否 dirty」的查询函数；unmount 时传 null。 */
+  /** SettingsPage registers a query function for "is the current draft dirty" on mount; passes null on unmount. */
   registerDirtyGuard: (fn: (() => boolean) | null) => void
 }
 
@@ -46,9 +50,10 @@ export function SettingsDrawerProvider({ children }: { children: ReactNode }) {
   const nonceRef = useRef(0)
 
   const open = useCallback((opts?: OpenOptions) => {
-    // 每次 open 都重置 sectionRequest：没传 section 就显式清空，避免上次 open 留下
-    // 的 section 在下一次"无 section 打开 → SettingsPage 重新 mount"时被旧 effect
-    // 再次消费，导致预期外的滚动。
+    // Reset sectionRequest on every open: explicitly clear it when no section
+    // is passed, so a section left over from a previous open doesn't get
+    // consumed again by a stale effect the next time it opens with "no
+    // section -> SettingsPage remounts", causing an unexpected scroll.
     if (opts?.section) {
       nonceRef.current += 1
       setSectionRequest({ section: opts.section, nonce: nonceRef.current })
@@ -74,7 +79,7 @@ export function SettingsDrawerProvider({ children }: { children: ReactNode }) {
     dirtyGuardRef.current = fn
   }, [])
 
-  // ESC 关：放在 Provider 里而非 Drawer 组件，避免 lazy 加载期间快捷键失效。
+  // Close on ESC: lives in the Provider rather than the Drawer component, so the shortcut still works during lazy loading.
   useEffect(() => {
     if (!isOpen) return
     const onKey = (e: KeyboardEvent) => {

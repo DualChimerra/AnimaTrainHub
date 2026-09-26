@@ -1,21 +1,23 @@
-"""统一日志体系入口（ADR-0009）。
+"""Entry point for the unified logging system (ADR-0009).
 
-C2：骨架（make_studio_log_handler）
-C3：完整 setup_logging + JsonLineFormatter + HumanConsoleFormatter + silence list
-    + uvicorn handler 接管 + utf8 reconfigure（本文件）
-C5：ContextVar trace_id + Filter（待加）
-C6：跨进程 env / db.tasks.request_trace_id（待加）
+C2: skeleton (make_studio_log_handler)
+C3: full setup_logging + JsonLineFormatter + HumanConsoleFormatter + silence list
+    + uvicorn handler takeover + utf8 reconfigure (this file)
+C5: ContextVar trace_id + Filter (to be added)
+C6: cross-process env / db.tasks.request_trace_id (to be added)
 
-使用规则（ADR-0009 §未来开发指南简版）：
-    每个进程入口（webui / cli / worker）开头调一次 `setup_logging(process=...)`。
-    业务代码模块顶 `logger = logging.getLogger(__name__)`，调 `.info/.warning/.exception`。
-    不要在 import time 调 setup_logging（破 import smoke test）。
+Usage rules (ADR-0009 SS Future Dev Guide, short version):
+    Every process entry point (webui / cli / worker) calls `setup_logging(process=...)` once
+    at the top.
+    Business code modules do `logger = logging.getLogger(__name__)` at module scope and call
+    `.info/.warning/.exception`.
+    Don't call setup_logging at import time (breaks the import smoke test).
 
-`process` 标识规范：
+`process` identifier convention:
     "webui"                 webui server
     "cli:<subcmd>"          CLI run / dev / build / test
-    "worker:<kind>/<id>"    worker subprocess（kind=download/tag/preprocess/reg_build）
-    "client"                前端上报（C 系列 PR-3 才用到）
+    "worker:<kind>/<id>"    worker subprocess (kind=download/tag/preprocess/reg_build)
+    "client"                frontend reporting (only used starting with the C-series PR-3)
 """
 from __future__ import annotations
 
@@ -42,13 +44,13 @@ STUDIO_LOG_NAME = "studio.log"
 STUDIO_LOG_MAX_BYTES = 50 * 1024 * 1024
 STUDIO_LOG_BACKUP_COUNT = 5
 
-# trace_id 跨进程 / 跨 surface 名约定 (ADR-0009 §3.1)
-TRACE_HEADER = "X-Trace-Id"           # HTTP 双向 header
-TRACE_ENV = "ANIMA_TRACE_ID"          # 子进程 env (C6 supervisor 注入)
-PROCESS_ENV = "ANIMA_PROCESS_NAME"    # 子进程预设 process 名
+# Cross-process / cross-surface naming convention for trace_id (ADR-0009 SS3.1)
+TRACE_HEADER = "X-Trace-Id"           # HTTP request/response header
+TRACE_ENV = "ANIMA_TRACE_ID"          # child process env (injected by the C6 supervisor)
+PROCESS_ENV = "ANIMA_PROCESS_NAME"    # preset process name for the child process
 
-# ContextVar — 同进程跨 async/thread 自动传播 (C5)
-# C6 / C7 后会用 job_id / task_id
+# ContextVar -- auto-propagates across async/thread within the same process (C5)
+# job_id / task_id will be used after C6 / C7
 _trace_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "studio_trace_id", default=None
 )
@@ -59,9 +61,9 @@ _task_id_var: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
     "studio_task_id", default=None
 )
 
-# 第三方库 logger 静音 list — root level=INFO 时这些库会大量出 INFO 噪音。
-# silence list 必须显式，避免漏一条让 stderr 爆 10×（B audit N.1 / A round2 §5.2）。
-# 在 setup_logging 末尾应用。
+# Silence list for third-party library loggers -- these libraries spew heavy INFO noise when
+# root level=INFO. The silence list must be explicit, so missing an entry doesn't 10x stderr
+# (B audit N.1 / A round2 SS5.2). Applied at the end of setup_logging.
 _NOISY_LOGGERS = (
     "asyncio",
     "urllib3",
@@ -74,22 +76,23 @@ _NOISY_LOGGERS = (
     "filelock",
 )
 
-# ── trace_id 公开 API ────────────────────────────────────────────────────
+# ── trace_id public API ────────────────────────────────────────────────────
 
 
 def new_trace_id() -> str:
-    """生成 24 字符 hex trace_id（uuid4 hex[:24]）。
+    """Generates a 24-char hex trace_id (uuid4 hex[:24]).
 
-    24 字符：(a) 用户截图末 8 字符易复制；(b) 跟 supervisor 后台 spawn 的
-    `bg-{new_trace_id()}` (28 字符) 区分清晰；(c) 比 ULID 26 简单不引依赖。
+    24 characters: (a) the last 8 characters are easy to copy from a user's screenshot;
+    (b) clearly distinguishable from the supervisor's background-spawn `bg-{new_trace_id()}`
+    (28 characters); (c) simpler than a 26-char ULID, no extra dependency needed.
     """
     return uuid.uuid4().hex[:24]
 
 
 def bind_trace_id(trace_id: str) -> contextvars.Token:
-    """设当前 ContextVar trace_id，返 token 用于 reset。
+    """Sets the current ContextVar trace_id, returns a token for reset.
 
-    用法（middleware / worker bootstrap）：
+    Usage (middleware / worker bootstrap):
         token = bind_trace_id(tid)
         try:
             ...do work...
@@ -104,7 +107,7 @@ def reset_trace_id(token: contextvars.Token) -> None:
 
 
 def get_trace_id() -> Optional[str]:
-    """当前 ContextVar trace_id；未 bind 返 None。"""
+    """The current ContextVar trace_id; returns None if never bound."""
     return _trace_id_var.get()
 
 
@@ -128,10 +131,12 @@ def get_task_id() -> Optional[int]:
 
 
 class ContextFilter(logging.Filter):
-    """读 ContextVar 注入到 LogRecord，让 JsonLineFormatter 直接拿。
+    """Reads ContextVars and injects them into the LogRecord, so JsonLineFormatter can pick
+    them up directly.
 
-    用 Filter 不用 LogRecord factory：factory 改全局，filter 装到 root 就行，
-    回滚干净（C5 PR 撤掉 filter 即恢复，不动 LogRecord 类）。
+    Uses a Filter rather than a LogRecord factory: a factory would be a global change, whereas
+    a filter just gets attached to root -- a clean rollback (removing the filter in a C5 PR
+    restores the old behavior without touching the LogRecord class).
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -148,8 +153,9 @@ class ContextFilter(logging.Filter):
         return True
 
 
-# 模块级 sentinel — 同一 process 名重复调 setup_logging 不重复装 handler。
-# supervisor 重启 / 测试 reload / worker 进程入口被双调时受益。
+# Module-level sentinel -- calling setup_logging again with the same process name doesn't
+# re-attach handlers. Benefits supervisor restarts / test reloads / a worker entry point being
+# called twice.
 _CONFIGURED_PROCESSES: set[str] = set()
 
 
@@ -157,10 +163,10 @@ _CONFIGURED_PROCESSES: set[str] = set()
 
 
 class JsonLineFormatter(logging.Formatter):
-    """JSON line 输出，10 固定字段（ADR-0009 §2.3）。
+    """JSON line output, 10 fixed fields (ADR-0009 SS2.3).
 
-    顶层字段：ts / level / process / pid / trace_id / logger / msg / job_id / task_id / exc。
-    可选嵌套：extra（logger.x(..., extra={...}) 传入的 user fields）。
+    Top-level fields: ts / level / process / pid / trace_id / logger / msg / job_id / task_id / exc.
+    Optional nested field: extra (user fields passed via logger.x(..., extra={...})).
     """
 
     def __init__(self, process: str) -> None:
@@ -168,7 +174,8 @@ class JsonLineFormatter(logging.Formatter):
         self._process = process
 
     def format(self, record: logging.LogRecord) -> str:
-        # stdlib formatTime 用 time.strftime 不支持 %f；用 datetime 自己拼 ms
+        # stdlib formatTime uses time.strftime which doesn't support %f; build the ms part
+        # ourselves via datetime
         ts = (
             _dt.datetime.fromtimestamp(record.created, tz=_dt.timezone.utc)
             .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -178,16 +185,16 @@ class JsonLineFormatter(logging.Formatter):
             "level": record.levelname,
             "process": self._process,
             "pid": record.process,
-            "trace_id": getattr(record, "trace_id", None),  # C5 Filter 会注入
+            "trace_id": getattr(record, "trace_id", None),  # injected by the C5 Filter
             "logger": record.name,
             "msg": record.getMessage(),
         }
-        # 可选 contextvar 字段
+        # optional contextvar fields
         for k in ("job_id", "task_id"):
             v = getattr(record, k, None)
             if v is not None:
                 out[k] = v
-        # exc_info → 结构化
+        # exc_info -> structured
         if record.exc_info:
             etype, evalue, etb = record.exc_info
             out["exc"] = {
@@ -195,8 +202,8 @@ class JsonLineFormatter(logging.Formatter):
                 "message": str(evalue),
                 "traceback": "".join(_traceback.format_exception(etype, evalue, etb)),
             }
-        # extra（用户 logger.x(..., extra={"k": "v"}) 进 record.__dict__）
-        # 区分原生字段 + 我们注入的 + 用户 extra
+        # extra (a user's logger.x(..., extra={"k": "v"}) lands in record.__dict__)
+        # distinguishes native fields + the ones we inject + user extra
         _builtin = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {
             "message", "asctime", "trace_id", "job_id", "task_id",
         }
@@ -207,7 +214,7 @@ class JsonLineFormatter(logging.Formatter):
 
 
 class HumanConsoleFormatter(logging.Formatter):
-    """人读 console format，给 CLI / dev terminal。
+    """Human-readable console format, for CLI / dev terminal use.
 
     `2026-05-28 14:32:18.453 INFO  studio.api.routers.queue: queued task=42`
     """
@@ -223,11 +230,13 @@ class HumanConsoleFormatter(logging.Formatter):
 
 
 def reconfigure_console_utf8() -> None:
-    """Windows 控制台默认 cp932/cp936，写中文 / emoji 会 UnicodeEncodeError。
-    强制 stdout/stderr 用 UTF-8 + replace 模式，让 logger 永远不抛。
+    """Windows consoles default to cp932/cp936, so writing non-ASCII text / emoji raises
+    UnicodeEncodeError. Forces stdout/stderr into UTF-8 + replace mode so the logger never
+    raises.
 
-    setup_logging 内首步调用，覆盖 webui / cli / worker 所有进程入口；
-    workers/_base.py:reconfigure_console_utf8 (B audit 4.6 — 4 worker 缺一半) 由此兜底。
+    Called as the first step inside setup_logging, covering all process entry points (webui /
+    cli / worker); workers/_base.py:reconfigure_console_utf8 (B audit 4.6 -- half the workers
+    were missing this) is covered by this fallback.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -242,12 +251,13 @@ def make_studio_log_handler(
     process: str = "webui",
     formatter: logging.Formatter | None = None,
 ) -> logging.Handler:
-    """创建写 studio.log 的 rotating handler（不装到 root；caller 决定）。
+    """Creates a rotating handler that writes to studio.log (doesn't attach it to root;
+    that's the caller's decision).
 
     Args:
-        log_dir: 落盘目录；默认 paths.LOGS_DIR
-        process: process 标识写进 JsonLineFormatter；默认 "webui"
-        formatter: 自定义 formatter；默认 JsonLineFormatter(process)
+        log_dir: directory to write to; defaults to paths.LOGS_DIR
+        process: process identifier written into JsonLineFormatter; defaults to "webui"
+        formatter: custom formatter; defaults to JsonLineFormatter(process)
     """
     target = log_dir or LOGS_DIR
     target.mkdir(parents=True, exist_ok=True)

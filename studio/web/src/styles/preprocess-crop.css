@@ -1,4 +1,4 @@
-/* Preprocess · 裁剪 page — interactive canvas, rect handles, filmstrip overlays.
+/* Preprocess · Crop page — interactive canvas, rect handles, filmstrip overlays.
  * Tailwind utilities cover most layout; this file holds the positioned /
  * absolutely-placed bits that don't compose well as utilities.
  */
@@ -107,7 +107,7 @@
   height: 1px;
 }
 
-/* 8 handles */
+/* 8 handles (unchanged, already English) */
 .handle {
   position: absolute;
   width: 10px;

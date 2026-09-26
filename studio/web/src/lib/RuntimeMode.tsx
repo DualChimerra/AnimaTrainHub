@@ -1,16 +1,20 @@
-// RuntimeMode.tsx —— Colab / Local 运行模式的全局数据层（本 fork）。
+// RuntimeMode.tsx -- global data layer for the Colab / Local runtime mode (this fork).
 //
-// 后端 `/api/runtime` 是唯一真相（见 studio/infrastructure/runtime_mode.py）。
-// 这层做三件事：
-//   1. 首屏拉一次状态，`mode === ''`（用户没选过）且未被 env 钉死时把 `needsPick`
-//      打开 —— `<RuntimeModeGate>` 据此弹选择框；
-//   2. 暴露 `setMode` 给选择框和设置区共用；
-//   3. 把 `effective` 模式广播给需要按模式改文案 / 行为的组件（Topbar 徽标、
-//      设置区的本地路径提示等）。
+// The backend's `/api/runtime` is the single source of truth (see
+// studio/infrastructure/runtime_mode.py). This layer does three things:
+//   1. Fetches the state once on first paint, and turns on `needsPick` when
+//      `mode === ''` (the user never chose) and it isn't pinned by env --
+//      `<RuntimeModeGate>` pops the picker based on that;
+//   2. Exposes `setMode`, shared by the picker and the settings section;
+//   3. Broadcasts the `effective` mode to components that need to change
+//      copy / behavior by mode (the Topbar badge, the local-path hint in
+//      settings, etc.).
 //
-// 拉取失败**不**阻断应用：后端刚起来时 SPA 可能先于 router 就绪，模式只影响
-// 提示与默认值，硬卡首屏得不偿失。失败时 `info` 保持 null、`needsPick` 为
-// false，用户照常用，下次刷新再问。
+// A fetch failure does **not** block the app: right after the backend comes
+// up, the SPA may be ready before the router is, and the mode only affects
+// hints and defaults -- hard-blocking first paint over it isn't worth it. On
+// failure, `info` stays null and `needsPick` stays false; the user proceeds
+// normally and gets asked again on the next refresh.
 import {
   createContext,
   useCallback,
@@ -25,13 +29,13 @@ import { api, type RuntimeInfo, type RuntimeMode } from '../api/client'
 
 interface RuntimeModeValue {
   info: RuntimeInfo | null
-  /** 生效模式；还没拿到状态时按 'local' 兜底（本地是绝大多数场景）。 */
+  /** The effective mode; falls back to 'local' before state is fetched (local is the overwhelming majority case). */
   mode: RuntimeMode
-  /** true = 需要弹选择框（用户从没选过，且没被 ALS_RUNTIME_MODE 钉死）。 */
+  /** true = needs to pop the picker (the user has never chosen, and it isn't pinned by ALS_RUNTIME_MODE). */
   needsPick: boolean
   loading: boolean
   error: string | null
-  /** 持久化选择；成功后 needsPick 落下。抛错交给调用方展示。 */
+  /** Persists the choice; needsPick drops once it succeeds. Throws are left for the caller to display. */
   setMode: (mode: RuntimeMode) => Promise<RuntimeInfo>
   reload: () => Promise<void>
 }
@@ -67,7 +71,7 @@ export function RuntimeModeProvider({ children }: { children: ReactNode }) {
   const value = useMemo<RuntimeModeValue>(() => ({
     info,
     mode: info?.effective ?? 'local',
-    // locked（env 注入）时永远不问 —— 环境已经替用户答过了。
+    // Never asks when locked (injected via env) -- the environment already answered for the user.
     needsPick: !!info && !info.locked && info.mode === '',
     loading,
     error,
@@ -84,13 +88,16 @@ export function useRuntimeMode(): RuntimeModeValue {
   return ctx
 }
 
-/** 同上，但没有 Provider 时返回 null 而不是抛错。
+/** Same as above, but returns null instead of throwing when there's no Provider.
  *
- *  给「可能在 Provider 之外被单独渲染」的挂件用 —— Topbar 的模式徽标、Settings
- *  里的模式区都属此类：它们在真实应用里必然在 Provider 内（main.tsx 挂在根
- *  上），但组件测试常只 render 单页/单组件。让一个装饰性徽标把整页 render 打挂
- *  是不划算的取舍；这些调用点在 `info` 为 null 时本来就要走"还没拿到状态"的
- *  分支，多一个 null 来源不增加复杂度。 */
+ *  For widgets that might get rendered standalone, outside the Provider --
+ *  the Topbar's mode badge and the settings mode section both fall into
+ *  this category: in the real app they're always inside the Provider
+ *  (main.tsx mounts it at the root), but component tests often render just
+ *  a single page/component. Letting a decorative badge crash the whole
+ *  page's render is a bad trade-off; these call sites already have to
+ *  handle a "state not fetched yet" branch when `info` is null, so one more
+ *  source of null adds no extra complexity. */
 export function useRuntimeModeOptional(): RuntimeModeValue | null {
   return useContext(Ctx)
 }

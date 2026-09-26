@@ -2,11 +2,13 @@ import { useEffect, useState, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 import { schemaGroupLabel } from '../lib/schema'
 
-/** SchemaForm 各分区的右侧锚点导航。
+/** Right-hand anchor nav for SchemaForm's sections.
  *
- * active 判定走 scroll 监听：找滚动容器视口顶端下方 50px 处之上、DOM 顺序最后
- * 一个 section 作为 active。比 IntersectionObserver + rootMargin "激活带" 稳，
- * 不会出现多个 section 同时在带内时 active 来回跳。 */
+ * The active section is determined by a scroll listener: it finds the last
+ * (in DOM order) section that is above the point 50px below the scroll
+ * container's viewport top. This is steadier than an IntersectionObserver +
+ * rootMargin "active band", which flickers between sections when more than
+ * one sits inside the band at once. */
 export default function SchemaSectionIndex({
   groups,
   scrollContainer,
@@ -27,9 +29,11 @@ export default function SchemaSectionIndex({
 
     const compute = () => {
       const rootTop = root.getBoundingClientRect().top
-      // 容器顶端往下 50px 当判定线 —— 这条线上方的最后一个 section 就是 active。
-      // 50 是经验值：太小（如 0）切换太晚，section 头已经露出来才 active；太大
-      // section 还远着就 active 上了。
+      // Use 50px below the container top as the decision line -- the last
+      // section above that line is active. 50 is an empirical value: too
+      // small (e.g. 0) switches too late, only going active once the section
+      // header has already scrolled into view; too large activates a section
+      // while it's still far off.
       const probe = rootTop + 50
       let next = groups[0].key
       for (const g of groups) {
@@ -46,7 +50,8 @@ export default function SchemaSectionIndex({
 
     compute()
     root.addEventListener('scroll', compute, { passive: true })
-    // 折叠 / 展开 section 会改变高度但不触发 scroll，靠 ResizeObserver 兜底。
+    // Collapsing / expanding a section changes its height without firing a
+    // scroll event, so ResizeObserver is the fallback that catches it.
     let ro: ResizeObserver | null = null
     if (typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver(compute)

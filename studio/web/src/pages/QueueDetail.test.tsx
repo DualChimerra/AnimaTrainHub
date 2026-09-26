@@ -1,8 +1,9 @@
-/** QueueDetail page 组件级 regression test。
+/** QueueDetail page component-level regression tests.
  *
- *  目前只覆盖 SnapshotConfigTab 的 refetch trap：父组件每 2s 浅 clone task
- *  做 elapsed time tick，旧实现 [task] 作 deps 会让 snapshot config 也跟着
- *  2s 重拉 —— 浏览器卡顿、loading flash。 */
+ *  Currently only covers the SnapshotConfigTab refetch trap: the parent
+ *  component shallow-clones task every 2s for the elapsed-time tick; the old
+ *  implementation used [task] as a dep, which made the snapshot config
+ *  refetch along with it every 2s -- browser stutter, loading flash. */
 import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -73,13 +74,14 @@ function setup(task: Task | null) {
 }
 
 describe('SnapshotConfigTab', () => {
-  it('父组件 2s 浅 clone task 不会触发重拉 — snapshot 是不可变的', async () => {
+  it('a 2s shallow clone of task by the parent does not trigger a refetch -- the snapshot is immutable', async () => {
     const task = makeTask()
     const view = setup(task)
 
     await waitFor(() => expect(snapshotCallCount()).toBe(1))
 
-    // 模拟父组件的 2s tick：shallow clone 出新引用，id / started_at 不变
+    // Simulate the parent's 2s tick: a shallow clone produces a new reference,
+    // id / started_at stay the same
     for (let i = 0; i < 5; i++) {
       view.rerender(
         <MemoryRouter>
@@ -90,12 +92,12 @@ describe('SnapshotConfigTab', () => {
       )
     }
 
-    // 等一下让任何额外 useEffect 走完
+    // Wait a bit for any extra useEffect to settle
     await new Promise((r) => setTimeout(r, 20))
     expect(snapshotCallCount()).toBe(1)
   })
 
-  it('pending → running 转换（started_at null→number）触发一次重拉', async () => {
+  it('a pending -> running transition (started_at null->number) triggers one refetch', async () => {
     const view = setup(makeTask({ status: 'pending', started_at: null }))
     await waitFor(() => expect(snapshotCallCount()).toBe(1))
 
@@ -111,14 +113,18 @@ describe('SnapshotConfigTab', () => {
   })
 })
 
-// ── 暂停按钮的 SSE 刷新（QueueDetailPage header）─────────────────────────────
+// ── SSE refresh of the pause button (QueueDetailPage header) ────────────────
 //
-// regression：恢复 / 启动后 is_pausable 由 train_loop_started + auto_epoch_backup_written
-// 翻 true，但 header 共享的 task 之前只在 task_state_changed 时 reload，漏听这两个
-// 事件 → 暂停按钮一直不出现，必须切到 /queue 再回来（整页重挂）才有。
+// regression: after resume/start, is_pausable flips to true via
+// train_loop_started + auto_epoch_backup_written, but the header's shared task
+// used to reload only on task_state_changed, missing these two events -> the
+// pause button never appeared until navigating to /queue and back (full page
+// remount).
 //
-// jsdom 默认没有 EventSource（useEventStream 内部 typeof 守卫会短路），这里塞个
-// fake 让 hook 真订阅，再手动驱动一条事件验证组件会重新 getTask 并显示按钮。
+// jsdom has no EventSource by default (useEventStream's internal typeof guard
+// short-circuits), so we install a fake one to make the hook actually
+// subscribe, then manually drive an event to verify the component re-fetches
+// getTask and shows the button.
 class FakeEventSource {
   static instances: FakeEventSource[] = []
   static readonly OPEN = 1
@@ -160,15 +166,15 @@ function getTaskCalls(): number {
   return fetchMock.mock.calls.filter(([u]) => u === QUEUE_ITEM_URL).length
 }
 
-describe('QueueDetailPage 暂停按钮 SSE 刷新', () => {
+describe('QueueDetailPage pause button SSE refresh', () => {
   beforeEach(() => {
     FakeEventSource.instances = []
     vi.stubGlobal('EventSource', FakeEventSource)
   })
 
-  it('auto_epoch_backup_written 事件触发重拉 → 暂停按钮出现', async () => {
-    // getTask：首拉 is_pausable=false（train loop / 首个 epoch backup 未就绪），
-    // 之后拉 is_pausable=true（首个 epoch backup 已落盘）。
+  it('an auto_epoch_backup_written event triggers a refetch -> pause button appears', async () => {
+    // getTask: first fetch has is_pausable=false (train loop / first epoch
+    // backup not ready yet), then is_pausable=true (first epoch backup written).
     let pausable = false
     fetchMock.mockImplementation((url: string) => {
       if (url === QUEUE_ITEM_URL) {
@@ -184,20 +190,21 @@ describe('QueueDetailPage 暂停按钮 SSE 刷新', () => {
 
     renderDetailPage()
 
-    // 初始：running header 已渲染（标题带任务名），但 is_pausable=false → 暂停按钮不在
+    // Initially: the running header has rendered (title includes the task
+    // name), but is_pausable=false -> pause button absent
     await waitFor(() => expect(screen.getByText(/^#119 · /)).toBeInTheDocument())
     expect(screen.queryByTestId('detail-pause-btn')).not.toBeInTheDocument()
 
-    // 后端首个 epoch backup 落盘 → is_pausable 升级；推一条 SSE 事件
+    // Backend writes the first epoch backup -> is_pausable flips; push an SSE event
     pausable = true
     await waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThan(0))
     FakeEventSource.instances[0].emit({ type: 'auto_epoch_backup_written', task_id: 119 })
 
-    // 重拉后暂停按钮出现（不依赖切页重挂）
+    // After the refetch, the pause button appears (no page remount needed)
     await waitFor(() => expect(screen.getByTestId('detail-pause-btn')).toBeInTheDocument())
   })
 
-  it('其它 task 的事件不会触发重拉', async () => {
+  it('an event for a different task does not trigger a refetch', async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === QUEUE_ITEM_URL) {
         return Promise.resolve(queueItemResponse(makeTask({
@@ -215,7 +222,7 @@ describe('QueueDetailPage 暂停按钮 SSE 刷新', () => {
     const before = getTaskCalls()
 
     await waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThan(0))
-    // 别的 task（task_id=999）的 backup 事件 — 不应触发本页重拉
+    // A backup event for a different task (task_id=999) -- should not trigger a refetch on this page
     FakeEventSource.instances[0].emit({ type: 'auto_epoch_backup_written', task_id: 999 })
     await new Promise((r) => setTimeout(r, 150))
 
@@ -223,9 +230,9 @@ describe('QueueDetailPage 暂停按钮 SSE 刷新', () => {
   })
 })
 
-// ── P-H 类型差异化 tab ───────────────────────────────────────────────────────
-describe('QueueDetailPage 类型差异化 tab（P-H）', () => {
-  it('generate 任务只留 overview+log，隐藏 monitor/eval/snapshot，带查看出图结果深链', async () => {
+// ── P-H task-type-specific tabs ──────────────────────────────────────────────
+describe('QueueDetailPage task-type-specific tabs (P-H)', () => {
+  it('a generate task only keeps overview+log, hides monitor/eval/snapshot, and deep-links to the generate result', async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === QUEUE_ITEM_URL) {
         return Promise.resolve(queueItemResponse(makeTask({
@@ -240,14 +247,15 @@ describe('QueueDetailPage 类型差异化 tab（P-H）', () => {
 
     renderDetailPage()
 
-    // task 加载后深链按钮出现（证明是 generate 且已 hydrate）
+    // The deep-link button appears once the task loads (proving it's a
+    // generate task and has hydrated)
     await waitFor(() => expect(screen.getByTestId('detail-view-generate')).toBeInTheDocument())
-    // 训练专用 tab 隐藏
-    expect(screen.queryByText('监控')).not.toBeInTheDocument()
-    expect(screen.queryByText('指标')).not.toBeInTheDocument()
-    expect(screen.queryByText('关联配置')).not.toBeInTheDocument()
-    expect(screen.queryByText('输出')).not.toBeInTheDocument()
-    // overview tab 仍在
-    expect(screen.getByText('详情')).toBeInTheDocument()
+    // Train-only tabs are hidden
+    expect(screen.queryByText('Monitor')).not.toBeInTheDocument()
+    expect(screen.queryByText('Metrics')).not.toBeInTheDocument()
+    expect(screen.queryByText('Snapshot config')).not.toBeInTheDocument()
+    expect(screen.queryByText('Outputs')).not.toBeInTheDocument()
+    // The overview tab is still there
+    expect(screen.getByText('Overview')).toBeInTheDocument()
   })
 })

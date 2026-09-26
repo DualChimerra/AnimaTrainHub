@@ -8,13 +8,13 @@ import Popover from './ds/Popover'
 interface Props {
   pid: number
   vid: number
-  /** 待保存数：0 = 无 dirty。 */
+  /** Pending save count: 0 = nothing dirty. */
   dirtyCount: number
-  /** 触发保存：父组件提供 commit 实现（已经计算 diff）。 */
+  /** Triggers save: the parent provides the commit implementation (diff already computed). */
   onSave: () => Promise<void>
   /** Drop the local edits and go back to what is on disk. */
   onDiscard: () => void
-  /** 触发还原后，父组件需要重新拉缓存。 */
+  /** After triggering a restore, the parent needs to refetch its cache. */
   onAfterRestore: () => Promise<void>
 }
 

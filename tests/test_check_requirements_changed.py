@@ -1,6 +1,6 @@
-"""PR-S1b — tools/check_requirements_changed.py bootstrap helper。
+"""PR-S1b -- tools/check_requirements_changed.py bootstrap helper.
 
-不读真 requirements.txt，用 tmp_path 隔离测试。
+Doesn't read the real requirements.txt; tests are isolated using tmp_path.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def helper_module():
 
 
 def _make_req(path: Path, content: str) -> None:
-    """写 requirements.txt，强制用二进制避免 Windows 平台 \\n 被改成 \\r\\n。"""
+    """Write requirements.txt, forcing binary mode to avoid Windows turning \\n into \\r\\n."""
     path.write_bytes(content.encode("utf-8"))
 
 
@@ -48,7 +48,7 @@ def test_compute_hash_changes_with_content(
     req = tmp_path / "requirements.txt"
     _make_req(req, "torch>=2.0.0\n")
     h1 = helper_module.compute_req_hash(req)
-    _make_req(req, "torch>=2.0.0\nmodelscope\n")  # 加新依赖
+    _make_req(req, "torch>=2.0.0\nmodelscope\n")  # add a new dependency
     h2 = helper_module.compute_req_hash(req)
     assert h1 != h2
 

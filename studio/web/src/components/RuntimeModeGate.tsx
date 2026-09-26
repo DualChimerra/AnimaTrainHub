@@ -1,14 +1,22 @@
-// RuntimeModeGate.tsx —— 首次进应用时的「Colab 还是 Local」选择框（本 fork）。
+// RuntimeModeGate.tsx -- the one-time "Colab or Local" picker shown on first
+// launch (this fork).
 //
-// 为什么是一次性阻断式的：两种模式下**合理的默认值互相冲突**（绑定地址、要不
-// 要开浏览器、studio_data 放哪、要不要提醒同步到 Drive）。以前靠 CLI flag 各自
-// 记，用户装完不知道要传什么；现在进应用先答一次，落盘后不再问。
+// Why it's a one-shot blocking gate: the sane defaults for the two modes
+// **actively conflict** (bind address, whether to open a browser, where to
+// put studio_data, whether to nag about syncing to Drive). It used to be a
+// CLI flag people had to remember; users had no idea what to pass right
+// after install. Now the app asks once on launch, persists the answer, and
+// never asks again.
 //
-// 探测结果只做预选，不代替用户按 —— 自建 JupyterHub / docker 里跑本地训练这类
-// 场景探测必然会猜错，硬替用户选反而更难纠正。卡片上把探测依据摆出来。
+// The detection result is only a preselection, never a substitute for the
+// user's own click -- setups like a self-hosted JupyterHub or local training
+// inside docker will inevitably be misdetected, and silently picking for the
+// user makes it harder to correct. The card surfaces what the detection was
+// based on.
 //
-// 被 `ALS_RUNTIME_MODE` 钉死时本组件不渲染（`needsPick` 为 false），Colab
-// notebook 的启动 cell 设了它，云端用户开箱即用不会被拦。
+// This component renders nothing (`needsPick` is false) when pinned by
+// `ALS_RUNTIME_MODE`; the Colab notebook's startup cell sets it, so cloud
+// users aren't blocked and get a working app out of the box.
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -31,7 +39,8 @@ export default function RuntimeModeGate() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // 探测结果做预选。info 是异步到的，所以在 effect 里补而不是 useState 初值。
+  // Preselect from the detection result. info arrives asynchronously, so this
+  // is filled in from an effect rather than as the useState initial value.
   useEffect(() => {
     if (info && choice === null) setChoice(info.detected)
   }, [info, choice])
@@ -53,7 +62,8 @@ export default function RuntimeModeGate() {
   }
 
   return (
-    // 刻意没有 backdrop onClick 关闭、也没有 × —— 这是必答题，答完就再也不出现。
+    // Deliberately no backdrop onClick-to-close and no X -- this is mandatory,
+    // and it never appears again once answered.
     <div
       className="fixed inset-0 z-[60] bg-zinc-950/40 backdrop-blur-[2px] flex items-center justify-center p-4"
       role="dialog"
@@ -86,7 +96,9 @@ export default function RuntimeModeGate() {
             />
           </div>
 
-          {/* 探测依据：用户据此判断预选对不对，也是选错后回来自查的入口。 */}
+          {/* Detection basis: lets the user judge whether the preselection is
+              right, and doubles as the entry point for self-diagnosis if the
+              wrong mode was picked. */}
           <div className="rounded-md border border-subtle bg-surface px-3 py-2 text-xs text-fg-secondary flex flex-col gap-1">
             <div className="text-fg-tertiary">{t('runtimeMode.detectedAs', {
               mode: t(`runtimeMode.${info.detected}.name`),

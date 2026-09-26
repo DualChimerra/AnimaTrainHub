@@ -427,10 +427,12 @@ def list_results(version_dir: Path, eval_root: Path | None = None) -> list[dict[
 
 
 def _attach_baseline_delta(results: list[dict[str, Any]]) -> None:
-    """给每条非 baseline 结果挂 ``delta``：各指标 = 该 checkpoint 值 − baseline 值。
+    """Attach ``delta`` to every non-baseline result: each metric = this checkpoint's
+    value minus the baseline value.
 
-    baseline run（纯底模、lora_scale=0、同 prompt/seed）的指标作为对照基线，Δ 才
-    能把「LoRA 净增益」从「底模本来就有的」里分离出来。无 baseline run 时不挂 delta。
+    The baseline run (base model only, lora_scale=0, same prompt/seed) provides the
+    reference metrics, so delta can separate the LoRA's net gain from what the base
+    model already had. No delta is attached when there is no baseline run.
     """
     baseline = next((r for r in results if r.get("baseline")), None)
     if baseline is None:

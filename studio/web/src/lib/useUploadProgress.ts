@@ -1,15 +1,21 @@
 /**
- * useUploadProgress — 浏览器上传进度状态机。
+ * useUploadProgress -- browser upload progress state machine.
  *
- * 协议：
- *   1. caller 在请求前 `start(totalBytes)` 让进度条立即 0%
- *   2. caller 把 `onProgress` 透传给 `api.xxx(..., onProgress)` —— XHR.upload
- *      progress 事件回调（fetch 没有 request body progress）
- *   3. loaded === total 时自动切到 'processing'（server 还在解 zip / 落盘，
- *      没有事件，UI 转菊花区分「上传完了在等服务端」）
- *   4. 请求 resolve / reject 后 caller 调 `finish()` / `fail(e)` / `reset()`
+ * Protocol:
+ *   1. the caller calls `start(totalBytes)` before the request, so the
+ *      progress bar shows 0% immediately
+ *   2. the caller passes `onProgress` through to `api.xxx(..., onProgress)`
+ *      -- the XHR.upload progress event callback (fetch has no request-body
+ *      progress)
+ *   3. automatically switches to 'processing' when loaded === total (the
+ *      server is still unzipping / writing to disk with no events to report,
+ *      so the UI shows a spinner to distinguish "upload done, waiting on
+ *      the server")
+ *   4. once the request resolves / rejects, the caller calls `finish()` /
+ *      `fail(e)` / `reset()`
  *
- * 速度计算用 1s 滑动窗口避免数字跳得太厉害；ETA = (total - loaded) / speed。
+ * Speed is computed over a 1s sliding window to keep the number from
+ * jumping around too much; ETA = (total - loaded) / speed.
  */
 import { useCallback, useRef, useState } from 'react'
 
@@ -19,9 +25,9 @@ export interface UploadProgressState {
   phase: UploadPhase
   loaded: number
   total: number
-  /** bytes/sec，1s 滑动平均；processing/idle/done 时为 0 */
+  /** bytes/sec, 1s moving average; 0 while processing/idle/done */
   speedBps: number
-  /** 秒；null = 无法计算（speed=0 或 total=0） */
+  /** seconds; null = can't be computed (speed=0 or total=0) */
   etaSec: number | null
   error: string | null
 }
@@ -37,13 +43,13 @@ const INITIAL: UploadProgressState = {
 
 export interface UseUploadProgress {
   state: UploadProgressState
-  /** 请求前调，让 UI 立即显示 0% / total */
+  /** Call before the request, so the UI shows 0% / total immediately */
   start: (totalBytes: number) => void
-  /** 透传给 api.xxx 作为 onProgress 回调 */
+  /** Pass through to api.xxx as the onProgress callback */
   onProgress: (e: { loaded: number; total: number; lengthComputable: boolean }) => void
   finish: () => void
   fail: (e: unknown) => void
-  /** 重置回 idle，用于关闭对话框 / 隐藏面板 */
+  /** Resets back to idle, for closing a dialog / hiding a panel */
   reset: () => void
 }
 
@@ -123,7 +129,7 @@ export function useUploadProgress(): UseUploadProgress {
   return { state, start, onProgress, finish, fail, reset }
 }
 
-// ── 格式化 helpers（独立 export，方便单测 / 别处复用） ──────────────────
+// ── formatting helpers (exported separately for unit testing / reuse elsewhere) ──
 
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'

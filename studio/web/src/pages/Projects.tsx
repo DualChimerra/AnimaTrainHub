@@ -278,7 +278,7 @@ export default function ProjectsPage() {
 
   const handleImportUpload = async (file: File | null | undefined) => {
     if (!file) return
-    // dialog 不立即关：进度条要显示在 dialog 里直到完成 / 失败
+    // Don't close the dialog right away: the progress bar shows inside it until done / failed
     uploadProgress.start(file.size)
     setImporting(true)
     try {

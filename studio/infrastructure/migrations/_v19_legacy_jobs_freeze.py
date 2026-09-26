@@ -1,11 +1,12 @@
-"""v17 → v18: 冻结旧 project_jobs 表（R-3 写路径翻转配套）。
+"""v17 -> v18: freezes the legacy project_jobs table (companion to the R-3 write-path flip).
 
-R-3 起数据作业统一写入 tasks（task_type = kind），supervisor 不再从
-project_jobs 派发。升级瞬间残留的 pending / running 旧行如果不处理会永远
-停在原状态（没人再调度它们）——一次性标 canceled 并注明原因。
+Starting with R-3, data jobs are written to tasks (task_type = kind) instead, and the
+supervisor no longer dispatches from project_jobs. Any pending / running rows leftover at the
+moment of upgrade would otherwise stay stuck in that state forever (nothing dispatches them
+anymore) -- so they're marked canceled once, with a reason noted.
 
-旧表其余行保留只读遗留（Q-R2：不迁移不展示，避免 ID 重映射污染 eval run
-引用与旧日志路径）。
+The rest of the old table's rows are kept read-only as legacy (Q-R2: not migrated, not
+displayed, to avoid an ID remap polluting eval run references and old log paths).
 """
 from __future__ import annotations
 

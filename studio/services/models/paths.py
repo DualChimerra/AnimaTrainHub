@@ -1,13 +1,16 @@
-"""模型路径常量 + 本地路径解析（PR-3.8 从 model_downloader 1068 行拆出 4-way 第 1 个）。
+"""Model path constants + local path resolution (the 1st piece of PR-3.8's
+4-way split of the 1068-line model_downloader).
 
-只做"模型在本地哪儿"的回答：models_root / safe_dir_name + **工具模型**
-（WD14 / CLTagger / 放大器 / eval / TAEFlux——它们不是模型族，永远不进
-families/）。模型族资产（Anima 权重清单 / target / selected 解析）在
-families/<fam>.py（多模型 PR-4）。不做下载、不读 endpoint / mirror
-（那些在 sources.py）。
+Only answers "where is the model locally": models_root / safe_dir_name +
+**tool models** (WD14 / CLTagger / upscalers / eval / TAEFlux -- these are not
+model families and never go into families/). Model family assets (Anima weight
+manifest / target / selected-value resolution) live in families/<fam>.py
+(multi-model PR-4). Does no downloading and doesn't read endpoints / mirrors
+(those live in sources.py).
 
-注意：`download_taeflux` 等 download_* 函数都搬到 downloader.py 了；这里只留
-`taeflux_dir` / `taeflux_available` 这种"是否就绪"的查询。
+Note: download_* functions like `download_taeflux` have all been moved to
+downloader.py; only "is it ready" queries like `taeflux_dir` / `taeflux_available`
+stay here.
 """
 from __future__ import annotations
 
@@ -19,12 +22,12 @@ from ... import secrets
 from ...paths import REPO_ROOT
 
 # ---------------------------------------------------------------------------
-# 模型清单常量（新版本发布时改这里）
+# Model manifest constants (edit here when a new version is released)
 # ---------------------------------------------------------------------------
 
-# TAEFlux：1.6MB 的 tiny autoencoder for Flux/Anima，daemon 预览中间步用。
-# 用 diffusers.AutoencoderTiny.from_pretrained 加载 → 需要同时拿 config.json
-# + safetensors 两个文件。
+# TAEFlux: a 1.6MB tiny autoencoder for Flux/Anima, used by the daemon for
+# intermediate-step previews. Loaded with diffusers.AutoencoderTiny.from_pretrained
+# -> needs both the config.json and safetensors files.
 TAEFLUX_REPO = "madebyollin/taef1"
 TAEFLUX_FILES = [
     "diffusion_pytorch_model.safetensors",
@@ -34,15 +37,21 @@ TAEFLUX_FILES = [
 CLTAGGER_REPO = "cella110n/cl_tagger"
 CLTAGGER_V2_REPO = "cella110n/cl_tagger_v2"
 
-# CLTagger 预设。v1 在 cella110n/cl_tagger 的版本子目录下；v2 是独立 gated
-# repo，但文件仍在版本子目录下。新版本出现时往这里加一行，UI 自动作为 radio 暴露。
+# CLTagger presets. v1 lives under cella110n/cl_tagger's version subdirectory;
+# v2 is a separate gated repo, but its files are still under a version
+# subdirectory. Add a new line here when a new version appears, and the UI
+# automatically exposes it as a radio option.
 #
-# 每个 variant 显式声明 extra_files（除 model_path / tag_mapping_path 之外还需
-# 一并下载 / 校验的文件），不再靠"v2 一定有同名 .data"的启发式：
-#   - v2 的 onnx 权重在外部 sidecar model.onnx.data（2GB+），缺它 onnxruntime 加载
-#     external data 时才黑盒炸 → 必须纳入；
-#   - model_metadata.json 一并带下，作为"下载是否完整"的就绪信号。
-# 将来若出现单文件（无 .data）的 v2 变体，把它的 extra_files 留空即可，不会误要 .data。
+# Each variant explicitly declares extra_files (files that need to be
+# downloaded/validated alongside model_path / tag_mapping_path), instead of
+# relying on the "v2 always has a same-named .data" heuristic:
+#   - v2's onnx weights live in an external sidecar model.onnx.data (2GB+);
+#     missing it makes onnxruntime blow up opaquely only when it tries to load
+#     external data -> it must be included;
+#   - model_metadata.json is downloaded alongside as the readiness signal for
+#     "is the download complete".
+# If a single-file (no .data) v2 variant shows up in the future, just leave its
+# extra_files empty -- it won't mistakenly require .data.
 CLTAGGER_VERSIONS: dict[str, dict[str, Any]] = {
     "cl_tagger_1_02": {
         "model_id": CLTAGGER_REPO,
@@ -67,9 +76,11 @@ CLTAGGER_VERSIONS: dict[str, dict[str, Any]] = {
 def cltagger_preset_for_paths(
     model_path: str, tag_mapping_path: str
 ) -> Optional[dict[str, Any]]:
-    """按 (model_path, tag_mapping_path) 反查匹配的预设；自定义路径返回 None。
+    """Look up the matching preset by (model_path, tag_mapping_path); a custom
+    path returns None.
 
-    v1/v2 的 model_path + tag_mapping_path 两两唯一，足以定位预设（无需 model_id）。
+    Each v1/v2 model_path + tag_mapping_path pair is unique, so it's enough to
+    locate the preset (no need for model_id).
     """
     norm_model = model_path.replace("\\", "/")
     norm_mapping = tag_mapping_path.replace("\\", "/")
@@ -87,11 +98,14 @@ def cltagger_canonical_file_paths(
     model_path: str,
     tag_mapping_path: str,
 ) -> tuple[str, str]:
-    """把早期 v2 的"裸根路径"配置还原成带版本子目录的规范路径。
+    """Restore an early v2 "bare root path" config into its canonical path with a
+    version subdirectory.
 
-    早期 v2 支持曾把文件存成仓库根名（model.onnx / model_vocabulary.json）。
-    这里按 model_id + 文件名在 CLTAGGER_VERSIONS 里反查回带版本子目录的路径，
-    不写死版本号——以后加 v2_02 等变体时自动适配；已是版本化路径则原样返回。
+    Early v2 support used to store files under bare repo-root names
+    (model.onnx / model_vocabulary.json). This looks them up in CLTAGGER_VERSIONS
+    by model_id + filename to recover the versioned-subdirectory path, without
+    hardcoding a version number -- so it auto-adapts when variants like v2_02
+    are added later; a path that's already versioned is returned unchanged.
     """
     normalized_model = model_path.replace("\\", "/")
     normalized_mapping = tag_mapping_path.replace("\\", "/")
@@ -117,10 +131,12 @@ def is_cltagger_v2_paths(model_path: str, tag_mapping_path: str) -> bool:
 
 
 def cltagger_required_files(model_path: str, tag_mapping_path: str) -> tuple[str, ...]:
-    """一个 variant 完整可用所需的全部文件（下载 + 就绪校验共用）。
+    """All files needed for one variant to be fully usable (shared by download +
+    readiness validation).
 
-    优先用预设里显式声明的 extra_files；非预设（用户自定义路径）回退到
-    "v2 onnx 必带同名 .data 权重"的启发式，保证手填路径也能正确校验。
+    Prefers the extra_files explicitly declared in the preset; for a non-preset
+    (user's custom path), falls back to the "v2 onnx must carry a same-named
+    .data weight" heuristic, so hand-typed paths still validate correctly.
     """
     preset = cltagger_preset_for_paths(model_path, tag_mapping_path)
     if preset is not None:
@@ -131,55 +147,58 @@ def cltagger_required_files(model_path: str, tag_mapping_path: str) -> tuple[str
         extra = []
     return (model_path, *extra, tag_mapping_path)
 
-# WD14 模型常驻文件名（HF SmilingWolf/* 仓库顶层都是这两个）。
+# WD14 model's standard filenames (HF SmilingWolf/* repos always have these two at the top level).
 WD14_FILES = ("model.onnx", "selected_tags.csv")
 
-# 预处理放大器预设清单。
+# Preprocessing upscaler preset list.
 #
-# label → 元数据 dict：
-#   filename      落地文件名（也是 `selected_upscaler` 持久化的 key 之一）
-#   hf            (repo_id, repo_subpath) HuggingFace 源；None 表示该模型在 HF 上无稳定镜像
-#   ms            (repo_id, repo_subpath) ModelScope 源；None 表示无镜像
-#   size_mb       近似下载体积，前端展示用
-#   description   一句话用途描述（前端展示）
+# label -> metadata dict:
+#   filename      the filename it lands as (also one of `selected_upscaler`'s persisted keys)
+#   hf            (repo_id, repo_subpath) HuggingFace source; None means no stable HF mirror exists
+#   ms            (repo_id, repo_subpath) ModelScope source; None means no mirror
+#   size_mb       approximate download size, shown in the frontend
+#   description   a one-line usage description (shown in the frontend)
 #
-# 路由：download_upscaler 先按 _get_download_source() 取偏好源，对应 None 时透明
-# fallback 到另一个源。两个源都 None 视为非法预设。
+# Routing: download_upscaler first picks the preferred source via
+# _get_download_source(), and transparently falls back to the other source when
+# that one is None. A preset with both sources None is considered invalid.
 #
-# 选源参考：libfishopen/upscaler 在魔搭上聚合了一批 A1111 时代主流权重，文件名 +
-# 字节大小与 HF 原仓库一致；HF 一侧则使用各上游作者的官方仓库（更权威）。
+# Source choice notes: libfishopen/upscaler on ModelScope aggregates a batch of
+# A1111-era mainstream weights, with filenames + byte sizes matching the
+# original HF repos; the HF side uses each upstream author's official repo
+# (more authoritative).
 UPSCALER_VARIANTS: dict[str, dict[str, Any]] = {
     "4x-AnimeSharp": {
         "filename": "4x-AnimeSharp.pth",
         "hf": ("Kim2091/AnimeSharp", "4x-AnimeSharp.pth"),
         "ms": ("libfishopen/upscaler", "4x-AnimeSharp.pth"),
         "size_mb": 64,
-        "description": "二次元线稿/扁色友好（Kim2091, ESRGAN-RRDB）",
+        "description": "Good for anime lineart/flat colors (Kim2091, ESRGAN-RRDB)",
     },
     "R-ESRGAN_4x+Anime6B": {
         "filename": "R-ESRGAN_4x+Anime6B.pth",
-        "hf": None,  # 上游 RealESRGAN 仓库未直接发 .pth，先只走 MS
+        "hf": None,  # The upstream RealESRGAN repo doesn't publish a .pth directly, so MS only for now
         "ms": ("libfishopen/upscaler", "R-ESRGAN_4x+Anime6B.pth"),
         "size_mb": 18,
-        "description": "动漫专用小模型（Real-ESRGAN，A1111 默认）",
+        "description": "Small anime-specific model (Real-ESRGAN, A1111 default)",
     },
     "4x_foolhardy_Remacri": {
         "filename": "4x_foolhardy_Remacri.pth",
         "hf": None,
         "ms": ("libfishopen/upscaler", "4x_foolhardy_Remacri.pth"),
         "size_mb": 64,
-        "description": "写实风格（口碑模型）",
+        "description": "Realistic style (well-regarded model)",
     },
     "ESRGAN_4x": {
         "filename": "ESRGAN_4x.pth",
         "hf": None,
         "ms": ("libfishopen/upscaler", "ESRGAN_4x.pth"),
         "size_mb": 64,
-        "description": "通用 ESRGAN baseline",
+        "description": "General-purpose ESRGAN baseline",
     },
 }
 DEFAULT_UPSCALER = "4x-AnimeSharp"
-# 允许的自定义/上传放大器扩展名（白名单防写错路径 / 误传可执行）。
+# Allowed extensions for custom/uploaded upscalers (whitelist to prevent bad paths / uploaded executables).
 UPSCALER_EXTS = (".pth", ".safetensors")
 # ---------------------------------------------------------------------------
 # paths
@@ -187,29 +206,35 @@ UPSCALER_EXTS = (".pth", ".safetensors")
 
 
 def safe_dir_name(model_id: str) -> str:
-    """把 HF/MS repo id 转成本地目录名（替换路径分隔符为 _）。
+    """Convert an HF/MS repo id into a local directory name (replaces path
+    separators with _).
 
-    通用 path-sanitization 工具，曾在 tagging.onnx_base 内（PR-3.8 移到这里
-    打破循环：models/paths.py ← tagging/onnx_base.py ← models/downloader.py）。
+    A general path-sanitization utility that used to live in tagging.onnx_base
+    (PR-3.8 moved it here to break a cycle: models/paths.py <- tagging/onnx_base.py
+    <- models/downloader.py).
     """
     return model_id.replace("/", "_").replace("\\", "_")
 
 
 def models_root() -> Path:
-    """模型根目录（所有训练 / WD14 模型共用）。
+    """The models root directory (shared by all training / WD14 models).
 
-    解析优先级：
-      1. `secrets.models.root`（用户在设置页配置的绝对路径）
-      2. 环境变量 `ALS_MODELS_ROOT`（云端 notebook 注入；让模型一次性下载到
-         持久盘 / Google Drive 后跨会话复用，无需用户手动进 Settings 配置）
-      3. `{REPO_ROOT}/models/`（默认）
+    Resolution priority:
+      1. `secrets.models.root` (the absolute path the user configured in Settings)
+      2. the `ALS_MODELS_ROOT` environment variable (injected by cloud notebooks;
+         lets models be downloaded once to a persistent disk / Google Drive and
+         reused across sessions, with no need to manually configure Settings)
+      3. `{REPO_ROOT}/models/` (default)
 
-    云端机系统盘是临时盘 —— 不设 1/2 时模型每次新连接都会重新下载（Anima
-    主模型 + Qwen3 + T5 等好几个 GB）。把根指到 Drive 即可「下载一次，永久复用」。
+    A cloud machine's system disk is ephemeral -- without setting 1 or 2, models
+    get re-downloaded on every new connection (the Anima main model + Qwen3 + T5
+    etc. add up to several GB). Pointing the root at Drive gets you "download
+    once, reuse forever".
 
-    注意目录命名：与 schema.py 里的 `transformer_path` 默认值（同 `models/`）
-    + WD14 的 `models/wd14/` 对齐；HF repo 内部命名 `diffusion_models/`，本地
-    扁平化时也用同名子目录。
+    Note on directory naming: aligned with schema.py's `transformer_path`
+    default (also `models/`) + WD14's `models/wd14/`; the HF repo names it
+    `diffusion_models/` internally, and the local flattened layout uses the
+    same subdirectory name.
     """
     try:
         cfg_root = secrets.load().models.root
@@ -224,25 +249,31 @@ def models_root() -> Path:
 
 
 def qwen_image_vae_target(root: Path) -> Path:
-    """Qwen-Image VAE 的本地落点——**族无关共享资产**，不属于任何模型族。
+    """Local landing spot for the Qwen-Image VAE -- a **family-agnostic shared
+    asset**, not owned by any model family.
 
-    Anima 与 Krea 2 都用这同一个 VAE 文件（同 Wan2.1 latent 空间，D6/D7）；
-    它历史上挂在 Anima 名下只因 Anima 先到。下载渠道（从哪个 repo 拿）仍是
-    各族资产清单的知识，本函数只回答「文件放哪 / 训练配置指哪」。
+    Both Anima and Krea 2 use this exact same VAE file (same Wan2.1 latent
+    space, D6/D7); it's historically been filed under Anima's name only
+    because Anima came first. The download channel (which repo to fetch it
+    from) is still each family's asset-manifest knowledge; this function only
+    answers "where does the file go / what should the training config point at".
     """
     return root / "vae" / "qwen_image_vae.safetensors"
 
 
-#: 本地文本编码器目录的就绪判据。transformers 目录（Qwen3 / Qwen3-VL，含
-#: 官方 fp8 单文件版）都带 config.json；缺它的目录一律当"不是编码器"。
+#: Readiness marker for a local text-encoder directory. transformers
+#: directories (Qwen3 / Qwen3-VL, including the official fp8 single-file
+#: version) all carry a config.json; a directory missing it is always treated
+#: as "not an encoder".
 TEXT_ENCODER_MARKER = "config.json"
 
 
 def custom_vae_path() -> Optional[Path]:
-    """用户在设置里选中的本地 VAE（`secrets.models.selected_vae`）。
+    """The local VAE selected by the user in Settings (`secrets.models.selected_vae`).
 
-    未选 / 文件失效（被删、移走、指向目录）→ None，调用方回退官方落点。
-    与主模型 custom 路径同口径：绝不返回不存在的死路径。
+    Unselected / a stale file (deleted, moved, points at a directory) -> None,
+    and the caller falls back to the official location. Same convention as the
+    main model's custom path: never returns a dead path that doesn't exist.
     """
     try:
         selected = secrets.load().models.selected_vae
@@ -256,7 +287,8 @@ def custom_vae_path() -> Optional[Path]:
 
 
 def resolve_vae_path(root: Optional[Path] = None) -> str:
-    """训练 / 出图实际要用的 VAE 绝对路径（本地选中优先，回退官方落点）。"""
+    """The VAE absolute path actually used for training / generation (local
+    selection takes priority, falls back to the official location)."""
     custom = custom_vae_path()
     if custom is not None:
         return str(custom)
@@ -264,11 +296,14 @@ def resolve_vae_path(root: Optional[Path] = None) -> str:
 
 
 def custom_text_encoder_dir(family: str) -> Optional[Path]:
-    """某族选中的**本地**文本编码器目录（`secrets.models.selected_te[family]`）。
+    """A family's selected **local** text-encoder directory
+    (`secrets.models.selected_te[family]`).
 
-    该字段同时承载官方 variant key（krea2 的 "bf16" / "fp8"）与本地绝对路径，
-    所以这里只认「绝对路径 + 目录存在 + 有 config.json」这一种形态；其余
-    （官方 key / 失效路径）返回 None，由各族按自己的官方目录解析。
+    This field carries both an official variant key (krea2's "bf16" / "fp8")
+    and a local absolute path, so this function only recognizes the single
+    shape "absolute path + directory exists + has config.json"; anything else
+    (an official key / a stale path) returns None, and each family resolves it
+    against its own official directory.
     """
     try:
         selected = secrets.load().models.selected_te.get(str(family))
@@ -282,22 +317,24 @@ def custom_text_encoder_dir(family: str) -> Optional[Path]:
 
 
 def taeflux_dir(root: Optional[Path] = None) -> Path:
-    """TAEFlux 本地目录。daemon 用 AutoencoderTiny.from_pretrained 加载。"""
+    """TAEFlux's local directory. The daemon loads it with AutoencoderTiny.from_pretrained."""
     r = root or models_root()
     return r / "taeflux"
 
 
 def taeflux_available(root: Optional[Path] = None) -> bool:
-    """两个文件都到位才算就绪。"""
+    """Counts as ready only when both files are present."""
     d = taeflux_dir(root)
     return all((d / f).exists() for f in TAEFLUX_FILES)
 
 
 
 def wd14_target_dir(root: Path, model_id: str) -> Path:
-    """WD14 单个 model_id 的本地目录。同 wd14_tagger 的 _resolve_model_dir 路径布局。
+    """A single WD14 model_id's local directory. Matches wd14_tagger's
+    _resolve_model_dir path layout.
 
-    `model_id` 为绝对路径时（统一来源候选 local 型）直接指向该目录。
+    When `model_id` is an absolute path (the unified-source candidate's local
+    type), points directly at that directory.
     """
     if secrets.is_abs_path(model_id):
         return Path(model_id)
@@ -305,11 +342,13 @@ def wd14_target_dir(root: Path, model_id: str) -> Path:
 
 
 def eval_model_target_dir(root: Path, kind: str, model_id: str) -> Path:
-    """CLIP / DINO eval 指标模型的本地目录（kind: ``clip`` | ``dino``）。
+    """Local directory for a CLIP / DINO eval-metric model (kind: ``clip`` | ``dino``).
 
-    多文件 transformers repo，整目录由 snapshot_download 落地，eval 时
-    from_pretrained 指向这里，统一归项目 models/ 管理而非 ~/.cache/huggingface。
-    `model_id` 为绝对路径时（local 候选）直接指向该目录。
+    A multi-file transformers repo; the whole directory is landed by
+    snapshot_download, and from_pretrained points here at eval time -- managed
+    uniformly under the project's models/ rather than ~/.cache/huggingface.
+    When `model_id` is an absolute path (a local candidate), points directly at
+    that directory.
     """
     if secrets.is_abs_path(model_id):
         return Path(model_id)
@@ -317,11 +356,13 @@ def eval_model_target_dir(root: Path, kind: str, model_id: str) -> Path:
 
 
 def ccip_model_dir(root: Path, variant: str) -> Path:
-    """CCIP（anime 角色身份）ONNX 变体本地目录。
+    """Local directory for a CCIP (anime character identity) ONNX variant.
 
-    deepghs/ccip_onnx 每个变体子目录含 model_feat.onnx + model_metrics.onnx +
-    metrics.json，只选这 3 个下到这里（repo 整库 3.5GB 含 torch ckpt + png，按
-    文件名选择性下载）。`variant` 为绝对路径时（local 候选）直接指向该目录。
+    Each variant subdirectory under deepghs/ccip_onnx contains model_feat.onnx +
+    model_metrics.onnx + metrics.json; only these 3 files are selectively
+    downloaded here (the full repo is 3.5GB including torch checkpoints + pngs,
+    so files are picked by name). When `variant` is an absolute path (a local
+    candidate), points directly at that directory.
     """
     if secrets.is_abs_path(variant):
         return Path(variant)
@@ -329,27 +370,29 @@ def ccip_model_dir(root: Path, variant: str) -> Path:
 
 
 def cltagger_target_root(root: Path, model_id: str) -> Path:
-    """CLTagger repo 的本地根目录。子目录布局来自 CLTAGGER_VERSIONS。"""
+    """The local root directory for a CLTagger repo. Subdirectory layout comes from CLTAGGER_VERSIONS."""
     return root / "cltagger" / safe_dir_name(model_id)
 
 
 def upscaler_dir(root: Optional[Path] = None) -> Path:
-    """放大器权重根目录 `{models_root}/upscalers/`。"""
+    """The upscaler weights root directory `{models_root}/upscalers/`."""
     r = root or models_root()
     return r / "upscalers"
 
 
 def upscaler_target(label: str, root: Optional[Path] = None) -> Path:
-    """单个放大器权重的目标路径。
+    """Target path for a single upscaler's weights.
 
-    label 可以是：
-      - 预设 key（在 UPSCALER_VARIANTS 中）→ 用预设里的 filename
-      - 直接的文件名（带 .pth/.safetensors 扩展名）→ 视为自定义/已上传模型
-      - 绝对路径（统一来源候选 local 型，用户 PathPicker 登记的自有文件）→
-        直接返回，不落 upscalers/ 目录
+    label can be:
+      - a preset key (in UPSCALER_VARIANTS) -> uses the preset's filename
+      - a direct filename (with .pth/.safetensors extension) -> treated as a custom/already-uploaded model
+      - an absolute path (a unified-source local candidate, a file the user
+        registered via PathPicker) -> returned directly, doesn't land under
+        upscalers/
 
-    路径穿越保护：绝对路径之外禁止 label 含 `/`、`\\` 或 `..`，避免相对
-    片段落到 upscalers/ 之外。
+    Path-traversal protection: outside of the absolute-path case, label must
+    not contain `/`, `\\`, or `..`, preventing relative segments from escaping
+    outside of upscalers/.
     """
     if secrets.is_abs_path(label):
         if not label.lower().endswith(UPSCALER_EXTS):
@@ -367,18 +410,18 @@ def upscaler_target(label: str, root: Optional[Path] = None) -> Path:
 
 
 def find_upscaler(label: str, root: Optional[Path] = None) -> Optional[Path]:
-    """已下载返回本地路径，没下载返回 None。"""
+    """Returns the local path if downloaded, None if not."""
     target = upscaler_target(label, root)
     return target if target.exists() else None
 
 
 def selected_upscaler() -> str:
-    """读 `secrets.models.selected_upscaler`，回退 DEFAULT_UPSCALER。
+    """Reads `secrets.models.selected_upscaler`, falling back to DEFAULT_UPSCALER.
 
-    返回值可能是：
-      - 预设 label（在 UPSCALER_VARIANTS 中）
-      - 已存在的 custom filename（带扩展名）
-    都未匹配时回退 DEFAULT_UPSCALER（预设 4x-AnimeSharp）。
+    The return value can be:
+      - a preset label (in UPSCALER_VARIANTS)
+      - an existing custom filename (with extension)
+    Falls back to DEFAULT_UPSCALER (the 4x-AnimeSharp preset) when neither matches.
     """
     try:
         v = secrets.load().models.selected_upscaler
@@ -388,7 +431,7 @@ def selected_upscaler() -> str:
         return DEFAULT_UPSCALER
     if v in UPSCALER_VARIANTS:
         return v
-    # custom：扫盘看文件存不存在
+    # custom: scan disk to see if the file exists
     if v.lower().endswith(UPSCALER_EXTS) and (upscaler_dir() / v).exists():
         return v
     return DEFAULT_UPSCALER

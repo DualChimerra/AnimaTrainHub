@@ -1,18 +1,22 @@
-"""上传 worker 子进程入口（fix 524）。
+"""Upload worker subprocess entry point (fix 524).
 
-由 supervisor 启动：`python -m studio.workers.upload_worker --job-id N`。
+Launched by supervisor: `python -m studio.workers.upload_worker --job-id N`.
 
-为什么要 worker：`/upload` 同步解 zip + convert_to_png 重编码每张图，184MB
-的包轻松 >100s，Cloudflare 100s 超时直接回 524。改成后台 job 后端点秒回，
-真正的解压 / 转码在这里跑，前端轮询 `upload/status` 看进度 + 结果。
+Why a worker is needed: `/upload` used to synchronously unzip + re-encode every image
+through convert_to_png; a 184MB package easily takes >100s, and Cloudflare's 100s timeout
+returns a straight 524. Moving it to a background job lets the endpoint respond instantly;
+the actual unzip / transcode runs here, and the frontend polls `upload/status` for
+progress + results.
 
-job.params：
-- ``staging_dir``: 端点把上传的原始文件落到这个临时目录；处理完整目录后删掉它。
-- ``paths``: 直接给定服务端可见路径列表（upload-from-path 用），处理后**不删**。
-至少要有其一。
+job.params:
+- ``staging_dir``: the endpoint drops the raw uploaded files into this temp directory;
+  the whole directory is deleted once processing finishes.
+- ``paths``: a directly given list of server-visible paths (used by upload-from-path),
+  **not** deleted after processing.
+At least one of the two must be present.
 
-结果（added / skipped）写到 `jobs/{id}.result.json`，status endpoint 读回。
-日志只走 stdout（见 download_worker 的说明）。
+Results (added / skipped) are written to `jobs/{id}.result.json`, read back by the status
+endpoint. Logging goes through stdout only (see the note in download_worker).
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ from studio.services.dataset import uploads as uploads_svc
 
 
 def _gather_sources(params: dict) -> tuple[list[Path], Path | None]:
-    """从 params 解出待处理文件列表 + 需清理的 staging 目录（无则 None）。"""
+    """Resolve params into the list of files to process + the staging directory to clean up (None if there isn't one)."""
     staging = params.get("staging_dir")
     if staging:
         staging_dir = Path(staging)
@@ -40,7 +44,7 @@ def _gather_sources(params: dict) -> tuple[list[Path], Path | None]:
 
 
 def run(job_id: int) -> int:
-    """主体：返回退出码（0 成功 / 1 失败）。"""
+    """Body: returns the exit code (0 success / 1 failure)."""
     with db.connection_for() as conn:
         job = project_jobs.get_job(conn, job_id)
     if not job:
@@ -66,7 +70,7 @@ def run(job_id: int) -> int:
 
         sources, staging_dir = _gather_sources(params)
         if not sources:
-            progress("[error] 没有待处理文件")
+            progress("[error] no files to process")
             project_jobs.write_result(job_id, {"added": [], "skipped": []})
             return 1
 
@@ -85,13 +89,14 @@ def run(job_id: int) -> int:
             f"[done] added={len(result.added)} skipped={len(result.skipped)}"
         )
         return 0
-    except Exception as exc:  # noqa: BLE001 — 同 download_worker
+    except Exception as exc:  # noqa: BLE001 -- same as download_worker
         logger.exception("upload worker crashed (job_id=%s)", job_id)
         progress(f"[error] {exc}")
         project_jobs.write_result(job_id, {"added": [], "skipped": []})
         return 1
     finally:
-        # staging 是端点为本次上传创建的临时目录，处理完无论成败都清掉。
+        # staging is the temp directory the endpoint created for this upload; clean it up
+        # regardless of success or failure once processing is done.
         if staging_dir is not None and staging_dir.is_dir():
             import shutil
             shutil.rmtree(staging_dir, ignore_errors=True)

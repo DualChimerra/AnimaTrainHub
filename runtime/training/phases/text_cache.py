@@ -1,7 +1,9 @@
-"""text_cache_phase：构造随图 caption sidecar 计划并交给 ModelFamily 编码。
+"""text_cache_phase: build the per-image caption sidecar plan and hand it to
+ModelFamily for encoding.
 
-位置固定在 dataset 之后、optimizer 之前。dataset 仍只产出 ``captions``；缓存命中
-与编码张量形状完全由 family 自治。Anima 的 online 策略走零开销 no-op。
+Fixed position: after dataset, before optimizer. dataset still only produces
+``captions``; cache hits and encoded tensor shapes are entirely up to the
+family. Anima's "online" strategy is a zero-cost no-op here.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _image_dataset(dataset):
-    """从 latent/repeat wrapper 中找到拥有 samples + caption resolver 的底层集。"""
+    """Find the underlying dataset with samples + caption resolver inside a latent/repeat wrapper."""
 
     seen = set()
     current = dataset
@@ -35,7 +37,7 @@ def _image_dataset(dataset):
 
 
 def _collect_entries(ctx: TrainingContext) -> list[TextCacheEntry]:
-    """主集 + 正则集按图片去重；分辨率 fan-out/repeat 不重复编码文本。"""
+    """Dedup main + regularization sets by image; resolution fan-out/repeat never re-encodes text."""
 
     by_image: dict[str, TextCacheEntry] = {}
     for dataset in (ctx.base_dataset, ctx.reg_dataset):
@@ -50,7 +52,7 @@ def _collect_entries(ctx: TrainingContext) -> list[TextCacheEntry]:
             if existing is not None:
                 if existing.caption != caption:
                     raise ValueError(
-                        f"同一图片解析出两个不同 caption，无法建立文本缓存: {image}"
+                        f"same image resolved to two different captions, cannot build text cache: {image}"
                     )
                 continue
             by_image[key] = TextCacheEntry.for_image(image, caption)
@@ -71,7 +73,7 @@ def _extra_prompts(args) -> list[str]:
     )
     if sampling_enabled and not out:
         out.append("1girl, masterpiece")
-    # CFG 无条件分支也需要编码；空串是合法且有意义的 prompt。
+    # The CFG unconditional branch also needs encoding; an empty string is a valid, meaningful prompt.
     out.append(str(getattr(args, "sample_negative_prompt", "") or ""))
     return list(dict.fromkeys(out))
 
@@ -81,12 +83,12 @@ def run(ctx: TrainingContext) -> None:
     if strategy == "online":
         ctx.family.prepare_text_cache([], [])
         return
-    if strategy != "cached_varlen":  # registry 正常会先拦，这里保留可操作错误
-        raise ValueError(f"未知文本策略: {strategy!r}")
+    if strategy != "cached_varlen":  # the registry normally catches this first; kept here as an actionable error
+        raise ValueError(f"unknown text strategy: {strategy!r}")
 
     if not bool(getattr(ctx.args, "text_encoder_cache", True)):
         logger.info(
-            "[text-cache] 缓存已关闭：不扫描/读写 sidecar，文本编码器常驻并逐 batch 编码"
+            "[text-cache] cache disabled: no sidecar scan/read/write, text encoder stays resident and encodes per batch"
         )
         ctx.family.prepare_text_cache(
             [],
@@ -100,12 +102,13 @@ def run(ctx: TrainingContext) -> None:
     entries = _collect_entries(ctx)
     captions = [entry.caption for entry in entries]
     extras = _extra_prompts(ctx.args)
-    # prompt 聚合缓存归 task 档案（tasks/<id>/.text-cache/），不落数据集
-    # train/：放那里会被数据集扫描当成 concept 文件夹误触。纯 CLI（无 task
-    # 档案）退回 output_dir，同样在数据集扫描范围之外。
+    # The aggregated prompt cache belongs to the task archive (tasks/<id>/.text-cache/), not the
+    # dataset's train/ dir: putting it there would get mistaken for a concept folder during
+    # dataset scanning. Plain CLI runs (no task archive) fall back to output_dir, which is also
+    # outside the dataset scan range.
     cache_root = ctx.task_archive_dir or ctx.output_dir
     logger.info(
-        "[text-cache] 预缓存 %d 张图片 caption + %d 条采样/负面 prompt（varlen）",
+        "[text-cache] pre-caching %d image captions + %d sample/negative prompts (varlen)",
         len(entries), len(extras),
     )
     ctx.family.prepare_text_cache(

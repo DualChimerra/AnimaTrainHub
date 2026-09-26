@@ -34,7 +34,7 @@ describe('arBucket', () => {
 
   it('handles ambiguous in-between ratios by snapping to nearest', () => {
     // 1.39 / 1.40 sit between 4:3 (1.333) and 3:2 (1.5); both are closer to 4:3.
-    // Before nearest-snap, 1.39 → 4:3 but 1.40 → "其他" — same shape, different bin.
+    // Before nearest-snap, 1.39 → 4:3 but 1.40 → "other" — same shape, different bin.
     expect(arBucket(1.39).label).toBe('4:3')
     expect(arBucket(1.40).label).toBe('4:3')
     // Midpoint between 4:3 (1.333) and 3:2 (1.5) by relative distance falls
@@ -43,7 +43,7 @@ describe('arBucket', () => {
     expect(arBucket(1.46).label).toBe('3:2')
   })
 
-  it('snaps extreme ratios to the closest bucket (no "其他" leak)', () => {
+  it('snaps extreme ratios to the closest bucket (no "other" leak)', () => {
     // 3:1 = 3.0 is way wider than any bucket; nearest is 21:9 = 2.33.
     expect(arBucket(3.0).label).toBe('21:9')
     // 1:3 = 0.333 is way taller than 9:21 = 0.428; should snap there.

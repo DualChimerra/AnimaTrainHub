@@ -526,8 +526,8 @@ export default function TrainPage() {
 
       const list = await api.listPresets()
       setPresets(list)
-      // refreshConfig 刷本页 config state；reload 刷父级 activeVersion，
-      // 主表单字段才会同步显示新预设的内容。
+      // refreshConfig refreshes this page's config state; reload refreshes the parent's
+      // activeVersion -- only then will the main form fields show the new preset's content.
       await Promise.all([refreshConfig(), reload()])
       toast(t('train.createdPreset', { name }), 'success')
     } catch (e) {
@@ -544,18 +544,18 @@ export default function TrainPage() {
     }
     setBusy(true)
     try {
-      // 1. 干掉等待中的 debounce save；不然它可能在 enqueue 之后才 fire，导致
-      //    worker 起来时读的是旧 config。
+      // 1. Kill any pending debounced save; otherwise it could fire after enqueue, causing the
+      //    worker to read a stale config when it starts up.
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current)
         debounceTimerRef.current = null
       }
-      // 2. 等任何正在飞的 save 跑完（debounce 刚刚 fire 的那一次）。
+      // 2. Wait for any in-flight save to finish (the one the debounce just fired).
       if (inFlightSaveRef.current) await inFlightSaveRef.current
-      // 3. 用 configRef（不是 config closure）再 diff 一次。覆盖「用户在 input
-      //    里敲完值不离开焦点直接点开始训练」的场景：input.onBlur (commit) 同步
-      //    setConfig 入队但 React 还没 flush，config closure 是旧的，但 configRef
-      //    在 setConfigSync 里同步更新过了。
+      // 3. Diff once more using configRef (not the config closure). This covers the case of "user
+      //    finishes typing a value in an input, then clicks start training without blurring
+      //    first": input.onBlur (commit) queues setConfig synchronously but React hasn't flushed
+      //    yet, so the config closure is stale, while configRef was already updated synchronously in setConfigSync.
       const cur = configRef.current
       if (cur && JSON.stringify(cur) !== savedJsonRef.current) {
         await persistConfig(cur)
@@ -581,7 +581,7 @@ export default function TrainPage() {
     }
   }
 
-  // datetime-local 的 value 格式（本地时区，分钟精度）。
+  // datetime-local's value format (local timezone, minute precision).
   const toLocalInputValue = (d: Date) => {
     const pad = (n: number) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -691,7 +691,7 @@ export default function TrainPage() {
       subtitle={subtitle}
       actions={
         <>
-          {/* 0.17 P-B — 定时训练：延迟 N 小时 / 指定时间，建成 scheduled task。 */}
+          {/* 0.17 P-B -- scheduled training: delay N hours / a specific time, creates a scheduled task. */}
           <button
             type="button"
             onClick={() => setScheduleOpen(true)}
@@ -780,8 +780,8 @@ export default function TrainPage() {
                 </span>
               </div>
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, alignContent: 'start' }}>
-                {/* + 新建预设 永远第一格（跟 Presets 页面一致）。pickerSearch
-                    非空时藏起来 —— 用户在搜旧的，新建是另一条意图。 */}
+                {/* + New preset is always the first cell (consistent with the Presets page). Hidden
+                    when pickerSearch is non-empty -- the user is searching for an existing one; creating new is a separate intent. */}
                 {!pickerSearch && (
                   <button
                     type="button"
@@ -1057,7 +1057,7 @@ function ScheduleDialog({ busy, scheduleTime, minTime, onTimeChange, onDelay, on
   )
 }
 
-/** config.resolution 归一成 number[]（schema 是 list[int]，旧 config / 标量也兜底）。 */
+/** Normalizes config.resolution to number[] (schema is list[int]; also falls back for old configs / scalar values). */
 function configResolutions(config: ConfigData | null): number[] {
   const r = config?.resolution as unknown
   if (Array.isArray(r)) return r.length ? (r as number[]) : [1024]
@@ -1065,13 +1065,13 @@ function configResolutions(config: ConfigData | null): number[] {
   return [1024]
 }
 
-/** 文件夹有效样本数 = repeat × 图数 × 分辨率档数（px 文件夹固定 1 档；否则跟 config 列表）。 */
+/** A folder's effective sample count = repeat × image count × resolution-tier count (a px folder is fixed at 1 tier; otherwise follows the config list). */
 function folderEffective(name: string, imageCount: number, resoCount: number): number {
   const { reso, repeat } = parseFolderMeta(name)
   return repeat * imageCount * (reso ? 1 : resoCount)
 }
 
-/** reg.files 形如 `5_concept/12345.png` —— 按首段文件夹聚合计数。 */
+/** reg.files look like `5_concept/12345.png` -- counts are aggregated by the first path segment (folder). */
 function aggregateRegFolders(files: string[]): Array<{ name: string; image_count: number }> {
   const m = new Map<string, number>()
   for (const f of files) {
@@ -1121,16 +1121,17 @@ function useTrainStats(projectId: number, activeVersion: Version | null, reg: Re
   const regEffective = regFolders.reduce((s, f) => s + folderEffective(f.name, f.image_count, resoCount), 0)
   const totalEffective = trainEffective + regEffective
 
-  // 桶分布 + NaViT 打包预估（后端用真 BucketManager / NavitPackBatchSampler 算）。
+  // Bucket distribution + NaViT packing estimate (computed backend-side with the real BucketManager / NavitPackBatchSampler).
   const vid = activeVersion?.id ?? 0
   const navitOn = config?.navit_packing === true
   const [dist, setDist] = useState<BucketDistribution | null>(null)
   const distSig = JSON.stringify([
     config?.resolution,
     config?.aspect_ratio_limit,
-    // 文件夹名单（含 px 前缀 / repeat / 图数）—— 改名加 px 也要触发重取，不能只看总数
+    // Folder list (including px prefix / repeat / image count) -- a rename adding a px prefix
+    // must also trigger a refetch, so it can't just look at totals
     activeVersion?.stats?.train_folders,
-    // navit 打包预估的输入 —— 任何一项变了包数都可能变
+    // Inputs to the navit packing estimate -- a change in any of them can change the pack count
     config?.navit_packing,
     config?.navit_native_resolution,
     config?.navit_token_budget,
@@ -1165,12 +1166,13 @@ function useTrainStats(projectId: number, activeVersion: Version | null, reg: Re
     return () => { cancelled = true }
   }, [projectId, vid, estSig])
 
-  // 单 epoch 优化器步数估算（与 sd-scripts max_train_steps 同语义）。
-  // - 常规路径：样本 ÷ (batch × ga)。不算 AR bucketing 损失（每桶最后一 batch
-  //   可能不满），相同 AR 数据集误差 < 5%。
-  // - navit_packing：batch_size 不参与分批（NavitPackBatchSampler 按 token 预算
-  //   拼包，一步 = 一包）——steps/epoch = ceil(包数 ÷ ga)，包数来自后端真打包模拟；
-  //   模拟结果没到手前不显示估算（宁缺毋假）。
+  // Estimated optimizer steps per epoch (same semantics as sd-scripts' max_train_steps).
+  // - Regular path: samples ÷ (batch × ga). Doesn't account for AR-bucketing loss (a bucket's
+  //   last batch may be under-filled); error is < 5% for a dataset with uniform AR.
+  // - navit_packing: batch_size doesn't participate in batching (NavitPackBatchSampler packs by
+  //   token budget; one step = one pack) -- steps/epoch = ceil(pack count ÷ ga), where the pack
+  //   count comes from the backend's real packing simulation; no estimate is shown before the
+  //   simulation result is in hand (prefer no number over a wrong one).
   const bs = Number(config?.batch_size) || 1
   const ga = Number(config?.grad_accum) || 1
   const epochs = Number(config?.epochs) || 0
@@ -1190,8 +1192,8 @@ function useTrainStats(projectId: number, activeVersion: Version | null, reg: Re
   const naturalTotal = stepsPerEpoch !== null && epochs > 0 ? stepsPerEpoch * epochs : null
   const finalTotal = naturalTotal !== null && maxSteps > 0 ? Math.min(maxSteps, naturalTotal) : naturalTotal
   const maxStepsTruncates = maxSteps > 0 && naturalTotal !== null && maxSteps < naturalTotal
-  // navit 下有效样本以真打包模拟为准（native 收拢多分辨率 fan-out、含 reg），
-  // 前端 folderEffective 的 resoCount fan-out 在该模式下会虚算
+  // Under navit, the effective sample count defers to the real packing simulation (natively
+  // collapses multi-resolution fan-out and includes reg); the frontend's folderEffective resoCount fan-out would over-count in this mode
   const shownEffective = navitEst && navitEst.samples > 0
     ? navitEst.samples
     : (authoritativeSamples ?? totalEffective)
@@ -1516,7 +1518,7 @@ function BucketBars({ dist }: { dist: BucketDistribution | null }) {
   )
 }
 
-/** 训练集有 mask 但 masked_loss 关闭时的提示（决策 D7：只提示不代开）。 */
+/** Hint shown when the train set has masks but masked_loss is off (decision D7: hint only, don't auto-enable it). */
 function MaskedLossHint({
   projectId, vid, maskedLoss,
 }: {

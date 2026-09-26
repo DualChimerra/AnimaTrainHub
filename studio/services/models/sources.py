@@ -1,10 +1,12 @@
-"""下载源路由 + 镜像 endpoint + 低层下载原语（PR-3.8 拆出 4-way 第 2 个）。
+"""Download-source routing + mirror endpoints + low-level download primitives
+(the 2nd piece of PR-3.8's 4-way split).
 
-回答两个问题：
-  1. 从哪儿下？（_get_download_source / _resolve_endpoint / _ms_token）
-  2. 怎么落地单个文件？（download_flat / download_flat_ms）
+Answers two questions:
+  1. Where to download from? (_get_download_source / _resolve_endpoint / _ms_token)
+  2. How does a single file land on disk? (download_flat / download_flat_ms)
 
-不持有模型路径常量（在 paths.py），不做模型特定的下载流程（在 downloader.py）。
+Holds no model path constants (those live in paths.py), and implements no
+model-specific download flow (that lives in downloader.py).
 """
 from __future__ import annotations
 
@@ -15,34 +17,39 @@ from typing import Callable, Optional
 from ... import secrets
 
 # ---------------------------------------------------------------------------
-# ModelScope 镜像源映射
+# ModelScope mirror source mapping
 # ---------------------------------------------------------------------------
 
-# ModelScope 镜像路径常量。
-# circlestone-labs 同步在 HF 和魔搭发布，repo ID 一致；
-# 魔搭里 Anima repo 将主模型 / VAE / 文本编码器全部打包在 split_files/ 下，
-# 文本编码器是单个 safetensors（而不是 HF 上 Qwen3 的散文件目录）。
+# ModelScope mirror path constants.
+# circlestone-labs publishes to both HF and ModelScope in sync, with matching
+# repo IDs; on ModelScope, the Anima repo packs the main model / VAE / text
+# encoder all under split_files/, and the text encoder is a single
+# safetensors file (rather than the loose-file directory Qwen3 uses on HF).
 MS_ANIMA_TEXT_ENCODER_PATH = "split_files/text_encoders/qwen_3_06b_base.safetensors"
-# T5 tokenizer / TAEFlux / CLTagger 在魔搭暂无对应镜像，走 HF 回退。
-# WD14：fireicewolf 在魔搭镜像了 SmilingWolf 系列，repo 命名规则为
-#   SmilingWolf/{name} → fireicewolf/{name}
+# T5 tokenizer / TAEFlux / CLTagger have no corresponding mirror on ModelScope
+# yet, so they fall back to HF.
+# WD14: fireicewolf mirrors the SmilingWolf series on ModelScope, with repos
+# named as SmilingWolf/{name} -> fireicewolf/{name}
 _MS_WD14_OWNER = "fireicewolf"
 _HF_WD14_OWNER = "SmilingWolf"
 
 
 def _ms_wd14_repo_id(hf_repo_id: str) -> Optional[str]:
-    """把 SmilingWolf/wd-xxx 换成 fireicewolf/wd-xxx；其它 repo 返回 None。"""
+    """Converts SmilingWolf/wd-xxx to fireicewolf/wd-xxx; returns None for other repos."""
     if hf_repo_id.startswith(_HF_WD14_OWNER + "/"):
         name = hf_repo_id[len(_HF_WD14_OWNER) + 1:]
         return f"{_MS_WD14_OWNER}/{name}"
     return None
 
 
-# CLIP / DINO eval 指标模型的 ModelScope 镜像映射。社区镜像组织 AI-ModelScope
-# 同步了 HF 上常见的视觉/多模态模型，repo 名一般一致。没有映射的返回 None →
-# 回退 HuggingFace（与 wd14 非 SmilingWolf 前缀同样的优雅回退）。MS 源仅在用户
-# 主动把 eval 源切到 modelscope 时才走到；默认 HF。具体 repo 是否存在以
-# ModelScope 实际为准，缺失时该模型下载失败、用户可切回 HF 源。
+# ModelScope mirror mapping for CLIP / DINO eval-metric models. The community
+# mirror organization AI-ModelScope syncs common vision/multimodal models from
+# HF, generally under matching repo names. An unmapped model returns None ->
+# falls back to HuggingFace (the same graceful fallback as wd14's
+# non-SmilingWolf-prefix case). The MS source is only used once the user
+# actively switches the eval source to modelscope; HF is the default. Whether a
+# given repo actually exists is up to ModelScope's actual state -- if missing,
+# that model's download fails and the user can switch back to the HF source.
 _MS_EVAL_REPO_IDS = {
     "openai/clip-vit-base-patch32": "AI-ModelScope/clip-vit-base-patch32",
     "openai/clip-vit-large-patch14": "AI-ModelScope/clip-vit-large-patch14",
@@ -52,50 +59,53 @@ _MS_EVAL_REPO_IDS = {
 
 
 def _ms_eval_repo_id(hf_repo_id: str) -> Optional[str]:
-    """CLIP / DINO 模型的 ModelScope 镜像 id；无映射返回 None（回退 HF）。"""
+    """ModelScope mirror id for a CLIP / DINO model; returns None when unmapped (falls back to HF)."""
     return _MS_EVAL_REPO_IDS.get(hf_repo_id)
 
 
 # ---------------------------------------------------------------------------
-# 同步下载 helper
+# Synchronous download helpers
 # ---------------------------------------------------------------------------
 
 
 def setup_mirror(use_mirror: bool) -> None:
-    """[Legacy] 设置 HF_ENDPOINT 环境变量。
+    """[Legacy] Sets the HF_ENDPOINT environment variable.
 
-    PR-S3 之后 Studio UI 走 secrets.huggingface.endpoint per-call 传给 HF 库，
-    不依赖 env var（env var 只在 huggingface_hub 模块 import 时读一次）。
-    本函数仅保留给 `tools/download_models.py` CLI 早期 setup 流程兼容。
+    Since PR-S3, the Studio UI passes secrets.huggingface.endpoint to the HF
+    library per-call instead of relying on the env var (the env var is only
+    read once, when the huggingface_hub module is imported).
+    This function is kept only for compatibility with `tools/download_models.py`'s
+    early CLI setup flow.
     """
     if use_mirror:
         os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    # 关镜像不主动 unset HF_ENDPOINT — 留给上层显式管理
+    # Turning the mirror off does not actively unset HF_ENDPOINT -- left for the caller to manage explicitly
 
 
 def _resolve_endpoint() -> Optional[str]:
-    """决定本次下载用什么 HF endpoint。优先级：
+    """Decides which HF endpoint to use for this download. Priority:
 
-    1. `HF_ENDPOINT` 环境变量（CLI 走 setup_mirror 设的，或用户手 export）
-    2. `secrets.huggingface.endpoint`（Studio UI 配的）
-    3. None（让 huggingface_hub 用默认 huggingface.co）
+    1. the `HF_ENDPOINT` environment variable (set by the CLI's setup_mirror, or
+       manually exported by the user)
+    2. `secrets.huggingface.endpoint` (configured in the Studio UI)
+    3. None (lets huggingface_hub use the default huggingface.co)
 
-    每次下载都调一次，UI 改了配置无需重启 server。
+    Called once per download, so a config change in the UI needs no server restart.
     """
     env = os.environ.get("HF_ENDPOINT", "").strip()
     if env:
         return env
     try:
         endpoint = secrets.load().huggingface.endpoint
-    except Exception:  # noqa: BLE001  secrets 损坏不应阻断下载
+    except Exception:  # noqa: BLE001  corrupted secrets shouldn't block a download
         return None
     return endpoint or None
 
 
 def _get_download_source() -> str:
-    """返回当前配置的下载源（'huggingface' 或 'modelscope'）。
+    """Returns the currently configured download source ('huggingface' or 'modelscope').
 
-    优先读 MODELSCOPE_SOURCE env var（CLI flag 用）；否则读 secrets。
+    Prefers the MODELSCOPE_SOURCE env var (used by the CLI flag); otherwise reads from secrets.
     """
     env = os.environ.get("MODELSCOPE_SOURCE", "").strip()
     if env:
@@ -107,11 +117,12 @@ def _get_download_source() -> str:
 
 
 def _source_for(type_key: str) -> str:
-    """某下载类型（training / wd14 / upscaler）当前选的源。
+    """The currently selected source for a download type (training / wd14 / upscaler).
 
-    MODELSCOPE_SOURCE env 仍作全局强制覆盖（CLI flag / CI）；否则读
-    secrets.download_sources[type_key]，缺省 / 非法值回落 huggingface。
-    固定 HF 的类型（cltagger / t5 / taeflux）不走这里。
+    MODELSCOPE_SOURCE env still acts as a global forced override (CLI flag /
+    CI); otherwise reads secrets.download_sources[type_key], falling back to
+    huggingface for a missing/invalid value. Types fixed to HF (cltagger / t5 /
+    taeflux) don't go through here.
     """
     env = os.environ.get("MODELSCOPE_SOURCE", "").strip().lower()
     if env in ("huggingface", "modelscope"):
@@ -124,7 +135,7 @@ def _source_for(type_key: str) -> str:
 
 
 def _ms_token() -> Optional[str]:
-    """读 ModelScope token：环境变量优先，其次 secrets。"""
+    """Reads the ModelScope token: environment variable first, then secrets."""
     env = os.environ.get("MODELSCOPE_API_TOKEN", "").strip()
     if env:
         return env
@@ -136,9 +147,10 @@ def _ms_token() -> Optional[str]:
 
 
 def _hf_token() -> Optional[str]:
-    """读 HF token：环境变量优先，其次 secrets.huggingface.token。
+    """Reads the HF token: environment variable first, then secrets.huggingface.token.
 
-    gated / private 仓库（如 cl_tagger_v2）下载需要；公开仓库不填也能下。
+    Needed to download gated / private repos (e.g. cl_tagger_v2); public repos
+    can be downloaded without one.
     """
     for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
         env = os.environ.get(var, "").strip()
@@ -147,12 +159,13 @@ def _hf_token() -> Optional[str]:
     try:
         t = secrets.load().huggingface.token
         return t or None
-    except Exception:  # noqa: BLE001  secrets 损坏不应阻断下载
+    except Exception:  # noqa: BLE001  corrupted secrets shouldn't block a download
         return None
 
 
 def _is_gated_auth_error(exc: BaseException) -> bool:
-    """粗判下载异常是否源于 gated/private 授权失败，用于追加可操作提示。"""
+    """Roughly determines whether a download exception stems from a gated/private
+    authorization failure, so an actionable hint can be appended."""
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
     return (
@@ -173,22 +186,24 @@ def download_flat_ms(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """用 modelscope Python API 下载单个文件到 target。
+    """Downloads a single file to target using the modelscope Python API.
 
-    `model_file_download(local_dir=target.parent)` 会把文件落在
-    `target.parent / repo_subpath`（保留 repo 内路径结构），之后复用与
-    `download_flat` 完全相同的 rename + 清理空目录逻辑把文件移到 target。
+    `model_file_download(local_dir=target.parent)` lands the file at
+    `target.parent / repo_subpath` (preserving the repo's internal path
+    structure), after which the exact same rename + empty-directory-cleanup
+    logic as `download_flat` moves it to target.
 
-    需要 ``pip install modelscope``；未安装时返回 False 并打印提示。
-    token 优先读 MODELSCOPE_API_TOKEN env var，其次 secrets.modelscope.token。
+    Requires ``pip install modelscope``; returns False and prints a hint if not
+    installed. The token is read from the MODELSCOPE_API_TOKEN env var first,
+    then secrets.modelscope.token.
     """
     if target.exists():
-        on_log(f"   ✓ {target.name} 已存在，跳过")
+        on_log(f"   already have {target.name}, skipping")
         return True
     try:
         from modelscope.hub.file_download import model_file_download
     except ImportError:
-        on_log("   ✗ 缺 modelscope（pip install modelscope）")
+        on_log("   missing modelscope (pip install modelscope)")
         return False
     target.parent.mkdir(parents=True, exist_ok=True)
     token = _ms_token()
@@ -202,16 +217,16 @@ def download_flat_ms(
             kwargs["token"] = token
         model_file_download(**kwargs)
     except Exception as exc:
-        on_log(f"   ✗ {target.name} (ModelScope): {exc}")
+        on_log(f"   failed {target.name} (ModelScope): {exc}")
         return False
-    # model_file_download 保留 repo 内路径；与 download_flat 逻辑完全一致
+    # model_file_download preserves the repo's internal path; the logic below matches download_flat exactly
     src = target.parent / repo_subpath
     if src != target:
         try:
             target.unlink(missing_ok=True)
             src.rename(target)
         except OSError as exc:
-            on_log(f"   ✗ rename 失败 {src} → {target}: {exc}")
+            on_log(f"   rename failed {src} -> {target}: {exc}")
             return False
         parent = src.parent
         while parent != target.parent and parent.exists():
@@ -222,7 +237,7 @@ def download_flat_ms(
             except OSError:
                 break
             parent = parent.parent
-    on_log(f"   ✓ {target.name} (via ModelScope)")
+    on_log(f"   done {target.name} (via ModelScope)")
     return True
 
 
@@ -233,18 +248,19 @@ def download_flat(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """从 HF 下载 repo_subpath，扁平落到 target；返回 True = 已就绪。
+    """Downloads repo_subpath from HF and lands it flat at target; returns True = ready.
 
-    实现：`hf_hub_download(local_dir=target.parent)` 把 repo 内部目录建出来，
-    再 rename 到 target（同卷 atomic，不重复 4 GB）。已存在直接跳过。
+    Implementation: `hf_hub_download(local_dir=target.parent)` builds out the
+    repo's internal directory structure, then renames it to target (atomic on
+    the same volume, no duplicating 4 GB). Skips outright if already present.
     """
     if target.exists():
-        on_log(f"   ✓ {target.name} 已存在，跳过")
+        on_log(f"   already have {target.name}, skipping")
         return True
     try:
         from huggingface_hub import hf_hub_download
     except ImportError:
-        on_log("   ✗ 缺 huggingface_hub")
+        on_log("   missing huggingface_hub")
         return False
     target.parent.mkdir(parents=True, exist_ok=True)
     endpoint = _resolve_endpoint()
@@ -262,12 +278,13 @@ def download_flat(
             kwargs["token"] = token
         hf_hub_download(**kwargs)
     except Exception as exc:
-        on_log(f"   ✗ {target.name}: {exc}")
+        on_log(f"   failed {target.name}: {exc}")
         if _is_gated_auth_error(exc):
             on_log(
-                "   ↳ 该仓库可能是 gated/private：请先到 huggingface.co 申请并接受"
-                "模型授权，再到 设置→密钥 填 HuggingFace token（或设 HF_TOKEN 环境"
-                "变量）后重试。"
+                "   -> This repo may be gated/private: please apply for and accept "
+                "the model license at huggingface.co first, then fill in your "
+                "HuggingFace token under Settings -> Keys (or set the HF_TOKEN "
+                "environment variable) and retry."
             )
         return False
     src = target.parent / repo_subpath
@@ -276,9 +293,9 @@ def download_flat(
             target.unlink(missing_ok=True)
             src.rename(target)
         except OSError as exc:
-            on_log(f"   ✗ rename 失败 {src} → {target}: {exc}")
+            on_log(f"   rename failed {src} -> {target}: {exc}")
             return False
-        # 清理空中间目录
+        # Clean up empty intermediate directories
         parent = src.parent
         while parent != target.parent and parent.exists():
             try:
@@ -288,7 +305,7 @@ def download_flat(
             except OSError:
                 break
             parent = parent.parent
-    on_log(f"   ✓ {target.name}")
+    on_log(f"   done {target.name}")
     return True
 
 
@@ -299,18 +316,20 @@ def download_snapshot(
     allow_patterns: Optional[list[str]] = None,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """从 HF 把整个 repo 下到 target_dir（多文件 transformers 模型用）。
+    """Downloads a whole repo from HF into target_dir (used for multi-file
+    transformers models).
 
-    与 download_flat（单文件 + 扁平 rename）不同，这里保留 repo 目录结构整目录
-    落地，from_pretrained 直接指向 target_dir。已就绪（有 config.json）则跳过。
+    Unlike download_flat (single file + flat rename), this lands the whole
+    directory preserving the repo's structure, so from_pretrained can point
+    directly at target_dir. Skips if already ready (has a config.json).
     """
     if (target_dir / "config.json").exists():
-        on_log(f"   ✓ {target_dir.name} 已存在，跳过")
+        on_log(f"   already have {target_dir.name}, skipping")
         return True
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
-        on_log("   ✗ 缺 huggingface_hub")
+        on_log("   missing huggingface_hub")
         return False
     target_dir.mkdir(parents=True, exist_ok=True)
     endpoint = _resolve_endpoint()
@@ -325,14 +344,15 @@ def download_snapshot(
             kwargs["token"] = token
         snapshot_download(**kwargs)
     except Exception as exc:
-        on_log(f"   ✗ {target_dir.name}: {exc}")
+        on_log(f"   failed {target_dir.name}: {exc}")
         if _is_gated_auth_error(exc):
             on_log(
-                "   ↳ 该仓库可能是 gated/private：请先到 huggingface.co 申请并接受"
-                "模型授权，再到 设置→密钥 填 HuggingFace token 后重试。"
+                "   -> This repo may be gated/private: please apply for and accept "
+                "the model license at huggingface.co first, then fill in your "
+                "HuggingFace token under Settings -> Keys and retry."
             )
         return False
-    on_log(f"   ✓ {target_dir.name}")
+    on_log(f"   done {target_dir.name}")
     return True
 
 
@@ -342,17 +362,17 @@ def download_snapshot_ms(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """从 ModelScope 把整个 repo 下到 target_dir（多文件模型用）。
+    """Downloads a whole repo from ModelScope into target_dir (used for multi-file models).
 
-    需要 ``pip install modelscope``；未安装返回 False。已就绪则跳过。
+    Requires ``pip install modelscope``; returns False if not installed. Skips if already ready.
     """
     if (target_dir / "config.json").exists():
-        on_log(f"   ✓ {target_dir.name} 已存在，跳过")
+        on_log(f"   already have {target_dir.name}, skipping")
         return True
     try:
         from modelscope import snapshot_download as ms_snapshot
     except ImportError:
-        on_log("   ✗ 缺 modelscope（pip install modelscope）")
+        on_log("   missing modelscope (pip install modelscope)")
         return False
     target_dir.mkdir(parents=True, exist_ok=True)
     token = _ms_token()
@@ -362,9 +382,9 @@ def download_snapshot_ms(
             kwargs["token"] = token
         ms_snapshot(**kwargs)
     except Exception as exc:
-        on_log(f"   ✗ {target_dir.name} (ModelScope): {exc}")
+        on_log(f"   failed {target_dir.name} (ModelScope): {exc}")
         return False
-    on_log(f"   ✓ {target_dir.name} (via ModelScope)")
+    on_log(f"   done {target_dir.name} (via ModelScope)")
     return True
 
 

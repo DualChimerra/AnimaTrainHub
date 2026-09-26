@@ -1,12 +1,14 @@
 /**
- * UploadProgressBar — 浏览器上传共用进度条 UI。
+ * UploadProgressBar - shared progress bar UI for browser uploads.
  *
- * 三个阶段视觉区分：
- *   - uploading  → 实进度 + speed + ETA
- *   - processing → 100% 满条 + "处理中…"（server 同步解包 / 落盘的等待）
- *   - error      → 红色边 + 错误信息
+ * Three visually distinct phases:
+ *   - uploading  -> real progress + speed + ETA
+ *   - processing -> full bar + "Processing..." (waiting on the server to
+ *                   unpack / write to disk synchronously)
+ *   - error      -> red border + error message
  *
- * 业务侧只负责喂 state（来自 useUploadProgress），其余完全 stateless。
+ * Callers only need to feed it state (from useUploadProgress); everything
+ * else is fully stateless.
  */
 import { useTranslation } from 'react-i18next'
 

@@ -1,15 +1,16 @@
-/** 数据集文件夹名元信息解析。
+/** Parses metadata out of a dataset folder name.
  *
- *  SYNC WITH `runtime/training/dataset.py:ImageDataset._parse_folder_meta` —— 两处
- *  解析必须一致，否则前端显示 / 放大目标 ≠ trainer 实际行为。
+ *  SYNC WITH `runtime/training/dataset.py:ImageDataset._parse_folder_meta` --
+ *  the two parsers must stay in agreement, otherwise the frontend's display /
+ *  upscale target diverges from the trainer's actual behavior.
  *
- *  文法 `[Npx_][R_]label`（token 顺序，均可选）：
- *   - `\d+px` 分辨率前缀（snap 到 64 倍数 + clamp [256,4096]）
+ *  Grammar `[Npx_][R_]label` (token order, both prefixes optional):
+ *   - `\d+px` resolution prefix (snapped to a multiple of 64 + clamped to [256,4096])
  *   - `\d+` Kohya repeat
- *   - 其余为 label
+ *   - the remainder is the label
  */
 export interface FolderMeta {
-  /** px 前缀指定的分辨率；null = 无前缀（用 config 分辨率列表 fan-out）。 */
+  /** Resolution specified by the px prefix; null = no prefix (fans out over the config's resolution list). */
   reso: number | null
   repeat: number
   label: string

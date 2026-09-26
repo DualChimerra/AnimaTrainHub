@@ -1,27 +1,32 @@
 /**
- * useZoomPan — 图片 / 画布查看视口：滚轮指针中心缩放 + 拖拽平移 + fit/100%。
+ * useZoomPan -- image / canvas viewing viewport: wheel zoom around the
+ * pointer + drag pan + fit/100%.
  *
- * 从涂抹页 InpaintCanvas 的视图层抽出（PR-B 系列），供全部单图查看场景复用：
- * FullscreenViewer / ImagePreviewModal / TagEdit 内嵌单图 / InpaintCanvas。
+ * Extracted from the inpaint page's InpaintCanvas view layer (PR-B series),
+ * reused by every single-image viewing scenario: FullscreenViewer /
+ * ImagePreviewModal / the embedded single image in TagEdit / InpaintCanvas.
  *
- * 用法（查看器，左键拖拽 = pan）：
+ * Usage (viewer, left-drag = pan):
  *   const zp = useZoomPan({ contentW, contentH, primaryButtonPans: true })
  *   <div ref={zp.wrapRef} {...zp.handlers} style={{ touchAction: 'none', ... }}>
  *     <img ref={zp.contentRef} style={{ position:'absolute', left:0, top:0,
  *          transformOrigin:'0 0' }} ... />
  *   </div>
  *
- * 用法（画笔类，左键留给画笔，空格 / 中键 = pan）：primaryButtonPans 缺省
- * false，调用方在自己的 pointer handler 里先问 panPointerDown/Move —— 返回
- * true 表示本事件是 pan 手势已被接管，画笔逻辑应跳过。
+ * Usage (brush-style tools, left button reserved for the brush, spacebar /
+ * middle button = pan): primaryButtonPans defaults to false; the caller asks
+ * panPointerDown/Move first in its own pointer handler -- returning true
+ * means this event was claimed as a pan gesture and the brush logic should
+ * skip it.
  *
- * 行为约定（与涂抹页一致）：
- * - wheel 缩放以指针为中心（non-passive，preventDefault 防页面滚动）
- * - 空格按住 = pan 修饰键（表单元素聚焦时不劫持）
- * - 容器 resize 时若用户没手动动过视图则保持 fit
- * - contentW/H 变化（换图）自动重新 fit
- * - 视图状态放 ref 直改 DOM transform —— pan/zoom 高频路径不走 React 渲染，
- *   只有 zoomPct（readout 用）走 state
+ * Behavior conventions (matching the inpaint page):
+ * - wheel zoom is centered on the pointer (non-passive, preventDefault to stop page scroll)
+ * - holding spacebar = the pan modifier key (not hijacked while a form element is focused)
+ * - on container resize, stays fit as long as the user hasn't manually touched the view
+ * - contentW/H changes (switching images) trigger an automatic refit
+ * - view state lives in a ref and writes straight to the DOM transform --
+ *   the pan/zoom hot path never goes through React rendering; only zoomPct
+ *   (for the readout) goes through state
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -32,21 +37,22 @@ export interface ZoomPanView {
 }
 
 export interface UseZoomPanOptions {
-  /** 内容原始尺寸（图片 naturalWidth/Height 或 canvas 尺寸）。0 时视为未就绪。 */
+  /** The content's native size (image naturalWidth/Height or canvas size). Treated as not-ready when 0. */
   contentW: number
   contentH: number
-  /** true = 左键拖拽即 pan（纯查看器）；false = 仅空格 / 中键（画笔类）。 */
+  /** true = left-drag pans (pure viewer); false = spacebar / middle button only (brush-style tools). */
   primaryButtonPans?: boolean
-  /** 缩放的 DOM 应用方式：
-   *  - 'transform'（默认）：translate+scale，纯 composite 最快；内容整体
-   *    视觉缩放（含边框 / 子元素）。
-   *  - 'size'：改宽高 + translate 平移 —— 内容按新尺寸重排，px 单位的
-   *    border / handle / label 不跟着缩放（DOM overlay 编辑器用，如
-   *    FreeCropEditor 的 % 定位 rect）。每帧触发 layout，小子树可接受。 */
+  /** How zoom is applied to the DOM:
+   *  - 'transform' (default): translate+scale, pure compositing, fastest;
+   *    scales the content as a whole (including borders / children).
+   *  - 'size': changes width/height + translates -- content reflows at the
+   *    new size, while px-based borders / handles / labels don't scale with
+   *    it (used by DOM overlay editors, e.g. FreeCropEditor's %-positioned
+   *    rects). Triggers layout every frame, acceptable for a small subtree. */
   applyMode?: 'transform' | 'size'
-  /** fit 时的留边系数，默认 0.98。 */
+  /** Padding factor used when fitting, defaults to 0.98. */
   fitPadding?: number
-  /** 缩放上下限（scale 值）。 */
+  /** Zoom bounds (scale values). */
   minScale?: number
   maxScale?: number
 }
@@ -66,7 +72,9 @@ export function useZoomPan({
   const interactedRef = useRef(false)
   const spaceRef = useRef(false)
   const panRef = useRef<{ x: number; y: number } | null>(null)
-  // pan 手势发生过拖动（区分「点击遮罩关闭」与「拖完松手」——查看器 modal 用）
+  // Whether the current pan gesture involved any dragging (distinguishes
+  // "clicked the backdrop to close" from "dragged then released" -- used by
+  // the viewer modal)
   const draggedRef = useRef(false)
   const [zoomPct, setZoomPct] = useState(100)
 
@@ -103,7 +111,7 @@ export function useZoomPan({
     applyView()
   }, [contentW, contentH, fitPadding, applyView])
 
-  /** 以视口中心为锚点回 100%。 */
+  /** Returns to 100%, anchored on the viewport center. */
   const reset100 = useCallback(() => {
     const wrap = wrapRef.current
     if (!wrap) return
@@ -120,7 +128,7 @@ export function useZoomPan({
     applyView()
   }, [applyView])
 
-  /** 屏幕坐标 → 内容坐标（原始像素）。容器未挂载返回 null。 */
+  /** Screen coordinates -> content coordinates (native pixels). Returns null if the container isn't mounted. */
   const toContentPoint = useCallback((clientX: number, clientY: number) => {
     const wrap = wrapRef.current
     if (!wrap) return null
@@ -132,12 +140,12 @@ export function useZoomPan({
     }
   }, [])
 
-  // 换图 / 初次就绪自动 fit
+  // Auto-fit when switching images / on initial readiness
   useEffect(() => {
     fit()
   }, [fit])
 
-  // 容器 resize：用户没手动动过视图时保持 fit
+  // Container resize: stays fit as long as the user hasn't manually touched the view
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
@@ -148,7 +156,7 @@ export function useZoomPan({
     return () => ro.disconnect()
   }, [fit])
 
-  // wheel zoom —— React onWheel 是 passive，必须手动挂 non-passive 才能 preventDefault
+  // wheel zoom -- React's onWheel is passive, so this must be attached manually as non-passive to allow preventDefault
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
@@ -172,7 +180,7 @@ export function useZoomPan({
     return () => wrap.removeEventListener('wheel', onWheel)
   }, [applyView, minScale, maxScale])
 
-  // 空格 = pan 修饰键（表单元素聚焦时不劫持）
+  // Spacebar = the pan modifier key (not hijacked while a form element is focused)
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return
@@ -197,7 +205,7 @@ export function useZoomPan({
     }
   }, [])
 
-  /** pointerdown 是否为 pan 手势；是则接管（调用方跳过自己的逻辑）。 */
+  /** Whether a pointerdown is a pan gesture; if so, claims it (the caller should skip its own logic). */
   const panPointerDown = useCallback((e: React.PointerEvent): boolean => {
     const isPan =
       spaceRef.current ||
@@ -209,7 +217,7 @@ export function useZoomPan({
     return true
   }, [primaryButtonPans])
 
-  /** pan 进行中的移动；返回是否消费了本事件。 */
+  /** Movement while a pan is in progress; returns whether this event was consumed. */
   const panPointerMove = useCallback((e: React.PointerEvent): boolean => {
     if (!panRef.current) return false
     const dx = e.clientX - panRef.current.x
@@ -226,7 +234,7 @@ export function useZoomPan({
     return true
   }, [applyToDom])
 
-  /** 结束 pan；返回本次手势是否发生过拖动（modal 据此决定是否当作点击关闭）。 */
+  /** Ends the pan; returns whether this gesture involved any dragging (the modal uses this to decide whether to treat it as a click-to-close). */
   const endPan = useCallback((): boolean => {
     panRef.current = null
     const dragged = draggedRef.current
@@ -234,7 +242,7 @@ export function useZoomPan({
     return dragged
   }, [])
 
-  /** 查看器一把梭绑定（画笔类不要用——自己组合 panPointerDown/Move/endPan）。 */
+  /** All-in-one binding for viewers (don't use for brush-style tools -- compose panPointerDown/Move/endPan yourself instead). */
   const handlers = {
     onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => {
       if (panPointerDown(e)) e.currentTarget.setPointerCapture(e.pointerId)

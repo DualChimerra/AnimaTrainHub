@@ -1,8 +1,9 @@
-"""v6 → v7: versions.trigger_word — 项目级触发词由 Step 4 (Tagging) 填写。
+"""v6 -> v7: versions.trigger_word -- the project-level trigger word, filled in at Step 4 (Tagging).
 
-加列 `versions.trigger_word TEXT DEFAULT ''`。空串语义 = 不启用触发词。
-Tag worker 用它在写 caption 时 prepend 第一个 tag；version_config 把它注入
-私有 yaml，runtime bootstrap_phase 顺便把它注入 sample_prompt/sample_prompts。
+Adds column `versions.trigger_word TEXT DEFAULT ''`. Empty string means the trigger word is
+disabled. The tag worker prepends it as the first tag when writing captions; version_config
+injects it into the private yaml, and runtime bootstrap_phase also injects it into
+sample_prompt/sample_prompts.
 """
 from __future__ import annotations
 

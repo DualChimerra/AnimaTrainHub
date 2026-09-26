@@ -1,6 +1,6 @@
-"""resume_phase：progress 初始化 + state recovery + 信号注册 + step 0 baseline 采样。
+"""resume_phase: progress init + state recovery + signal registration + step 0 baseline sampling.
 
-抽自 main() L439-594（ADR 0003 PR-B）。
+Extracted from main() L439-594 (ADR 0003 PR-B).
 """
 
 from __future__ import annotations
@@ -24,15 +24,15 @@ logger = logging.getLogger(__name__)
 
 def run(ctx: TrainingContext) -> None:
     """
-    - init_progress + 可选 Rich Live（含 loss curve panel）
-    - 如有 --resume-state：load_training_state + restore monitor 历史 loss
-    - 注册 SIGINT → ctx.handle_interrupt
-    - 准备 sample_prompts 列表（多角色轮换）
-    - global_step==0 时跑 baseline 采样（最多 3 prompt）
+    - init_progress + optional Rich Live (incl. loss curve panel)
+    - if --resume-state is set: load_training_state + restore monitor's historical loss
+    - register SIGINT -> ctx.handle_interrupt
+    - prepare the sample_prompts list (multi-character rotation)
+    - run baseline sampling when global_step==0 (up to 3 prompts)
     """
     args = ctx.args
 
-    # 初始化进度显示
+    # Initialize the progress display
     ctx.progress, ctx.task_id, progress_kind = init_progress(not args.no_progress, ctx.total_steps)
     ctx.use_rich = progress_kind == "rich"
     ctx.use_plain = ctx.progress == "plain"
@@ -54,11 +54,11 @@ def run(ctx: TrainingContext) -> None:
             ctx.live = None
             ctx.progress.start()
 
-    # 训练循环初始状态
+    # Initial training loop state
     ctx.global_step = 0
     ctx.start_epoch = 0
 
-    # 从训练状态恢复（断点续训）
+    # Restore from training state (resume from checkpoint)
     if getattr(args, "resume_state", "") and Path(args.resume_state).exists():
         ctx.start_epoch, ctx.global_step, ctx.loss_history, saved_monitor_state = load_training_state(
             args.resume_state, ctx.injector, ctx.optimizer, ctx.scheduler,
@@ -68,9 +68,9 @@ def run(ctx: TrainingContext) -> None:
             expected_family=ctx.family.spec.family_id,
             ema=ctx.ema,
         )
-        ctx.emit(f"从断点恢复训练: epoch={ctx.start_epoch}, step={ctx.global_step}")
+        ctx.emit(f"Resumed training from checkpoint: epoch={ctx.start_epoch}, step={ctx.global_step}")
 
-        # 恢复监控面板的历史数据（loss 曲线等）
+        # Restore the monitor panel's historical data (loss curve etc.)
         if ctx.monitor_server and saved_monitor_state:
             try:
                 from train_monitor import restore_monitor_state
@@ -82,44 +82,47 @@ def run(ctx: TrainingContext) -> None:
                     step=ctx.global_step,
                     total_steps=ctx.total_steps,
                 )
-                ctx.emit(f"监控面板历史数据已恢复: {len(saved_monitor_state.get('losses', []))} 个 loss 点")
+                ctx.emit(f"Monitor panel history restored: {len(saved_monitor_state.get('losses', []))} loss points")
             except Exception as e:
-                ctx.emit(f"监控数据恢复失败: {e}")
+                ctx.emit(f"Monitor data restore failed: {e}")
 
-        # ADR §`_on_line` 识别此事件后清理上次 pause 文件对（PR-3 cmd_builder 接入）。
+        # ADR §`_on_line` recognizes this event and cleans up the previous pause file pair (wired up via PR-3 cmd_builder).
         emit_event("resume_state_loaded", {"path": str(args.resume_state)})
 
-    # 信号处理：handle_interrupt 由 TrainingContext 自带，跨平台双绑
-    # （ADR §`runtime/training/phases/resume.py`）：
-    #   POSIX：SIGINT（CLI Ctrl+C / supervisor `os.kill(pid, SIGINT)`）
-    #   Windows：SIGINT 留给 CLI Ctrl+C，SIGBREAK 接 supervisor 发的
-    #     CTRL_BREAK_EVENT（CREATE_NEW_PROCESS_GROUP 子进程组收不到 CTRL_C_EVENT）
+    # Signal handling: handle_interrupt comes from TrainingContext itself, bound
+    # cross-platform in two ways (ADR §`runtime/training/phases/resume.py`):
+    #   POSIX: SIGINT (CLI Ctrl+C / supervisor `os.kill(pid, SIGINT)`)
+    #   Windows: SIGINT is left for CLI Ctrl+C; SIGBREAK catches the supervisor's
+    #     CTRL_BREAK_EVENT (a CREATE_NEW_PROCESS_GROUP child process group doesn't
+    #     receive CTRL_C_EVENT)
     signal.signal(signal.SIGINT, ctx.handle_interrupt)
     if os.name == "nt":
-        # SIGBREAK 在 POSIX 上不存在；只 Windows 注册
+        # SIGBREAK doesn't exist on POSIX; only register it on Windows
         signal.signal(signal.SIGBREAK, ctx.handle_interrupt)  # type: ignore[attr-defined]
 
     ctx.current_epoch = ctx.start_epoch
     ctx.model.train()
-    # Schedule-Free 系优化器（PPSF / soap_sf 等）须从 train_mode 起步：参数张量
-    # 持有梯度评估点 y 而非 averaged x。duck-type 而非硬编码 optimizer_type，新增
-    # schedule-free 变体零改动；AdamW / Prodigy 无 .train 方法走 hasattr 静默跳过。
+    # Schedule-Free-family optimizers (PPSF / soap_sf etc.) must start in
+    # train_mode: their parameter tensors hold the gradient evaluation point y,
+    # not the averaged x. We duck-type rather than hardcode optimizer_type, so
+    # new schedule-free variants need zero changes here; AdamW / Prodigy have no
+    # .train method and are silently skipped via hasattr.
     if hasattr(ctx.optimizer, "train") and callable(getattr(ctx.optimizer, "train")):
         ctx.optimizer.train()
-    # step_start_time 由 train_loop 内自己重置；这里不需要
+    # step_start_time is reset inside train_loop itself; not needed here
 
-    # 设置采样提示词列表（支持多角色轮换）
+    # Set up the sample prompt list (supports multi-character rotation)
     ctx.sample_prompts = getattr(args, "sample_prompts", []) or []
     if not ctx.sample_prompts and args.sample_prompt:
         ctx.sample_prompts = [args.sample_prompt]
     ctx.sample_prompt_idx = 0
 
-    # Step 0 初始采样（基线效果，测试所有提示词）
-    # 只在新训练时执行（global_step == 0），resume 时跳过
+    # Step 0 initial sampling (baseline result, tests all prompts)
+    # Only runs for a fresh training run (global_step == 0); skipped on resume
     sampling_enabled = args.sample_steps > 0 or args.sample_every > 0
     if ctx.global_step == 0 and sampling_enabled:
-        ctx.emit("采样中 (step 0, 基线)...")
-        for i, prompt in enumerate(ctx.sample_prompts[:3]):  # 最多测试 3 个
+        ctx.emit("Sampling (step 0, baseline)...")
+        for i, prompt in enumerate(ctx.sample_prompts[:3]):  # test at most 3
             sample_path = ctx.sample_dir / f"step_0_baseline_{i}.png"
             run_sample(
                 ctx,
@@ -131,9 +134,10 @@ def run(ctx: TrainingContext) -> None:
                 seed_offset=i,
             )
     elif ctx.global_step > 0 and sampling_enabled:
-        ctx.emit(f"跳过启动基线采样（从 step {ctx.global_step} 恢复，非 step 0）")
+        ctx.emit(f"Skipping startup baseline sampling (resumed from step {ctx.global_step}, not step 0)")
 
-    # ADR §8.1 is_pausable 信号：resume phase 全部跑完 → 训练进入主循环 →
-    # 允许用户暂停。supervisor `_on_line` 收到此事件后 slot.train_loop_started = True
-    # → 通过 SSE 派发 is_pausable=True 解锁 UI 暂停按钮。
+    # ADR §8.1 is_pausable signal: once the resume phase finishes -> training
+    # enters the main loop -> the user may pause. When the supervisor's
+    # `_on_line` receives this event it sets slot.train_loop_started = True,
+    # which dispatches is_pausable=True over SSE to unlock the UI's pause button.
     emit_event("train_loop_started", {"global_step": ctx.global_step})

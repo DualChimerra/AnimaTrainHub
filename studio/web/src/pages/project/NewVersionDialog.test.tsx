@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { NewVersionDialog } from './Layout'
 
 describe('NewVersionDialog (PP10.1)', () => {
-  it('hides 从…创建 dropdown when no existing versions', () => {
+  it('hides the "Fork from…" dropdown when no existing versions', () => {
     render(
       <NewVersionDialog
         existingLabels={[]}
@@ -13,7 +13,7 @@ describe('NewVersionDialog (PP10.1)', () => {
         onSubmit={() => {}}
       />,
     )
-    expect(screen.queryByText(/从…创建/)).toBeNull()
+    expect(screen.queryByText(/Fork from…/)).toBeNull()
   })
 
   it('shows dropdown with existing versions and submits with null forkFrom by default', async () => {
@@ -27,14 +27,14 @@ describe('NewVersionDialog (PP10.1)', () => {
         onSubmit={onSubmit}
       />,
     )
-    expect(screen.getByText(/从…创建/)).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: '从空白开始' })).toBeInTheDocument()
+    expect(screen.getByText(/Fork from…/)).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Start from scratch' })).toBeInTheDocument()
     expect(
-      screen.getByRole('option', { name: /从 baseline 复制/ }),
+      screen.getByRole('option', { name: /Copy from baseline/ }),
     ).toBeInTheDocument()
 
     await user.type(screen.getByPlaceholderText(/baseline/), 'high-lr')
-    await user.click(screen.getByRole('button', { name: '创建' }))
+    await user.click(screen.getByRole('button', { name: 'Create' }))
     expect(onSubmit).toHaveBeenCalledWith('high-lr', null)
   })
 
@@ -51,9 +51,9 @@ describe('NewVersionDialog (PP10.1)', () => {
     )
     await user.type(screen.getByPlaceholderText(/baseline/), 'forked')
     await user.selectOptions(screen.getByRole('combobox'), '7')
-    // 选了源 version 后应该出现 hint
-    expect(screen.getByText(/将复制 train\/、reg\//)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '创建' }))
+    // A hint should appear once a source version is picked
+    expect(screen.getByText(/Copies train\/, reg\//)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Create' }))
     expect(onSubmit).toHaveBeenCalledWith('forked', 7)
   })
 
@@ -69,8 +69,8 @@ describe('NewVersionDialog (PP10.1)', () => {
       />,
     )
     await user.type(screen.getByPlaceholderText(/baseline/), 'baseline')
-    await user.click(screen.getByRole('button', { name: '创建' }))
+    await user.click(screen.getByRole('button', { name: 'Create' }))
     expect(onSubmit).not.toHaveBeenCalled()
-    expect(screen.getByText(/label 已存在/)).toBeInTheDocument()
+    expect(screen.getByText(/Label already exists/)).toBeInTheDocument()
   })
 })

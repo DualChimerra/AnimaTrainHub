@@ -1,4 +1,4 @@
-"""/api/projects + versions CRUD 请求 BaseModel（PR-6.5 commit 1 从 server.py 抽出）。"""
+"""/api/projects + versions CRUD request BaseModels (extracted from server.py in PR-6.5 commit 1)."""
 from __future__ import annotations
 
 from typing import Any, Optional

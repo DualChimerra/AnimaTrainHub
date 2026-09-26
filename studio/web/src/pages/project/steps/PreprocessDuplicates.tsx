@@ -67,7 +67,7 @@ export default function PreprocessDuplicatesPage() {
     ])
   })
 
-  // 裁剪/缩放候选已并入分组（更严格的重复判断），故预览名单直接取分组成员即可。
+  // Crop/scale candidates have already been merged into groups (a stricter duplicate check), so the preview list can just take group members directly.
   const previewNames = useMemo(
     () => result
       ? Array.from(new Set(
@@ -141,7 +141,7 @@ export default function PreprocessDuplicatesPage() {
     setPreviewIdx(index >= 0 ? index : 0)
   }
 
-  // ADR 0010: hooks 之后再做 vid guard
+  // ADR 0010: do the vid guard after the hooks
   if (!activeVersion) {
     return (
       <div className="p-6 text-fg-secondary">
@@ -162,8 +162,8 @@ export default function PreprocessDuplicatesPage() {
         scanLogVisible && logs.length > 0 && {
           key: 'dup_scan',
           label: t('logDrawer.dupScan'),
-          // 扫描是同步 HTTP + SSE 进度，前端合成状态：跑着 = running，
-          // 否则按最后一条日志判 failed/done。不可取消。
+          // Scanning is synchronous HTTP + SSE progress; the frontend synthesizes the status: running while
+          // in progress, otherwise judged failed/done from the last log line. Not cancelable.
           status: busy
             ? ('running' as const)
             : logs[logs.length - 1]?.status === 'error'

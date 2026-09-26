@@ -1,8 +1,10 @@
-"""Anima 族 block swap 接线（docs/design/block-swap.md B3：机制 family 无关，
-接线 = loader 落位 + 能力位 + 版本感知折扣 + 采样 offload 互斥）。
+"""Anima family block swap wiring (docs/design/block-swap.md B3: the mechanism
+is family-agnostic; wiring = loader placement + capability bit + version-aware
+discount + sampling offload mutual exclusion).
 
-机制核心（四钩子 / 双缓冲 / pinned 生命周期）已由 test_block_swap*.py 钉死，
-这里只测 anima 侧新增的接线面。
+The mechanism core (four hooks / double buffering / pinned lifecycle) is
+already pinned down by test_block_swap*.py; this file only tests the wiring
+surface newly added on the anima side.
 """
 
 from __future__ import annotations
@@ -26,14 +28,15 @@ from training.families.anima.loader import (  # noqa: E402
 _CUDA = torch.cuda.is_available()
 
 
-# ── swapped_param_ratio：safetensors header 数 numel（无 CUDA 依赖） ────────
+# ── swapped_param_ratio: counts numel from the safetensors header (no CUDA dependency) ────────
 
 def _write_fake_checkpoint(path: Path, *, num_blocks: int, prefix: str = "") -> dict:
-    """写一个键形态贴近真实 checkpoint 的小 safetensors。
+    """Write a small safetensors file whose key shapes resemble a real checkpoint.
 
-    每层一个 64 参数张量 + 两个非 block 张量（x_embedder 32 / final_layer 16）。
-    prefix 模拟 model./module. 这类会被 _load_weights_best_effort 剥掉的前缀
-    —— ratio 必须前缀无关。
+    One 64-param tensor per layer + two non-block tensors (x_embedder 32 /
+    final_layer 16). ``prefix`` simulates the model./module. style prefixes
+    that get stripped by _load_weights_best_effort -- the ratio must be
+    prefix-agnostic.
     """
     from safetensors.torch import save_file
 
@@ -50,28 +53,29 @@ def _write_fake_checkpoint(path: Path, *, num_blocks: int, prefix: str = "") -> 
 def test_ratio_counts_trailing_blocks_from_header(tmp_path):
     ckpt = tmp_path / "anima.safetensors"
     _write_fake_checkpoint(ckpt, num_blocks=4)
-    # 总量 = 32 + 16 + 4×64 = 304；换出末尾 2 层 = 128
+    # total = 32 + 16 + 4x64 = 304; swapping the trailing 2 layers = 128
     assert swapped_param_ratio_from_header(ckpt, 2) == pytest.approx(128 / 304)
-    # 全换出
+    # swap everything
     assert swapped_param_ratio_from_header(ckpt, 4) == pytest.approx(256 / 304)
-    # 超界 clamp 到总层数（跨版本共享的设置值，36 喂给 28 层版）
+    # out-of-range clamps to the total layer count (a cross-version shared
+    # setting value: 36 fed into a 28-layer checkpoint)
     assert swapped_param_ratio_from_header(ckpt, 99) == pytest.approx(256 / 304)
     assert swapped_param_ratio_from_header(ckpt, 0) == 0.0
 
 
 def test_ratio_is_prefix_agnostic(tmp_path):
-    """checkpoint 键带 model. 前缀（loader 加载时才剥）→ ratio 不受影响。"""
+    """Checkpoint keys carry a model. prefix (stripped only at loader time) -> ratio is unaffected."""
     ckpt = tmp_path / "prefixed.safetensors"
     _write_fake_checkpoint(ckpt, num_blocks=4, prefix="model.")
     assert swapped_param_ratio_from_header(ckpt, 2) == pytest.approx(128 / 304)
 
 
 def test_family_ratio_degrades_to_conservative_zero(tmp_path):
-    """无路径 / 文件坏 → 0（护栏按完整模型预算，不误放行）。"""
+    """No path / broken file -> 0 (the guard budgets for the full model so it never wrongly lets a config through)."""
     from training.families.anima.family import AnimaFamily
 
     fam = AnimaFamily()
-    assert fam.swapped_param_ratio(14) == 0.0  # 未给 checkpoint_path
+    assert fam.swapped_param_ratio(14) == 0.0  # no checkpoint_path given
     assert fam.swapped_param_ratio(14, checkpoint_path="") == 0.0
     bad = tmp_path / "not_a_checkpoint.safetensors"
     bad.write_bytes(b"garbage")
@@ -82,11 +86,11 @@ def test_family_ratio_degrades_to_conservative_zero(tmp_path):
 
 
 def test_family_reports_swappable_block_count_from_checkpoint(tmp_path):
-    """层数上界只有 checkpoint 自己知道（2B=28 / 14B=36），预检搜推荐值要用它。"""
+    """Only the checkpoint itself knows the layer-count ceiling (2B=28 / 14B=36); preflight's recommendation search needs it."""
     from training.families.anima.family import AnimaFamily
 
     fam = AnimaFamily()
-    assert fam.swappable_blocks() == 0                       # 没路径 → 不下判断
+    assert fam.swappable_blocks() == 0                       # no path -> can't decide
     assert fam.swappable_blocks(checkpoint_path="") == 0
     bad = tmp_path / "broken.safetensors"
     bad.write_bytes(b"garbage")
@@ -98,12 +102,14 @@ def test_family_reports_swappable_block_count_from_checkpoint(tmp_path):
 
 
 def test_preflight_lets_anima_run_on_a_6gb_card(tmp_path, monkeypatch):
-    """**回归**：预检不透传 ``checkpoint_path`` 时 anima 的比例恒为 0，于是
-    算出「换出多少层都省不下显存」，把本来跑得动的 6GB 配置判为不通过。
+    """**Regression**: when preflight doesn't pass through ``checkpoint_path``,
+    anima's ratio is always 0, so it computes "swapping any number of layers
+    saves no VRAM" and judges an otherwise runnable 6GB config as failing.
 
-    这里用真实量级的数字：Anima 2B bf16 权重约 4GB，6GB 卡空闲约 5.5GB。
-    比例为 0 时 need = 4GB + 3GB 基底 > 5.5GB → 拒；拿到真实比例（换出 28/28
-    层，非 block 参数是零头）后 need 落回 3GB 出头 → 放行。
+    Real-world magnitudes here: Anima 2B bf16 weights are about 4GB, and a
+    6GB card has about 5.5GB free. With ratio 0, need = 4GB + 3GB base >
+    5.5GB -> rejected. With the real ratio (swapping 28/28 layers, non-block
+    params are a rounding error), need drops to just over 3GB -> allowed.
     """
     import types
 
@@ -133,10 +139,11 @@ def test_preflight_lets_anima_run_on_a_6gb_card(tmp_path, monkeypatch):
         swapped_param_ratio=fam.swapped_param_ratio,
         swappable_blocks=fam.swappable_blocks,
     )
-    preflight.run(_ctx(real))  # 接线正确 → 放行
+    preflight.run(_ctx(real))  # wiring is correct -> allowed
 
-    # 对照组：比例恒 0（= 漏传 checkpoint_path 的行为）→ 必须被拒，
-    # 证明上面那条不是因为判据太松才绿
+    # control: ratio always 0 (= behavior of a missing checkpoint_path) ->
+    # must be rejected, proving the above passes for the right reason and
+    # not because the criterion is too loose
     blind = types.SimpleNamespace(
         spec=types.SimpleNamespace(capabilities=frozenset({"block_swap"})),
         swapped_param_ratio=lambda _b, *, checkpoint_path=None: 0.0,
@@ -146,10 +153,10 @@ def test_preflight_lets_anima_run_on_a_6gb_card(tmp_path, monkeypatch):
         preflight.run(_ctx(blind))
 
 
-# ── loader 落位：换出层不上卡（§9.4 纪律） ─────────────────────────────────
+# ── loader placement: swapped-out layers never go on the card (§9.4 discipline) ─────────────────────────────────
 
 class _TinyDiT(torch.nn.Module):
-    """结构上贴近 Anima 的最小替身：.blocks ModuleList + 非 block 参数与 buffer。"""
+    """Minimal stand-in shaped like Anima: .blocks ModuleList + non-block params and buffers."""
 
     def __init__(self, num_blocks: int = 4) -> None:
         super().__init__()
@@ -161,24 +168,24 @@ class _TinyDiT(torch.nn.Module):
 
 
 def test_pinned_budget_guard_fails_fast_before_any_placement(monkeypatch):
-    """预算护栏在任何搬运 / 分配之前 raise（B6），无 CUDA 也必须成立。"""
+    """The budget guard raises before any move / allocation happens (B6); must hold even without CUDA."""
     from training import sysmem
 
-    monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 1024)  # 1KB：必拒
+    monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 1024)  # 1KB: must reject
     model = _TinyDiT()
     with pytest.raises(RuntimeError, match="内存不足以换出"):
         place_model_for_block_swap(model, "cuda", torch.float32, 2)
-    # fail-fast 语义：模型分毫未动（全部仍在 CPU、无标记）
+    # fail-fast semantics: the model hasn't moved at all (still all on CPU, no marker)
     assert all(p.device.type == "cpu" for p in model.parameters())
     assert getattr(model, "blocks_to_swap", 0) == 0
 
 
-@pytest.mark.skipif(not _CUDA, reason="需要 CUDA")
+@pytest.mark.skipif(not _CUDA, reason="requires CUDA")
 def test_placement_keeps_swapped_blocks_on_cpu():
-    """非换出部分上卡、末尾 N 层留 CPU、dtype 已 cast、标记落位、超界 clamp。"""
+    """Non-swapped parts go on the card, the trailing N layers stay on CPU, dtype is cast, the marker is set, out-of-range clamps."""
     model = _TinyDiT(num_blocks=4)
     num = place_model_for_block_swap(model, "cuda", torch.bfloat16, 99)
-    assert num == 4  # clamp 到总层数
+    assert num == 4  # clamps to the total layer count
 
     model2 = _TinyDiT(num_blocks=4)
     num2 = place_model_for_block_swap(model2, "cuda", torch.bfloat16, 2)
@@ -187,19 +194,22 @@ def test_placement_keeps_swapped_blocks_on_cpu():
     for i, block in enumerate(model2.blocks):
         expect = "cpu" if i >= 2 else "cuda"
         for p in block.parameters():
-            assert p.device.type == expect, f"blocks.{i} 应在 {expect}"
+            assert p.device.type == expect, f"blocks.{i} should be on {expect}"
             assert p.dtype == torch.bfloat16
-    # 非 block 参数与 buffer 全部上卡
+    # non-block params and buffers all go on the card
     assert model2.x_embedder.weight.device.type == "cuda"
     assert model2.pos_freq.device.type == "cuda"
 
 
-@pytest.mark.skipif(not _CUDA, reason="需要 CUDA")
+@pytest.mark.skipif(not _CUDA, reason="requires CUDA")
 def test_anima_forward_backward_matches_without_swap():
-    """真 Anima 小号模型：loader 落位 + 四钩子挂载后，前向输出与输入梯度
-    同无 swap 对照一致（fp32 消除非确定性；机制竞态由 grad_fidelity 真尺寸
-    测试把关，这里钉的是 anima 结构兼容性——rope/adaln_lora/cross-attn 一串
-    预备张量都经手工展开循环传入 block）。
+    """A real small-scale Anima model: after loader placement + attaching the
+    four hooks, the forward output and input gradient match a no-swap
+    control (fp32 eliminates nondeterminism; mechanism race conditions are
+    guarded by the grad_fidelity real-size test -- this one pins down anima's
+    structural compatibility, i.e. the rope/adaln_lora/cross-attn chain of
+    prepared tensors all get fed into the block through a manually unrolled
+    loop).
     """
     import copy
 
@@ -257,35 +267,42 @@ def test_anima_forward_backward_matches_without_swap():
     swap.close()
 
 
-# ── 采样期 VAE decode offload 与 swap 互斥 ─────────────────────────────────
+# ── sampling-time VAE decode offload and swap are mutually exclusive ─────────────────────────────────
 
 def test_decode_offload_skips_swapped_dit():
     from training.families.anima.sampling import _decode_offload_targets
 
     model = _TinyDiT()
     qwen = object()
-    # 无 swap：DiT + Qwen 都可 offload
+    # no swap: both DiT and Qwen can be offloaded
     assert _decode_offload_targets(model, qwen) == (model, qwen)
-    # swap 生效（loader 落的标记）：只 offload Qwen —— 恢复期的一刀切 .to()
-    # 会把 CPU pinned 主副本搬上卡，DiT 必须跳过
+    # swap active (marker set by the loader): only offload Qwen -- the
+    # blanket .to() during restore would move the pinned CPU master copy
+    # back onto the card, so DiT must be skipped
     model.blocks_to_swap = 2
     assert _decode_offload_targets(model, qwen) == (qwen,)
 
 
-# ── NaViT 打包路径必须同样经过 __call__（否则四钩子静默不触发） ─────────────
+# ── the NaViT packed path must also go through __call__ (otherwise the four hooks silently never fire) ─────────────
 
-@pytest.mark.skipif(not _CUDA, reason="需要 CUDA + xformers")
+@pytest.mark.skipif(not _CUDA, reason="requires CUDA + xformers")
 def test_navit_packed_forward_backward_matches_without_swap():
-    """回归：NaViT 块对角打包前向在 block swap 下与无 swap 对照逐值一致。
+    """Regression: NaViT's block-diagonal packed forward matches a no-swap
+    control value-for-value under block swap.
 
-    曾经的 bug：打包循环直接调 ``blk.forward_tokens(...)``。nn.Module 的
-    forward/backward 钩子只在 ``__call__`` 上触发，于是 swap 的取回/放开一次都
-    不跑——被换出的 block 仍指着上一次标准前向（如 step 0 基线采样）留在两个
-    GPU 槽里的权重。**全在卡上，所以不报错、不 NaN**，只是 26 层变成两层的复制，
-    梯度按 attach() 文档所述静默算错，出图 2-5 个 epoch 后烂成马赛克。
+    The old bug: the packing loop called ``blk.forward_tokens(...)``
+    directly. nn.Module's forward/backward hooks only fire through
+    ``__call__``, so swap's fetch/release never ran even once -- the
+    swapped-out block kept pointing at the weights left in the two GPU slots
+    by the last standard forward pass (e.g. the step-0 baseline sample).
+    **Everything stays on the card, so nothing errors and nothing is NaN**;
+    it's just that 26 layers become a duplicate of two, and per attach()'s
+    documented semantics the gradient is silently wrong -- after 2-5 epochs
+    the output degrades into a mosaic.
 
-    修法：打包循环走 ``blk(..., packed_tokens=True)``，与
-    ``families/anima/forward.py`` 的标准 checkpoint 循环同款 hook 语义。
+    The fix: the packing loop goes through ``blk(..., packed_tokens=True)``,
+    the same hook semantics as the standard checkpoint loop in
+    ``families/anima/forward.py``.
     """
     import copy
     from types import SimpleNamespace
@@ -325,8 +342,10 @@ def test_navit_packed_forward_backward_matches_without_swap():
     swap = PinnedBlockSwap(swapped.blocks, 2, "cuda")
     swap.attach()
 
-    # 真实场景复现：先跑一次标准前向，让两个 GPU 槽装上「最后两层」的权重。
-    # 修复前，紧随其后的打包前向就是拿这两份权重冒充全部换出层的时刻。
+    # reproduce the real scenario: run one standard forward pass first so
+    # the two GPU slots hold the weights of the "last two layers". Before
+    # the fix, the packed forward pass right after this is exactly the
+    # moment those two weight sets get used to impersonate all swapped layers.
     from training.families.anima.forward import forward_with_optional_checkpoint
     forward_with_optional_checkpoint(
         swapped,
@@ -337,7 +356,7 @@ def test_navit_packed_forward_backward_matches_without_swap():
         use_checkpoint=False,
     )
 
-    shapes = [(8, 8), (8, 12)]          # G=2 异构图
+    shapes = [(8, 8), (8, 12)]          # G=2 heterogeneous images
     loss_fn = build_loss(SimpleNamespace(loss_type="mse"))
 
     def _inputs():
@@ -354,7 +373,7 @@ def test_navit_packed_forward_backward_matches_without_swap():
     for model in (ref, swapped):
         lats, t, cross = _inputs()
         cross_packed, text_seqlens = pack_cross_embeddings(cross, None, False)
-        torch.manual_seed(11)           # 逐图加噪用 global RNG，两边必须同种子
+        torch.manual_seed(11)           # per-image noising uses the global RNG; both sides need the same seed
         loss, _pred, _info = navit_packed_forward_and_loss(
             model, lats, t, cross_packed, text_seqlens, loss_fn,
             use_checkpoint=True,

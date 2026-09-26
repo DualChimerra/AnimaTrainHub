@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 
-/** Job / Task 的最小公共形状 — 回放 guard 只看这三个字段。 */
+/** The minimal common shape of Job / Task -- the replay guard only looks at these three fields. */
 interface ReplayableItem {
   id: number
   status: string
@@ -10,19 +10,24 @@ interface ReplayableItem {
 export const splitLog = (log: string): string[] => (log ? log.split('\n') : [])
 
 /**
- * 「最近一次任务 + 日志回放」状态容器（Tagging / Regularization 共用）。
+ * "Latest task + log replay" state container (shared by Tagging / Regularization).
  *
- * 进页面 / SSE 重连（onOpen）时调 refresh() 从服务端 hydrate 最近一次
- * 任务和全量日志；SSE 增量日志照常走 setItem / setLogs append。
+ * On page entry / SSE reconnect (onOpen), calls refresh() to hydrate the
+ * most recent task and its full log from the server; incremental SSE log
+ * lines keep flowing through the usual setItem / setLogs append.
  *
- * refresh 三层防回退 guard：
- * 1. 本地正在跟踪 running/pending 任务时，不被另一个 id 的结果顶掉
- * 2. 同 id 时服务端日志比本地短（文件落盘滞后）不覆盖
- * 3. 服务端无任务时只清掉「属于其它 version」的残留状态
+ * refresh has three layers of anti-regression guards:
+ * 1. While locally tracking a running/pending task, don't let it get
+ *    clobbered by a result for a different id
+ * 2. For the same id, don't overwrite if the server's log is shorter than
+ *    the local one (the file write to disk can lag behind)
+ * 3. When the server has no task, only clear leftover state that "belongs
+ *    to a different version"
  *
- * onHydrated 在 refresh 实际改写状态时回调（清空时传 null），给调用方
- * 同步衍生状态（如 aiBusy）。fetchLatest / onHydrated 走 ref，不要求
- * 调用方 memoize。
+ * onHydrated fires whenever refresh actually rewrites state (passing null on
+ * clear), letting the caller keep derived state (like aiBusy) in sync.
+ * fetchLatest / onHydrated go through refs, so the caller doesn't need to
+ * memoize them.
  */
 export function useLatestJobReplay<T extends ReplayableItem>(
   vid: number | null,
@@ -69,7 +74,7 @@ export function useLatestJobReplay<T extends ReplayableItem>(
       setItem(r.item)
       setLogs(hydratedLogs)
       onHydratedRef.current?.(r.item)
-    } catch { /* hydrate 失败不阻塞页面 */ }
+    } catch { /* a hydrate failure shouldn't block the page */ }
   }, [vid])
 
   return { item, logs, setItem, setLogs, itemIdRef, refresh }

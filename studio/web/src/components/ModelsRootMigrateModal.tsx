@@ -1,13 +1,17 @@
-/** 模型根目录迁移确认 + 进度 modal（Settings → 系统 → 存储位置 → 模型根目录）。
+/** Models root directory migration confirm + progress modal (Settings -> System -> Storage location -> models root).
  *
- * 镜像 StudioDataMigrateModal，区别：复制完 **立即生效、无需重启**（models_root()
- * 现读 secrets.models.root）。所以 done 态不给「立即重启」，只给「完成」+ 关闭，
- * 并回调 onDone 让父级刷新当前路径显示。
+ * Mirrors StudioDataMigrateModal; the difference: the copy **takes effect
+ * immediately, no restart needed** (models_root() reads secrets.models.root
+ * live). So the done phase skips "restart now" and just offers "done" +
+ * close, and calls onDone so the parent refreshes the displayed current path.
  *
- * 相位：loading（拉 info 扫描）→ confirm（文件数/大小/顶层明细 + 确认）→
- * running（进度条，SSE 驱动）→ done / error。running 期间 modal 不可关。
- * 目标已有 models 数据时后端回 409 target_conflict → conflict 相位（issue #351）：
- * 「跳过已有文件」（合并补齐，同名保留目标现有版本）/「覆盖已有文件」/ 取消。
+ * Phases: loading (fetches the scan info) -> confirm (file count / size /
+ * top-level breakdown + confirm) -> running (progress bar, SSE-driven) ->
+ * done / error. The modal can't be closed while running. If the target
+ * already has models data, the backend returns 409 target_conflict -> the
+ * conflict phase (issue #351): "skip existing files" (merge in, keep the
+ * target's existing version for same-named files) / "overwrite existing
+ * files" / cancel.
  */
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -39,12 +43,13 @@ const EMPTY_PROGRESS: Progress = {
 export default function ModelsRootMigrateModal({ target, onClose, onDone }: {
   target: string
   onClose: () => void
-  /** 迁移成功后回调（父级据此重新拉 getModelsRootInfo 刷新当前路径，无需重启） */
+  /** Called on successful migration (the parent refetches getModelsRootInfo to refresh the current path; no restart needed) */
   onDone: () => void
 }) {
   const { t } = useTranslation()
-  // 用户选的是父目录，后端实际把数据复制到 target/models/（display 用，
-  // API 仍传 target，由后端拼接）
+  // The user picks the parent directory; the backend actually copies data to
+  // target/models/ (for display only -- the API still sends `target` and the
+  // backend appends the suffix).
   const sep = target.includes('\\') ? '\\' : '/'
   const destination = target.endsWith(sep) ? `${target}models` : `${target}${sep}models`
   const [phase, setPhase] = useState<Phase>('loading')
@@ -67,7 +72,7 @@ export default function ModelsRootMigrateModal({ target, onClose, onDone }: {
     return () => { cancelled = true }
   }, [])
 
-  // SSE：实时进度 + 完成事件（只在 running 态响应，防外部杂音翻状态）
+  // SSE: live progress + completion events (only acted on while running, to keep unrelated noise from flipping the phase)
   useEventStream((evt) => {
     if (evt.type === 'models_root_migrate_progress') {
       setProgress({
@@ -86,8 +91,9 @@ export default function ModelsRootMigrateModal({ target, onClose, onDone }: {
       })
     }
   }, {
-    // SSE 断线重连期间 done 事件会丢，running 态会卡死（modal 不可关）——
-    // 重连时冷拉一次状态快照补齐
+    // A done event can be lost while SSE is disconnected/reconnecting, which
+    // would leave the running phase stuck (the modal can't be closed) --
+    // fetch a fresh status snapshot on reconnect to catch up.
     onOpen: () => {
       void api.getModelsRootMigrateStatus().then((s) => {
         setPhase((p) => {
@@ -96,7 +102,7 @@ export default function ModelsRootMigrateModal({ target, onClose, onDone }: {
           if (s.state === 'error') { setError(s.error); return 'error' }
           return p
         })
-      }).catch(() => { /* 下次重连再试 */ })
+      }).catch(() => { /* retry on the next reconnect */ })
     },
   })
 

@@ -111,8 +111,8 @@ describe('ProjectOverview pause action refreshes over SSE', () => {
     // Open the task's ⋯ menu: cancel is there, pause is not (is_pausable=false).
     const kebab = await screen.findByRole('button', { name: 'Actions' })
     fireEvent.click(kebab)
-    await waitFor(() => expect(screen.getByText('取消训练')).toBeInTheDocument())
-    expect(screen.queryByText('暂停')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Cancel training')).toBeInTheDocument())
+    expect(screen.queryByText('Pause')).not.toBeInTheDocument()
     const callsBefore = listSpy.mock.calls.length
 
     // The first epoch backup lands on disk -> is_pausable flips; push an SSE event.
@@ -121,7 +121,7 @@ describe('ProjectOverview pause action refreshes over SSE', () => {
     FakeEventSource.instances[0].emit({ type: 'auto_epoch_backup_written', task_id: 42 })
 
     // After the refetch the open menu shows pause (no version switch / reload needed).
-    await waitFor(() => expect(screen.getByText('暂停')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Pause')).toBeInTheDocument())
     expect(listSpy.mock.calls.length).toBeGreaterThan(callsBefore)
   })
 })

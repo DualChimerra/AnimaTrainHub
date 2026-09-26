@@ -1,35 +1,42 @@
 #!/usr/bin/env python3
-"""block_swap_probe —— block swap 可行性 Gate-0 探针。
+"""block_swap_probe -- Gate-0 feasibility probe for block swap.
 
-配套文档：``docs/design/block-swap.md``。**实现代码之前必须先跑本探针**，
-数据不达门槛则方案直接否决。
+Companion doc: ``docs/design/block-swap.md``. **This probe must be run before any
+implementation code is written** -- if the numbers don't clear the bar, the plan is
+rejected outright.
 
-block swap 的成败只看一个不等式（doc §2.2）：
+Whether block swap succeeds comes down to a single inequality (doc §2.2):
 
-    可完全遮蔽  ⟺  T_transfer(block) < T_compute(block)
-    T_transfer = 单 block 字节数 / 有效 PCIe 带宽
+    fully maskable  <=>  T_transfer(block) < T_compute(block)
+    T_transfer = bytes per block / effective PCIe bandwidth
 
-本探针分六段回答它，外加用户明确关注的硬件影响（doc §3）：
+This probe answers it in six stages, plus the hardware impact the user explicitly
+cares about (doc §3):
 
-  A 链路体检   PCIe 实际 gen/width vs 最大值、replay 基线、GPU/RAM 容量
-  B 带宽矩阵   pinned/pageable × H2D/D2H × 多种 size；pinned 分配耗时
-  C 计算基准   真实 SingleStreamBlock 在真实 shape 下的前向/反向耗时
-  D 遮蔽判据   B/C 比值 → blocks_to_swap × (省显存, 加时间) 曲线
-  E 端到端     真双 stream swap 循环 vs 全常驻循环的 wall clock 差
-  F 稳定性     持续负载下温度 / 功耗 / PCIe replay 增量 / 可用 RAM
+  A link health     actual PCIe gen/width vs max, replay baseline, GPU/RAM capacity
+  B bandwidth matrix pinned/pageable x H2D/D2H x several sizes; pinned alloc time
+  C compute baseline real SingleStreamBlock forward/backward time at real shapes
+  D masking criterion B/C ratio -> blocks_to_swap x (VRAM saved, time added) curve
+  E end-to-end       wall clock diff between a real dual-stream swap loop and a fully
+                      resident loop
+  F stability        temperature / power / PCIe replay delta / available RAM under
+                      sustained load
 
-用法
-----
+Usage
+-----
     ./venv/Scripts/python.exe tools/block_swap_probe.py
-    ./venv/Scripts/python.exe tools/block_swap_probe.py --stages ABCD  # 跳过耗时段
+    ./venv/Scripts/python.exe tools/block_swap_probe.py --stages ABCD  # skip the slow stages
     ./venv/Scripts/python.exe tools/block_swap_probe.py --resolution 1536 --soak-seconds 120
     ./venv/Scripts/python.exe tools/block_swap_probe.py --out probe.csv
 
-无 CUDA 时只跑 A 段并退出。依赖 torch；pynvml 可选（缺失则 A/F 段降级）。
+Without CUDA, only stage A runs, then it exits. Depends on torch; pynvml is optional
+(stages A/F degrade gracefully without it).
 
-范围：C/D/E/F 段只覆盖 **krea2**（28 层同构 SingleStreamBlock，是方案的目标
-族）。Anima 的 Block forward 需要 rope/adaln_lora 等一串预备张量，构造成本高
-而收益低（24GB 已够用），本探针只统计其权重规模，计算基准留待需要时再补。
+Scope: stages C/D/E/F only cover **krea2** (28 homogeneous SingleStreamBlock layers,
+the plan's target family). Anima's Block forward needs a chain of prep tensors like
+rope/adaln_lora, which is expensive to construct for little payoff (24GB is already
+enough); this probe only measures its weight size, leaving the compute baseline for
+if/when it's needed.
 """
 
 from __future__ import annotations
@@ -42,7 +49,7 @@ import sys
 import time
 from pathlib import Path
 
-# 本机终端是 cp932，中文输出不重定向会崩（见 windows_console_cp932_utf8）
+# This machine's terminal is cp932; non-ASCII output crashes without reconfiguring (see windows_console_cp932_utf8)
 if sys.platform == "win32":
     for _stream in (sys.stdout, sys.stderr):
         try:
@@ -58,7 +65,7 @@ for _path in (_REPO_ROOT, _REPO_ROOT / "runtime"):
 MIB = 1024 ** 2
 GIB = 1024 ** 3
 
-#: 采集到的所有观测点，末尾可选写 CSV
+#: every observation collected; optionally written to CSV at the end
 RECORDS: list[dict] = []
 
 
@@ -72,9 +79,9 @@ def section(title: str) -> None:
     print(f"\n{'=' * 72}\n{title}\n{'=' * 72}")
 
 
-# ------------------------------------------------------------------ NVML 封装
+# ------------------------------------------------------------------ NVML wrapper
 class Nvml:
-    """pynvml 薄封装：缺库 / 缺 API 时整体降级为 None，不让探针挂掉。"""
+    """Thin pynvml wrapper: degrades entirely to None when the library / API is missing, so it never crashes the probe."""
 
     def __init__(self) -> None:
         self.handle = None
@@ -145,23 +152,23 @@ class Nvml:
                 pass
 
 
-# ------------------------------------------------------------------ A 链路体检
+# ------------------------------------------------------------------ A link health
 def stage_a(nvml: Nvml) -> dict:
-    """PCIe 链路是否降级 + 容量基线 + replay 基线（doc §3.2 ②）。"""
-    section("A · 链路体检")
+    """Whether the PCIe link is degraded + capacity baseline + replay baseline (doc §3.2 (2))."""
+    section("A - Link health")
     import torch
 
     info: dict = {}
 
     cuda_ok = torch.cuda.is_available()
     info["cuda"] = cuda_ok
-    print(f"torch {torch.__version__}   CUDA 可用: {cuda_ok}")
+    print(f"torch {torch.__version__}   CUDA available: {cuda_ok}")
     if cuda_ok:
         props = torch.cuda.get_device_properties(0)
         info["gpu_name"] = props.name
         info["vram_total"] = props.total_memory
         print(f"GPU        : {props.name}")
-        print(f"显存       : {props.total_memory / GIB:.1f} GB")
+        print(f"VRAM       : {props.total_memory / GIB:.1f} GB")
         record("A", "vram_total", props.total_memory / GIB, "GB", props.name)
 
     from training.sysmem import available_ram_bytes
@@ -169,7 +176,7 @@ def stage_a(nvml: Nvml) -> dict:
     avail = available_ram_bytes()
     if avail is not None:
         info["ram_available"] = avail
-        print(f"可用内存   : {avail / GIB:.1f} GB")
+        print(f"RAM avail. : {avail / GIB:.1f} GB")
         record("A", "ram_available", round(avail / GIB, 1), "GB")
 
     if nvml.ok:
@@ -179,30 +186,31 @@ def stage_a(nvml: Nvml) -> dict:
         info["pcie_width"] = cur_width
         degraded = []
         if cur_gen and max_gen and cur_gen < max_gen:
-            degraded.append(f"gen {cur_gen} < 最大 {max_gen}")
+            degraded.append(f"gen {cur_gen} < max {max_gen}")
         if cur_width and max_width and cur_width < max_width:
-            degraded.append(f"width x{cur_width} < 最大 x{max_width}")
-        print(f"PCIe 链路  : gen{cur_gen} x{cur_width}（最大 gen{max_gen} x{max_width}）")
+            degraded.append(f"width x{cur_width} < max x{max_width}")
+        print(f"PCIe link  : gen{cur_gen} x{cur_width} (max gen{max_gen} x{max_width})")
         record("A", "pcie_gen", cur_gen, "", f"max={max_gen}")
         record("A", "pcie_width", cur_width, "", f"max={max_width}")
         if degraded:
-            # 空闲时链路会自动降到 gen1 省电，负载下才拉满 —— 此处仅提示
-            print(f"  ! 当前处于降级态（{'; '.join(degraded)}）")
-            print("    空闲省电降速属正常，B 段有负载时会复测；若届时仍降级则是真降级")
+            # The link auto-downshifts to gen1 to save power when idle, and only ramps
+            # up under load -- this is just a heads-up
+            print(f"  ! Currently degraded ({'; '.join(degraded)})")
+            print("    Idle power-saving downshift is normal; stage B re-measures under load; if still degraded then it's a real degradation")
 
         replay = nvml.replay_counter()
         info["replay_base"] = replay
-        print(f"PCIe replay: {replay}（基线，F 段看增量）")
+        print(f"PCIe replay: {replay} (baseline, stage F looks at the delta)")
         record("A", "pcie_replay_base", replay)
     else:
-        print("pynvml 不可用 —— PCIe 链路与 replay 计数无法采集（A/F 段降级）")
+        print("pynvml unavailable -- can't collect PCIe link / replay counters (stages A/F degrade)")
 
     return info
 
 
-# ------------------------------------------------------------------ B 带宽矩阵
+# ------------------------------------------------------------------ B bandwidth matrix
 def _time_copy(src, dst_device: str, iters: int) -> float:
-    """返回单次拷贝耗时中位数（秒）。用 cuda event 计时，排除 launch 抖动。"""
+    """Returns the median time for a single copy (seconds). Uses cuda events for timing, to exclude launch jitter."""
     import torch
 
     events = []
@@ -218,8 +226,8 @@ def _time_copy(src, dst_device: str, iters: int) -> float:
 
 
 def stage_b(args) -> dict:
-    """pinned vs pageable × H2D vs D2H 的有效带宽（doc §2.1）。"""
-    section("B · 传输带宽矩阵")
+    """Effective bandwidth for pinned vs pageable x H2D vs D2H (doc §2.1)."""
+    section("B - Transfer bandwidth matrix")
     import torch
 
     sizes_mib = [16, 64, 256, 1024]
@@ -234,8 +242,8 @@ def stage_b(args) -> dict:
         try:
             pinned = torch.empty(numel, dtype=torch.bfloat16, pin_memory=True)
         except RuntimeError as exc:
-            # doc §3.2 ①：pinned 分配失败是硬错误，实现必须有降级路径
-            print(f"{size_mib:>6}MB  pinned 分配失败：{exc}")
+            # doc §3.2 (1): a pinned allocation failure is a hard error, the implementation must have a fallback path
+            print(f"{size_mib:>6}MB  pinned allocation failed: {exc}")
             record("B", f"pin_alloc_fail_{size_mib}MB", 1, "", str(exc))
             continue
         pin_alloc = time.perf_counter() - pin_start
@@ -274,25 +282,26 @@ def stage_b(args) -> dict:
     if results:
         big = max(results)
         peak = results[big]["pinned_h2d"]
-        print(f"\n有效带宽（取 {big}MB pinned H2D）: {peak:.1f} GB/s")
+        print(f"\nEffective bandwidth (using {big}MB pinned H2D): {peak:.1f} GB/s")
         print(
-            f"pinned 相对 pageable 提速: "
-            f"{results[big]['pinned_h2d'] / results[big]['pageable_h2d']:.2f}×"
+            f"pinned speedup over pageable: "
+            f"{results[big]['pinned_h2d'] / results[big]['pageable_h2d']:.2f}x"
         )
         print(
-            f"pinned 分配耗时: {results[big]['pin_alloc_s'] * 1000:.0f} ms / {big}MB"
-            "  ← 实现必须预分配复用，不能每步 alloc"
+            f"pinned alloc time: {results[big]['pin_alloc_s'] * 1000:.0f} ms / {big}MB"
+            "  <- the implementation must pre-allocate and reuse, not alloc every step"
         )
         results["effective_bw"] = peak
     return results
 
 
-# ------------------------------------------------------------------ C 计算基准
+# ------------------------------------------------------------------ C compute baseline
 def _build_krea2_block(device, dtype):
-    """实例化单个真实 SingleStreamBlock + 其前向所需的合成输入。
+    """Instantiates a single real SingleStreamBlock + the synthetic inputs its forward needs.
 
-    输入构造逐行对齐 ``SingleStreamDiT.forward``（krea2_modeling.py:444-522）：
-    combined = cat(text, image) 后过 block，vec 是 tproj 出来的 (B, 6F)。
+    The input construction mirrors ``SingleStreamDiT.forward`` line-for-line
+    (krea2_modeling.py:444-522): combined = cat(text, image) is fed through the block,
+    vec is the (B, 6F) tensor produced by tproj.
     """
     import torch
     from modeling.krea2 import KREA2_CONFIG
@@ -308,7 +317,7 @@ def _build_krea2_block(device, dtype):
 def _krea2_inputs(cfg, PositionalEncoding, resolution: int, batch: int, device, dtype):
     import torch
 
-    latent = resolution // 8              # VAE f8（WAN21_F8C16）
+    latent = resolution // 8              # VAE f8 (WAN21_F8C16)
     grid = latent // cfg.patch            # patch=2
     image_len = grid * grid
     text_len = 512                        # TextSpec.max_seq_len
@@ -335,8 +344,8 @@ def _krea2_inputs(cfg, PositionalEncoding, resolution: int, batch: int, device, 
 
 
 def stage_c(args) -> dict:
-    """真实 block 的前向 / 前向+反向耗时（T_compute）。"""
-    section("C · 单 block 计算基准（krea2）")
+    """Forward / forward+backward time for a real block (T_compute)."""
+    section("C - Single-block compute baseline (krea2)")
     import torch
 
     device = torch.device("cuda")
@@ -351,15 +360,15 @@ def stage_c(args) -> dict:
     param_count = sum(p.numel() for p in block.parameters())
     total_bytes = param_bytes * cfg.layers
 
-    print(f"分辨率     : {args.resolution}² → seq_len {seq_len}（text 512 + image {seq_len - 512}）")
-    print(f"单 block   : {param_count / 1e6:.1f}M 参数, {param_bytes / MIB:.0f} MB @ {args.dtype}")
-    print(f"{cfg.layers} 层合计  : {total_bytes / GIB:.2f} GB（不含 txtfusion / embed / last）")
+    print(f"Resolution : {args.resolution}^2 -> seq_len {seq_len} (text 512 + image {seq_len - 512})")
+    print(f"Single blk : {param_count / 1e6:.1f}M params, {param_bytes / MIB:.0f} MB @ {args.dtype}")
+    print(f"{cfg.layers} layers  : {total_bytes / GIB:.2f} GB total (excludes txtfusion / embed / last)")
     record("C", "block_params", round(param_count / 1e6, 1), "M")
     record("C", "block_bytes", round(param_bytes / MIB), "MB", args.dtype)
     record("C", "dit_blocks_bytes", round(total_bytes / GIB, 2), "GB")
 
-    # 默认参数早绑定（krea2_modeling.py:517 同款）：末尾 del 这几个名字释放显存，
-    # 闭包捕获会让它们变成悬空引用
+    # Default args bound early (same trick as krea2_modeling.py:517): deleting these
+    # names at the end frees VRAM -- closure capture would otherwise leave them dangling
     def once(backward: bool, blk=block, inp=x, mod=vec, rope=freqs):
         if backward:
             out = blk(inp, mod, rope)
@@ -384,7 +393,7 @@ def stage_c(args) -> dict:
             torch.cuda.synchronize()
             samples.append(time.perf_counter() - start)
         median = statistics.median(samples)
-        label = "前向+反向" if backward else "前向"
+        label = "fwd+bwd" if backward else "fwd"
         print(f"{label:>9} : {median * 1000:.2f} ms")
         record("C", "fwd_bwd_ms" if backward else "fwd_ms", round(median * 1000, 2), "ms")
         if backward:
@@ -404,14 +413,14 @@ def stage_c(args) -> dict:
     }
 
 
-# ------------------------------------------------------------------ D 遮蔽判据
+# ------------------------------------------------------------------ D masking criterion
 def stage_d(bandwidth: dict, compute: dict) -> None:
-    """把 B 和 C 的数字代进 doc §2.2 的不等式，给出 blocks_to_swap 曲线。"""
-    section("D · 遮蔽判据")
+    """Plugs B and C's numbers into doc §2.2's inequality, and prints the blocks_to_swap curve."""
+    section("D - Masking criterion")
 
     bw = bandwidth.get("effective_bw")
     if not bw:
-        print("B 段无有效带宽，跳过")
+        print("No effective bandwidth from stage B, skipping")
         return
 
     param_bytes = compute["param_bytes"]
@@ -419,35 +428,36 @@ def stage_d(bandwidth: dict, compute: dict) -> None:
     t_fwd = compute["t_fwd"]
     t_fwd_bwd = compute["t_fwd_bwd"]
 
-    print(f"T_transfer (单 block) : {t_transfer * 1000:.2f} ms  "
-          f"（{param_bytes / MIB:.0f} MB ÷ {bw:.1f} GB/s）")
-    print(f"T_compute  前向       : {t_fwd * 1000:.2f} ms")
-    print(f"T_compute  前向+反向  : {t_fwd_bwd * 1000:.2f} ms")
+    print(f"T_transfer (1 block)  : {t_transfer * 1000:.2f} ms  "
+          f"({param_bytes / MIB:.0f} MB / {bw:.1f} GB/s)")
+    print(f"T_compute  forward    : {t_fwd * 1000:.2f} ms")
+    print(f"T_compute  fwd+bwd    : {t_fwd_bwd * 1000:.2f} ms")
     record("D", "t_transfer_ms", round(t_transfer * 1000, 2), "ms")
 
     ratio_fwd = t_transfer / t_fwd
-    print(f"\n传输/计算比（前向，推理口径）  : {ratio_fwd:.2f}")
-    print(f"传输/计算比（前反向，训练口径）: {t_transfer / t_fwd_bwd:.2f}")
+    print(f"\nTransfer/compute ratio (forward, inference basis)  : {ratio_fwd:.2f}")
+    print(f"Transfer/compute ratio (fwd+bwd, training basis)    : {t_transfer / t_fwd_bwd:.2f}")
     record("D", "ratio_fwd", round(ratio_fwd, 3))
     record("D", "ratio_train", round(t_transfer / t_fwd_bwd, 3))
 
     if ratio_fwd < 1:
-        print("→ 传输快于计算：**理论可完全遮蔽**（前向与训练均是）")
+        print("-> Transfer is faster than compute: **theoretically fully maskable** (both forward and training)")
     else:
-        print(f"→ 传输慢于计算：每 block 暴露 {(t_transfer - t_fwd) * 1000:.1f} ms（前向口径）")
+        print(f"-> Transfer is slower than compute: {(t_transfer - t_fwd) * 1000:.1f} ms exposed per block (forward basis)")
 
-    # LoRA 训练：底模冻结，只有 H2D，前向 1 次 + 反向重算 1 次（doc §2.3/2.4）
+    # LoRA training: base model frozen, only H2D, 1 forward pass + 1 backward recompute (doc §2.3/2.4)
     layers = compute["layers"]
     per_block = param_bytes / GIB
-    # 训练一步里每个 block 有两个驻留窗口：前向一次，反向（含 checkpoint
-    # 重算）一次。两段计算时间不同，必须分别与传输时间比（doc §2.4）。
+    # Each block has two residency windows within a training step: once for the forward
+    # pass, once for the backward pass (including checkpoint recompute). The two compute
+    # times differ and must be compared against the transfer time separately (doc §2.4).
     t_bwd_only = max(t_fwd_bwd - t_fwd, 0.0)
     exposed_fwd = max(0.0, t_transfer - t_fwd)
     exposed_bwd = max(0.0, t_transfer - t_bwd_only)
-    print(f"\nblocks_to_swap 曲线（LoRA 训练口径，单步 2 遍 H2D）")
-    print(f"  前向段暴露 {exposed_fwd * 1000:.1f} ms/block、"
-          f"反向段暴露 {exposed_bwd * 1000:.1f} ms/block")
-    print(f"{'N':>4} {'省显存':>10} {'暴露/步':>12} {'相对基线':>10}")
+    print(f"\nblocks_to_swap curve (LoRA training basis, 2 H2D passes per step)")
+    print(f"  forward-pass exposure {exposed_fwd * 1000:.1f} ms/block, "
+          f"backward-pass exposure {exposed_bwd * 1000:.1f} ms/block")
+    print(f"{'N':>4} {'VRAM saved':>10} {'exposed/step':>12} {'vs baseline':>10}")
     print("-" * 40)
     base_step = t_fwd_bwd * layers
     for n in (0, 4, 8, 14, 20, 28):
@@ -460,13 +470,13 @@ def stage_d(bandwidth: dict, compute: dict) -> None:
         record("D", f"swap_{n}_saved_gb", round(saved, 2), "GB")
         record("D", f"swap_{n}_overhead_pct", round(overhead, 1), "%")
 
-    print("\n注：这是理论上界（假设预取零开销、stream 完美重叠）。E 段测真实值。")
+    print("\nNote: this is a theoretical upper bound (assumes zero-overhead prefetch, perfect stream overlap). Stage E measures the real value.")
 
 
-# ------------------------------------------------------------------ E 端到端
+# ------------------------------------------------------------------ E end-to-end
 def stage_e(args, compute: dict) -> dict:
-    """真双 stream swap 循环 vs 全常驻循环的 wall clock 差。"""
-    section("E · 端到端 swap 循环 vs 全常驻")
+    """Wall clock difference between a real dual-stream swap loop and a fully resident loop."""
+    section("E - End-to-end swap loop vs fully resident")
     import torch
     from modeling.krea2 import KREA2_CONFIG
     from modeling.krea2.krea2_modeling import PositionalEncoding, SingleStreamBlock
@@ -487,12 +497,12 @@ def stage_e(args, compute: dict) -> dict:
 
     need = compute["param_bytes"] * n / GIB
     free = torch.cuda.mem_get_info()[0] / GIB
-    print(f"对照组需常驻 {n} block ≈ {need:.1f} GB，当前空闲 {free:.1f} GB")
+    print(f"Control group needs {n} resident blocks ~= {need:.1f} GB, currently {free:.1f} GB free")
     if need + 3 > free:
-        print("显存不足以建立全常驻对照组，请减小 --swap-blocks")
+        print("Not enough VRAM to build the fully-resident control group, reduce --swap-blocks")
         return {}
 
-    # ---- 基线：N 个 block 全部常驻 GPU
+    # ---- Baseline: N blocks all resident on GPU
     resident = [make_block(device) for _ in range(n)]
     for _ in range(2):
         h = x0
@@ -511,14 +521,15 @@ def stage_e(args, compute: dict) -> dict:
         torch.cuda.synchronize()
         samples.append(time.perf_counter() - start)
     t_resident = statistics.median(samples)
-    print(f"全常驻     : {t_resident * 1000:.1f} ms / {n} block")
+    print(f"Fully resident : {t_resident * 1000:.1f} ms / {n} block")
     record("E", "resident_ms", round(t_resident * 1000, 1), "ms", f"{n} blocks")
 
-    # ---- swap：权重在 CPU pinned，2 个 GPU buffer 轮转 + 独立 copy stream 预取
+    # ---- swap: weights pinned on CPU, 2 GPU buffers rotate + prefetch on an independent copy stream
     #
-    # 两种传输粒度都测，因为差别是本探针最关键的实现指导：
-    #   per_tensor —— 逐 param `copy_`（朴素实现），单 block 十余次小传输
-    #   flat       —— 权重重绑到一段连续 buffer，单 block 一次大传输（musubi 做法）
+    # Measuring both transfer granularities, since the difference is this probe's most
+    # important implementation guidance:
+    #   per_tensor -- per-param `copy_` (naive implementation), a dozen-plus small transfers per block
+    #   flat       -- weights rebound to one contiguous buffer, one big transfer per block (musubi's approach)
     cpu_weights = [
         {k: v.detach().to("cpu").pin_memory() for k, v in blk.state_dict().items()}
         for blk in resident
@@ -527,7 +538,7 @@ def stage_e(args, compute: dict) -> dict:
     torch.cuda.empty_cache()
 
     def rebind_flat(block):
-        """把 block 的所有 parameter 重绑到一段连续 GPU buffer 的 view 上。"""
+        """Rebind all of a block's parameters onto views of one contiguous GPU buffer."""
         entries = list(block.named_parameters())
         total = sum(p.numel() for _, p in entries)
         flat = torch.empty(total, device=device, dtype=dtype)
@@ -573,8 +584,10 @@ def stage_e(args, compute: dict) -> dict:
             for i in range(n):
                 slot = i % 2
                 if i + 1 < n:
-                    # 该 slot 上一轮的计算必须先完成，否则预取会覆盖正在被读的
-                    # 权重（朴素实现最容易漏的数据竞争，且漏了时间还偏乐观）
+                    # This slot's previous compute must finish first, otherwise the
+                    # prefetch would overwrite weights still being read (the data race
+                    # naive implementations most easily miss, and skipping it makes
+                    # the timing look overly optimistic)
                     nxt = (i + 1) % 2
                     if i >= 1:
                         copy_stream.wait_event(done[nxt])
@@ -602,7 +615,7 @@ def stage_e(args, compute: dict) -> dict:
         t_swap = statistics.median(samples)
         overhead = (t_swap - t_resident) / t_resident * 100
         print(f"swap({label:>10}) : {t_swap * 1000:.1f} ms / {n} block"
-              f"   开销 {overhead:+.1f}%")
+              f"   overhead {overhead:+.1f}%")
         record("E", f"swap_{label}_ms", round(t_swap * 1000, 1), "ms", f"{n} blocks")
         record("E", f"overhead_{label}_pct", round(overhead, 1), "%")
         results[label] = {"t_swap": t_swap, "overhead": overhead, "swap_pass": swap_pass}
@@ -614,17 +627,17 @@ def stage_e(args, compute: dict) -> dict:
 
     saved = compute["param_bytes"] * n / GIB
     overhead = min(r["overhead"] for r in results.values())
-    print(f"\n最优实测开销 : {overhead:+.1f}%（前向口径）")
-    print(f"换来省显存   : {saved:.2f} GB（{n} block 不常驻）")
+    print(f"\nBest measured overhead : {overhead:+.1f}% (forward basis)")
+    print(f"VRAM saved in exchange : {saved:.2f} GB ({n} blocks not resident)")
     record("E", "saved_gb", round(saved, 2), "GB")
 
     if overhead < 15:
-        print("→ 达到 doc §5 建议门槛（<15%）")
+        print("-> Meets doc §5's recommended threshold (<15%)")
     elif overhead > 30:
-        print("→ 超过 doc §5 否决线（>30%）")
+        print("-> Exceeds doc §5's rejection line (>30%)")
     else:
-        print("→ 落在 15%~30% 灰区，需用户裁定")
-    print("注：前向口径是**最坏情形** —— 训练的反向段计算时间远长于传输，更易遮蔽")
+        print("-> Falls in the 15%~30% gray zone, needs a user call")
+    print("Note: the forward basis is the **worst case** -- training's backward-pass compute time is much longer than transfer, making it easier to mask")
 
     winner = min(results.values(), key=lambda r: r["overhead"])
     return {
@@ -636,22 +649,26 @@ def stage_e(args, compute: dict) -> dict:
     }
 
 
-# ------------------------------------------------------------------ G 训练口径
+# ------------------------------------------------------------------ G training basis
 def stage_g(args, compute: dict) -> dict:
-    """训练口径端到端：gradient checkpointing + 反向逆序预取（B10）。
+    """Training-basis end-to-end: gradient checkpointing + reverse-order backward prefetch (B10).
 
-    E 段只测前向，训练口径此前是由 D 段公式外推的（doc §5.3-1）。本段实测
-    完整一步的时序，模拟的是 **LoRA + gradient checkpointing** 这个本仓唯一
-    的真实场景：
+    Stage E only measures forward; the training basis was previously extrapolated from
+    stage D's formula (doc §5.3-1). This stage measures the timing of a complete step,
+    simulating **LoRA + gradient checkpointing**, the only real scenario in this repo:
 
-      前向  底模 frozen、不保存中间激活（checkpoint 语义），逐 block 换入
-      反向  逆序 N-1→0，每个 block 换入后「重算前向 + 反向」在同一驻留窗口
-            内完成（doc §2.4 说的合流），只求 grad_input 不求权重梯度
+      forward  base model frozen, no intermediate activations saved (checkpoint
+               semantics), swapped in block by block
+      backward reverse order N-1->0, each block's "recompute forward + backward" happens
+               within the same residency window after being swapped in (the merge doc
+               §2.4 describes), only grad_input is needed, no weight gradients
 
-    数值正确性不在本段范围内（buffer 权重被轮转覆盖，梯度无意义）——只测时序。
-    LoRA 参数本身常驻 GPU 不参与 swap，其计算量相对底模可忽略。
+    Numerical correctness is out of scope for this stage (buffer weights get overwritten
+    by rotation, so gradients are meaningless) -- only timing is measured. The LoRA
+    parameters themselves stay resident on GPU and don't participate in swap; their
+    compute cost is negligible relative to the base model.
     """
-    section("G · 训练口径端到端（checkpoint + 反向逆序预取）")
+    section("G - Training-basis end-to-end (checkpoint + reverse-order backward prefetch)")
     import torch
     from modeling.krea2 import KREA2_CONFIG
     from modeling.krea2.krea2_modeling import PositionalEncoding, SingleStreamBlock
@@ -669,19 +686,20 @@ def stage_g(args, compute: dict) -> dict:
         blk = SingleStreamBlock(
             cfg.features, cfg.heads, cfg.multiplier, cfg.bias, cfg.kvheads
         ).to(device=dev, dtype=dtype)
-        blk.requires_grad_(False)  # 底模 frozen（LoRA 场景）
+        blk.requires_grad_(False)  # base model frozen (LoRA scenario)
         return blk
 
     need = compute["param_bytes"] * n / GIB
     free = torch.cuda.mem_get_info()[0] / GIB
-    print(f"对照组需常驻 {n} block ≈ {need:.1f} GB，当前空闲 {free:.1f} GB")
+    print(f"Control group needs {n} resident blocks ~= {need:.1f} GB, currently {free:.1f} GB free")
     if need + 4 > free:
-        print("显存不足以建立全常驻对照组，请减小 --swap-blocks")
+        print("Not enough VRAM to build the fully-resident control group, reduce --swap-blocks")
         return {}
 
     def step(get_block, after=None):
-        """一步 checkpoint 训练的时序。get_block(i) 返回第 i 层就绪的 module，
-        after(i) 在该层算完后调用（swap 路径用它记录「该 slot 可以被覆盖了」）。"""
+        """Timing for one step of checkpoint training. get_block(i) returns the ready
+        module for layer i; after(i) is called once that layer's compute finishes (the
+        swap path uses it to mark "this slot can now be overwritten")."""
         saved = []
         h = x0
         for i in range(n):
@@ -700,8 +718,10 @@ def stage_g(args, compute: dict) -> dict:
                 after(i)
         return grad
 
-    # 两条路径**交错**测量：顺序测会被 GPU 时钟状态差异污染（先跑的那条在冷态
-    # 时钟未 boost）—— 首版顺序测量给出 -2.2% 的荒谬负开销就是这么来的
+    # The two paths are measured **interleaved**: measuring them sequentially gets
+    # contaminated by GPU clock state differences (whichever runs first is measured
+    # cold, before the clock boosts) -- that's exactly how the first version's
+    # sequential measurement produced a nonsensical -2.2% negative overhead
     def measure_ab(fn_a, fn_b) -> tuple[list[float], list[float]]:
         for _ in range(2):
             fn_a()
@@ -717,13 +737,14 @@ def stage_g(args, compute: dict) -> dict:
                 bucket.append(time.perf_counter() - start)
         return a_samples, b_samples
 
-    # ---- 基线：全常驻 + 同样的 checkpoint 重算语义（与 swap 同时驻留以便交错）
+    # ---- Baseline: fully resident + the same checkpoint recompute semantics (kept
+    # resident alongside swap so they can be interleaved)
     resident = [make_block(device) for _ in range(n)]
 
     def resident_step():
         return step(lambda i, forward: resident[i])
 
-    # ---- swap：前向顺序预取 + 反向逆序预取
+    # ---- swap: forward sequential prefetch + backward reverse-order prefetch
     cpu_weights = [
         {k: v.detach().to("cpu").pin_memory() for k, v in blk.state_dict().items()}
         for blk in resident
@@ -734,15 +755,15 @@ def stage_g(args, compute: dict) -> dict:
     copy_stream = torch.cuda.Stream()
     ready = [torch.cuda.Event() for _ in range(2)]
     done = [torch.cuda.Event() for _ in range(2)]
-    fetched = [-1, -1]  # 每个 slot 当前装着哪一层，避免重复搬运
+    fetched = [-1, -1]  # which layer each slot currently holds, to avoid re-transferring
 
     def prefetch(idx: int, slot: int) -> None:
-        """把第 idx 层权重搬进 slot。未 record 过的 done event wait 是 no-op，
-        所以首轮不需要特判。"""
+        """Move layer idx's weights into slot. Waiting on a done event that was never
+        recorded is a no-op, so the first round needs no special-casing."""
         if idx < 0 or idx >= n or fetched[slot] == idx:
             return
         with torch.cuda.stream(copy_stream):
-            # 该 slot 上一次的计算必须先完成，否则会覆盖正在被读的权重
+            # This slot's previous compute must finish first, otherwise it would overwrite weights still being read
             copy_stream.wait_event(done[slot])
             for key, dst in buf_params[slot].items():
                 dst.copy_(cpu_weights[idx][key], non_blocking=True)
@@ -751,14 +772,16 @@ def stage_g(args, compute: dict) -> dict:
 
     def get_swapped(i: int, forward: bool):
         slot = i % 2
-        prefetch(i, slot)                       # 本层（通常已被上一轮预取命中）
+        prefetch(i, slot)                       # this layer (usually already a prefetch hit from the previous round)
         prefetch(i + 1 if forward else i - 1, (i + 1) % 2 if forward else (i - 1) % 2)
         torch.cuda.current_stream().wait_event(ready[slot])
         return buffers[slot]
 
     def swap_step():
-        # 每步重置：模拟权重不在 GPU 常驻，反向阶段也必须重新搬
-        # （真实实现可复用前向末尾还在位的那两层，此处取保守估计）
+        # Reset every step: simulates weights not staying resident on GPU, so the
+        # backward phase must re-transfer too (a real implementation could reuse the
+        # two layers still in place at the end of the forward pass; this is the
+        # conservative estimate)
         fetched[0] = fetched[1] = -1
         return step(get_swapped, after=lambda i: done[i % 2].record(
             torch.cuda.current_stream()
@@ -774,25 +797,25 @@ def stage_g(args, compute: dict) -> dict:
 
     overhead = (t_swap - t_resident) / t_resident * 100
     saved_gb = compute["param_bytes"] * n / GIB
-    print(f"全常驻+checkpoint : {t_resident * 1000:.1f} ms / {n} block"
-          f"   (min {min(res_samples) * 1000:.1f}, 抖动 ±{spread:.1f}%)")
-    print(f"block swap        : {t_swap * 1000:.1f} ms / {n} block"
+    print(f"resident+checkpoint : {t_resident * 1000:.1f} ms / {n} block"
+          f"   (min {min(res_samples) * 1000:.1f}, jitter +-{spread:.1f}%)")
+    print(f"block swap          : {t_swap * 1000:.1f} ms / {n} block"
           f"   (min {min(swap_samples) * 1000:.1f})")
-    print(f"\n训练口径实测开销  : {overhead:+.1f}%")
+    print(f"\nTraining-basis measured overhead  : {overhead:+.1f}%")
     if abs(overhead) < spread:
-        print(f"  ! 开销小于基线自身抖动（±{spread:.1f}%）—— 结论是「在噪声内」，"
-              f"不是精确值")
-    print(f"换来省显存        : {saved_gb:.2f} GB")
+        print(f"  ! Overhead is smaller than the baseline's own jitter (+-{spread:.1f}%) -- "
+              f"the conclusion is 'within noise', not a precise value")
+    print(f"VRAM saved in exchange            : {saved_gb:.2f} GB")
     record("G", "resident_ms", round(t_resident * 1000, 1), "ms", f"{n} blocks")
     record("G", "swap_ms", round(t_swap * 1000, 1), "ms", f"{n} blocks")
     record("G", "overhead_pct", round(overhead, 1), "%")
     record("G", "baseline_spread_pct", round(spread, 1), "%")
 
     per_block_ms = (t_swap - t_resident) / n * 1000
-    print(f"每 block 额外     : {per_block_ms:+.2f} ms（前向+反向两个驻留窗口合计）")
+    print(f"Extra per block    : {per_block_ms:+.2f} ms (forward+backward residency windows combined)")
     record("G", "per_block_extra_ms", round(per_block_ms, 2), "ms")
 
-    # 不显式 del：resident / buffers 被上面两个闭包持有，函数返回后一并回收
+    # Not explicitly deleted: resident / buffers are held by the two closures above, and get GC'd together once the function returns
     return {
         "overhead": overhead,
         "t_swap": t_swap,
@@ -801,16 +824,16 @@ def stage_g(args, compute: dict) -> dict:
     }
 
 
-# ------------------------------------------------------------------ F 稳定性
+# ------------------------------------------------------------------ F stability
 def stage_f(args, nvml: Nvml, e_result: dict) -> None:
-    """持续负载下的温度 / 功耗 / replay 增量 / 可用 RAM（doc §3.2）。"""
-    section(f"F · 稳定性与硬件影响（{args.soak_seconds}s 持续 swap 负载）")
+    """Temperature / power / replay delta / available RAM under sustained load (doc §3.2)."""
+    section(f"F - Stability and hardware impact ({args.soak_seconds}s sustained swap load)")
     import torch
     from training.sysmem import available_ram_bytes
 
     swap_pass = e_result.get("swap_pass")
     if swap_pass is None:
-        print("E 段未产出 swap 循环，跳过")
+        print("Stage E didn't produce a swap loop, skipping")
         return
 
     replay_start = nvml.replay_counter()
@@ -819,7 +842,7 @@ def stage_f(args, nvml: Nvml, e_result: dict) -> None:
     powers: list[float] = []
     passes = 0
 
-    print(f"{'t':>6} {'温度':>6} {'功耗':>8} {'可用RAM':>10} {'replay':>8}")
+    print(f"{'t':>6} {'temp':>6} {'power':>8} {'RAM avail':>10} {'replay':>8}")
     print("-" * 44)
     start = time.perf_counter()
     next_sample = 0.0
@@ -849,41 +872,41 @@ def stage_f(args, nvml: Nvml, e_result: dict) -> None:
 
     replay_end = nvml.replay_counter()
     ram_end = available_ram_bytes()
-    print(f"\n完成 {passes} 轮，{passes * args.swap_blocks} 次 block 换入")
+    print(f"\nCompleted {passes} passes, {passes * args.swap_blocks} block swap-ins")
 
     if replay_start is not None and replay_end is not None:
         delta = replay_end - replay_start
-        print(f"PCIe replay 增量 : {delta}")
+        print(f"PCIe replay delta : {delta}")
         record("F", "replay_delta", delta)
         if delta == 0:
-            print("  → 链路零重传，PCIe 侧健康（doc §3.2 ② 通过）")
+            print("  -> Zero link retransmits, PCIe side is healthy (doc §3.2 (2) passes)")
         else:
-            print("  ! 出现链路重传：检查插槽 / riser / 是否走 chipset 通道")
+            print("  ! Link retransmits occurred: check the slot / riser / whether it's on a chipset lane")
     if temps:
-        print(f"温度 max/mean    : {max(temps)}°C / {statistics.mean(temps):.0f}°C")
-        record("F", "temp_max", max(temps), "°C")
+        print(f"Temp max/mean      : {max(temps)}C / {statistics.mean(temps):.0f}C")
+        record("F", "temp_max", max(temps), "C")
     if powers:
-        print(f"功耗 max/mean    : {max(powers):.0f}W / {statistics.mean(powers):.0f}W")
+        print(f"Power max/mean     : {max(powers):.0f}W / {statistics.mean(powers):.0f}W")
         record("F", "power_max", round(max(powers)), "W")
     if ram_start and ram_end:
         drift = (ram_start - ram_end) / MIB
-        print(f"可用内存漂移     : {drift:+.0f} MB（pinned 常驻，不应持续增长）")
+        print(f"Available RAM drift : {drift:+.0f} MB (pinned memory stays resident, shouldn't keep growing)")
         record("F", "ram_drift_mb", round(drift))
 
 
 # ------------------------------------------------------------------ main
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="block swap 可行性 Gate-0 探针（见 docs/design/block-swap.md）"
+        description="Gate-0 feasibility probe for block swap (see docs/design/block-swap.md)"
     )
-    parser.add_argument("--stages", default="ABCDEF", help="要跑的阶段，如 ABCD")
-    parser.add_argument("--resolution", type=int, default=1024, help="训练/推理边长")
+    parser.add_argument("--stages", default="ABCDEF", help="stages to run, e.g. ABCD")
+    parser.add_argument("--resolution", type=int, default=1024, help="training/inference side length")
     parser.add_argument("--batch", type=int, default=1, help="batch size")
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp16"))
-    parser.add_argument("--iters", type=int, default=10, help="每项测量的采样次数")
-    parser.add_argument("--swap-blocks", type=int, default=8, help="E 段对照的 block 数")
-    parser.add_argument("--soak-seconds", type=int, default=60, help="F 段持续时长")
-    parser.add_argument("--out", type=Path, help="观测点写入的 CSV 路径")
+    parser.add_argument("--iters", type=int, default=10, help="number of samples per measurement")
+    parser.add_argument("--swap-blocks", type=int, default=8, help="number of blocks in stage E's control group")
+    parser.add_argument("--soak-seconds", type=int, default=60, help="stage F's sustained duration")
+    parser.add_argument("--out", type=Path, help="CSV path to write observations to")
     args = parser.parse_args()
 
     stages = args.stages.upper()
@@ -894,7 +917,7 @@ def main() -> int:
         import torch
 
         if not torch.cuda.is_available():
-            print("\n无 CUDA 设备 —— B 段之后全部跳过。")
+            print("\nNo CUDA device -- skipping everything after stage B.")
             return 0
 
         bandwidth = stage_b(args) if "B" in stages else {}
@@ -906,16 +929,16 @@ def main() -> int:
         if "F" in stages and e_result:
             stage_f(args, nvml, e_result)
 
-        section("结论摘要")
+        section("Summary of conclusions")
         if e_result:
-            print(f"推理口径（前向）实测开销 {e_result['overhead']:+.1f}%")
+            print(f"Inference-basis (forward) measured overhead {e_result['overhead']:+.1f}%")
         if g_result:
-            print(f"训练口径（checkpoint+反向逆序）实测开销 {g_result['overhead']:+.1f}%")
+            print(f"Training-basis (checkpoint+reverse backward) measured overhead {g_result['overhead']:+.1f}%")
         if compute:
-            print(f"省显存 {compute['param_bytes'] * args.swap_blocks / GIB:.2f} GB "
-                  f"（{args.swap_blocks} block, {args.resolution}²）；"
-                  f"全 {compute['layers']} 层可省 {compute['total_bytes'] / GIB:.2f} GB")
-        print("判读见 docs/design/block-swap.md §5 门槛与 §7 开放问题")
+            print(f"VRAM saved {compute['param_bytes'] * args.swap_blocks / GIB:.2f} GB "
+                  f"({args.swap_blocks} blocks, {args.resolution}^2); "
+                  f"all {compute['layers']} layers could save {compute['total_bytes'] / GIB:.2f} GB")
+        print("See docs/design/block-swap.md §5 for thresholds and §7 for open questions")
 
         if args.out:
             with args.out.open("w", newline="", encoding="utf-8") as fh:
@@ -924,7 +947,7 @@ def main() -> int:
                 )
                 writer.writeheader()
                 writer.writerows(RECORDS)
-            print(f"\n观测点已写入 {args.out}（{len(RECORDS)} 条）")
+            print(f"\nObservations written to {args.out} ({len(RECORDS)} entries)")
         return 0
     finally:
         nvml.shutdown()

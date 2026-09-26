@@ -25,20 +25,22 @@ export default function ProjectLayout() {
   const [showExportDialog, setShowExportDialog] = useState(false)
   const projectRef = useRef<ProjectDetail | null>(null)
   projectRef.current = project
-  // 版本切换请求序号：快速连切时只认最后一次切换的结果，防止先发后至的响应/回滚覆盖新选择。
-  const switchSeqRef = useRef(0)
-  // 版本切换守卫：步骤页有需确认才能丢弃的状态时（如 TagEdit 未保存编辑）注册，
-  // 返回 false 取消切换。切版本重挂载步骤页不走路由导航，useBlocker 拦不住，
-  // 需要这条独立通道。
+  // Version-switch request sequence number: on rapid successive switches only the result of the
+  // last switch counts, so a late-arriving response/rollback can't overwrite the newer choice.
+  // Version-switch guard: step pages with state that needs confirmation before discarding
+  // (e.g. unsaved edits in TagEdit) register here. Returning false cancels the switch. Switching
+  // versions remounts the step page without going through route navigation, so useBlocker can't
+  // catch it -- hence this separate channel.
   const switchGuardRef = useRef<(() => Promise<boolean>) | null>(null)
   const setVersionSwitchGuard = useCallback(
     (g: (() => Promise<boolean>) | null) => { switchGuardRef.current = g },
     [],
   )
-  // 版本作用域路由（v/:vid/*）下 Outlet 以 activeVersion.id 为 key：切版本强制
-  // 步骤页重挂载，本地 state / 缓存全部换代，杜绝「挂着新版本显示旧数据」
-  //（如 Curation 的 view 缓存守卫不会因 vid 变化重拉）。Overview / Download 是
-  // project 作用域（Overview 另有自己的 selectedVid 本地态），不跟切。
+  // Under the version-scoped route (v/:vid/*), the Outlet is keyed on activeVersion.id: switching
+  // versions forces the step page to remount, so local state / caches all get replaced, ruling out
+  // "still showing old data under the new version" (e.g. Curation's view-cache guard wouldn't
+  // otherwise refetch on a vid change). Overview / Download are project-scoped (Overview also has
+  // its own local selectedVid) and don't remount on switch.
   const inVersionScope = useMatch('/projects/:pid/v/:vid/*') != null
   const location = useLocation()
 
@@ -99,16 +101,17 @@ export default function ProjectLayout() {
     if (guard && !(await guard())) return
     const prevVid = prev.active_version_id
     const seq = ++switchSeqRef.current
-    // 乐观更新：先本地切换再等后端。activate 往返期间 activeVersion 若停在旧值，
-    // 「切完版本马上点开始训练」会把旧版本入队（#386）。
+    // Optimistic update: switch locally first, then wait for the backend. If activeVersion stayed
+    // at the old value during the activate round-trip, "switch version then immediately start
+    // training" would enqueue the old version (#386).
     setProject((cur) => (cur ? { ...cur, active_version_id: vid } : cur))
     try {
       await api.activateVersion(prev.id, vid)
-      // 成功不应用响应（瘦响应）：乐观值即服务端新状态，全量数据由
-      // project_state_changed → reload 收敛。
+      // Don't apply the response on success (thin response): the optimistic value is already the
+      // new server state; full data converges via project_state_changed → reload.
     } catch (e) {
       if (seq === switchSeqRef.current) {
-        // 只回滚 active_version_id 字段，不整包回退——避免吞掉在途 reload 带来的其他更新。
+        // Roll back only the active_version_id field, not the whole object -- avoids swallowing other updates from an in-flight reload.
         setProject((cur) => (cur ? { ...cur, active_version_id: prevVid } : cur))
         toast(String(e), 'error')
       }
@@ -176,7 +179,7 @@ export default function ProjectLayout() {
 
   const handleCreateVersion = useCallback(async (label: string, forkFromVersionId: number | null) => {
     if (!projectRef.current || creatingBusy) return
-    // 建新版本会激活它 → 步骤页重挂载，同样要过切换守卫（取消则对话框留在原地）。
+    // Creating a new version activates it → step page remounts, so it also needs to pass the switch guard (canceling leaves the dialog in place).
     const guard = switchGuardRef.current
     if (guard && !(await guard())) return
     setCreatingBusy(true)
@@ -219,8 +222,9 @@ export default function ProjectLayout() {
     return () => { setCtx?.(null) }
   }, [setCtx])
 
-  // 粘性快照：加载/刷新时写入，离开项目页时**不清**（见 ProjectContext 注释），
-  // 让侧边栏跨页保留选中项目用于导航。打开另一个项目会覆盖这份快照。
+  // Sticky snapshot: written on load/refresh, and deliberately **not cleared** when leaving the
+  // project page (see the ProjectContext comment), so the sidebar keeps the selected project
+  // across pages for navigation. Opening a different project overwrites this snapshot.
   useEffect(() => {
     if (project) setSelected?.({ project, activeVersion })
   }, [project, activeVersion, setSelected])
@@ -290,7 +294,7 @@ export function NewVersionDialog({
 }: {
   existingLabels: string[]
   existingVersions: { id: number; label: string }[]
-  /** 打开对话框时预填的 forkFrom version id（null = 不预填，user 自己选）。 */
+  /** forkFrom version id pre-filled when the dialog opens (null = not pre-filled, user picks their own). */
   initialForkFrom?: number | null
   busy?: boolean
   onCancel: () => void

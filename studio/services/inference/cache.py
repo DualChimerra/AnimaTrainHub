@@ -1,16 +1,20 @@
-"""测试出图的 server 进程内存缓存（commit 10 + LRU 兜底 commit 11）。
+"""In-process server memory cache for test-generation images (commit 10 + LRU
+fallback in commit 11).
 
-设计：
-  - daemon 把 PNG bytes 通过 stdout JSON 推回（base64 编码）
-  - InferenceDaemon reader 解码后调 cache_image(task_id, filename, bytes)
-  - HTTP `GET /api/generate/{tid}/sample/{fn}` 从这里取，不走磁盘
-  - 关 server / 重启 → 内存自动没；强杀也不残留
+Design:
+  - the daemon pushes PNG bytes back over stdout JSON (base64-encoded)
+  - InferenceDaemon's reader decodes them and calls cache_image(task_id, filename, bytes)
+  - HTTP `GET /api/generate/{tid}/sample/{fn}` reads from here, never touches disk
+  - closing/restarting the server clears memory automatically; a hard kill leaves
+    nothing behind either
 
-清理触发器（commit 11）：
-  1. LRU：上限 200 张 / 500MB（取小先触发，按写入访问 order；read 也算）
-  2. SSE 客户端断连 + 30s 缓冲（server.py lifespan 内挂 timer）
-  3. lifespan shutdown → clear_all
-  4. supervisor 主动 drop_task（task 失败/取消等场景，仍保留接口）
+Cleanup triggers (commit 11):
+  1. LRU: cap of 200 images / 500MB (whichever triggers first, ordered by write
+     access order; reads count too)
+  2. SSE client disconnect + 30s buffer (timer hooked into server.py's lifespan)
+  3. lifespan shutdown -> clear_all
+  4. supervisor actively calls drop_task (task failure/cancellation etc.; the
+     interface is still kept for that)
 """
 from __future__ import annotations
 
@@ -18,20 +22,20 @@ import collections
 import threading
 from typing import Optional
 
-# 默认上限：200 张 OR 500MB（取小先触发）。可通过 configure() 调。
+# Default cap: 200 images OR 500MB (whichever triggers first). Adjustable via configure().
 DEFAULT_MAX_COUNT = 200
 DEFAULT_MAX_BYTES = 500 * 1024 * 1024
 
-# (task_id, filename) → PNG bytes；OrderedDict 维护访问顺序（最旧在头部）
+# (task_id, filename) -> PNG bytes; OrderedDict keeps access order (oldest first)
 _CACHE: "collections.OrderedDict[tuple[int, str], bytes]" = collections.OrderedDict()
 _LOCK = threading.RLock()
-_BYTES_TOTAL = 0  # 当前缓存总字节
+_BYTES_TOTAL = 0  # current total cached bytes
 _max_count = DEFAULT_MAX_COUNT
 _max_bytes = DEFAULT_MAX_BYTES
 
 
 def configure(*, max_count: Optional[int] = None, max_bytes: Optional[int] = None) -> None:
-    """动态调上限（启动时或测试用）。改完立刻 enforce。"""
+    """Adjust the caps dynamically (at startup or in tests). Enforced immediately after."""
     global _max_count, _max_bytes
     with _LOCK:
         if max_count is not None:
@@ -42,7 +46,8 @@ def configure(*, max_count: Optional[int] = None, max_bytes: Optional[int] = Non
 
 
 def cache_image(task_id: int, filename: str, data: bytes) -> None:
-    """daemon image_done 时调用。同 task_id+filename 重复则覆盖；触发 LRU。"""
+    """Called on the daemon's image_done. A repeat task_id+filename overwrites the
+    entry; triggers LRU eviction."""
     global _BYTES_TOTAL
     with _LOCK:
         key = (task_id, filename)
@@ -55,7 +60,8 @@ def cache_image(task_id: int, filename: str, data: bytes) -> None:
 
 
 def get_image(task_id: int, filename: str) -> Optional[bytes]:
-    """HTTP 拉图。命中返回 bytes 并 move_to_end（LRU 看作最近使用）。"""
+    """HTTP image fetch. On a hit, returns the bytes and moves the entry to the end
+    (marks it as most-recently-used for LRU)."""
     with _LOCK:
         key = (task_id, filename)
         if key not in _CACHE:
@@ -65,13 +71,13 @@ def get_image(task_id: int, filename: str) -> Optional[bytes]:
 
 
 def list_filenames(task_id: int) -> list[str]:
-    """列出该 task 当前在 cache 里的全部 filename（按字母序）。"""
+    """List all filenames currently cached for this task (alphabetical order)."""
     with _LOCK:
         return sorted(fn for (tid, fn) in _CACHE if tid == task_id)
 
 
 def drop_task(task_id: int) -> int:
-    """删该 task 的全部 cache 条目；返回删了多少条。"""
+    """Delete all cache entries for this task; returns how many were removed."""
     global _BYTES_TOTAL
     with _LOCK:
         keys = [k for k in _CACHE if k[0] == task_id]
@@ -82,19 +88,19 @@ def drop_task(task_id: int) -> int:
 
 
 def total_count() -> int:
-    """当前 cache 里图片数量（不含 task 数）。"""
+    """Current number of images in the cache (not the number of tasks)."""
     with _LOCK:
         return len(_CACHE)
 
 
 def total_bytes() -> int:
-    """当前 cache 占字节数。"""
+    """Current bytes occupied by the cache."""
     with _LOCK:
         return _BYTES_TOTAL
 
 
 def clear_all() -> None:
-    """server lifespan shutdown 调；测试也用。"""
+    """Called on server lifespan shutdown; also used by tests."""
     global _BYTES_TOTAL
     with _LOCK:
         _CACHE.clear()
@@ -102,8 +108,9 @@ def clear_all() -> None:
 
 
 def _enforce_limits_locked() -> None:
-    """剔最旧条目直到满足 max_count 和 max_bytes。调用方持锁。"""
+    """Evict the oldest entries until max_count and max_bytes are satisfied. Caller
+    must already hold the lock."""
     global _BYTES_TOTAL
     while _CACHE and (len(_CACHE) > _max_count or _BYTES_TOTAL > _max_bytes):
-        _, data = _CACHE.popitem(last=False)  # 最旧
+        _, data = _CACHE.popitem(last=False)  # oldest
         _BYTES_TOTAL -= len(data)

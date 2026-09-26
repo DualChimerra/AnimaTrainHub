@@ -68,7 +68,7 @@ export function useToast(): ToastApi {
   return ctx
 }
 
-/** 把任意 throw 的错误转成 toast，避免 alert/console。 */
+/** Turns any thrown error into a toast, instead of alert/console. */
 export function useReportError() {
   const { toast } = useToast()
   return useCallback(
@@ -77,7 +77,7 @@ export function useReportError() {
   )
 }
 
-/** 副作用：当 deps 变化且 cond 真，弹一条 toast。常用于事件提示。 */
+/** Side effect: shows a toast when deps change and cond is true. Commonly used for event notifications. */
 export function useToastOn(cond: boolean, message: string, kind: Kind = 'info') {
   const { toast } = useToast()
   useEffect(() => {

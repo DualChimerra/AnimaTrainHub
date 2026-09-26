@@ -1,5 +1,5 @@
 /** Optional steps carry a trailing parenthetical in every locale:
- *  "Препроцесс (необязательно)", "Preprocess (optional)", "预处理（可选）".
+ *  "Препроцесс (необязательно)", "Preprocess (optional)".
  *  The sidebar and breadcrumbs show the short form; the full label stays
  *  available as a tooltip. */
 const OPTIONAL_SUFFIX = /^(.*?)\s*[(（][^()（）]+[)）]\s*$/

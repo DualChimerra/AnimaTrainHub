@@ -100,18 +100,21 @@ def test_vram_discount_does_not_relax_ram_side(fake_env):
 
 
 def test_swapped_bytes_use_checkpoint_dtype_not_compute_dtype(tmp_path):
-    """**回归**：pinned 预算必须按 checkpoint 实际 dtype 算，不能按计算 dtype。
+    """**Regression**: the pinned budget must be computed from the checkpoint's
+    actual dtype, not the compute dtype.
 
-    fp8 checkpoint 只有 bf16 的一半。按 bf16 估会把 28 层算成两倍，在内存
-    充足的机器上撞 60% 安全线被**误拒** —— 恰好挡死 B12 的目标配置。
-    高估在这里不是保守，是假阴性。
+    An fp8 checkpoint is only half the size of bf16. Estimating from bf16
+    would count 28 layers as double, hitting the 60% safety line on a
+    machine with plenty of RAM and being **wrongly rejected** -- exactly
+    blocking B12's target config. Overestimating here isn't conservative,
+    it's a false negative.
     """
     import torch
     from safetensors.torch import save_file
 
     from training.families.krea2 import loader as L
 
-    # 造一个 fp8 与一个 bf16 的迷你 checkpoint，键名带 blocks.N. 前缀
+    # build one fp8 and one bf16 mini checkpoint whose keys carry a blocks.N. prefix
     n2s = {}
     fp8_t, bf16_t = {}, {}
     for i in range(4):
@@ -124,17 +127,17 @@ def test_swapped_bytes_use_checkpoint_dtype_not_compute_dtype(tmp_path):
     save_file(fp8_t, str(fp8_path))
     save_file(bf16_t, str(bf16_path))
 
-    prefixes = ("blocks.2.", "blocks.3.")  # 末尾 2 层
+    prefixes = ("blocks.2.", "blocks.3.")  # trailing 2 layers
     fp8_bytes = L._swapped_bytes_from_checkpoint(fp8_path, prefixes, n2s)
     bf16_bytes = L._swapped_bytes_from_checkpoint(bf16_path, prefixes, n2s)
 
     assert fp8_bytes == 2 * 256 * 256 * 1
     assert bf16_bytes == 2 * 256 * 256 * 2
-    assert bf16_bytes == 2 * fp8_bytes  # 正是被搞错的那个倍数
+    assert bf16_bytes == 2 * fp8_bytes  # exactly the factor that was being miscalculated
 
 
 def test_swapped_bytes_falls_back_when_header_unreadable(tmp_path):
-    """header 读不出时返回 0，由调用方回退到按计算 dtype 估（不静默放行）。"""
+    """When the header can't be read, returns 0 so the caller falls back to estimating from the compute dtype (never silently passes)."""
     from training.families.krea2 import loader as L
 
     bogus = tmp_path / "not-a-safetensors.bin"
@@ -143,40 +146,41 @@ def test_swapped_bytes_falls_back_when_header_unreadable(tmp_path):
 
 
 def test_pinned_budget_rejects_over_safe_fraction(monkeypatch):
-    """大内存机器：80% 比例是生效的那一侧。"""
+    """Large-RAM machine: the 80% ratio is the side that governs."""
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 40 * _GIB)
-    # 安全上限 = min(40 × 0.8, 40 - 4) = min(32, 36) = 32GB
+    # safe cap = min(40 x 0.8, 40 - 4) = min(32, 36) = 32GB
     sysmem.check_pinned_budget(int(31 * _GIB), blocks=28)
     with pytest.raises(RuntimeError, match="内存不足以换出"):
         sysmem.check_pinned_budget(int(33 * _GIB), blocks=28)
 
 
 def test_pinned_budget_absolute_floor_protects_small_ram(monkeypatch):
-    """**小内存机器**：4GB 绝对下限是生效的那一侧，纯比例会把机器压垮。
+    """**Small-RAM machine**: the 4GB absolute floor is the side that governs; a pure ratio would crush the machine.
 
-    可用 10GB 时纯 80% 允许 pin 8GB，只剩 2GB 给训练进程自身的非 pinned 部分
-    （基底 ≈4GB）→ 换页。取 min 后上限是 6GB。
+    With 10GB available, a pure 80% would allow pinning 8GB, leaving only
+    2GB for the training process's own non-pinned part (base ~4GB) ->
+    paging. Taking the min gives a 6GB cap.
     """
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 10 * _GIB)
-    # 安全上限 = min(10 × 0.8, 10 - 4) = min(8, 6) = 6GB
+    # safe cap = min(10 x 0.8, 10 - 4) = min(8, 6) = 6GB
     sysmem.check_pinned_budget(int(5.5 * _GIB), blocks=14)
     with pytest.raises(RuntimeError, match="内存不足以换出"):
         sysmem.check_pinned_budget(int(7 * _GIB), blocks=14)
 
 
 def test_pinned_budget_real_scenario_fp8_28_layers(monkeypatch):
-    """用户真机场景回归：37.5GB 可用 + fp8 28 层（11.3GB）应放行。
+    """Regression from a real user machine: 37.5GB available + fp8 28 layers (11.3GB) should pass.
 
-    旧口径（60% + 按 bf16 估的 22.6GB）在这里误拒，两处都修完才通过。
+    The old rule (60% + a bf16-estimated 22.6GB) wrongly rejected this; only passes once both are fixed.
     """
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: int(37.5 * _GIB))
     sysmem.check_pinned_budget(int(11.32 * _GIB), blocks=28)
-    # bf16 28 层 22.65GB 在同一台机器上现在也放行（上限 30GB）
+    # bf16 28 layers at 22.65GB now also passes on the same machine (cap 30GB)
     sysmem.check_pinned_budget(int(22.65 * _GIB), blocks=28)
 
 
 def test_pinned_budget_message_is_actionable(monkeypatch):
-    """B6：报错不静默降级，且文案要能指导操作。"""
+    """B6: the error doesn't silently degrade, and the message should tell the user what to do."""
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 8 * _GIB)
     with pytest.raises(RuntimeError) as exc:
         sysmem.check_pinned_budget(int(20 * _GIB), blocks=28)
@@ -187,7 +191,7 @@ def test_pinned_budget_message_is_actionable(monkeypatch):
 
 
 def test_pinned_budget_silent_when_query_fails(monkeypatch):
-    """查询失败静默放行（与既有护栏口径一致，不因探测不到就挡住训练）。"""
+    """A failed query silently passes (consistent with the other guards' rule -- never block training just because probing failed)."""
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: None)
     sysmem.check_pinned_budget(int(999 * _GIB), blocks=28)
 

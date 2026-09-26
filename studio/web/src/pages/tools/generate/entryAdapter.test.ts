@@ -1,20 +1,21 @@
-/** entryTaskId —— 0.17 P-H `?task=` 深链按 task_id 命中历史条目的匹配逻辑。
- *  cache 条目顶层带 taskId；disk 条目的 task_id 由 server enrich 进 PNG anima_params。 */
+/** entryTaskId -- the matching logic for the 0.17 P-H `?task=` deep link to hit
+ *  a history entry by task_id. Cache entries carry taskId at the top level;
+ *  disk entries get task_id enriched into the PNG's anima_params by the server. */
 import { describe, expect, it } from 'vitest'
 import { entryTaskId, type HistoryEntry } from './entryAdapter'
 
 describe('entryTaskId', () => {
-  it('cache 条目取顶层 taskId', () => {
+  it('a cache entry reads the top-level taskId', () => {
     const e = { source: 'cache', taskId: 42 } as HistoryEntry
     expect(entryTaskId(e)).toBe(42)
   })
 
-  it('disk 条目从 params.task_id 取', () => {
+  it('a disk entry reads params.task_id', () => {
     const e = { source: 'disk', params: { task_id: 7 } } as unknown as HistoryEntry
     expect(entryTaskId(e)).toBe(7)
   })
 
-  it('disk 条目无 task_id → undefined（老落盘图无 enrich）', () => {
+  it('a disk entry with no task_id -> undefined (old disk images have no enrichment)', () => {
     const e = { source: 'disk', params: {} } as unknown as HistoryEntry
     expect(entryTaskId(e)).toBeUndefined()
   })

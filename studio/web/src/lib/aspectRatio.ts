@@ -34,10 +34,10 @@ const HIST_TARGETS: ReadonlyArray<{ w: number; h: number; v: number }> = [
 /** Bucket an AR value for histogram display.
  *
  *  Snaps to the **nearest** common LoRA bucket AR (1:1 / 2:3 / 3:2 / 16:9 ...).
- *  No "其他" fallback — trainer (sd-scripts etc.) also lands every image in
+ *  No "other" fallback — trainer (sd-scripts etc.) also lands every image in
  *  some resolution bucket, so histogram showing this is faithful to training
  *  reality. Hard tolerance cutoffs were misleading: a 1.39 image (snapped to
- *  4:3) and a 1.41 image (which would fall into "其他") are semantically the
+ *  4:3) and a 1.41 image (which would fall into "other") are semantically the
  *  same shape but appear in different bins.
  *
  *  Returns `{ label, sortKey }`. `sortKey` = the canonical AR value, letting

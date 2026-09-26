@@ -1,4 +1,4 @@
-"""/api/generate 请求 BaseModel（PR-6 commit 5 从 server.py 抽出）。"""
+"""/api/generate request BaseModels (extracted from server.py in PR-6 commit 5)."""
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
@@ -21,24 +21,27 @@ class GenerateRequest(BaseModel):
     seed: int = 0
     lora_configs: list[LoraEntry] = []
     mixed_precision: str = "bf16"
-    # 底模所属模型族（多模型 P4-4）：决定路径解析 / daemon 加载与采样栈；
-    # sampler 按族白名单校验（GenerateConfig validator，越族 422）
+    # Model family the base model belongs to (multi-model P4-4): determines path resolution /
+    # daemon loading and the sampling stack; sampler is validated against a per-family whitelist
+    # (GenerateConfig validator, cross-family -> 422)
     model_family: Literal["anima", "krea2"] = "anima"
-    # 本次出图临时选用的底模（官方 variant key 或注册的本地 custom 路径）；
-    # None → 用 Settings 里该族 selected。只换 transformer 权重。
+    # Base model to use for this generation (official variant key or a registered local custom
+    # path); None -> use the family's "selected" from Settings. Only swaps the transformer weights.
     base_model: Optional[str] = None
-    # 本次出图选用的文本编码器 variant（krea2 生效）：None → 跟随下载中心
-    # 选中的 TE（selected_te）；显式 "bf16"/"fp8" 临时覆盖（与 base_model
-    # 语义对称）。
+    # Text encoder variant to use for this generation (applies to krea2): None -> follow the
+    # download center's selected TE (selected_te); explicit "bf16"/"fp8" overrides it for this
+    # request (symmetric with base_model semantics).
     text_encoder: Optional[Literal["bf16", "fp8"]] = None
-    # commit C：attention_backend 默认从 secrets.generate.attention_backend 读，
-    # 前端 Generate 页不再发这个字段；保留 Optional 兼容老客户端 / 临时覆盖。
+    # commit C: attention_backend now defaults from secrets.generate.attention_backend and the
+    # frontend Generate page no longer sends this field; kept Optional for old-client compat /
+    # ad-hoc overrides.
     attention_backend: Optional[AttentionBackend] = None
-    # XY 矩阵：None=单图模式；设值时 schema 强制 prompts 单条 + count=1
+    # XY matrix: None = single-image mode; when set, the schema forces a single prompt + count=1
     xy_matrix: Optional[XYMatrixSpec] = None
-    # 前端构造的 GenerateParamsSnapshot dict（prefs 视图：含 prompts/loras/
-    # xy_draft/dataset_pick 等），server 不解释结构、原样透传到 daemon →
-    # image_done 时塞进加密 cache payload header。/api/generate/cache/index
-    # 时返还前端，作为 CacheEntry.params 回填用。save_test_images=true 走
-    # 落盘分支也共用这份 snapshot 写入 PNG anima_params metadata。
+    # GenerateParamsSnapshot dict built by the frontend (a prefs view: prompts/loras/xy_draft/
+    # dataset_pick etc). The server doesn't interpret its structure, just passes it through to
+    # the daemon -> on image_done it's stuffed into the encrypted cache payload header. Returned
+    # to the frontend via /api/generate/cache/index as CacheEntry.params for refill. The
+    # save_test_images=true disk-write path also uses this same snapshot when writing PNG
+    # anima_params metadata.
     params_snapshot: Optional[dict[str, Any]] = None

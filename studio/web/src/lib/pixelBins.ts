@@ -1,5 +1,6 @@
-/** 像素面积分桶 —— 映射到常见 LoRA 训练分辨率（共享于 Preprocess 页 +
- *  Overview 详情 tab）。bin 边界按总像素数（w*h）划分，跟训练分辨率匹配。 */
+/** Pixel-area binning -- maps to common LoRA training resolutions (shared by
+ *  the Preprocess pages and the Overview detail tab). Bin edges are split by
+ *  total pixel count (w*h), matching training resolution. */
 
 export const PX_BINS = [
   { id: 'lt-512',    label: '< 512²',         lo: 0,           hi: 512 * 512,   sortKey: 0 },
@@ -25,7 +26,7 @@ export interface PixelHistBin {
   n: number
 }
 
-/** 给定一组 (w, h)，返回非空 bin 的 histogram 数据（适配 BarHistogram）。 */
+/** Given a set of (w, h) pairs, returns histogram data for the non-empty bins (fits BarHistogram). */
 export function computePixelHist(items: ReadonlyArray<{ w: number | null; h: number | null }>): PixelHistBin[] {
   const counts = new Map<PxBinId, number>(PX_BINS.map((b) => [b.id, 0]))
   for (const it of items) {

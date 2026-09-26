@@ -1,4 +1,4 @@
-"""bundle / train 导出导入 BaseModel（PR-6.5 commit 2 从 server.py 抽出）。"""
+"""bundle / train export-import BaseModels (extracted from server.py in PR-6.5 commit 2)."""
 from __future__ import annotations
 
 from typing import Optional

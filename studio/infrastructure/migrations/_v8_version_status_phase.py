@@ -1,34 +1,35 @@
-"""v7 → v8: versions 加 status / phase / last_failure_reason — ADR-0007 §11.3-B。
+"""v7 -> v8: adds status / phase / last_failure_reason to versions -- ADR-0007 SS11.3-B.
 
-把 master `versions.stage` 一个 enum 字段拆成两个正交字段：
+Splits the master `versions.stage` single enum field into two orthogonal fields:
 
-- `status` (5 enum): preparing / training / completed / failed / canceled
-- `phase`  (5 enum, 仅 status=preparing 时有意义):
+- `status` (5-value enum): preparing / training / completed / failed / canceled
+- `phase`  (5-value enum, only meaningful when status=preparing):
   curating / tagging / editing / regularizing / ready
-- `last_failure_reason` TEXT: 训练失败原因（UI 派生用，可空）
+- `last_failure_reason` TEXT: training failure reason (used for UI derivation, nullable)
 
-本迁移只 add 字段并按映射表回填，**不删** `versions.stage` 列（删除走 v9）。
-迁移期间 backend 由 PR-3 双写新旧字段，保持老 frontend 兼容。
+This migration only adds fields and backfills from the mapping table, it does **not drop**
+the `versions.stage` column (that happens in v9). During the migration window the backend
+dual-writes old and new fields (PR-3), keeping old frontends compatible.
 
-映射表（ADR-0007 §11.3-B）：
+Mapping table (ADR-0007 SS11.3-B):
 
-  master versions.stage → 新 status / phase
-  ────────────────────────────────────────────────────────────
-  curating         → status=preparing, phase=curating
-  tagging          → status=preparing, phase=tagging
-  regularizing     → status=preparing, phase=regularizing
-  ready            → status=preparing, phase=ready
-  training         → 看 latest task:
-                       done     → completed
-                       failed   → failed
-                       canceled → canceled
-                       running / pending / paused → training
-                       task 不存在 → preparing + phase=ready (脏数据 fallback)
-  done             → status=completed, phase=ready
-  未知 stage       → preparing + phase=ready (fallback)
+  master versions.stage -> new status / phase
+  ------------------------------------------------------------
+  curating         -> status=preparing, phase=curating
+  tagging          -> status=preparing, phase=tagging
+  regularizing     -> status=preparing, phase=regularizing
+  ready            -> status=preparing, phase=ready
+  training         -> derived from the latest task:
+                       done     -> completed
+                       failed   -> failed
+                       canceled -> canceled
+                       running / pending / paused -> training
+                       no task found -> preparing + phase=ready (dirty-data fallback)
+  done             -> status=completed, phase=ready
+  unknown stage    -> preparing + phase=ready (fallback)
 
-phase 在 status != preparing 时无业务意义，但字段必填以保 schema 简单 —
-统一落 ready 表示"已走完准备阶段"。
+phase has no business meaning when status != preparing, but the field is kept required to
+keep the schema simple -- it's uniformly set to ready, meaning "the preparing phase is done".
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ import sqlite3
 from ._v2_projects import _add_column_if_missing
 
 
-# stage → (status, phase) 静态映射（training 例外，需要 task lookup）
+# stage -> (status, phase) static mapping (training is an exception, needs a task lookup)
 _STATIC_STAGE_MAP: dict[str, tuple[str, str]] = {
     "curating":     ("preparing", "curating"),
     "tagging":      ("preparing", "tagging"),
@@ -46,7 +47,7 @@ _STATIC_STAGE_MAP: dict[str, tuple[str, str]] = {
     "done":         ("completed", "ready"),
 }
 
-# 老 stage='training' 时，按 latest task.status 派生
+# When the old stage='training', derive it from the latest task.status
 _TASK_STATUS_MAP: dict[str, str] = {
     "done":     "completed",
     "failed":   "failed",
@@ -78,7 +79,7 @@ def _add_columns(conn: sqlite3.Connection) -> None:
 
 
 def _backfill(conn: sqlite3.Connection) -> None:
-    """按 ADR §11.3-B 迁移表把现有 versions.stage 翻译成 status + phase。"""
+    """Translate the existing versions.stage into status + phase, per the ADR SS11.3-B mapping table."""
     rows = conn.execute("SELECT id, stage FROM versions").fetchall()
     for vid, stage in rows:
         if stage in _STATIC_STAGE_MAP:
@@ -86,7 +87,7 @@ def _backfill(conn: sqlite3.Connection) -> None:
         elif stage == "training":
             status, phase = _derive_from_latest_task(conn, vid)
         else:
-            # 未知 stage（理论上不应出现）→ fallback
+            # Unknown stage (should never happen in theory) -> fallback
             status, phase = "preparing", "ready"
         conn.execute(
             "UPDATE versions SET status = ?, phase = ? WHERE id = ?",
@@ -98,7 +99,7 @@ def _backfill(conn: sqlite3.Connection) -> None:
 def _derive_from_latest_task(
     conn: sqlite3.Connection, version_id: int
 ) -> tuple[str, str]:
-    """training stage 时按 latest task 推 status；phase 落 'ready'（终态无意义）。"""
+    """For the training stage, derive status from the latest task; phase lands on 'ready' (meaningless once terminal)."""
     row = conn.execute(
         "SELECT status FROM tasks "
         "WHERE version_id = ? "
@@ -106,7 +107,7 @@ def _derive_from_latest_task(
         (version_id,),
     ).fetchone()
     if row is None:
-        # 脏数据 fallback：stage=training 但无关联 task
+        # Dirty-data fallback: stage=training but no associated task
         return ("preparing", "ready")
     task_status = str(row[0]) if row[0] else ""
     new_status = _TASK_STATUS_MAP.get(task_status, "preparing")

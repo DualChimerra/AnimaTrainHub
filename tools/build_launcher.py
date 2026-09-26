@@ -1,18 +1,19 @@
 #!/usr/bin/env python
-"""把 `tools/launcher.py` 编译成单文件可执行程序（Windows 上即 AnimaLoraStudio.exe）。
+"""Compiles `tools/launcher.py` into a single-file executable (AnimaLoraStudio.exe on Windows).
 
-    python tools/build_launcher.py                 → dist/AnimaLoraStudio(.exe)
-    python tools/build_launcher.py --output-dir X   自定义输出目录
-    python tools/build_launcher.py --console        保留控制台窗口（默认就保留）
+    python tools/build_launcher.py                 -> dist/AnimaLoraStudio(.exe)
+    python tools/build_launcher.py --output-dir X   custom output directory
+    python tools/build_launcher.py --console        keep the console window (default anyway)
 
-产物只有几 MB：打进去的是引导逻辑（纯 stdlib），**不含** torch / 前端 /
-studio 本身 —— 那些留在仓库里，由 exe 在用户机器上按显卡装对的版本。见
-`tools/launcher.py` 的模块 docstring。
+The output is only a few MB: it bundles just the bootstrap logic (pure stdlib), it does
+**not** include torch / the frontend / studio itself -- those stay in the repo, and the
+exe installs the right versions for the user's GPU on their machine. See the module
+docstring of `tools/launcher.py`.
 
-PyInstaller 只在构建机上需要，故不进 requirements.txt；本脚本会在缺失时给出
-安装命令而不是直接崩。交叉编译不可行（PyInstaller 产出的是宿主平台的可执行
-文件），所以 Windows 的 exe 必须在 Windows 上构建 —— CI 走
-`.github/workflows/build-launcher.yml`。
+PyInstaller is only needed on the build machine, so it's not in requirements.txt; this
+script prints the install command instead of crashing when it's missing. Cross-compiling
+isn't possible (PyInstaller produces an executable for the host platform), so the Windows
+exe must be built on Windows -- CI does this via `.github/workflows/build-launcher.yml`.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ NAME = "AnimaLoraStudio"
 
 def ensure_pyinstaller() -> None:
     try:
-        import PyInstaller  # noqa: F401  — 只探测可用性
+        import PyInstaller  # noqa: F401  -- only probing availability
     except ImportError:
         print(
             "PyInstaller is not installed.\n"
@@ -48,8 +49,9 @@ def build(output_dir: Path, *, windowed: bool, clean: bool) -> Path:
         "--distpath", str(output_dir),
         "--workpath", str(work),
         "--specpath", str(work),
-        # 引导程序纯 stdlib：显式排掉这些包，免得构建机上恰好装了 torch /
-        # numpy 时 PyInstaller 的依赖分析把几百 MB 一起打进去。
+        # The bootstrap is pure stdlib: exclude these packages explicitly, so that if the
+        # build machine happens to have torch / numpy installed, PyInstaller's dependency
+        # analysis doesn't bundle in hundreds of extra MB.
         "--exclude-module", "torch",
         "--exclude-module", "numpy",
         "--exclude-module", "PIL",
@@ -59,8 +61,9 @@ def build(output_dir: Path, *, windowed: bool, clean: bool) -> Path:
     ]
     if clean:
         argv.append("--clean")
-    # 默认保留控制台：首次运行要装几 GB 依赖，装到哪一步、报什么错全靠这个窗口。
-    # 藏掉窗口只会把「装了十分钟没反应」变成用户唯一能描述的现象。
+    # Console kept by default: the first run installs several GB of dependencies, and this
+    # window is the only way to see progress or errors. Hiding it would leave the user with
+    # nothing to describe except "it sat there for ten minutes and did nothing."
     argv.append("--windowed" if windowed else "--console")
     icon = REPO_ROOT / "docs" / "images" / "launcher.ico"
     if icon.exists():

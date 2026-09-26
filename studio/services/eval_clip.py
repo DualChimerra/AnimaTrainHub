@@ -345,7 +345,8 @@ def _default_scorer(
     items = _done_image_items(run, version_dir, eval_root)
     references = _reference_paths(run, version_dir)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # 统一下载中心：缺则下到项目 models/eval/clip/（不再隐式落 ~/.cache/huggingface）。
+    # Unified download center: missing files go under the project's models/eval/clip/
+    # (no more implicit downloads to ~/.cache/huggingface).
     from studio.services.models.downloader import ensure_eval_model
     local_dir = ensure_eval_model("clip", model_name, on_log=progress)
     progress(f"[eval-clip] loading CLIP on {device}")

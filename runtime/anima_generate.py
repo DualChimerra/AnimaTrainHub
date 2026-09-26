@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""测试出图 — 独立运行推理（CLI 用法，不再被 Studio server 调）。
+"""Test image generation -- standalone inference run (CLI usage, no longer called by the Studio server).
 
-用法：
+Usage:
     python runtime/anima_generate.py --config generate_config.json [--monitor-state-file state.json]
 
-JSON 配置字段见 studio.schema.GenerateConfig。
+See studio.schema.GenerateConfig for the JSON config fields.
 
-历史 / 当前位置：
-  - 早期 server 通过 supervisor spawn 这个脚本作为 generate task 的 worker；
-    每次出图都要 30-60s 重 load 模型。
-  - PR Phase 2（commit 9+）改成常驻 inference_daemon（runtime/anima_daemon.py）+
-    模型跨 task 复用 + 图不落盘走内存 cache。Server 不再 spawn 这个脚本。
-  - 本文件保留作 CLI 用法：用户在命令行直跑出图，写盘到 cfg.output_dir
-    （用户指定路径，是真实持久化）。
+History / current place in the stack:
+  - Early on, the server had the supervisor spawn this script as the worker for
+    a generate task; every generation had to reload the model, taking 30-60s.
+  - PR Phase 2 (commit 9+) switched to a resident inference_daemon
+    (runtime/anima_daemon.py) + model reuse across tasks + images served from
+    an in-memory cache instead of hitting disk. The server no longer spawns this script.
+  - This file is kept around for CLI usage: the user runs generation directly
+    from the command line, writing to disk at cfg.output_dir (a user-specified path, genuinely persisted).
 
-关键实现：
-  - 多 LoRA 加载走 studio.services.inference_core.apply_loras —— 每份 LoRA 独立
-    inject 一份 AnimaLycorisAdapter，rank/alpha 从 ss_network_args 读，用
-    multiplier=scale 控制贡献权重（修 PR #17 硬编码 rank=32 + LoKr 子矩阵
-    直加的出错图问题）。
-  - 进度通过 train_monitor 推 SSE，前端按 sample_path 拉单图显示。
+Key implementation notes:
+  - Multi-LoRA loading goes through studio.services.inference_core.apply_loras --
+    each LoRA gets its own independently injected AnimaLycorisAdapter, with
+    rank/alpha read from ss_network_args, and contribution weight controlled via
+    multiplier=scale (fixes PR #17's bug of a hardcoded rank=32 plus directly
+    adding LoKr submatrices, which produced broken images).
+  - Progress is pushed via train_monitor over SSE; the frontend pulls single images by sample_path.
 """
 from __future__ import annotations
 
@@ -32,7 +34,7 @@ from pathlib import Path
 
 import torch
 
-# anima_train + train_monitor 都在 runtime/ 同目录，_THIS_DIR 即够。
+# anima_train + train_monitor are both in the same runtime/ directory, so _THIS_DIR is enough.
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
 for _p in (_THIS_DIR, _REPO_ROOT):
@@ -63,9 +65,9 @@ def _torch_dtype_from_precision(value: str | None) -> torch.dtype:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Anima 测试出图")
-    p.add_argument("--config", required=True, help="JSON 配置文件路径")
-    p.add_argument("--monitor-state-file", default="", help="进度状态文件路径")
+    p = argparse.ArgumentParser(description="Anima test image generation")
+    p.add_argument("--config", required=True, help="path to the JSON config file")
+    p.add_argument("--monitor-state-file", default="", help="path to the progress state file")
     return p.parse_args()
 
 
@@ -74,7 +76,7 @@ def main() -> None:
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
-        logger.error(f"配置文件不存在: {cfg_path}")
+        logger.error(f"config file does not exist: {cfg_path}")
         sys.exit(1)
 
     with open(cfg_path, encoding="utf-8") as f:
@@ -128,13 +130,13 @@ def main() -> None:
         })
         _update_monitor = update_monitor
     except Exception as e:
-        logger.warning(f"monitor 初始化失败: {e}")
+        logger.warning(f"monitor init failed: {e}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = _torch_dtype_from_precision(mixed_precision)
     vae_dtype = _torch_dtype_from_precision(vae_precision)
 
-    # 路径解析
+    # Path resolution
     repo_root = _T.find_diffusion_pipe_root()
     bases = [Path.cwd(), _THIS_DIR, repo_root]
     transformer_path = _T.resolve_path_best_effort(transformer_path, bases)
@@ -143,13 +145,13 @@ def main() -> None:
     if t5_tokenizer_path:
         t5_tokenizer_path = _T.resolve_path_best_effort(t5_tokenizer_path, bases)
 
-    family = _T.resolve_family(cfg)  # D8'：旁路调用方经 family 派发
-    logger.info("加载 VAE...")
+    family = _T.resolve_family(cfg)  # D8': bypass callers dispatch through family too
+    logger.info("Loading VAE...")
     vae = family.load_vae(vae_path, device, vae_dtype,
                           tiling=str(cfg.get("vae_tiling", "auto")))
 
-    logger.info("加载文本编码器...")
-    # 族 opaque 文本栈不拆包；ad-hoc prompt 关缓存（cached_varlen 族 TE 常驻）
+    logger.info("Loading text encoder...")
+    # The family's opaque text stack isn't unpacked; caching is off for ad-hoc prompts (cached_varlen families keep the TE resident)
     text_stack = family.load_text(
         text_encoder_path, device, dtype,
         t5_tokenizer_path=t5_tokenizer_path or None,
@@ -159,25 +161,26 @@ def main() -> None:
         cache_enabled=False,
     )
 
-    # TE 先行编排（krea2，daemon 同款）：DiT 加载前预编码全部 prompt 并
-    # 彻底释放 TE——任一时刻 GPU 只有一个大模型。prompts 集合封闭（XY 时
-    # schema 保证单条）。anima 文本栈（tuple）无此 API 自然跳过；
-    # performance 档不释放。
+    # TE-first ordering (krea2, same as the daemon): pre-encode all prompts
+    # before loading the DiT and fully release the TE -- only one big model on
+    # the GPU at a time. The prompt set is closed (schema guarantees a single
+    # prompt for XY). The anima text stack (a tuple) has no such API and is
+    # skipped naturally; the "performance" tier never releases.
     precache = getattr(text_stack, "precache_online_prompts", None)
     if callable(precache):
         try:
             encoded = precache([*[str(p) for p in prompts], negative_prompt])
         except Exception:
-            logger.exception("prompt 预编码失败；退回逐图惰性编码")
+            logger.exception("prompt pre-encoding failed; falling back to lazy per-image encoding")
         else:
             if vram_policy != "performance":
                 release = getattr(text_stack, "release_model", None)
                 if callable(release):
                     release()
             if encoded:
-                logger.info("krea2 预编码 %d 条 prompt；TE 已释放", encoded)
+                logger.info("krea2 pre-encoded %d prompts; TE released", encoded)
 
-    logger.info("加载 Transformer...")
+    logger.info("Loading Transformer...")
     model = family.load_dit(
         transformer_path, device, dtype,
         attention_backend=("flash_attn" if use_flash else "none"), repo_root=repo_root,
@@ -189,18 +192,19 @@ def main() -> None:
             "but xformers could not be enabled"
         )
 
-    # 多 LoRA：每份独立 inject + multiplier=scale。adapters 必须保持引用，否则
-    # 被 GC 后 forward hook 失效（lycoris 通过 closure 持有 network）。
+    # Multi-LoRA: each one independently injected + multiplier=scale. adapters must
+    # keep a reference alive, otherwise the forward hook stops working after GC
+    # (lycoris holds the network via a closure).
     specs = [
         LoRASpec(path=str(lc.get("path", "")), scale=float(lc.get("scale", 1.0)))
         for lc in lora_configs
     ]
-    _adapters = apply_loras(model, specs, device, torch.float32,  # noqa: F841 — 保持引用
+    _adapters = apply_loras(model, specs, device, torch.float32,  # noqa: F841 -- keep the reference alive
                             family_id=family.spec.family_id)
 
     model.eval()
 
-    # XY 矩阵分支（schema 已校验：xy_matrix 设值时 prompts 单条 + count=1）
+    # XY matrix branch (schema already validated: when xy_matrix is set, prompts has a single entry + count=1)
     xy_matrix = cfg.get("xy_matrix")
     if xy_matrix is not None:
         _run_xy_matrix(
@@ -223,12 +227,12 @@ def main() -> None:
             update_monitor=_update_monitor,
             vram_policy=vram_policy,
         )
-        logger.info("XY 矩阵生成完成")
+        logger.info("XY matrix generation complete")
         return
 
-    # 生成循环
+    # Generation loop
     total = count * len(prompts)
-    logger.info(f"开始生成：{len(prompts)} 个 prompt × {count} 次 = {total} 张")
+    logger.info(f"starting generation: {len(prompts)} prompts x {count} each = {total} images")
 
     img_idx = 0
     for pi, prompt in enumerate(prompts):
@@ -258,28 +262,28 @@ def main() -> None:
                 fname = f"gen_{img_idx:04d}_p{pi}_c{ci}_s{seed}.png"
                 out_path = output_dir / fname
                 img.save(out_path)
-                logger.info(f"已保存: {out_path}")
+                logger.info(f"saved: {out_path}")
                 if _update_monitor:
                     _update_monitor(sample_path=str(out_path), step=img_idx + 1)
             except Exception as e:
-                logger.error(f"生成失败 [{img_idx + 1}/{total}]: {e}")
+                logger.error(f"generation failed [{img_idx + 1}/{total}]: {e}")
 
             img_idx += 1
 
-    logger.info("生成完成")
+    logger.info("generation complete")
 
 
 # ---------------------------------------------------------------------------
-# XY 矩阵实现 —— 单 task 内循环全图，省去 N 次 model load 摊销成本
+# XY matrix implementation -- loops over all images within a single task, avoiding N model-load costs
 # ---------------------------------------------------------------------------
 
 
 def _set_lora_multiplier(adapter, scale: float) -> None:
-    """In-place 改一份 adapter 的 multiplier，不需要 re-inject。
+    """Change an adapter's multiplier in place, no re-injection needed.
 
-    与 inference_core.apply_loras 内的设值路径一致：network.multiplier 是
-    forward 内取的全局倍率；per-lora.multiplier 兜底（lycoris 不同版本取值
-    路径有差异）。
+    Matches the value-setting path inside inference_core.apply_loras:
+    network.multiplier is the global multiplier read during forward;
+    per-lora.multiplier is a fallback (different lycoris versions read it via different paths).
     """
     if adapter.network is None:
         return
@@ -296,12 +300,12 @@ def _apply_axis(
     cur_steps: int, cur_cfg_scale: float, cur_seed: int, cur_sampler: str,
     base_specs, adapters,
 ) -> tuple[int, float, int, str]:
-    """对 axis_type 派生的字段做更新；lora_scale 直接 mutate 所有 adapter。
+    """Update the fields derived from axis_type; lora_scale directly mutates every adapter.
 
-    lora_ckpt 不在这里 —— 它要 reinject，由 _run_xy_matrix 单独走
-    apply_loras 重新加载路径。
+    lora_ckpt is not handled here -- it requires reinjection, which
+    _run_xy_matrix handles separately via the apply_loras reload path.
 
-    返回 (steps, cfg_scale, seed, sampler) 4 元组（不变量直接透传）。
+    Returns a (steps, cfg_scale, seed, sampler) 4-tuple (values that don't change pass through unchanged).
     """
     axis_type = axis["axis"]
     if axis_type == "steps":
@@ -313,7 +317,7 @@ def _apply_axis(
     elif axis_type == "sampler_name":
         cur_sampler = str(value)
     elif axis_type == "lora_scale":
-        # 全局轴：所有 LoRA 的 multiplier 都设成同一个 cell 值
+        # Global axis: every LoRA's multiplier gets set to the same cell value
         for ad in adapters:
             _set_lora_multiplier(ad, float(value))
     return cur_steps, cur_cfg_scale, cur_seed, cur_sampler
@@ -340,57 +344,60 @@ def _run_xy_matrix(
     distilled: bool = False,
     vram_policy: str = "auto",
 ) -> None:
-    """循环 (yi, xi) 出 N×M 张图。
+    """Loop over (yi, xi) to produce an N x M grid of images.
 
-    设计：
-      - 每个 cell 从 base_* 派生本次参数（防上次 cell 修改泄漏到下次）；
-        lora_scale 通过 mutate adapter.multiplier 实现，每次 cell 进入前必须
-        把所有 LoRA 的 multiplier 重置回 base_specs[i].scale。
-      - 文件名 `xy_x{xi:02d}_y{yi:02d}_s{seed}.png`，前端按 (yi, xi) 排 grid。
-      - update_monitor 推 sample_path + xy 元数据；前端拿 xy={xi,yi,xv,yv}
-        渲染 cell 标签 + 排序。
-      - base_seed=0 → 随机一次后所有 cell 共享（XY 仅看轴效应）；axis=seed
-        时按 cell 值覆盖。
+    Design:
+      - Each cell derives its parameters from base_* (preventing the previous
+        cell's changes from leaking into the next); lora_scale is implemented by
+        mutating adapter.multiplier, so every LoRA's multiplier must be reset
+        back to base_specs[i].scale before each cell.
+      - Filename `xy_x{xi:02d}_y{yi:02d}_s{seed}.png`; the frontend arranges the
+        grid by (yi, xi).
+      - update_monitor pushes sample_path + xy metadata; the frontend uses
+        xy={xi,yi,xv,yv} to render cell labels + ordering.
+      - base_seed=0 -> randomized once and shared across all cells (XY should
+        only show the axis effect); axis=seed overrides per cell value.
     """
     x_spec = xy_matrix["x"]
     y_spec = xy_matrix.get("y")
     x_values = x_spec["values"]
     y_values = y_spec["values"] if y_spec else [None]
 
-    # lora_ckpt 轴需要 cell 间 detach + reinject LoRA，CLI runner 不接入
-    # CACHE.apply_loras 那套（daemon 才有），所以这里直接拒绝。生产路径走
-    # runtime/anima_daemon.py:_run_xy 已支持。
+    # The lora_ckpt axis needs a detach + reinject of the LoRA between cells; the
+    # CLI runner doesn't wire into the CACHE.apply_loras setup (only the daemon
+    # has that), so it's rejected outright here. The production path via
+    # runtime/anima_daemon.py:_run_xy already supports it.
     if x_spec.get("axis") == "lora_ckpt" or (y_spec and y_spec.get("axis") == "lora_ckpt"):
         raise NotImplementedError(
-            "lora_ckpt 轴需走 daemon path (runtime/anima_daemon.py)；"
-            "CLI runner anima_generate.py 不支持热切换 LoRA 文件"
+            "the lora_ckpt axis requires the daemon path (runtime/anima_daemon.py); "
+            "the CLI runner anima_generate.py does not support hot-swapping LoRA files"
         )
 
-    # fp8 底模的 LoRA 是 merge 进权重的（无常驻 network），lora_scale 轴
-    # 需要逐格 detach + 重 merge——daemon 的 CACHE.apply_loras 路径已支持
-    # （_cell_lora_configs）；CLI runner 无缓存管理，与 lora_ckpt 轴同款
-    # 不接入。
+    # An fp8 base model's LoRA is merged into the weights (no resident network),
+    # so the lora_scale axis needs a per-cell detach + re-merge -- the daemon's
+    # CACHE.apply_loras path already supports this (_cell_lora_configs); the CLI
+    # runner has no cache management and, like the lora_ckpt axis, isn't wired up for it.
     if x_spec.get("axis") == "lora_scale" or (y_spec and y_spec.get("axis") == "lora_scale"):
         from training.families.krea2.quant_fp8 import model_has_fp8_layers
 
         if model_has_fp8_layers(model):
             raise NotImplementedError(
-                "fp8 底模的 LoRA 强度轴需逐格重新合并，走 daemon path "
-                "(runtime/anima_daemon.py)；CLI runner 请改用 bf16 底模。"
+                "an fp8 base model's LoRA strength axis needs a per-cell re-merge; use the "
+                "daemon path (runtime/anima_daemon.py); the CLI runner should use a bf16 base model instead."
             )
 
     if base_seed == 0:
         base_seed = random.randint(0, 2**31 - 1)
-        logger.info(f"XY 共享种子（cfg.seed=0 随机化）: {base_seed}")
+        logger.info(f"XY shared seed (randomized from cfg.seed=0): {base_seed}")
 
     base_scales = [float(s.scale) for s in base_specs]
     total = len(x_values) * len(y_values)
-    logger.info(f"开始 XY 生成：{len(x_values)}×{len(y_values)} = {total} 张")
+    logger.info(f"starting XY generation: {len(x_values)}x{len(y_values)} = {total} images")
 
     img_idx = 0
     for yi, yv in enumerate(y_values):
         for xi, xv in enumerate(x_values):
-            # 重置每个 LoRA 到 base scale，避免上次 cell 的 lora_scale 改动遗留
+            # Reset every LoRA back to its base scale, so a previous cell's lora_scale change doesn't leak
             for i, s in enumerate(base_scales):
                 if i < len(adapters):
                     _set_lora_multiplier(adapters[i], s)
@@ -441,7 +448,7 @@ def _run_xy_matrix(
                 fname = f"xy_x{xi:02d}_y{yi:02d}_s{cur_seed}.png"
                 out_path = output_dir / fname
                 img.save(out_path)
-                logger.info(f"已保存: {out_path}")
+                logger.info(f"saved: {out_path}")
                 if update_monitor:
                     update_monitor(
                         sample_path=str(out_path),
@@ -449,7 +456,7 @@ def _run_xy_matrix(
                         xy={"xi": xi, "yi": yi, "xv": xv, "yv": yv},
                     )
             except Exception as e:
-                logger.error(f"XY [{xi},{yi}] 失败: {e}")
+                logger.error(f"XY [{xi},{yi}] failed: {e}")
 
             img_idx += 1
 

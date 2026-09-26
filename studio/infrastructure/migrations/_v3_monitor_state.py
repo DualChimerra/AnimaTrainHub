@@ -1,7 +1,7 @@
-"""v2 → v3: tasks 表加 `monitor_state_path` 列（PP6.1）。
+"""v2 -> v3: adds a `monitor_state_path` column to tasks (PP6.1).
 
-每个训练任务都有自己的 monitor state 文件路径（per-version 或 per-task 兜底）。
-端点 `/api/state?task_id=N` 用此列定位文件。
+Each training task has its own monitor state file path (per-version, falling back to per-task).
+The `/api/state?task_id=N` endpoint uses this column to locate the file.
 """
 from __future__ import annotations
 

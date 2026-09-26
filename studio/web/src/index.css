@@ -14,14 +14,15 @@ input[type='radio'] {
   accent-color: var(--accent);
 }
 
-/* 给所有 overflow-auto / overflow-y-auto 默认预留滚动槽，杜绝抖动 */
+/* Reserve a scrollbar gutter by default on every overflow-auto / overflow-y-auto to prevent layout shift */
 .overflow-auto,
 .overflow-y-auto {
   scrollbar-gutter: stable;
 }
 
-/* 设置页「已保存」指示：每次保存（React key 变 → 重挂载）重播，从 accent 色
-   淡入再渐变回常态色——让同一分钟内的连续保存也有一眼可见的反馈。 */
+/* Settings page "saved" indicator: replays on every save (React key changes
+   -> remount), fading from the accent color back to the normal color -- so
+   back-to-back saves within the same minute still get visible feedback. */
 @keyframes settings-saved-flash {
   0% { color: var(--accent-text, var(--accent)); opacity: 0.5; }
   100% { color: var(--fg-tertiary); opacity: 1; }

@@ -1,23 +1,28 @@
-"""推理核心 — 多 LoRA 加载 / 合并的统一实现。
+"""Inference core -- unified implementation for loading/merging multiple LoRAs.
 
-服务对象：
-  - runtime/anima_generate.py（独立测试出图，多 LoRA 叠加）
-  - runtime/anima_train.py 训练期 sample（PR-9 commit 7 切过来）
-  - runtime/anima_reg_ai.py（先验生成 — 不调 apply_loras，base 模型直出）
+Consumers:
+  - runtime/anima_generate.py (standalone test generation, stacking multiple LoRAs)
+  - runtime/anima_train.py's in-training sampling (moved here in PR-9 commit 7)
+  - runtime/anima_reg_ai.py (prior generation -- does not call apply_loras, samples
+    straight from the base model)
 
-PR #17 作者在 anima_generate.py / anima_reg_ai.py 各 copy 了一份 LoRA 加载，
-有两个 P0 bug：
-  1. rank/alpha 硬编码 32/32，不从顶层 ss_network_dim/ss_network_alpha 读 ——
-     训练 dim≠32 的 LoRA 会 shape 错或 alpha 缩放错。
-  2. 多 LoRA 把不同 LoRA 的 tensor 直接 add 到一份 state_dict 然后灌进
-     一个 LycorisNetwork —— LoKr 的 lokr_w1/lokr_w2 是子矩阵，
-     子矩阵相加 ≠ 权重 delta 相加，出图错。
+The author of PR #17 copy-pasted a LoRA-loading implementation into both
+anima_generate.py and anima_reg_ai.py, which carried two P0 bugs:
+  1. rank/alpha were hardcoded to 32/32 instead of reading the top-level
+     ss_network_dim/ss_network_alpha -- LoRAs trained with dim != 32 would get
+     the wrong shape or the wrong alpha scaling.
+  2. With multiple LoRAs, tensors from different LoRAs were added directly into
+     one state_dict and fed into a single LycorisNetwork -- but LoKr's
+     lokr_w1/lokr_w2 are submatrices, and summing submatrices is not the same as
+     summing weight deltas, producing wrong images.
 
-本模块统一修这两条：
-  - read_lora_meta()：从顶层 metadata 读 rank/alpha，从 ss_network_args 读 algo/factor
-  - apply_loras()：每份 LoRA 单独 inject 一份 AnimaLycorisAdapter，靠
-    LycorisNetwork.multiplier=scale 控制贡献权重；forward 时多份 hook
-    自然累加 delta，等价于权重 delta 加和。
+This module fixes both issues in one place:
+  - read_lora_meta(): reads rank/alpha from top-level metadata, algo/factor from
+    ss_network_args
+  - apply_loras(): injects a separate AnimaLycorisAdapter per LoRA, controlling
+    each one's contribution via LycorisNetwork.multiplier=scale; at forward time
+    the multiple hooks naturally accumulate deltas, which is equivalent to
+    summing weight deltas.
 """
 from __future__ import annotations
 
@@ -31,13 +36,14 @@ from typing import Any, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-# 测试出图 task 的临时输出目录前缀。每个 task 一个 anima_gen_{task_id}/。
-# 用户决策：测试页面出图不保存，task 结束 supervisor 清掉整个目录；
-# studio 启动时扫一遍清遗留（防 supervisor crash 时 leak）。
+# Temp output directory prefix for test-generation tasks. One anima_gen_{task_id}/
+# per task. Product decision: images generated on the test page are not saved --
+# the supervisor deletes the whole directory when the task ends; studio also
+# sweeps and cleans up leftovers on startup (in case the supervisor crashed).
 GENERATE_TEMP_PREFIX = "anima_gen_"
 
 
-# 缺 metadata 时的回退值。与 AnimaLycorisAdapter 默认对齐。
+# Fallback values when metadata is missing. Matches AnimaLycorisAdapter's defaults.
 _DEFAULT_RANK = 32
 _DEFAULT_ALPHA = 16.0
 _DEFAULT_ALGO = "lokr"
@@ -46,22 +52,25 @@ _DEFAULT_FACTOR = 8
 
 @dataclass
 class LoRASpec:
-    """单个 LoRA 的加载参数。"""
+    """Load parameters for a single LoRA."""
     path: str
     scale: float = 1.0
 
 
 @dataclass
 class LoRAMeta:
-    """从 safetensors metadata 解析出来的 LoRA 训练参数。
+    """LoRA training parameters parsed from safetensors metadata.
 
-    weight_decompose / rs_lora 必须忠实回放训练侧设置 —— 否则推理网络结构
-    与文件不匹配：DoRA 漏 dora_scale 张量（unexpected keys），RS-LoRA 把
-    effective alpha 从 α/√rank 错算成 α/rank，强度被砍 √rank 倍。
+    weight_decompose / rs_lora must faithfully replay the training-side settings
+    -- otherwise the inference-side network structure won't match the file:
+    DoRA would be missing its dora_scale tensor (unexpected keys), and RS-LoRA
+    would miscompute effective alpha as alpha/rank instead of alpha/sqrt(rank),
+    cutting the strength by a factor of sqrt(rank).
 
-    lora_reg_dims（正则 → rank）同理：训练时按 pattern 把部分层的 rank 覆盖
-    成自定义值；推理重建网络若用全局 rank 实例化，被覆盖层的 lokr_w2_a/b
-    形状跟 checkpoint 立刻 mismatch。
+    Likewise for lora_reg_dims (regex -> rank): during training, some layers'
+    rank is overridden to a custom value by pattern. If inference reconstructs
+    the network using the global rank, the overridden layers' lokr_w2_a/b shapes
+    immediately mismatch the checkpoint.
     """
     rank: int
     alpha: float
@@ -70,23 +79,26 @@ class LoRAMeta:
     weight_decompose: bool = False
     rs_lora: bool = False
     lora_reg_dims: Optional[dict[str, int]] = None
-    #: 产物所属模型族（D13 标记）；无标记的存量产物 grandfather 为 anima
+    #: The model family this artifact belongs to (D13 tag); untagged legacy
+    #: artifacts are grandfathered in as anima.
     model_family: str = "anima"
-    #: model_family 是否来自显式 metadata 标记。外部生态文件（civitai /
-    #: musubi / comfy 系）不带我们的标记——grandfather 值只用于展示，
-    #: 跨族硬拒绝只对显式标记生效，无标记靠注入/merge 的键匹配兜底。
+    #: Whether model_family came from an explicit metadata tag. External-ecosystem
+    #: files (civitai / musubi / comfy-style) don't carry our tag -- the
+    #: grandfathered value is display-only; the hard cross-family rejection only
+    #: applies to explicitly tagged files, and untagged files fall back to the
+    #: key-matching check done during injection/merge.
     family_explicit: bool = False
 
 
 def read_lora_meta(path: str) -> LoRAMeta:
-    """从 safetensors 顶层 metadata 读 LoRA 训练参数。
+    """Read LoRA training parameters from the safetensors top-level metadata.
 
-    AnimaLycorisAdapter.save() 写入约定（utils/lycoris_adapter.py）：
-      - 顶层 metadata: ss_network_dim (rank), ss_network_alpha (alpha)
-      - ss_network_args JSON 内: algo, factor, weight_decompose, rs_lora, ...
+    Matches the convention AnimaLycorisAdapter.save() writes (utils/lycoris_adapter.py):
+      - top-level metadata: ss_network_dim (rank), ss_network_alpha (alpha)
+      - inside the ss_network_args JSON: algo, factor, weight_decompose, rs_lora, ...
 
-    缺字段或解析失败时回退到默认值（rank=32, alpha=rank, algo=lokr, factor=8,
-    weight_decompose=False, rs_lora=False）。
+    Falls back to defaults when fields are missing or parsing fails (rank=32,
+    alpha=rank, algo=lokr, factor=8, weight_decompose=False, rs_lora=False).
     """
     from safetensors import safe_open
 
@@ -94,7 +106,7 @@ def read_lora_meta(path: str) -> LoRAMeta:
         with safe_open(str(path), framework="pt", device="cpu") as f:
             meta = f.metadata() or {}
     except Exception as e:
-        logger.warning(f"读 LoRA metadata 失败 {path}: {e}; 用默认参数")
+        logger.warning(f"Failed to read LoRA metadata {path}: {e}; using default parameters")
         return LoRAMeta(_DEFAULT_RANK, _DEFAULT_ALPHA, _DEFAULT_ALGO, _DEFAULT_FACTOR)
 
     try:
@@ -111,7 +123,7 @@ def read_lora_meta(path: str) -> LoRAMeta:
         except (ValueError, TypeError):
             pass
 
-    # 没显式 alpha 时常见约定是 alpha=rank（保留 1.0 倍率）
+    # The common convention when alpha isn't explicit is alpha=rank (keeps a 1.0x multiplier)
     alpha = float(rank)
     if "ss_network_alpha" in meta:
         try:
@@ -130,8 +142,9 @@ def read_lora_meta(path: str) -> LoRAMeta:
     weight_decompose = bool(ss_args.get("weight_decompose", False))
     rs_lora = bool(ss_args.get("rs_lora", False))
 
-    # lora_reg_dims：训练时按正则覆盖部分层 rank；推理必须按同样 pattern 重建，
-    # 否则被覆盖层 shape 与 checkpoint 不匹配。校验是 dict[str, int]，其他形态丢弃。
+    # lora_reg_dims: training overrides some layers' rank via regex; inference must
+    # rebuild with the same pattern, otherwise the overridden layers' shapes won't
+    # match the checkpoint. Validated as dict[str, int]; other shapes are dropped.
     lora_reg_dims: Optional[dict[str, int]] = None
     raw_reg = ss_args.get("lora_reg_dims")
     if isinstance(raw_reg, dict) and raw_reg:
@@ -140,7 +153,7 @@ def read_lora_meta(path: str) -> LoRAMeta:
             try:
                 parsed[str(k)] = int(v)
             except (ValueError, TypeError):
-                logger.warning(f"lora_reg_dims 条目跳过（rank 非整数）: {k!r}={v!r}")
+                logger.warning(f"Skipping lora_reg_dims entry (rank is not an integer): {k!r}={v!r}")
         if parsed:
             lora_reg_dims = parsed
 
@@ -168,14 +181,17 @@ _PEFT_SUFFIX_MAP = {
 def _normalize_peft_lora_sd(
     sd: dict,
 ) -> Optional[tuple[dict, int, Optional[dict[str, int]]]]:
-    """PEFT/comfy 键格式（civitai 生态）归一到 kohya/lycoris 约定。
+    """Normalize PEFT/comfy key format (the civitai ecosystem's) to the
+    kohya/lycoris convention.
 
-    ``diffusion_model.{点分层名}.lora_A/lora_B`` → ``lora_unet_{下划线层名}.
-    lora_down/lora_up.weight``；无 alpha 键 = comfy 缩放 1.0 语义 → 补
-    per-layer ``alpha = rank``（alpha/rank 式 loader 得 1.0，数值一致）；
-    rank 从 lora_A 张量形状推断（此类文件无 ss_* metadata，header 读不到），
-    混秩层进 lora_reg_dims。返回 (归一 sd, max_rank, reg_dims)；非纯 PEFT
-    形态返回 None（kohya/lycoris 文件原样走）。
+    ``diffusion_model.{dotted layer name}.lora_A/lora_B`` -> ``lora_unet_{layer
+    name with underscores}.lora_down/lora_up.weight``; a missing alpha key means
+    comfy's 1.0-scale semantics, so we fill in a per-layer ``alpha = rank`` (an
+    alpha/rank-style loader then gets 1.0, matching the numeric value); rank is
+    inferred from the lora_A tensor shape (these files have no ss_* metadata, so
+    it can't be read from the header); mixed-rank layers go into lora_reg_dims.
+    Returns (normalized sd, max_rank, reg_dims); returns None for non-pure-PEFT
+    shapes (kohya/lycoris files pass through unchanged).
     """
     import torch  # noqa: PLC0415
 
@@ -230,27 +246,33 @@ def apply_loras(
     dtype: Any,
     family_id: str = "anima",
 ) -> list[Any]:
-    """对每个 LoRA 单独 inject 一份 AnimaLycorisAdapter；forward 时 hook 累加 delta。
+    """Inject a separate AnimaLycorisAdapter for each LoRA; forward-time hooks
+    accumulate the deltas.
 
-    dtype 是 LoRA network / tensor 的计算 dtype。ComfyUI weight adapter 会用
-    fp32 中间精度计算 LoRA delta；测试生成 parity 路径应传 torch.float32。
+    dtype is the compute dtype for the LoRA network / tensors. ComfyUI's weight
+    adapter computes the LoRA delta at fp32 intermediate precision; the test
+    generation parity path should pass torch.float32.
 
-    multiplier 字段控制每份 LoRA 贡献权重（用户传的 scale）：
-      - LycorisNetwork.multiplier 是 forward 内取的全局倍率
-      - per-lora module 也设一份兜底（lycoris 不同版本取值路径有差异）
+    The multiplier field controls each LoRA's contribution weight (the caller's
+    scale):
+      - LycorisNetwork.multiplier is the global multiplier read at forward time
+      - a per-lora-module fallback is also set (different lycoris versions read
+        it from different places)
 
-    返回 adapter 列表 — caller **必须保持引用**，否则 Python GC 触发后
-    AnimaLycorisAdapter 内的 LycorisNetwork 也会被 GC，model 上的 forward
-    hook 跟着失效（lycoris 通过 closure 持有 network）。
+    Returns the adapter list -- the caller **must keep a reference** to it,
+    otherwise once Python's GC runs, the LycorisNetwork inside each
+    AnimaLycorisAdapter gets collected too, and the forward hooks on the model
+    stop working (lycoris holds the network via a closure).
     """
     from safetensors import safe_open
 
     from utils.lycoris_adapter import AnimaLycorisAdapter
 
-    # fp8 量化底模走 ComfyUI merge 语义（dequant → 加 delta → stochastic
-    # rounding 回写，seed=层名 CRC32）——lycoris hook 直接注入 fp8 权重会因
-    # dtype 崩或产生与 Comfy 不一致的数值。目前只有 krea2 loader 会产出
-    # fp8 权重（Anima loader 拒绝 fp8）。
+    # An fp8-quantized base model follows ComfyUI's merge semantics (dequant ->
+    # add delta -> stochastic-rounding write-back, seed = CRC32 of the layer
+    # name) -- injecting fp8 weights directly via a lycoris hook would either
+    # crash on dtype or produce values inconsistent with Comfy. Currently only
+    # the krea2 loader produces fp8 weights (the Anima loader rejects fp8).
     fp8_merge = False
     if specs:
         from training.families.krea2.quant_fp8 import model_has_fp8_layers  # noqa: PLC0415
@@ -262,19 +284,22 @@ def apply_loras(
     for spec in specs:
         path = spec.path or ""
         if not path or not Path(path).exists():
-            logger.warning(f"LoRA 路径不存在，跳过: {path!r}")
+            logger.warning(f"LoRA path does not exist, skipping: {path!r}")
             continue
 
         meta = read_lora_meta(path)
-        # 跨族 fail-fast（A5，与训练侧 resume_lora 检查同款）：krea2 LoRA 配
-        # anima 底模（或反之）用错 preset 注入 = 键全 miss 的静默坏结果。
-        # 只对**显式标记**硬拒——外部生态文件（civitai/musubi/comfy 系）没有
-        # 我们的 model_family 标记，grandfather 值不可作拒绝依据；无标记文件
-        # 放行，由下方注入/merge 的键匹配兜底（全 miss 报错，不静默）。
+        # Cross-family fail-fast (A5, matches the training-side resume_lora
+        # check): injecting a krea2 LoRA into an anima base model (or vice
+        # versa) with the wrong preset silently produces a broken result where
+        # every key misses. Hard-reject only on an **explicit tag** -- external-
+        # ecosystem files (civitai/musubi/comfy-style) carry no model_family tag
+        # of ours, so the grandfathered value can't be used to reject; untagged
+        # files are allowed through and fall back to the key-matching check
+        # during injection/merge below (an all-miss raises an error, not silent).
         if meta.family_explicit and meta.model_family != family_id:
             raise ValueError(
                 f"This LoRA belongs to a different model family: {Path(path).name} is for "
-                f"'{meta.model_family}'，当前底模族为 '{family_id}'。"
+                f"'{meta.model_family}', while the current base model family is '{family_id}'. "
                 f"Use a LoRA from the same family, or switch the base model."
             )
         sd_raw: dict = {}
@@ -282,25 +307,29 @@ def apply_loras(
             for k in f.keys():
                 sd_raw[k] = f.get_tensor(k)
 
-        # 外部生态 PEFT 键格式归一（civitai 常见）：转 kohya 键 + 从张量
-        # 形状推断 rank/reg_dims（这类文件零 ss_* metadata，meta 里的
-        # rank=32 只是回退默认，碰运气不可用）
+        # Normalize external-ecosystem PEFT key format (common with civitai):
+        # convert to kohya keys + infer rank/reg_dims from tensor shapes (these
+        # files carry no ss_* metadata at all, so meta's rank=32 is just the
+        # fallback default and can't be relied on)
         rank, alpha, algo = meta.rank, meta.alpha, meta.algo
         reg_dims = meta.lora_reg_dims
         peft = _normalize_peft_lora_sd(sd_raw)
         if peft is not None:
             sd_raw, rank, reg_dims = peft
-            alpha = float(rank)   # per-layer alpha 已补进 sd，全局值仅建网用
-            algo = "lora"         # PEFT 双矩阵 = plain LoRA
+            alpha = float(rank)   # per-layer alpha is already filled into sd; the global value is only for building the network
+            algo = "lora"         # PEFT's two matrices = plain LoRA
 
         if fp8_merge:
-            # merge 是权重级线性操作，只认 per-layer alpha/dim 缩放。
-            # rs_lora 产物无需特判：lycoris 保存时把 √rank 校正烘进
-            # per-layer alpha 键（register_buffer("alpha", α·dim/√dim)，
-            # locon/loha/lokr 同款），标准 alpha/dim merge 得到的正是
-            # α/√rank——与 bf16 注入路径（建网 scale=α/√r）数值一致。
-            # DoRA（列范数归一化，非线性）merge 需要 comfy
-            # weight_decompose 语义，尚未实现，保持拒绝。
+            # merge is a weight-level linear operation, so it only honors
+            # per-layer alpha/dim scaling. rs_lora artifacts need no special
+            # case: lycoris bakes the sqrt(rank) correction into the per-layer
+            # alpha key when saving (register_buffer("alpha", alpha*dim/sqrt(dim)),
+            # same for locon/loha/lokr), so a standard alpha/dim merge already
+            # yields alpha/sqrt(rank) -- numerically consistent with the bf16
+            # injection path (network built with scale=alpha/sqrt(r)). DoRA
+            # (column-norm normalization, non-linear) merge would need comfy's
+            # weight_decompose semantics, which isn't implemented yet, so it
+            # stays rejected.
             if meta.weight_decompose:
                 raise ValueError(
                     f"An fp8-quantized base model cannot load a LoRA trained with DoRA (weight_decompose): "
@@ -336,14 +365,16 @@ def apply_loras(
         missing = len(getattr(result, "missing_keys", []) or [])
         unexpected = len(getattr(result, "unexpected_keys", []) or [])
         if sd and unexpected >= len(sd):
-            # 键全部没被 LoRA 网络吃掉 = 异族文件或本路径不支持的键格式
-            # （无标记文件放行后的内容匹配兜底，防静默出无 LoRA 效果的图）
+            # None of the keys were consumed by the LoRA network = a different-
+            # family file or a key format this path doesn't support (this is the
+            # content-matching fallback for untagged files, so it doesn't
+            # silently produce an image with no LoRA effect)
             raise ValueError(
                 f"This LoRA does not match the current base model: none of the keys in {Path(path).name} line up"
                 f" (it may belong to another model family, or use a key format this path does not support yet)."
             )
         logger.info(
-            f"已加载 LoRA: {Path(path).name} "
+            f"Loaded LoRA: {Path(path).name} "
             f"(algo={algo}, rank={rank}, alpha={alpha}, "
             f"scale={spec.scale}; missing={missing}, unexpected={unexpected})"
         )
@@ -354,27 +385,29 @@ def apply_loras(
             merge_loras_into_fp8_model,
         )
 
-        # 单个句柄对应全部 LoRA（merge 一次完成）；daemon 换 LoRA / 变
-        # scale 时 detach() 从备份还原后重 merge
+        # A single handle covers all LoRAs (merge happens once); when the daemon
+        # swaps LoRAs / changes scale, detach() restores from the backup and re-merges
         return [merge_loras_into_fp8_model(model, merge_sources)]
     return adapters
 
 
 # ---------------------------------------------------------------------------
-# Generate 测试出图：临时目录管理
+# Generate test-image output: temp directory management
 # ---------------------------------------------------------------------------
 
 
 def generate_tempdir(task_id: int) -> Path:
-    """单个 generate task 的临时输出目录路径。
+    """Temp output directory path for a single generate task.
 
-    位于系统 tempdir 下（与 studio_data 隔离），task 完成清掉。
+    Lives under the system tempdir (isolated from studio_data); cleaned up when
+    the task finishes.
     """
     return Path(tempfile.gettempdir()) / f"{GENERATE_TEMP_PREFIX}{task_id}"
 
 
 def cleanup_generate_tempdir(task_id: int) -> None:
-    """task 结束时清单个 tempdir。目录不存在视为 noop（非 generate task 也安全调）。"""
+    """Clean up a single tempdir when the task ends. A missing directory is a
+    no-op (safe to call even for non-generate tasks)."""
     d = generate_tempdir(task_id)
     if not d.exists():
         return
@@ -386,7 +419,8 @@ def cleanup_generate_tempdir(task_id: int) -> None:
 
 
 def cleanup_stale_generate_tempdirs() -> None:
-    """启动时扫清所有 anima_gen_* 遗留目录（防 supervisor crash 泄漏）。"""
+    """Sweep and clean up any leftover anima_gen_* directories at startup (in case
+    the supervisor crashed and leaked one)."""
     parent = Path(tempfile.gettempdir())
     if not parent.exists():
         return
