@@ -1,24 +1,25 @@
 """
-Optimizer Utils Module - 优化器创建
-===================================
-支持多种优化器：
-1. 标准 AdamW - PyTorch 内置
-2. 8-bit AdamW (bitsandbytes) - 内存高效
-3. Prodigy (prodigyopt) - 无需调 lr 的自适应优化器
-4. ProdigyPlusScheduleFree (prodigy-plus-schedule-free) - Schedule-Free + Prodigy，
-   解决 Prodigy 在扩散 LoRA 训练中的 mutation ep / 风格突变问题。
+Optimizer Utils Module - Optimizer creation
+============================================
+Supports multiple optimizers:
+1. Standard AdamW - PyTorch built-in
+2. 8-bit AdamW (bitsandbytes) - Memory-efficient
+3. Prodigy (prodigyopt) - Adaptive optimizer that needs no lr tuning
+4. ProdigyPlusScheduleFree (prodigy-plus-schedule-free) - Schedule-Free + Prodigy,
+   addressing the mutation-episode / style-shift problem Prodigy has in diffusion LoRA training.
 5. Lion - EvoLved Sign Momentum (Chen et al., 2023, arxiv 2302.06675)
 6. Automagic - Per-parameter adaptive lr via sign-agreement tracking
-   原作者: Ostris (https://github.com/ostris/ai-toolkit, MIT license, Copyright (c)
-   2024 Ostris, LLC). bf16 Kahan summation path 借鉴自 tdrussell/diffusion-pipe.
+   Original author: Ostris (https://github.com/ostris/ai-toolkit, MIT license, Copyright (c)
+   2024 Ostris, LLC). The bf16 Kahan summation path is borrowed from tdrussell/diffusion-pipe.
 7. SOAP - Adam in the Shampoo eigenbasis (Vyas et al., 2024, arxiv 2409.11321)
-8. SOAP-SF - Schedule-Free SOAP，SOAP 预条件 + Schedule-Free trajectory
-   (Defazio et al., 2024, "The Road Less Scheduled", arxiv 2405.15682)。SOAP 类
-   实现在 utils/soap_optimizer.py（MIT，Copyright (c) 2024 Nikhil Vyas）。
+8. SOAP-SF - Schedule-Free SOAP, SOAP preconditioning + Schedule-Free trajectory
+   (Defazio et al., 2024, "The Road Less Scheduled", arxiv 2405.15682). The SOAP class
+   is implemented in utils/soap_optimizer.py (MIT, Copyright (c) 2024 Nikhil Vyas).
 9. CAME - Confidence-guided Adaptive Memory Efficient optimizer
-   (Luo et al., 2023, ACL 2023, arxiv 2307.02047)。Adafactor 式分解二阶矩省显存
-   + 置信度引导（instability EMA）压制分解近似带来的更新噪声。
-   派生自官方实现 yangluo7/CAME（MIT，Copyright (c) 2023 Yang Luo）。
+   (Luo et al., 2023, ACL 2023, arxiv 2307.02047). Adafactor-style factored second-moment
+   to save memory + confidence guidance (instability EMA) to suppress the update noise
+   introduced by the factorization approximation.
+   Derived from the official implementation yangluo7/CAME (MIT, Copyright (c) 2023 Yang Luo).
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from torch.optim import Optimizer, AdamW
 
 logger = logging.getLogger(__name__)
 
-# 尝试导入 bitsandbytes
+# Try importing bitsandbytes
 try:
     import bitsandbytes as bnb
     BITSANDBYTES_AVAILABLE = True
@@ -68,9 +69,10 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-# 用户通过 schema (ppsf_* 字段) 显式配置的 kwarg。如果上游版本不接受这些，
-# silent drop 会让用户的勾选/数值悄悄失效，可能 8 小时后才发现训练效果不对——
-# 所以这些必须 fail loud，而不是只 log warning。
+# kwargs the user explicitly configures via the schema (ppsf_* fields). If the upstream
+# version doesn't accept these, a silent drop would make the user's toggles/values silently
+# stop working, possibly not noticed until 8 hours later when training results look off --
+# so these must fail loud rather than just log a warning.
 _USER_EXPOSED_PPSF_KWARGS = frozenset({
     "d_coef", "prodigy_steps",
     "split_groups", "split_groups_mean",
@@ -102,10 +104,10 @@ def _filter_kwargs_by_signature(cls_or_fn, kwargs: Dict[str, Any]) -> Dict[str, 
         if exposed_dropped:
             cls_name = getattr(cls_or_fn, "__name__", str(cls_or_fn))
             raise RuntimeError(
-                f"[optimizer] {cls_name} 不支持以下用户配置的 kwarg："
-                f"{exposed_dropped}。可能是 prodigy-plus-schedule-free 库版本不匹配 "
-                f"（pip show prodigy-plus-schedule-free 检查版本）。"
-                f"升级/降级依赖，或在 yaml 关掉对应字段。"
+                f"[optimizer] {cls_name} does not support the following user-configured kwargs: "
+                f"{exposed_dropped}. This is likely a prodigy-plus-schedule-free library version "
+                f"mismatch (check the version with pip show prodigy-plus-schedule-free). "
+                f"Upgrade/downgrade the dependency, or disable the corresponding field in the yaml."
             )
         logger.warning(
             f"[optimizer] Dropped unsupported kwargs for "
@@ -124,26 +126,26 @@ def create_optimizer(
     **kwargs
 ) -> Optimizer:
     """
-    创建优化器
+    Create an optimizer
 
-    根据配置创建不同类型的优化器。这是工厂模式的应用，
-    将优化器创建逻辑集中管理，便于维护和扩展。
+    Creates different optimizer types based on config. This is a factory-pattern
+    application that centralizes optimizer creation logic for easier maintenance and extension.
 
     Args:
-        optimizer_type: 优化器类型 ("adamw", "adamw8bit", "prodigy")
-        params: 模型参数迭代器
-        learning_rate: 学习率
-        betas: Adam beta 参数 (beta1, beta2)
-        weight_decay: 权重衰减系数
-        eps: 数值稳定性 epsilon
-        **kwargs: 其他优化器特定参数
+        optimizer_type: optimizer type ("adamw", "adamw8bit", "prodigy")
+        params: iterator of model parameters
+        learning_rate: learning rate
+        betas: Adam beta parameters (beta1, beta2)
+        weight_decay: weight decay coefficient
+        eps: numerical stability epsilon
+        **kwargs: other optimizer-specific parameters
 
     Returns:
-        Optimizer: 创建的优化器实例
+        Optimizer: the created optimizer instance
 
     Raises:
-        ValueError: 如果优化器类型不支持
-        ImportError: 如果需要的库未安装
+        ValueError: if the optimizer type is not supported
+        ImportError: if a required library is not installed
     """
     optimizer_type = optimizer_type.lower()
 
@@ -251,13 +253,14 @@ def create_optimizer(
 
 
 def iter_optimizer_params(params) -> Iterator[nn.Parameter]:
-    """展平「参数列表」或「param group 列表」为逐个参数。
+    """Flatten a "parameter list" or a "param group list" into individual parameters.
 
-    trainer 走的是 param group 形态（`injector.get_param_groups()` 返回
-    `[{"params": [...], "weight_decay": ...}, ...]`，LoKr 还会把 w1 单独分组），
-    而裸参数列表也是合法输入。torch.optim 两种都收，所以**构造优化器时不要
-    展平**；只有统计参数量这类旁路逻辑需要展平——直接 `p.numel()` 会在 group
-    形态下撞 `'dict' object has no attribute 'numel'`。
+    The trainer works with the param group shape (`injector.get_param_groups()` returns
+    `[{"params": [...], "weight_decay": ...}, ...]`, and LoKr also groups w1 separately),
+    while a plain parameter list is also valid input. torch.optim accepts both, so **don't
+    flatten when constructing the optimizer**; flattening is only needed for side logic
+    like counting parameters -- calling `p.numel()` directly would hit
+    `'dict' object has no attribute 'numel'` on the group shape.
     """
     for item in params:
         if isinstance(item, dict):
@@ -276,34 +279,34 @@ def create_8bit_adamw(
     **kwargs
 ) -> Optimizer:
     """
-    创建 8-bit AdamW 优化器
-    
-    8-bit AdamW 是 bitsandbytes 库提供的内存高效优化器。
-    它将优化器状态（动量、二阶矩）量化为 8-bit，可以
-    减少约 50% 的优化器显存占用。
-    
-    原理：
-    - 大多数深度学习参数不需要完整的 32-bit 精度来存储优化器状态
-    - 通过分块量化和动态范围调整，8-bit 可以保持良好的优化性能
-    
-    适用场景：
-    - 显存受限的训练（如单卡 RTX 3090 训练大模型）
-    - LoRA 训练（虽然 LoRA 参数少，但 8-bit 可以进一步节省内存）
-    
-    参数说明：
-    - min_8bit_size: 小于此大小的张量将保持 32-bit
-      这是因为小张量的 8-bit 量化收益不大，反而可能损失精度
-    
+    Create an 8-bit AdamW optimizer
+
+    8-bit AdamW is a memory-efficient optimizer provided by the bitsandbytes library.
+    It quantizes the optimizer state (momentum, second moment) to 8-bit, which can
+    reduce optimizer VRAM usage by roughly 50%.
+
+    Principle:
+    - Most deep learning parameters don't need full 32-bit precision to store optimizer state
+    - Through block-wise quantization and dynamic range adjustment, 8-bit can maintain good optimization performance
+
+    Use cases:
+    - VRAM-constrained training (e.g. training a large model on a single RTX 3090)
+    - LoRA training (although LoRA has few parameters, 8-bit can save memory further)
+
+    Parameter notes:
+    - min_8bit_size: tensors smaller than this size stay 32-bit
+      This is because small tensors gain little from 8-bit quantization, and may actually lose precision
+
     Args:
-        params: 模型参数
-        lr: 学习率
-        betas: Adam beta 参数
-        weight_decay: 权重衰减
+        params: model parameters
+        lr: learning rate
+        betas: Adam beta parameters
+        weight_decay: weight decay
         eps: epsilon
-        min_8bit_size: 8-bit 量化的最小张量大小
-        
+        min_8bit_size: minimum tensor size for 8-bit quantization
+
     Returns:
-        bnb.optim.AdamW8bit: 8-bit AdamW 优化器
+        bnb.optim.AdamW8bit: 8-bit AdamW optimizer
     """
     if not BITSANDBYTES_AVAILABLE:
         raise ImportError(
@@ -313,11 +316,11 @@ def create_8bit_adamw(
     
     print(f"Creating 8-bit AdamW optimizer (lr={lr}, weight_decay={weight_decay})")
     print(f"  min_8bit_size: {min_8bit_size}")
-    
-    # 将参数转换为列表（bitsandbytes 需要可索引的参数）
+
+    # Convert parameters to a list (bitsandbytes needs indexable parameters)
     param_list = list(params)
 
-    # 创建优化器（param group 形态原样传入，torch.optim 协议本来就接受）
+    # Create the optimizer (the param group shape is passed through as-is; the torch.optim protocol already accepts it)
     optimizer = bnb.optim.AdamW8bit(
         param_list,
         lr=lr,
@@ -328,11 +331,11 @@ def create_8bit_adamw(
         **kwargs
     )
     
-    # 计算内存节省
+    # Calculate memory savings
     total_params = sum(p.numel() for p in iter_optimizer_params(param_list))
-    # 8-bit 优化器状态：约 2 bytes per parameter (vs 8 bytes for 32-bit)
-    # 节省约 75% 的优化器状态内存
-    estimated_savings_gb = (total_params * 6) / (1024 ** 3)  # 节省 6 bytes per param
+    # 8-bit optimizer state: roughly 2 bytes per parameter (vs 8 bytes for 32-bit)
+    # Saves roughly 75% of optimizer state memory
+    estimated_savings_gb = (total_params * 6) / (1024 ** 3)  # saves 6 bytes per param
     print(f"  [OK] 8-bit AdamW created (estimated memory savings: {estimated_savings_gb:.2f} GB)")
     
     return optimizer
@@ -347,29 +350,29 @@ def create_standard_adamw(
     **kwargs
 ) -> Optimizer:
     """
-    创建标准 AdamW 优化器
-    
-    标准的 PyTorch AdamW 实现。作为后备选项，当其他
-    优化器不可用时使用。
-    
-    AdamW 特点：
-    - 将权重衰减与梯度更新解耦（decoupled weight decay）
-    - 比 Adam + L2 正则化效果更好
-    - 现代深度学习的事实标准优化器
-    
+    Create a standard AdamW optimizer
+
+    The standard PyTorch AdamW implementation. Used as a fallback option when other
+    optimizers are unavailable.
+
+    AdamW characteristics:
+    - Decouples weight decay from the gradient update (decoupled weight decay)
+    - Performs better than Adam + L2 regularization
+    - The de facto standard optimizer in modern deep learning
+
     Args:
-        params: 模型参数
-        lr: 学习率
-        betas: Adam beta 参数
-        weight_decay: 权重衰减
+        params: model parameters
+        lr: learning rate
+        betas: Adam beta parameters
+        weight_decay: weight decay
         eps: epsilon
-        
+
     Returns:
-        AdamW: 标准 AdamW 优化器
+        AdamW: standard AdamW optimizer
     """
     print(f"Creating standard AdamW optimizer (lr={lr}, weight_decay={weight_decay})")
-    
-    # 将参数转换为列表
+
+    # Convert parameters to a list
     param_list = list(params)
     
     optimizer = AdamW(

@@ -1,13 +1,15 @@
-"""FastAPI 应用工厂（PR-5 从 server.py 抽出）。
+"""FastAPI app factory (extracted from server.py in PR-5).
 
-只创建 `app` 实例并配 middleware + lifespan。**路由注册不在这里**：
-    - 老路由仍在 `studio/server.py` 通过 `@app.get(...)` 装饰到本实例
-      （PR-5 commit 1 范围；后续 commit 把 router 逐批搬到 api/routers/）
-    - 新路由走 `api/routers/<name>.py` + `app.include_router(...)`
+Only creates the `app` instance and wires up middleware + lifespan. **Route
+registration does not happen here**:
+    - Legacy routes still live in `studio/server.py`, decorated onto this
+      instance via `@app.get(...)` (PR-5 commit 1 scope; later commits move
+      routers over to api/routers/ in batches)
+    - New routes go through `api/routers/<name>.py` + `app.include_router(...)`
 
-只要至少 import 一次 `studio.server`，全部 130 个老 route decorator
-就会注册到本 app 上，`uvicorn studio.server:app` 或 `studio.api.app:app`
-启动都拿到同一 FastAPI 实例。
+As long as `studio.server` is imported at least once, all 130 legacy route
+decorators register onto this app — starting via `uvicorn studio.server:app`
+or `studio.api.app:app` gets you the same FastAPI instance either way.
 """
 from __future__ import annotations
 
@@ -54,65 +56,71 @@ from .routers.queue import lifecycle as queue_lifecycle
 from .routers.queue import outputs as queue_outputs
 
 app = FastAPI(title="AnimaTrainHub", version=__version__, lifespan=lifespan)
-# Middleware 注册顺序：starlette 后注册的 middleware 在 stack 外层。
-# TraceIdMiddleware 最先注册 → 实际包在 GZip 外层 → trace_id 在 GZip
-# 之前 bind，gzip handler 内 logger.x 也能拿到。
+# Middleware registration order: in starlette, a middleware registered later
+# sits on the outer layer of the stack. TraceIdMiddleware is registered
+# first -> it ends up wrapping around GZip -> trace_id is bound before GZip
+# runs, so logger.x calls inside the gzip handler can pick it up too.
 app.add_middleware(_SelectiveGZipMiddleware, minimum_size=1000)
 app.add_middleware(TraceIdMiddleware)
 # Phone access: when no tunnel is running this is a no-op, and local requests
 # are never gated — only requests that arrived through Cloudflare are.
 app.add_middleware(TunnelAuthMiddleware)
-# ADR-0009 PR-2 C2: 装 3 个 exception handler（DomainError / RequestValidation /
-# Exception fallback）— dual-write envelope 保 detail contract + 加 error 结构化字段。
-# HTTPException 不注册，让 starlette 默认 handler 跑保现有 175 处 raise 形状不变。
+# ADR-0009 PR-2 C2: register 3 exception handlers (DomainError / RequestValidation /
+# Exception fallback) — dual-write envelope keeps the detail contract while adding
+# a structured error field. HTTPException is not registered, so starlette's default
+# handler keeps the shape of the existing ~175 raise sites unchanged.
 register_exception_handlers(app)
 
-# Router 注册顺序无所谓（FastAPI 按 path 精确匹配，include_router 先后只影响
-# include_in_schema=False 的 catch-all 顺序）。按 PR / 字母序排列方便审查。
+# Router registration order doesn't matter (FastAPI matches paths exactly;
+# include_router order only affects the ordering of catch-alls with
+# include_in_schema=False). Sorted by PR / alphabetically for easier review.
 # PR-5 commit 2: health / presets / browse / events_sse
 app.include_router(health.router)
 app.include_router(presets.router)
 app.include_router(browse.router)
 app.include_router(events_sse.router)
-# ADR-0009 PR-3 C1: 前端错误上报 (ErrorBoundary / window.onerror / unhandledrejection)
+# ADR-0009 PR-3 C1: frontend error reporting (ErrorBoundary / window.onerror / unhandledrejection)
 app.include_router(client_errors.router)
-# PR-6 commit 1: 5 个小 router（root / samples / logs / data_exports / tagger）
-# 本 fork：公告栏（announcements）与自更新（system）随 in-app updater 一起移除。
+# PR-6 commit 1: 5 small routers (root / samples / logs / data_exports / tagger)
+# This fork: the announcements banner and self-update (system) were removed
+# along with the in-app updater.
 app.include_router(root.router)
 app.include_router(samples.router)
 app.include_router(logs.router)
 app.include_router(data_exports.router)
 app.include_router(tagger.router)
-# PR-6 commit 2: admin router（secrets / models / upscalers）。jobs router 已删（R-5 台账合并，数据作业走 /api/queue）
+# PR-6 commit 2: admin router (secrets / models / upscalers). jobs router removed (merged into the R-5 ledger; data jobs now go through /api/queue)
 app.include_router(secrets_router.router)
-# 本 fork：Colab / Local 运行模式（前端首屏选择框 + 设置区切换）
+# This fork: Colab / Local run mode (frontend first-screen picker + settings toggle)
 app.include_router(runtime.router)
 app.include_router(models.router)
 app.include_router(upscalers.router)
 app.include_router(tag_dictionary.router)
-# PR-6 commit 3: installs router（10 routes: wd14/torch/flash-attn/xformers/llm-tagger admin）
+# PR-6 commit 3: installs router (10 routes: wd14/torch/flash-attn/xformers/llm-tagger admin)
 app.include_router(installs.router)
-# studio_data 迁移 + 模型来源统一管理（#446）。system router（自更新）本 fork 不含。
+# studio_data migration + unified model source management (#446). This fork
+# does not include the system router (self-update).
 app.include_router(studio_data.router)
 app.include_router(models_storage.router)
-# PR-6 commit 5: generate router（8 routes: 出图 + daemon 状态 + TAEFlux）
+# PR-6 commit 5: generate router (8 routes: image generation + daemon status + TAEFlux)
 app.include_router(generate.router)
 app.include_router(soup.router)
 app.include_router(tunnel.router)
-# PR-6 commit 6: queue 子包 3 文件（lifecycle 12 + io 3 + outputs 5 = 20 routes）
-# 注册顺序：io 必须在 lifecycle 之前（FastAPI 按定义顺序匹配 path，"export" /
-# "import" 字符串否则会被 `/api/queue/{task_id}` 的整数解析截胡 422）
+# PR-6 commit 6: 3 files in the queue subpackage (lifecycle 12 + io 3 + outputs 5 = 20 routes)
+# Registration order: io must come before lifecycle (FastAPI matches paths in
+# definition order; otherwise the "export" / "import" strings would get
+# intercepted by `/api/queue/{task_id}`'s integer parsing and 422)
 app.include_router(queue_io_router.router)
 app.include_router(queue_lifecycle.router)
 app.include_router(queue_outputs.router)
-# PR-6.5 commit 1: projects/versions CRUD 子包第一刀（16 routes）
+# PR-6.5 commit 1: first cut of the projects/versions CRUD subpackage (16 routes)
 app.include_router(projects_crud.router)
 # ADR-0011: eval sample runs + manual run trigger (task-scoped)
 app.include_router(projects_eval_samples.router)
 # ADR-0011: metric result endpoints and concrete metric runner triggers
 app.include_router(projects_eval_metrics.router)
 # PR-6.5 commit 2: train.zip / bundle.zip / export-bundle / import-bundle (path/upload) /
-# import-train（6 routes）
+# import-train (6 routes)
 app.include_router(projects_exports.router)
 # PR-6.5 commit 3: download/upload + preprocess (14 routes)
 app.include_router(projects_ingestion.router)

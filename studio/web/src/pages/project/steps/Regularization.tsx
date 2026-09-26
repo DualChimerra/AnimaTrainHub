@@ -18,7 +18,6 @@ import ImagePreviewModal from '../../../components/ImagePreviewModal'
 import StepShell from '../../../components/StepShell'
 import FieldLabel from '../../../components/ds/FieldLabel'
 import KebabMenu from '../../../components/ds/KebabMenu'
-import { TranslatedTag } from '../../../components/tagDisplay/TranslatedTag'
 import { TagSuggestList } from '../../../components/tagSuggest/TagSuggestList'
 import { useTagSuggest } from '../../../components/tagSuggest/useTagSuggest'
 import { useDialog } from '../../../components/Dialog'
@@ -1055,7 +1054,7 @@ export function ExcludeTags({
                 title={custom ? t('reg.excludeCustomRemoveTitle') : undefined}
               >
                 <span className="min-w-0 truncate text-left" title={tag.replace(/_/g, ' ')}>
-                  <TranslatedTag tag={tag.replace(/_/g, ' ')} />
+                  {tag.replace(/_/g, ' ')}
                 </span>
                 <button type="button" className="ds-chip-x" onClick={() => onToggle(tag)} aria-label={t('reg.excludeCustomRemoveAria', { tag })}>
                   {Icon.x}
@@ -1109,7 +1108,7 @@ export function ExcludeTags({
                   title={t('reg.excludeClick')}
                 >
                   <span className="min-w-0 truncate text-left" title={info.tag.replace(/_/g, ' ')}>
-                    <TranslatedTag tag={info.tag.replace(/_/g, ' ')} />
+                    {info.tag.replace(/_/g, ' ')}
                   </span>
                   <b>{info.count}</b>
                 </button>

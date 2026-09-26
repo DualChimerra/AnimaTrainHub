@@ -1,1 +1,1 @@
-"""Wan2.1 VAE（跨族共享资产，不属于任何单一模型族）。"""
+"""Wan2.1 VAE (a shared asset across families, not owned by any single model family)."""

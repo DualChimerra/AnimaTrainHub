@@ -16,7 +16,6 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { useTranslation } from 'react-i18next'
 
-import { TranslatedTag } from './tagDisplay/TranslatedTag'
 import { TagSuggestList } from './tagSuggest/TagSuggestList'
 import { useTagSuggest } from './tagSuggest/useTagSuggest'
 
@@ -319,7 +318,7 @@ function SortableChip({ id, trigger, onRemove }: { id: string; trigger?: boolean
       {...listeners}
       className="ds-chip"
     >
-      <TranslatedTag tag={id} />
+      {id}
       <button
         type="button"
         onPointerDown={(e) => e.stopPropagation()}

@@ -1,4 +1,4 @@
-// ExportBundleDialog — 选择 bundle.zip 导出内容后触发浏览器下载。
+// ExportBundleDialog -- pick what to include in bundle.zip, then trigger a browser download.
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -92,7 +92,7 @@ export default function ExportBundleDialog({ onConfirm, onCancel }: Props) {
           </label>
         </div>
 
-        {/* 训练集 */}
+        {/* Training set */}
         <div className="flex flex-col gap-2">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
@@ -140,7 +140,7 @@ export default function ExportBundleDialog({ onConfirm, onCancel }: Props) {
           )}
         </div>
 
-        {/* 正则集 */}
+        {/* Regularization set */}
         <div className="flex flex-col gap-2">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
@@ -178,7 +178,7 @@ export default function ExportBundleDialog({ onConfirm, onCancel }: Props) {
           )}
         </div>
 
-        {/* 训练配置 */}
+        {/* Training config */}
         <label className="flex items-center gap-2 cursor-pointer">
           <input
             type="checkbox"

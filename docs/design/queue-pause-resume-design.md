@@ -1,51 +1,71 @@
-# Queue 暂停 / 恢复训练 — 逻辑设计草稿
+# Queue pause / resume training — logic design draft
 
-> 临时设计文档，仅整理**逻辑模型**：状态机、按钮语义、文件存放、用户场景。
-> 不涉及代码实现细节。实现 workflow 见后续 ADR / PR 描述。
+> A working design document laying out only the **logic model**: the state
+> machine, button semantics, file storage, and user scenarios. It doesn't
+> cover code implementation details. See the follow-up ADR / PR descriptions
+> for the implementation workflow.
 
-## 0. 目的与非目的
+## 0. Purpose and non-goals
 
-**目的**：让用户在 UI 上对**训练中**的 task 执行"暂停 → 释放 GPU → 之后从同一进度继续"，
-不再像今天的"取消"那样彻底丢进度。
+**Purpose**: let the user, from the UI, "pause → release the GPU → later
+continue from the same progress" for a task that is **currently training**,
+instead of losing all progress the way today's "cancel" does.
 
-**非目的**：
-- 不替换今天的"取消"——cancel 仍然是 terminal、立即释放 GPU、无法恢复。
-- 不改变已有的 `--resume-state` / `ResumeFieldPicker` 手动从 .pt 续训路径——这条路径继续存在，跟新加的"暂停 / 恢复"是两套入口（见 §6）。
-- 不涉及 generate / download / tag 等非 training task。这些 task 跑得快，没暂停意义。
-
----
-
-## 1. 任务状态（含新增 paused）
-
-### 当前状态集
-
-| 状态 | 类别 | 说明 |
-|------|------|------|
-| `pending` | live | 在队列等待调度 |
-| `running` | live | 正在执行 |
-| `done` | terminal | 正常完成 |
-| `failed` | terminal | 异常退出 |
-| `canceled` | terminal | 用户取消（硬中断） |
-
-### 新增状态
-
-| 状态 | 类别 | 说明 |
-|------|------|------|
-| `paused` | **non-terminal, non-live** | 用户主动暂停，state 已保存，可恢复 |
-
-**关键性质**：
-- `paused` **不**进 `TERMINAL_STATUSES`——它不是终态，可被恢复。
-- `paused` **不**占调度——dispatcher 看到队列只有 paused 没有 pending 时，不会自动拉起 paused，必须用户主动 resume。
-- `paused` **不**占 GPU——子进程已退出，资源完全释放，其他 pending task 可正常调度。
-
-### 不引入的中间态
-
-- **不**引入 `pausing`（"正在暂停中"）：从用户点暂停到子进程退出有几秒钟窗口，这段窗口 task 还是 `running`，UI 通过 `pause_pending` 这种"动作中"标志展示，不进 db 状态。
-- **不**引入 `resuming`：用户点恢复后，task 状态直接回到 `pending`，dispatcher 自然拾起。UI 区分"原生 pending"和"带 resume 的 pending"靠 `resume_state` 字段，不需要额外状态。
+**Non-goals**:
+- Not replacing today's "cancel" — cancel remains terminal, releases the GPU
+  immediately, and cannot be resumed.
+- Not changing the existing `--resume-state` / `ResumeFieldPicker` manual
+  resume-from-.pt path — that path continues to exist as a separate entry
+  point from the new "pause / resume" feature (see §6).
+- Doesn't cover non-training tasks like generate / download / tag. These
+  tasks run quickly, so pausing them wouldn't be meaningful.
 
 ---
 
-## 2. 状态转移图
+## 1. Task status (including the new paused status)
+
+### Current status set
+
+| Status | Category | Description |
+|------|------|------|
+| `pending` | live | waiting in the queue to be scheduled |
+| `running` | live | currently executing |
+| `done` | terminal | completed normally |
+| `failed` | terminal | exited abnormally |
+| `canceled` | terminal | user canceled it (hard interrupt) |
+
+### New status
+
+| Status | Category | Description |
+|------|------|------|
+| `paused` | **non-terminal, non-live** | the user deliberately paused it; state has been saved and it can be resumed |
+
+**Key properties**:
+- `paused` is **not** in `TERMINAL_STATUSES` — it's not a terminal state and
+  can be resumed.
+- `paused` **doesn't** occupy a scheduling slot — when the dispatcher sees a
+  queue with only paused tasks and no pending ones, it won't automatically
+  pick up a paused task; the user must explicitly resume it.
+- `paused` **doesn't** hold the GPU — the child process has already exited,
+  resources are fully released, and other pending tasks can be scheduled
+  normally.
+
+### Intermediate states not introduced
+
+- **No** `pausing` ("in the process of pausing") state is introduced: there's
+  a window of a few seconds between the user clicking pause and the child
+  process exiting, during which the task is still `running`; the UI shows
+  this via an "action in progress" flag like `pause_pending`, which never
+  enters the db state.
+- **No** `resuming` state is introduced: after the user clicks resume, the
+  task's status goes straight back to `pending`, and the dispatcher naturally
+  picks it up. The UI distinguishes "native pending" from "pending with a
+  resume attached" using the `resume_state` field, with no extra status
+  needed.
+
+---
+
+## 2. State transition diagram
 
 ```
                     ┌──────────────────────────────────────────┐
@@ -62,525 +82,816 @@
               │          │  │           │
               │          ▼  │           ▼
               └──► canceled │       canceled
-                   (cancel  │       (server restart → 仍 paused)
+                   (cancel  │       (server restart → stays paused)
                     pending)│
                             │
                   (cancel running)
 ```
 
-转移说明：
-- `running → paused`：用户点暂停 → 发 pause 信号 → 子进程触发 `handle_interrupt` → 保存 state → 进程退出 → supervisor 写 status=paused。
-- `paused → pending`（带 resume_state）：用户点恢复 → 复用原 task config，注入 `resume_state` 指向保存的 .pt → 状态写回 pending → dispatcher 重新调度。
-- `paused → canceled`：用户在暂停态决定彻底放弃 → 直接改 db 状态，进程早已退出，无需信号。
-- `paused → paused`（跨 server 重启）：进程已退出，状态只在 db 里，重启 server 不影响。
+Transition notes:
+- `running → paused`: the user clicks pause → a pause signal is sent → the
+  child process triggers `handle_interrupt` → saves state → the process
+  exits → the supervisor writes status=paused.
+- `paused → pending` (carrying resume_state): the user clicks resume → the
+  original task config is reused, with `resume_state` injected pointing at
+  the saved .pt → the status is written back to pending → the dispatcher
+  reschedules it.
+- `paused → canceled`: the user, while paused, decides to give up entirely →
+  the db status is changed directly; the process already exited long ago, so
+  no signal is needed.
+- `paused → paused` (across a server restart): the process has already
+  exited, and the status lives only in the db, so restarting the server
+  doesn't affect it.
 
 ---
 
-## 3. 两类暂停语义（术语：暂停 vs 挂起）
+## 3. Two kinds of pause semantics (terminology: pause vs. hold)
 
-用户提到"全局暂停"和"任务级暂停"，这是**两个独立的 feature**，作用对象、生命周期、状态存放都不同。为避免歧义，**故意用不同动词**：
+The user mentioned both "global pause" and "task-level pause" — these are
+**two independent features** with different targets, lifecycles, and state
+storage. To avoid ambiguity, **deliberately different verbs are used**:
 
-| 名词 | 作用对象 | 动词 | 反义动词 |
+| Term | Target | Verb | Opposite verb |
 |------|---------|------|---------|
-| **任务暂停** | 单个 running task | 暂停 | 恢复 |
-| **队列挂起** | 整个 dispatcher（"是否拉新 pending"开关） | 挂起 | 恢复调度 |
+| **Task pause** | a single running task | pause | resume |
+| **Queue hold** | the whole dispatcher (a switch for "should new pending tasks be picked up") | hold | release |
 
-英文等价（如果以后做 i18n）：task **pause** / **resume** vs queue **hold** / **release**（或 suspend / resume scheduling，HPC 圈惯用术语）。中文敲定 **挂起 / 恢复调度**——挂起是计算机术语里的标准 suspend，恢复调度带"调度"二字跟任务级"恢复"消歧义。
+English equivalents (in case i18n is done later): task **pause** / **resume**
+vs. queue **hold** / **release** (or suspend / resume scheduling, a common
+term in the HPC world). The localized terms settled on the standard computing
+term for "suspend" for hold, and a "resume scheduling" phrasing for release —
+adding the word "scheduling" specifically to disambiguate it from the
+task-level "resume."
 
-### 3.1 任务暂停（task pause）
+### 3.1 Task pause
 
-**作用对象**：当前正在 running 的 training task。
+**Target**: a training task that is currently running.
 
-**效果**：
-- 给该 task 子进程发暂停信号 → 走 `handle_interrupt` → 保 state → 退出。
-- task 状态从 `running` → `paused`。
-- GPU 释放。**如果队列未挂起**，supervisor 主循环看到 TRAIN 槽位空，自动调度下一个 pending task。
-- 用户日后点"恢复"才会把这个 paused task 拉起来。
+**Effect**:
+- A pause signal is sent to that task's child process → it goes through
+  `handle_interrupt` → saves state → exits.
+- The task's status changes from `running` → `paused`.
+- The GPU is released. **If the queue isn't held**, the supervisor's main
+  loop sees the TRAIN slot empty and automatically schedules the next
+  pending task.
+- The paused task only gets picked up again once the user clicks "resume"
+  later.
 
-### 3.2 队列挂起（queue hold）
+### 3.2 Queue hold
 
-**作用对象**：supervisor 的 dispatcher，单一 bool 开关。
+**Target**: the supervisor's dispatcher, a single bool switch.
 
-**状态存放**：db 持久化（建议放 `app_settings` 或 kv 表，单条记录），**跨 server 重启保留**。
-理由：挂起是用户显式决策，重启 server 不应自动恢复调度——否则维护重启时队列突然自己跑起来，用户没预期。
+**State storage**: persisted in the db (suggested to live in `app_settings`
+or a kv table, a single record), **preserved across server restarts**.
+Reasoning: holding is an explicit user decision, and restarting the server
+shouldn't automatically release the hold — otherwise the queue would
+suddenly start running by itself after a maintenance restart, which the user
+wouldn't expect.
 
-**效果**：
-- dispatcher 不再从 `pending` 队列拉新 task。
-- **不影响**当前正在 running 的 task——它继续跑到自然结束，写入 done / failed。
-- **不影响**任务级 pause / resume API——两套独立工作（详见 §3.3）。
-- UI 永远显示当前挂起状态（顶部 banner / toggle 按钮的状态色）。
-- 用户恢复调度后，dispatcher 恢复正常调度，按现有的 `next_pending` 优先级 + 创建时间排序拉 task。
+**Effect**:
+- The dispatcher stops pulling new tasks from the `pending` queue.
+- **Doesn't affect** the task currently running — it keeps running to
+  completion naturally, ending as done / failed.
+- **Doesn't affect** the task-level pause / resume API — the two work
+  independently (see §3.3 for details).
+- The UI always shows the current hold status (a top banner / a toggle
+  button's status color).
+- After the user releases the hold, the dispatcher resumes normal
+  scheduling, pulling tasks per the existing `next_pending` priority +
+  creation-time ordering.
 
-**挂起状态下的 pending 任务**：什么都不发生——既不算异常也不算错误，UI 显示"等待恢复调度"提示。
+**Pending tasks while held**: nothing happens — this counts as neither an
+error nor an anomaly; the UI shows a "waiting for the queue to resume" note.
 
-### 3.3 两者的交互
+### 3.3 How the two interact
 
-**正交关系**：两个开关可以任意组合，4 个象限都合法：
+**Orthogonal relationship**: the two switches can be combined freely, and
+all 4 quadrants are valid:
 
-| 队列状态 | running task | 行为 |
+| Queue state | running task | behavior |
 |---------|------------|------|
-| 未挂起 + 有 running | running 跑完 → 自动拉下一个 pending |
-| 未挂起 + 无 running | dispatcher 立刻拉下一个 pending（如有） |
-| 已挂起 + 有 running | running 跑完 → **不**拉下一个 pending |
-| 已挂起 + 无 running | dispatcher 空转，等恢复调度 |
+| not held + has a running task | when it finishes → automatically pulls the next pending task |
+| not held + no running task | the dispatcher immediately pulls the next pending task (if any) |
+| held + has a running task | when it finishes → does **not** pull the next pending task |
+| held + no running task | the dispatcher idles, waiting to be released |
 
-**挂起时的 task 操作**：
-- 任务暂停：允许。挂起时把 running 的 task 暂停 → task 进 paused，TRAIN 槽空着不调度。
-- 任务恢复（resume）：允许。task 从 paused 转回 pending，但**不会被实际拉起**——只是排进 pending 队列等恢复调度。UI 上 task 状态显示 pending，旁边附"等待恢复调度"小字。
-- 任务取消 / 删除：允许，跟挂起状态无关。
+**Task operations while held**:
+- Task pause: allowed. Pausing a running task while held → the task enters
+  paused, and the TRAIN slot sits empty with no dispatch.
+- Task resume: allowed. The task goes from paused back to pending, but
+  **won't actually be picked up** — it's just enqueued into pending, waiting
+  for the hold to be released. In the UI, the task shows as pending, with a
+  small "waiting for the queue to resume" note next to it.
+- Task cancel / delete: allowed, unrelated to the hold status.
 
-**为什么允许"挂起 + resume"的"延迟启动"语义**：
-- 简化模型：resume = "把这个 task 标记为可再被调度"，调度本身受挂起状态控制。
-- 反例：如果挂起时禁用 resume 按钮，用户得"先恢复调度 → resume → 再挂起"来排队等一会儿，工作流啰嗦。
-- 但是 UI 必须明确显示"task 已在排队，等待恢复调度"，否则用户会困惑"为什么没启动"。
+**Why "hold + resume" is allowed to have "deferred start" semantics**:
+- Simplifies the model: resume just means "mark this task as schedulable
+  again"; scheduling itself is controlled by the hold status.
+- Counter-argument: if the resume button were disabled while held, the user
+  would have to "release the hold first → resume → hold again" just to queue
+  something up — a clunky workflow.
+- But the UI must clearly show "this task is queued, waiting for the queue
+  to resume," or the user would be confused about "why didn't it start."
 
-### 3.4 挂起时机的 user case
+### 3.4 User cases for when to use hold
 
-详见 §7 Case F / G。简单说：用户想"让队列自己慢下来"的场景，比如临时观察、过夜不跑、维护窗口。
+See §7 Case F / G for details. In short: scenarios where the user wants "the
+queue to slow itself down" — e.g. temporary observation, not running
+overnight, a maintenance window.
 
 ---
 
-## 4. 按钮 / 入口分布
+## 4. Button / entry-point placement
 
-### 4.1 Queue 列表页
+### 4.1 The Queue list page
 
-**顶部 banner**（挂起状态可视化，**仅用 banner，不用 task chip**）：
-- 队列未挂起：**不显示任何 banner**——避免视觉噪音。
-- 队列已挂起：sticky 顶部 banner "队列已挂起，待办任务不会自动开始 [恢复调度]"。
-- 注意：banner 是 UI 元素，**不是** task 状态机的一部分。task 状态徽章只反映 task 自身状态（pending / running / paused / done / failed / canceled），不参与表达队列挂起。
+**Top banner** (visualizing the hold status, **banner only, no task chip**):
+- Queue not held: **no banner shown at all** — avoiding visual noise.
+- Queue held: a sticky top banner, "Queue is held; pending tasks won't start
+  automatically [Release]."
+- Note: the banner is a UI element, **not** part of the task state machine.
+  The task status badge only reflects the task's own status (pending /
+  running / paused / done / failed / canceled) and never represents the
+  queue-hold state.
 
-**顶部 actions**：
+**Top actions**:
 
-| 按钮 | 出现条件 | 行为 |
+| Button | Appears when | Behavior |
 |------|---------|------|
-| 暂停当前 | 有 running task **且 task 已进入 train_loop**（见 §8.1） | 任务级暂停 |
-| 取消当前 | 有 running task | （现有）任务级 cancel，硬中断 |
-| 挂起队列 | 队列未挂起时显示 | 弹 confirmation modal（见 §4.3）|
-| 恢复调度 | 队列已挂起时显示 | 直接恢复调度，无需 confirmation |
+| Pause current | there's a running task **and it has entered train_loop** (see §8.1) | task-level pause |
+| Cancel current | there's a running task | (existing) task-level cancel, hard interrupt |
+| Hold queue | shown when the queue isn't held | opens a confirmation modal (see §4.3) |
+| Release | shown when the queue is held | releases the hold directly, no confirmation needed |
 
-**不做**：没有"暂停全部"复合按钮。挂起 + 暂停 running 通过 §4.3 的 modal 一次完成。
+**Not doing**: there's no combined "pause everything" button. Hold + pausing
+the running task is accomplished in one go via the §4.3 modal.
 
-**每行**：
+**Per row**:
 
-| 行内按钮 | 出现条件 | 行为 |
+| Inline button | Appears when | Behavior |
 |---------|---------|------|
-| 恢复 | task.status = paused | 状态回 pending，注入 resume_state |
-| 彻底取消 | task.status = paused | paused → canceled，删除 pause 文件 |
+| Resume | task.status = paused | status goes back to pending, injecting resume_state |
+| Cancel permanently | task.status = paused | paused → canceled, deletes the pause files |
 
-paused task 的提示文案：行内显示"在 step N 暂停于 YYYY-MM-DD HH:MM"。
-挂起状态下，所有 pending 行（含刚 resume 进来的）显示小字"等待恢复调度"。
+Copy for a paused task: shown inline as "paused at step N on YYYY-MM-DD
+HH:MM."
+While held, every pending row (including those that just came from a
+resume) shows a small "waiting for the queue to resume" note.
 
-### 4.2 QueueDetail 页
+### 4.2 The QueueDetail page
 
-跟 Queue 页对齐，按钮放详情卡片：
-- running + 已进入 train_loop：暂停 / 取消
-- running + 启动阶段：仅显示 取消（暂停按钮隐藏）
-- paused：恢复 / 彻底取消 + 显示"在 step N 暂停于 …"
-- 其他状态：维持现状
+Matches the Queue page, with buttons placed on the detail card:
+- running + has entered train_loop: pause / cancel
+- running + still starting up: only cancel is shown (the pause button is hidden)
+- paused: resume / cancel permanently + shows "paused at step N …"
+- other statuses: unchanged from today
 
-### 4.3 暂停任务的过程 modal（覆盖全流程）
+### 4.3 The pause-task progress modal (covers the whole flow)
 
-点"暂停当前"按钮后**立刻弹出一个 modal**，覆盖整个 pause 流程：发信号 → 保存中 → 完成 / 超时 / 失败。modal 期间**锁定其他操作**，避免用户误操作（比如点取消把进度全丢）。
+Clicking the "Pause current" button **immediately pops a modal** covering the
+whole pause flow: sending the signal → saving → complete / timeout /
+failure. Other actions are **locked** while the modal is open, to prevent a
+stray click (e.g. clicking cancel and losing all progress).
 
-**状态机**（modal 内自管）：
+**State machine** (self-managed within the modal):
 
 ```
-[暂停按下]
+[Pause clicked]
    ↓
-状态1：保存中
-  显示：spinner + "正在保存训练状态…（已用 Ns）"
-  按钮：无（或一个 disabled 的"等待"），阻止用户做别的
-   ↓ 子进程 emit __EVENT__:pause_state（成功）
-   ↓ OR 30s 超时
-   ↓ OR 子进程异常退出
-   ├─→ 状态2A：保存成功
-   │     显示：✓ "已暂停在 step N，可随时恢复"
-   │     按钮：[好] → 关 modal + toast
+State 1: saving
+  Shows: spinner + "Saving training state… (Ns elapsed)"
+  Buttons: none (or a disabled "waiting" one), blocking any other action
+   ↓ child process emits __EVENT__:pause_state (success)
+   ↓ OR 30s timeout
+   ↓ OR child process exits abnormally
+   ├─→ State 2A: saved successfully
+   │     Shows: ✓ "Paused at step N — can be resumed anytime"
+   │     Button: [OK] → closes the modal + a toast
    │
-   ├─→ 状态2B：超时（>30s 还没收到事件）
-   │     显示：⚠️ "保存耗时超过预期（已用 Ns）"
-   │     按钮：[再等 30s] [强制取消（保留 pause 文件）] [终止任务（丢弃进度）]
-   │     - 再等：继续等下一轮 30s
-   │     - 强制取消：发硬终止信号；如果磁盘上 pause 文件已经写出来了仍标 paused，否则降级 canceled
-   │     - 终止任务：发硬终止 + 标 canceled
+   ├─→ State 2B: timed out (still hasn't received the event after >30s)
+   │     Shows: ⚠️ "Saving is taking longer than expected (Ns elapsed)"
+   │     Buttons: [wait 30 more seconds] [force-cancel (keep the pause file)] [terminate the task (discard progress)]
+   │     - Wait: continues waiting for another 30s round
+   │     - Force-cancel: sends a hard terminate signal; if the pause file
+   │       has already been written to disk, it's still marked paused,
+   │       otherwise it falls back to canceled
+   │     - Terminate the task: sends a hard terminate + marks it canceled
    │
-   └─→ 状态2C：子进程异常退出（rc != 0）
-         显示：✗ "保存过程出错（exit code N）"
-         按钮：[查看日志] [终止任务]
-         任务标 failed
+   └─→ State 2C: child process exited abnormally (rc != 0)
+         Shows: ✗ "An error occurred while saving (exit code N)"
+         Buttons: [view logs] [terminate the task]
+         The task is marked failed
 ```
 
-**关键设计点**：
-1. **modal 一启动就锁屏**——pause 期间用户没有机会做"我反悔了不想 pause 了"，因为信号已经发出去了，反悔无意义。
-2. **30s 阈值由用户决定下一步**，不再"默默降级 cancel"。三个选项让用户根据 disk / IO 状况自己判断。
-3. **modal 期间显示已用秒数**——透明的反馈，避免用户以为程序卡死。
-4. **子进程 emit 的 `__EVENT__:pause_state` 是触发"成功"的唯一信号**，光看 rc=0 不够（rc 可能因为 Windows wrapper 改写不可靠）。
+**Key design points**:
+1. **The modal locks the screen the moment it opens** — during a pause,
+   there's no opportunity for the user to "change their mind about
+   pausing," since the signal has already been sent, so changing their mind
+   would be meaningless anyway.
+2. **The 30s threshold lets the user decide what happens next**, rather than
+   "silently downgrading to cancel." The three options let the user judge
+   based on disk / IO conditions themselves.
+3. **The modal shows elapsed seconds** — transparent feedback, so the user
+   doesn't think the program has hung.
+4. **The child process's emitted `__EVENT__:pause_state` is the only signal
+   that triggers "success"** — rc=0 alone isn't enough (rc can be unreliable
+   due to Windows wrapper rewriting).
 
-### 4.4 挂起队列的 confirmation modal
+### 4.4 The queue-hold confirmation modal
 
-点"挂起队列"按钮时根据当前 running 情况展示不同的 modal：
+Clicking the "Hold queue" button shows a different modal depending on the
+current running state:
 
-**情形 A：没有 running task**
+**Case A: no running task**
 ```
-挂起队列？
-挂起后，新的待办任务不会自动开始。
-[确认挂起] [取消]
-```
-
-**情形 B：有 running task**
-```
-挂起队列？
-挂起后，新的待办任务不会自动开始。
-
-当前正在运行：task #42 "my_anime_v1"。
-对 task #42 做什么？
-
-  ○ 让 task #42 跑完（默认）
-  ○ 同时暂停 task #42（保存进度，恢复调度后或单独恢复均可）
-
-[确认挂起，让 task #42 跑完]  [取消]
+Hold the queue?
+Once held, new pending tasks won't start automatically.
+[Confirm hold] [Cancel]
 ```
 
-主按钮文案随 radio 选择**联动**（"让 task #42 跑完" / "同时暂停 task #42"），避免用户点完不知道自己确认了什么。
-具体 task name / id **直接出现**在选项里，不再用"它"指代。
+**Case B: has a running task**
+```
+Hold the queue?
+Once held, new pending tasks won't start automatically.
 
-**情形 B 的 3 个 outcome**：
-- 取消 → 什么都不变。
-- 确认 + "让 task #42 跑完" → 仅写 queue_held=true。
-- 确认 + "同时暂停 task #42" → 写 queue_held=true + 调任务级 pause API（触发 §4.3 暂停过程 modal）。
+Currently running: task #42 "my_anime_v1".
+What should happen to task #42?
 
-**恢复调度按钮**：直接生效，无需 confirmation（解除一个限制是低风险操作）。
+  ○ Let task #42 finish running (default)
+  ○ Also pause task #42 (saves progress; can be resumed either after the hold is released, or individually)
 
-### 4.5 不变的入口
+[Confirm hold, let task #42 finish]  [Cancel]
+```
 
-- 新建 task 页的 `ResumeFieldPicker`（从任意 .pt 起新 task）**不动**。见 §6 路径 B。
+The primary button's label **updates in sync** with the radio selection
+("Let task #42 finish" / "Also pause task #42"), so the user isn't left
+unsure what they just confirmed. The specific task name / id **appears
+directly** in the options, rather than using "it."
+
+**Case B's 3 outcomes**:
+- Cancel → nothing changes.
+- Confirm + "Let task #42 finish" → only writes queue_held=true.
+- Confirm + "Also pause task #42" → writes queue_held=true + calls the
+  task-level pause API (triggering the §4.3 pause-progress modal).
+
+**Release button**: takes effect immediately, no confirmation needed
+(lifting a restriction is a low-risk operation).
+
+### 4.5 Unchanged entry points
+
+- The `ResumeFieldPicker` on the new-task page (starting a new task from any
+  .pt) is **unchanged**. See §6 path B.
 
 ---
 
-## 5. State 文件存放与命名
+## 5. State file storage and naming
 
-### 5.1 文件位置与命名（per-task 子目录 + pause 前缀 + config snapshot）
+### 5.1 File location and naming (per-task subdirectory + pause prefix + config snapshot)
 
-**写盘路径**：
+**Write paths**:
 
-| 来源 | 路径 |
+| Source | Path |
 |------|------|
-| `handle_interrupt`（暂停触发，state） | `<output_dir>/state/task_<TID>/pause_step_<N>.pt` |
-| `handle_interrupt`（暂停触发，config snapshot） | `<output_dir>/state/task_<TID>/pause_step_<N>.config.json` |
-| `save_state_every` / `save_state_every_epochs`（周期触发） | `<output_dir>/state/task_<TID>/step_<N>.pt` |
+| `handle_interrupt` (pause-triggered, state) | `<output_dir>/state/task_<TID>/pause_step_<N>.pt` |
+| `handle_interrupt` (pause-triggered, config snapshot) | `<output_dir>/state/task_<TID>/pause_step_<N>.config.json` |
+| `save_state_every` / `save_state_every_epochs` (periodic) | `<output_dir>/state/task_<TID>/step_<N>.pt` |
 
-三点改动：
-1. **加 per-task 子目录**：原因见 §5.3 / §5.4——同一个 version 下可能跑过多个 task，必须用 task_id 隔离 state 文件，否则会互相覆盖（今天的 latent bug）。
-2. **pause 文件加 `pause_` 前缀**：区分"暂停锚点"和"周期 checkpoint"。两者生命周期不同（见 §5.5 / §5.6），命名必须能区分。
-3. **pause 时同步落盘 config snapshot**：把当前正在用的所有训练参数 freeze 一份 JSON，跟 .pt 同名（`.config.json`后缀）。resume 时**用 snapshot 跑**，不读 task 表 / version 配置 / 外部 preset。详见 §5.7。
+Three changes:
+1. **Adding a per-task subdirectory**: the reasoning is in §5.3 / §5.4 — the
+   same version might run multiple tasks over time, and state files must be
+   isolated by task_id, otherwise they'll overwrite each other (today's
+   latent bug).
+2. **Pause files get a `pause_` prefix**: to distinguish "a pause anchor"
+   from "a periodic checkpoint." The two have different lifecycles (see §5.5
+   / §5.6), so the naming must be able to tell them apart.
+3. **A config snapshot is written to disk at the same time as pause**:
+   freezes all training parameters currently in use into a JSON file, with
+   the same name as the .pt (with a `.config.json` suffix). Resume **runs
+   from the snapshot**, never reading the task table / version config /
+   external preset. See §5.7 for details.
 
-LoRA 输出（`.safetensors`）和 samples 目录**不动**，只挪 state 相关文件。
+LoRA output (`.safetensors`) and the samples directory are **unchanged** —
+only state-related files are moved.
 
-### 5.2 与 task 的关联
+### 5.2 Association with the task
 
-db 的 task 表新加一列：`paused_state_path`（绝对路径），记最后一次暂停写的 .pt。
+A new column is added to the db's task table: `paused_state_path` (an
+absolute path), recording the .pt from the most recent pause.
 
-- 每次 pause 都覆盖这个字段（永远指向"最新可恢复点"）。
-- paused → pending（resume）时**不**清空。
-- task 进入 terminal 状态（done / failed / canceled）后保留作为历史记录。
+- Every pause overwrites this field (it always points to the "latest
+  resumable point").
+- It is **not** cleared on paused → pending (resume).
+- It's kept as a historical record once the task reaches a terminal state
+  (done / failed / canceled).
 
-### 5.3 同一 version 下多个 task 的隔离（关键场景 1）
+### 5.3 Isolating multiple tasks under the same version (key scenario 1)
 
-**场景**：用户在 version V 下先跑了 task #42（被暂停），然后在同一 V 下又起了 task #43。
+**Scenario**: the user runs task #42 under version V (which gets paused),
+then starts task #43 under the same V.
 
-| Task | State 路径 | Config snapshot 路径 |
+| Task | State path | Config snapshot path |
 |------|-----------|---------------------|
 | #42 | `<output_dir>/state/task_42/pause_step_1000.pt` | `…/state/task_42/pause_step_1000.config.json` |
 | #43 | `<output_dir>/state/task_43/pause_step_500.pt`  | `…/state/task_43/pause_step_500.config.json` |
 
-两个 task **完全隔离**，互不干扰；任一被暂停的 task 都能独立 resume，且各自的 config snapshot 不会互相覆盖。
+The two tasks are **completely isolated**, not interfering with each other;
+either paused task can be resumed independently, and neither task's config
+snapshot overwrites the other's.
 
-**今天的实现是有 bug 的**：没有 task_id 子目录，task #42 和 #43 都写 `step_500.pt` / `step_1000.pt` 到同一个目录——后跑的会盖前跑的。本 feature 必须修这个 bug，否则 pause/resume 不可靠。
+**Today's implementation has a bug here**: with no task_id subdirectory,
+both task #42 and #43 write `step_500.pt` / `step_1000.pt` into the same
+directory — whichever runs later overwrites the earlier one. This feature
+must fix that bug, or pause/resume can't be relied upon.
 
-### 5.4 配置改动后再训（仍是同一 version）（关键场景 2）
+### 5.4 Retraining after a config change (still the same version) (key scenario 2)
 
-**场景**：task #42 跑了 1000 step 暂停。用户改了 lr / dataset / optimizer 配置（无论是改 version 配置、改 preset、还是改外部 yaml），submit 出 task #43（同 version）。
+**Scenario**: task #42 runs for 1000 steps and gets paused. The user changes
+the lr / dataset / optimizer configuration (whether by editing the version
+config, editing a preset, or editing an external yaml), and submits task #43
+(same version).
 
-- 配置改动 = **新 task**（task_id 不同），不是 "resume #42"。db 记录两条独立 task 行。
-- task #42 和 #43 各写各的 state 子目录（见 §5.3），state 互不影响。
-- **task #42 的 config snapshot 已经落盘在 `pause_step_1000.config.json`**，pause 时 freeze 的是 pause 那一刻正在用的全部训练参数。
-- 用户**改 version / preset / 外部配置文件后，task #42 的 snapshot 不受影响**——resume #42 时严格用 snapshot，跟"最新的 config 长什么样"完全解耦。
-- 用户**不能**用改过的配置 resume task #42——见 §8.5（resume 不允许编辑 config，UI 检测到 task 的 config 字段或 snapshot 跟当前 effective config 有差异时禁用恢复按钮提示走 fork）。
-- 如果用户想"沿用旧 state 但跑新 config"，用 ResumeFieldPicker 起一个全新 task（§6 路径 B），手动把 .pt 路径指向 task #42 的 state 文件——这就是显式 fork。
+- A config change = a **new task** (a different task_id), not "resuming
+  #42." The db records two independent task rows.
+- Task #42 and #43 each write to their own state subdirectory (see §5.3),
+  and their state doesn't affect each other.
+- **Task #42's config snapshot has already been written to disk in
+  `pause_step_1000.config.json`** — at pause time, all training parameters
+  in use at that moment were frozen.
+- After the user **edits the version / preset / external config file, task
+  #42's snapshot is unaffected** — resuming #42 strictly uses the snapshot,
+  fully decoupled from "what the latest config looks like."
+- The user **cannot** resume task #42 with the edited config — see §8.5
+  (resuming doesn't allow editing config; the UI disables the resume button
+  and directs the user toward fork when it detects the task's config field
+  or snapshot differs from the current effective config).
+- If the user wants to "reuse the old state but run with a new config,"
+  they use ResumeFieldPicker to start a brand-new task (§6 path B), manually
+  pointing the .pt path at task #42's state file — this is an explicit fork.
 
-**核心原则**：state 归属由 task_id 锁死；config 归属由 snapshot 锁死。配置变更不会回头污染老 task 的任何东西。
+**Core principle**: state ownership is locked to a task_id; config ownership
+is locked to a snapshot. Config changes never retroactively pollute anything
+about an old task.
 
-### 5.5 Pause 文件生命周期（resume 成功后自动删除）
+### 5.5 Pause-file lifecycle (auto-deleted after a successful resume)
 
-**核心规则**：pause 文件（`.pt` + 同名 `.config.json` snapshot 配对）是"暂停锚点"，仅在 task 处于 paused 状态期间有效。当 task 离开 paused 状态后**两个文件一起自动删除**——同一 task 任何时刻最多只有 1 对 pause 文件。
+**Core rule**: pause files (the `.pt` + the matching `.config.json` snapshot
+pair) are "pause anchors," valid only while the task is in the paused
+status. Once the task leaves the paused status, **both files are
+automatically deleted together** — at any moment, a task has at most 1 pause
+file pair.
 
-| 事件 | pause 文件对处理（.pt + .config.json） |
+| Event | Handling of the pause file pair (.pt + .config.json) |
 |------|---------------|
-| `running → paused` | 写新 pause 文件对，`paused_state_path` 指向 .pt |
-| `paused → pending`（resume，path A） | 子进程**成功加载** state 后删除文件对，清空 `paused_state_path` |
-| `paused → canceled`（彻底取消） | 静默删除（task 已弃用，文件无意义） |
-| 删除 paused task | 一并删除（见 §5.8） |
+| `running → paused` | writes a new pause file pair, `paused_state_path` points to the .pt |
+| `paused → pending` (resume, path A) | deletes the file pair after the child process **successfully loads** the state, clears `paused_state_path` |
+| `paused → canceled` (fully canceled) | silently deleted (the task is abandoned, the files are meaningless) |
+| deleting a paused task | deleted together (see §5.8) |
 
-**删除时机为什么是"成功加载后"而不是"用户点击 resume 时"**：
-- 用户点 resume 后，task 状态先改 pending，等 dispatcher 调度可能要几秒到几分钟（前面有别的 task 在跑）。
-- 子进程拉起后 `load_training_state` 可能失败（.pt 损坏 / 版本不兼容 / OOM）。如果点击时就删，加载失败用户无法重试。
-- 安全时机：CLI 端 `load_training_state` 成功返回后，emit `__EVENT__:resume_state_loaded:{"path":"..."}`，supervisor 收到事件再删文件。失败则 task → failed，pause 文件保留，用户可以选择再次 resume 或用 ResumeFieldPicker debug。
+**Why the deletion happens "after a successful load" rather than "when the
+user clicks resume"**:
+- After the user clicks resume, the task's status changes to pending first,
+  and it might take anywhere from seconds to minutes for the dispatcher to
+  schedule it (other tasks might be running ahead of it).
+- Once the child process is spawned, `load_training_state` could fail (a
+  corrupted .pt / version mismatch / OOM). If the files were deleted at
+  click-time, a failed load would leave the user with no way to retry.
+- The safe timing: once the CLI side's `load_training_state` returns
+  successfully, it emits `__EVENT__:resume_state_loaded:{"path":"..."}`, and
+  the supervisor deletes the files only after receiving that event. On
+  failure, the task → failed, the pause files are kept, and the user can
+  choose to resume again or debug via ResumeFieldPicker.
 
-**用户的反向场景**（曾担心的"想留着"）：
-- 想回滚到 pause 时的旧 state → resume 之后训练已经覆盖过 in-memory state，那个 .pt 已经是 stale 拷贝。真要回滚必须先取消当前 resume task，但这时新 pause 文件还没生成、旧的已删——结论是：**回滚不是本 feature 的功能**，要回滚走 §6 路径 B（手动 fork）+ 把握时机（resume 前用 ResumeFieldPicker 起 fork task）。
-- 想 fork 一个新分支 → 应该在 resume **之前**做（用 ResumeFieldPicker 起新 task，并行保留 paused task）。pause 文件还在的时候 fork，是合法操作。一旦点了 resume，意图就是"接着跑同一个 task"，旧 state 不再需要。
+**A reverse scenario the user was worried about** ("what if I want to keep
+it"):
+- Wanting to roll back to the old pause-time state → once resumed, training
+  has already overwritten the in-memory state, and that .pt is already a
+  stale copy. To actually roll back, the current resumed task would need to
+  be canceled first, but by then the new pause file hasn't been generated
+  yet and the old one is already deleted — the conclusion is: **rolling back
+  isn't a feature of this feature**; to roll back, use §6 path B (manual
+  fork) + time it right (use ResumeFieldPicker to start a fork task before
+  resuming).
+- Wanting to fork a new branch → should be done **before** resuming (use
+  ResumeFieldPicker to start a new task, keeping the paused task around in
+  parallel). Forking while the pause files still exist is a legitimate
+  operation. Once resume is clicked, the intent is "keep running the same
+  task," and the old state is no longer needed.
 
-### 5.6 周期 save 文件生命周期（保留，由用户管理）
+### 5.6 Periodic save file lifecycle (kept, managed by the user)
 
-跟 pause 文件**完全独立**：
-- 由 `save_state_every` / `save_state_every_epochs` 写出，是用户主动开的灾后恢复点。
-- **不自动清理**——用户开了这个功能就是要这些 checkpoint。
-- 累积在 `state/task_<TID>/` 同子目录，用 `step_<N>.pt` 命名（无 `pause_` 前缀）。
-- 跟 pause 文件按文件名区分，不会被 §5.5 的"删除 pause 文件"规则误删。
-- 任务 done / failed 后保留作为历史 checkpoint，可被 ResumeFieldPicker 选中起新 task。
-- 用户手动清理；或未来加"task done 后批量清"开关。
+Completely independent from pause files:
+- Written by `save_state_every` / `save_state_every_epochs`, these are
+  disaster-recovery points the user opted into.
+- **Not automatically cleaned up** — if the user turned this on, they want
+  these checkpoints kept.
+- Accumulate in the same `state/task_<TID>/` subdirectory, named
+  `step_<N>.pt` (no `pause_` prefix).
+- Distinguished from pause files by filename, so they're never accidentally
+  deleted by the §5.5 "delete pause files" rule.
+- Kept as historical checkpoints after the task is done / failed, and can be
+  selected by ResumeFieldPicker to start a new task.
+- Cleaned up manually by the user; or a future "bulk-clean after task is
+  done" toggle could be added.
 
-### 5.7 Config snapshot 设计（resume 的另一半锚点）
+### 5.7 Config snapshot design (the other half of resume's anchor)
 
-**动机**：仅靠 .pt 文件 resume 是不够的——load_training_state 恢复 optimizer + step + lr scheduler 等，但训练参数（dataset 路径、lr、optimizer 类型、batch size、loss weighting、noise schedule、采样配置等）来自外部 args / config。这些参数在 pause 到 resume 之间**可能被用户改动**（编辑 version 配置、改 preset、改外部 yaml）。
+**Motivation**: resuming from the .pt file alone isn't enough —
+load_training_state restores the optimizer + step + lr scheduler, etc., but
+training parameters (dataset path, lr, optimizer type, batch size, loss
+weighting, noise schedule, sampling config, etc.) come from external args /
+config. These parameters **might get changed by the user** between pause and
+resume (editing the version config, changing a preset, editing an external
+yaml).
 
-如果 resume 时再读"当前 effective config"，paused task 的训练就会受用户后续编辑影响，行为不确定。
+If resume read "the current effective config" again, a paused task's
+training would be affected by whatever the user edited afterward, making
+behavior unpredictable.
 
-**方案**：pause 触发时，`handle_interrupt` 除了写 `.pt`，同步把当前进程**实际在用的所有训练参数**序列化成 JSON，落盘到 `pause_step_<N>.config.json`。resume 时严格从这个 snapshot 拼 args，不读 task 表的 config 字段、不读 version 配置、不读外部 preset。
+**Approach**: when pause triggers, `handle_interrupt` writes the `.pt` and,
+alongside it, serializes **all training parameters actually in use by the
+current process** into JSON, written to `pause_step_<N>.config.json`. Resume
+strictly builds args from this snapshot, never reading the task table's
+config field, the version config, or an external preset.
 
-**snapshot 内容**（候选清单，最终以实现时的 args 序列化结果为准）：
-- 所有 `args.*`：lr、optimizer、optimizer_args、scheduler、batch_size、grad_accum、max_train_steps、num_epochs、noise schedule、loss weighting、network_dim、network_alpha、rank、alpha、dropout、conv_dim、conv_alpha、…
-- dataset 配置：dataset_config / resolution / caption_extension / shuffle / repeat / class_tokens
-- output_dir、output_name、sample_prompts、sample_every、save_every_n_steps、save_state_every…
-- 关键路径：base model、vae、text encoder（不存 hash，只存路径）
+**Snapshot contents** (a candidate list; the final result is whatever gets
+serialized from args at implementation time):
+- All `args.*`: lr, optimizer, optimizer_args, scheduler, batch_size,
+  grad_accum, max_train_steps, num_epochs, noise schedule, loss weighting,
+  network_dim, network_alpha, rank, alpha, dropout, conv_dim, conv_alpha, …
+- Dataset config: dataset_config / resolution / caption_extension / shuffle
+  / repeat / class_tokens
+- output_dir, output_name, sample_prompts, sample_every,
+  save_every_n_steps, save_state_every…
+- Key paths: base model, vae, text encoder (stores the path, not a hash)
 - random seed
-- **不存**：wandb run id（已 finish），monitor live state（已 dump 在 .pt 内）
+- **Not stored**: wandb run id (already finished), monitor live state
+  (already dumped inside the .pt)
 
-**resume 流程**：
-1. UI 点恢复 → API 取 task.paused_state_path → 推出旁边的 `.config.json`。
-2. 拼新 args：基于 snapshot.config.json，**只覆盖** `--resume-state <pt_path>`，其他全用 snapshot。
-3. cmd_builder 拼命令 → spawn 子进程 → CLI 跑 snapshot 配置 + 从 .pt load state。
+**Resume flow**:
+1. UI clicks resume → the API reads task.paused_state_path → derives the
+   adjacent `.config.json`.
+2. Builds new args: based on snapshot.config.json, **only overriding**
+   `--resume-state <pt_path>`, everything else uses the snapshot.
+3. cmd_builder assembles the command → spawns the child process → the CLI
+   runs with the snapshot's config + loads state from the .pt.
 
-**db 字段**：除了已规划的 `paused_state_path`，加 `paused_config_path`（绝对路径，跟 state 同步覆盖）。也可以约定 "snapshot 路径永远 = state_path 同名 .config.json"，db 只存一个字段——后者更简洁。
+**db fields**: besides the already-planned `paused_state_path`, add
+`paused_config_path` (an absolute path, overwritten together with state). It
+could also be conventioned that "the snapshot path is always = the state
+path's name with .config.json" and the db only stores one field — the
+latter is simpler.
 
-**用户改 config 后再点恢复**：
-- snapshot 跟用户当前 config 内容可能不一致——这是好事，snapshot 才是正确的。
-- UI 建议提示："此 task 暂停时的配置已固化，恢复将沿用暂停时配置；如需用新配置训练，请通过 ResumeFieldPicker 新建 task。"
-- §8.5 进一步说明禁用 / 引导规则。
+**The user edits config, then clicks resume**:
+- The snapshot might now differ from the user's current config content —
+  that's expected, the snapshot is the correct one.
+- Suggested UI copy: "This task's config was frozen at pause time; resuming
+  will use the config from that moment. To train with the new config,
+  create a new task via ResumeFieldPicker."
+- §8.5 covers the disabling / guidance rules further.
 
-**Snapshot 跟 .pt 同生命周期**：见 §5.5 / §5.8——pause 文件被删时，snapshot 一起删（同文件夹同前缀）。
+**The snapshot shares a lifecycle with the .pt**: see §5.5 / §5.8 — when the
+pause files are deleted, the snapshot is deleted along with them (same
+folder, same prefix).
 
-### 5.8 删除 paused task（或任意状态 task）
+### 5.8 Deleting a paused task (or a task in any status)
 
-- 删除 db 记录。
-- 子目录 `state/task_<TID>/` 处理：
-  - **Pause 文件（.pt + .config.json）**：跟随 task 一起删（无失分场景，§5.5 已论证）。
-  - **周期 save 文件**：UI 弹窗"是否同时删除 N 个 checkpoint 文件"，默认**保留**（用户可能想 ResumeFieldPicker 复用）。
-- 子目录粒度让批量清简单：`rm -rf state/task_<TID>/` 就行，不会误伤别的 task。
+- Delete the db record.
+- Handling of the `state/task_<TID>/` subdirectory:
+  - **Pause files (.pt + .config.json)**: deleted along with the task (no
+    downside scenario, as already argued in §5.5).
+  - **Periodic save files**: the UI pops "also delete N checkpoint files?",
+    defaulting to **keep** (the user might want to reuse them via
+    ResumeFieldPicker).
+- Per-subdirectory granularity makes bulk cleanup simple:
+  `rm -rf state/task_<TID>/` works fine, without accidentally touching
+  another task.
 
 ---
 
-## 6. 两条恢复路径并存
+## 6. Two coexisting resume paths
 
-| 入口 | 文件选择 | 任务状态 | 用途 |
+| Entry point | File selection | Task status | Purpose |
 |------|----------|----------|------|
-| **A. 恢复按钮**（paused task） | 自动用 `paused_state_path` | 原 task 复活（paused → pending） | 主路径：暂停后回来接着跑 |
-| **B. ResumeFieldPicker**（新建 task） | 用户手动选任意 .pt | 新建一个 pending task | 已有：跨 task 续训 / 从 done task 中间 checkpoint 重启 / 灾后恢复 |
+| **A. Resume button** (a paused task) | automatically uses `paused_state_path` | the original task revives (paused → pending) | main path: coming back to keep running after a pause |
+| **B. ResumeFieldPicker** (starting a new task) | the user manually picks any .pt | starts a new pending task | existing: cross-task resume / restarting from a done task's mid checkpoint / disaster recovery |
 
-**两条不互斥也不冲突**：
-- A 只有 paused task 才出现，是 task 内部生命周期续接。
-- B 永远可用，从文件系统挑 .pt 起新 task。
-- 同一个 .pt 文件理论上可以被 B 路径反复用来起新 task，paused_state_path 只是 A 路径的便捷指针。
+**The two aren't mutually exclusive or conflicting**:
+- A only appears for a paused task, continuing a task's own internal
+  lifecycle.
+- B is always available, picking a .pt from the filesystem to start a new
+  task.
+- The same .pt file could theoretically be reused via path B repeatedly to
+  start new tasks; paused_state_path is just a convenience pointer for path A.
 
-**为什么不合并成一条**：A 保持原 task 身份（同一行 task，同一个 task_id，loss 历史 / 监控历史延续），B 是新 task（新 id、新 log）。这两个语义不一样，强行合并会让用户困惑"我点恢复为什么 task_id 变了"。
-
----
-
-## 7. User Case 罗列
-
-### Case A — 临时让出 GPU 做别的
-用户跑了 1000 step，临时想用 GPU 跑个 generate。
-→ 任务级暂停 → generate task 跑（队列下一个或新插一个） → 用完 GPU → 点"恢复"。
-
-### Case B — 关机 / 离线过夜
-用户晚上想关电脑，但希望明天继续。
-→ 任务级暂停（保 state） → 关机 → 第二天开机、启动 server → task 状态仍是 paused → 点"恢复"。
-
-### Case C — 观察 loss 后决策
-跑了 1000 step，loss 不太对，想离线分析 sample 图再决定。
-→ 暂停 → 看 sample / loss 曲线 → 决定继续 OR 彻底取消（paused → canceled）。
-
-### Case D — 调度策略调整
-队列有 5 个 task，第二个跑了一半发现第三个更紧急。
-→ 暂停第二个 → 调整队列顺序（或直接让第三个排队） → dispatcher 自动跑第三个 → 第三个完了后点"恢复"第二个。
-
-### Case E — 服务器要重启（用户主动）
-用户要重启 server（更新代码 / 改配置）。
-→ 任务级暂停当前 running（用户**主动**做这一步） → 等子进程退出 → 重启 server → resume。
-
-**关键约定**：server 关闭时**不**自动 pause running task。原因详见 §9——服务器异常退出场景太多（crash / 断电 / OS kill），无法承诺"每次都能保 state"，做了反而给用户错误的安全感。用户该自己 pause 就主动 pause。
-
-### Case F — 让队列今晚自然停下来
-"今晚不想让队列继续跑新的，但当前这个跑完没事。"
-→ 挂起队列（弹 modal，情形 B，选"让它跑完"） → 当前 task 跑完自然结束 → 队列里 pending 不会自动启动。
-→ 早上恢复调度。
-
-### Case G — 全停做维护
-"我要做系统维护，全停。"
-→ 挂起队列（弹 modal，情形 B，选"同时暂停它"） → 既不调度新的，也保存当前进度。
-→ 维护完恢复调度 + 用户手动逐个 resume 想恢复的 paused task。
-
-### Case H — 挂起期间 resume 老 task
-"队列挂起着，但我想让一个之前暂停的 task A 排上队，等明天恢复调度后第一个跑。"
-→ 点 task A 行内的"恢复" → task A 状态 paused → pending → UI 显示"等待恢复调度"。
-→ 明天恢复调度 → dispatcher 按优先级 + 创建时间排序拉，task A 按它的序位进入 running。
-→ （如果想让它**先跑**，要顺手调整队列顺序——这是现有功能，不属于本 feature。）
-
-### Case I — 灾后 / 异常恢复（不在本 feature scope）
-不属于本 feature，由现有 `save_state_every` + `ResumeFieldPicker` 覆盖：
-进程意外死亡 / OOM / 蓝屏 / 断电 → task 被标 failed → 用户用 ResumeFieldPicker 选最近的周期 .pt 起新 task。
-
-**前提**：用户必须在训练配置里**主动开** `save_state_every`（默认 0，即不写中间 checkpoint）。本 feature 不替代这条防线，参 §9。
+**Why they aren't merged into one**: A preserves the original task's
+identity (same row, same task_id, loss history / monitoring history
+continues), while B is a new task (new id, new log). These are different
+semantics, and forcing them together would confuse users about "why did my
+task_id change when I clicked resume."
 
 ---
 
-## 8. 边界 / 未定义行为
+## 7. User Case list
 
-### 8.1 过早暂停（global_step=0 之前）
-用户在 dataset 加载 / 模型加载阶段就想暂停，此时还没进 train_loop，`global_step=0`，存的 state 没意义。
+### Case A — temporarily freeing up the GPU for something else
+The user has trained 1000 steps and temporarily wants to run a generate on
+the GPU.
+→ task-level pause → the generate task runs (the queue's next item, or a
+new one inserted) → once done with the GPU → clicks "resume."
 
-**策略**（双层防护，UI 为主）：
-1. **UI 层（主）**：暂停按钮**只在 task 进入 train_loop 后才显示**。启动阶段只显示取消按钮。
-   - 实现：CLI 端进入 train_loop 时 emit `__EVENT__:train_loop_started:{}`，supervisor 缓存到 slot，通过 task API / SSE 暴露 `is_pausable: bool`。
-   - UI `useMonitorProgress(taskId)` 已经在订阅状态，扩个字段就行。
-2. **API 层（防御）**：直接调 pause API 时，server 端检查 `is_pausable` 标志，未就绪返回 409 + 提示文案。覆盖 UI 显示有延迟 / 用户直接调 API 的情况。
+### Case B — shutting down / going offline overnight
+The user wants to shut their computer down at night, but wants to continue
+tomorrow.
+→ task-level pause (saves state) → shut down → the next day, power on,
+start the server → the task's status is still paused → click "resume."
 
-不做"自动延后到 loop 启动再暂停"——把简单的事做复杂没必要，用户看不到按钮就知道现在不能暂停。
+### Case C — deciding after observing the loss
+1000 steps in, the loss looks off, and the user wants to analyze the sample
+images offline before deciding.
+→ pause → look at samples / the loss curve → decide to continue OR cancel
+permanently (paused → canceled).
 
-### 8.2 暂停过程的 modal（取代"超时默默降级"）
-子进程收到暂停信号后，`handle_interrupt` 在保存 state + config snapshot（可能几秒到十几秒）。整个过程**在 UI 端用一个 modal 全程覆盖**，详见 §4.3：
+### Case D — adjusting scheduling strategy
+There are 5 tasks in the queue; the second one is halfway done when the
+user realizes the third one is more urgent.
+→ pause the second → reorder the queue (or just let the third one queue up)
+→ the dispatcher automatically runs the third → once it's done, click
+"resume" on the second.
 
-- modal 一启动就锁屏，期间用户不能做别的操作（避免点取消把进度丢了）。
-- 30s 超时**不**自动降级，而是 modal 给用户选：[再等 30s] / [强制取消保存进度] / [终止任务丢弃进度]。
-- 子进程异常退出（rc != 0）：modal 进失败态，引导用户看日志。
-- 成功：modal 关闭 + toast "已暂停在 step N"。
+### Case E — the server needs to restart (user-initiated)
+The user needs to restart the server (updating code / changing config).
+→ task-level pause the currently running task (the user does this step
+**deliberately**) → wait for the child process to exit → restart the server
+→ resume.
 
-**底层规则保留**：
-- 只有子进程 emit `__EVENT__:pause_state` 且文件落盘完整时，才标 `paused`。
-- 用户在 modal 里点"强制取消保存进度"时：如果磁盘上 pause 文件已写出来了（snapshot + .pt 都存在）→ 标 paused；否则降级 canceled。
-- 用户在 modal 里点"终止任务"：发硬终止 + 标 canceled，不保留任何 pause 文件。
+**Key convention**: the server **does not** automatically pause a running
+task on shutdown. The reasoning is detailed in §9 — there are too many
+abnormal server-exit scenarios (crash / power loss / an OS kill), so "state
+is always saved" can't be promised, and attempting it would give users a
+false sense of security. The user should pause deliberately when they mean
+to.
 
-### 8.3 服务器重启 / 异常退出时还在 running 的 task
-现状：supervisor.stop() 同步发硬终止信号，state 不存；进程被外部 kill / 断电时 task 留在 running 状态，重启后被 orphan 扫描标 failed。
+### Case F — letting the queue naturally stop tonight
+"I don't want the queue to keep starting new tasks tonight, but it's fine
+for the current one to finish."
+→ hold the queue (a modal pops, case B, choose "let it finish") → the
+current task finishes naturally → pending items in the queue won't start
+automatically.
+→ release the hold in the morning.
 
-**本 feature 不改这个**——明确不做"server stop 时自动 pause"。
-原因写在 §9：覆盖面太窄（只有用户主动 stop 才能 hook，crash / 断电 / OOM kill 都没机会），做了反而误导用户。引导用户通过 `save_state_every` 主动配置周期 checkpoint。
+### Case G — stopping everything for maintenance
+"I need to do system maintenance, stop everything."
+→ hold the queue (a modal pops, case B, choose "also pause it") → neither
+schedules anything new, nor keeps the current progress running unsaved.
+→ after maintenance, release the hold + the user manually resumes each
+paused task they want to resume.
 
-### 8.4 paused task 跨 server 重启
-状态完全在 db，重启 server 不动它。重启后 task 仍是 paused，用户能正常 resume。
-orphan 清理逻辑只扫"重启时还是 running 的"，paused 不受影响。
+### Case H — resuming an old task while held
+"The queue is held, but I want a previously paused task A to get in line so
+it's first to run once I release the hold tomorrow."
+→ click "resume" on task A's row → task A's status goes paused → pending →
+the UI shows "waiting for the queue to resume."
+→ release the hold tomorrow → the dispatcher pulls tasks by priority +
+creation-time ordering, and task A enters running in its turn.
+→ (if the user wants it to run **first**, they'd need to reorder the
+queue too — that's existing functionality, not part of this feature.)
 
-### 8.5 配置变更（由 config snapshot 兜底）
-**snapshot 已经把暂停那一刻的 config freeze 在 `pause_step_<N>.config.json`**（详见 §5.7），用户暂停后改 version 配置 / preset / 外部 yaml **都不会污染** paused task 的恢复。
+### Case I — disaster / abnormal recovery (out of scope for this feature)
+Not part of this feature; covered by the existing `save_state_every` +
+`ResumeFieldPicker`:
+process dies unexpectedly / OOM / BSOD / power loss → the task gets marked
+failed → the user picks the most recent periodic .pt via ResumeFieldPicker
+to start a new task.
 
-- 恢复按钮永远用 snapshot 跑，跟"用户当前 effective config 长什么样"完全无关。
-- UI 在 paused 行 / 详情页用 info 提示："此 task 暂停时的配置已固化，恢复将沿用暂停时配置。如需用新配置训练，请通过 ResumeFieldPicker 新建 task。"
-- 不暴露"resume 前编辑 config"入口——想换 config 只能走 §6 路径 B 显式 fork 出新 task。
-
-**为什么不让用户用新 config 直接 resume**：
-- optimizer state 跟旧 lr / 旧 betas 强耦合，换 optimizer 类型就直接崩。
-- scheduler 状态跟旧 warmup / total_steps 强耦合。
-- dataset 换了，loss 历史就失去意义。
-- 强行支持 = 一堆"似 resume 非 resume"的边界 case。fork 新 task 是干净边界。
-
-### 8.6 Wandb run
-`handle_interrupt` 已 `finish()` 原 run；resume 时起新 run（不复用 run_id）。
-**接受这个 trade-off**，写到 doc。未来想接续 run 要单独存 run_id，本期不做。
-
-### 8.7 删除 paused task 时清不清 state 子目录
-- Pause 文件对（.pt + .config.json）：**跟着删**（§5.5 / §5.8 已论证无失分场景）。
-- 周期 save 文件：UI 弹窗确认，**默认保留**。
-
-### 8.8 多次 pause / resume 不会累积 pause 文件
-每次 pause 写新文件对（不同 step），但**任何时刻只有 1 对存活**——resume 成功就删，再 pause 又写新对。
-周期 save 文件独立累积，规则不变（§5.6）。
+**Prerequisite**: the user must have **deliberately enabled**
+`save_state_every` in the training config (default 0, i.e. no intermediate
+checkpoints are written). This feature doesn't replace that safety net; see
+§9.
 
 ---
 
-## 9. 明确不做的
+## 8. Boundaries / undefined behavior
 
-| 项 | 原因 |
+### 8.1 Pausing too early (before global_step=0)
+The user wants to pause while still in the dataset-loading / model-loading
+stage, before entering train_loop, with `global_step=0` — any saved state
+would be meaningless.
+
+**Strategy** (two layers of defense, UI as primary):
+1. **UI layer (primary)**: the pause button is **only shown once the task
+   has entered train_loop**. During the startup stage, only the cancel
+   button is shown.
+   - Implementation: the CLI emits `__EVENT__:train_loop_started:{}` when it
+     enters train_loop; the supervisor caches this on the slot and exposes
+     `is_pausable: bool` through the task API / SSE.
+   - The UI's `useMonitorProgress(taskId)` already subscribes to state, so
+     it just needs one more field.
+2. **API layer (defense)**: when the pause API is called directly, the
+   server checks the `is_pausable` flag and returns 409 + explanatory copy
+   if not ready. This covers cases where the UI display is delayed or the
+   user calls the API directly.
+
+Not doing "automatically deferring the pause until the loop starts" —
+that would be over-engineering something simple; if the user can't see the
+button, they already know it can't be paused right now.
+
+### 8.2 The pause-in-progress modal (replaces "silently downgrading on timeout")
+After the child process receives the pause signal, `handle_interrupt`
+spends anywhere from a few seconds to over ten seconds saving state + the
+config snapshot. The whole process is **covered by a modal on the UI side
+the entire time**, as detailed in §4.3:
+
+- The modal locks the screen the moment it opens; the user can't do
+  anything else during this time (to avoid a stray click on cancel losing
+  progress).
+- On a 30s timeout, it does **not** automatically downgrade — instead, the
+  modal lets the user choose from: [wait 30 more seconds] / [force-cancel
+  and keep saved progress] / [terminate the task and discard progress].
+- If the child process exits abnormally (rc != 0): the modal enters a
+  failure state, guiding the user to check the logs.
+- On success: the modal closes + a toast reads "Paused at step N."
+
+**Underlying rule kept in place**:
+- A task is only marked `paused` once the child process emits
+  `__EVENT__:pause_state` and the files have been fully written to disk.
+- If the user clicks "force-cancel and keep saved progress" in the modal: if
+  the pause files have already been written to disk (both the snapshot and
+  the .pt exist) → it's marked paused; otherwise it falls back to canceled.
+- If the user clicks "terminate the task": a hard terminate is sent + it's
+  marked canceled, with no pause files kept.
+
+### 8.3 A task still running when the server restarts / exits abnormally
+Current behavior: `supervisor.stop()` synchronously sends a hard terminate
+signal, and state isn't saved; if the process is killed externally / the
+power is lost, the task stays in the running status, and after a restart
+the orphan scan marks it failed.
+
+**This feature doesn't change that** — it's a deliberate choice not to
+"automatically pause on server stop."
+The reasoning is in §9: the coverage would be too narrow (only a
+user-initiated stop could hook into this — crash / power loss / an OOM kill
+would have no chance to run it at all), and doing it anyway would mislead
+users. Instead, guide users to proactively configure periodic checkpoints
+via `save_state_every`.
+
+### 8.4 A paused task surviving a server restart
+The state lives entirely in the db, and restarting the server doesn't touch
+it. After a restart, the task is still paused, and the user can resume it
+normally.
+The orphan-cleanup logic only scans tasks that were "still running at
+restart time" — paused tasks are unaffected.
+
+### 8.5 Config changes (backstopped by the config snapshot)
+**The snapshot already froze the config at the moment of pausing, in
+`pause_step_<N>.config.json`** (see §5.7 for details), so if the user edits
+the version config / preset / external yaml after pausing, it **won't
+pollute** the paused task's resume.
+
+- The resume button always runs from the snapshot, completely independent
+  of "what the user's current effective config looks like."
+- The UI shows an info note on the paused row / detail page: "This task's
+  config was frozen at pause time; resuming will use the config from that
+  moment. To train with a new config, create a new task via
+  ResumeFieldPicker."
+- No "edit config before resuming" entry point is exposed — changing config
+  is only possible via §6 path B, explicitly forking a new task.
+
+**Why the user isn't allowed to resume directly with a new config**:
+- Optimizer state is tightly coupled to the old lr / old betas; switching
+  optimizer type would just crash.
+- Scheduler state is tightly coupled to the old warmup / total_steps.
+- If the dataset changes, the loss history becomes meaningless.
+- Supporting it anyway would create a pile of "sort-of-resume,
+  sort-of-not" edge cases. Forking a new task is a clean boundary.
+
+### 8.6 The wandb run
+`handle_interrupt` already calls `finish()` on the original run; resume
+starts a new run (not reusing run_id).
+**This trade-off is accepted**, and documented as such. Continuing the same
+run in the future would need a separately stored run_id — not done this
+round.
+
+### 8.7 Whether to clean the state subdirectory when deleting a paused task
+- The pause file pair (.pt + .config.json): **deleted along with it** (no
+  downside scenario, as already argued in §5.5 / §5.8).
+- Periodic save files: the UI pops a confirmation, defaulting to **keep**.
+
+### 8.8 Repeated pause / resume doesn't accumulate pause files
+Every pause writes a new file pair (a different step), but **only 1 pair is
+ever alive at a time** — it's deleted on a successful resume, and a new
+pair is written on the next pause.
+Periodic save files accumulate independently, with unchanged rules (§5.6).
+
+---
+
+## 9. Explicitly not doing
+
+| Item | Reason |
 |----|------|
-| paused 状态下编辑 config | 语义复杂，容易让 resume 出错 |
-| paused 状态下移动 LoRA 输出目录 | output_dir 路径硬编码在 state 文件里 |
-| Wandb run id 续接 | 单独 feature，需要存额外字段 |
-| 自动清理周期 save 文件 | 用户主动开的 checkpoint，由用户管 |
-| pause generate / download / tag task | 这些 task 跑得快，没意义 |
-| 强 kill 子进程后还标 paused | 强 kill 时 state 不可信，必须标 canceled |
-| **server stop / crash / 断电时自动保 state** | 覆盖面不可控（用户主动 stop 才能 hook，crash / 断电 / OOM kill / 蓝屏全没机会），做了会给用户错觉以为有保护；引导用户在训练配置里开 `save_state_every` 才是正解 |
-| **挂起状态下强制禁用 task resume** | UI 反复操作啰嗦；改成"resume 后排队等恢复调度"语义更顺（§3.3） |
-| **"暂停全部"复合按钮** | UI 冗余；挂起时 modal 已经能多问一句"是否同时暂停 running"（§4.3） |
+| Editing config while paused | too semantically complex, easy to break resume |
+| Moving the LoRA output directory while paused | output_dir's path is hardcoded inside the state file |
+| Continuing the same wandb run id | a separate feature, needs an extra stored field |
+| Automatically cleaning up periodic save files | user-opted-in checkpoints, managed by the user |
+| Pausing generate / download / tag tasks | these tasks run quickly, so it wouldn't be meaningful |
+| Marking it paused after a hard kill of the child process | state isn't trustworthy after a hard kill, must be marked canceled |
+| **Automatically saving state on server stop / crash / power loss** | coverage is uncontrollable (only a user-initiated stop could hook into this — crash / power loss / an OOM kill / BSOD all have no chance), and doing it anyway would give users a false sense of protection; guiding users to enable `save_state_every` in the training config is the actual right answer |
+| **Forcibly disabling task resume while held** | too clunky for the UI to keep toggling; "resume then queue up waiting for release" reads more naturally (§3.3) |
+| **A combined "pause everything" button** | redundant for the UI; the hold modal already asks the extra question "also pause the running task?" (§4.3) |
 
 ---
 
-## 10. 决策记录
+## 10. Decision log
 
-### 第一轮（初始 5 个开放问题）
+### Round 1 (the initial 5 open questions)
 
-1. ~~**队列级暂停是否纳入本期 scope**~~ **已决**（§3.2 / §3.3 / §4 / §7 Case F-H）：
-   纳入本期。用 **挂起 / 恢复调度** 命名跟"暂停"区分。
-   状态用 db 持久化的单一 bool（survives server restart），不动 task 状态机。
-   挂起跟任务级 pause / resume **正交**，4 个象限都合法。
-2. ~~**"暂停全部"复合按钮**~~ **已决**（§4.4 / §9）：
-   不做独立按钮。挂起队列的 confirmation modal 检测 running task 并多问一句"是否同时暂停"——一次操作覆盖两种意图。
-3. ~~**server stop / crash 时自动保 state**~~ **已决**（§8.3 / §9）：
-   不做。覆盖面太窄（只能 hook 用户主动 stop，crash / 断电 / 蓝屏全部漏掉），承诺不了"必然保 state"反而误导用户。引导用户开 `save_state_every` 周期 checkpoint。
-4. ~~**删除 paused task 时 .pt 文件处理**~~ **已决**（§5.5 / §5.8）：
-   Pause 文件对（.pt + .config.json）：跟随 task 一起删（resume / 取消 / 删除 task 任一时刻），同一 task 任何时刻最多 1 对 pause 文件。
-   周期 save 文件：UI 弹窗确认，默认保留。
-5. ~~**过早暂停（train_loop 未启动）**~~ **已决**（§8.1）：
-   UI 端暂停按钮在 task 进入 train_loop 之前**不显示**（用 `__EVENT__:train_loop_started` 事件门控）。API 端做 defense-in-depth 拒绝。
+1. ~~**Whether queue-level pause is in scope for this round**~~ **decided**
+   (§3.2 / §3.3 / §4 / §7 Case F-H):
+   included in this round. Named **hold / release** to distinguish it from
+   "pause." Status is a single db-persisted bool (survives a server
+   restart), the task state machine is untouched. Hold is **orthogonal**
+   to task-level pause / resume, and all 4 quadrants are valid.
+2. ~~**A combined "pause everything" button**~~ **decided** (§4.4 / §9):
+   not building a separate button. The queue-hold confirmation modal
+   detects a running task and asks an extra question — "also pause it?" —
+   covering both intents in one action.
+3. ~~**Automatically saving state on server stop / crash**~~ **decided**
+   (§8.3 / §9):
+   not doing it. The coverage is too narrow (can only hook into a
+   user-initiated stop; crash / power loss / BSOD are all missed), and
+   promising "state is always saved" when it can't be guaranteed would
+   mislead users. Instead, guide users to enable periodic checkpoints via
+   `save_state_every`.
+4. ~~**Handling of the .pt file when deleting a paused task**~~ **decided**
+   (§5.5 / §5.8):
+   the pause file pair (.pt + .config.json) is deleted along with the task
+   (whenever it's resumed / canceled / the task is deleted) — a task has at
+   most 1 pause file pair at any moment.
+   Periodic save files: the UI confirms with a popup, defaulting to keep.
+5. ~~**Pausing too early (train_loop hasn't started)**~~ **decided** (§8.1):
+   the UI's pause button is **not shown** before the task enters train_loop
+   (gated by the `__EVENT__:train_loop_started` event). The API adds a
+   defense-in-depth rejection.
 
-### 第二轮（三方 review 吸收）
+### Round 2 (incorporating the three-way review)
 
-6. ~~**术语 "冻结" 反直觉**~~ **已决**（§3 / 全文）：
-   中文改 **挂起 / 恢复调度**，英文 hold / release（或 suspend / resume scheduling）。理由：挂起是计算机标准 suspend 术语，恢复调度带"调度"二字消歧义。
-7. ~~**"继续训练" 命名不对称 + 跟 ResumeFieldPicker 撞**~~ **已决**：行内按钮统一改为 **恢复**。
-8. ~~**§8.2 暂停超时默默降级 cancel = 用户惊吓**~~ **已决**（§4.3 / §8.2）：
-   重新设计为"暂停过程 modal" 覆盖全流程——点暂停立刻锁屏 modal 显示进度，30s 超时让用户从 [再等 30s] / [强制取消] / [终止任务] 三选一。
-9. ~~**config snapshot 解耦**~~ **已决**（§5.1 / §5.7 / §8.5）：
-   pause 时同步写 `pause_step_<N>.config.json`，把当前训练实际在用的参数全 freeze。resume 严格用 snapshot，跟用户后续改的 version / preset / 外部 yaml 完全解耦。
-10. ~~**modal 文案 "它" 指代不明**~~ **已决**（§4.4）：
-    所有提及 running task 处直接用具体 `#{id} "{name}"`，radio + 主按钮文案联动。
-11. ~~**挂起状态用 banner 还是 chip**~~ **已决**（§4.1）：
-    仅用顶部 sticky banner，**不用 task chip 形式**——banner 是 UI 元素，不是 task 状态机。未挂起时不显示任何东西避免噪音。
+6. ~~**The term "freeze" is counterintuitive**~~ **decided** (§3 / throughout):
+   renamed to hold / release scheduling, in English hold / release (or
+   suspend / resume scheduling). Reasoning: "hold" is the standard computing
+   term for suspend, and adding "scheduling" to the release term disambiguates
+   it from the task-level "resume."
+7. ~~**"Continue training" naming is asymmetric + collides with
+   ResumeFieldPicker**~~ **decided**: the inline button is unified to
+   **Resume**.
+8. ~~**§8.2's pause timeout silently downgrading to cancel is startling to
+   the user**~~ **decided** (§4.3 / §8.2):
+   redesigned as a "pause-progress modal" covering the whole flow — the
+   moment pause is clicked, the screen locks with a modal showing progress,
+   and a 30s timeout offers the user a choice from [wait 30 more seconds] /
+   [force-cancel] / [terminate the task].
+9. ~~**Decoupling via a config snapshot**~~ **decided** (§5.1 / §5.7 / §8.5):
+   `pause_step_<N>.config.json` is written to disk at the same time as
+   pause, freezing all parameters currently in use by training. Resume
+   strictly uses the snapshot, fully decoupled from any later edits the
+   user makes to the version / preset / external yaml.
+10. ~~**The modal copy's "it" is ambiguous**~~ **decided** (§4.4):
+    every mention of a running task uses the specific `#{id} "{name}"`
+    directly, with the radio button and primary button copy linked together.
+11. ~~**Should the hold status use a banner or a chip**~~ **decided** (§4.1):
+    only a top sticky banner is used, **not a task chip** — the banner is
+    a UI element, not part of the task state machine. Nothing is shown when
+    not held, to avoid noise.
 
-### 第三轮（其他 review 反馈，未在本文档处理，留给 ADR / UI spec / v2）
+### Round 3 (other review feedback, not addressed in this document, left for the ADR / UI spec / v2)
 
-PM 视角：
-- 成功指标章节（落 ADR）
-- feature flag / 灰度策略（落 ADR）
-- per-task 子目录改造拆独立前置 PR（落 PR 拆分计划）
-- `save_state_every` 默认值改非 0（独立 PR 评估）
+PM perspective:
+- A success-metrics section (goes in the ADR)
+- Feature flag / gradual rollout strategy (goes in the ADR)
+- Splitting the per-task subdirectory change into its own upfront PR (goes
+  in the PR breakdown plan)
+- Changing `save_state_every`'s default away from 0 (evaluated in a separate PR)
 
-User 视角：
-- paused 行显示 step + loss（v2）
-- 批量 pause / resume（v2）
-- 挂起定时自动恢复（v2）
-- paused 超 X 天提醒（v2）
-- 首次跑训练 UI 推荐开 `save_state_every`（独立 PR）
+User perspective:
+- Showing step + loss on the paused row (v2)
+- Bulk pause / resume (v2)
+- Scheduled auto-release of a held queue (v2)
+- A reminder for a task paused more than X days (v2)
+- Recommending `save_state_every` be enabled in the UI on first training run (a separate PR)
 
-Designer 视角：
-- 状态徽章配色 / banner / 时间戳格式（UI spec 单独文档）
-- a11y 细节（UI spec）
-- 暂停 / 取消按钮颜色 + 顺序（UI spec）
-- "等待恢复调度" 用紫色 chip 而非小字（UI spec）
+Designer perspective:
+- Status badge colors / banner / timestamp format (a separate UI spec document)
+- a11y details (UI spec)
+- Pause / cancel button colors + ordering (UI spec)
+- Using a purple chip instead of small text for "waiting for the queue to resume" (UI spec)
 
 ---
 
-## 11. 下一步
+## 11. Next steps
 
-本文档定调后，可以拆 ADR + 实现 PR：
-- ADR 落到 `docs/adr/000X-queue-pause-resume.md`，承袭本文档逻辑模型。
-- 实现 PR 拆分见前次讨论的 workflow（spike → 后端骨架 → API → cmd → UI → 文档）。
-- 实现前先跑 Windows 信号 spike，确认 `CTRL_BREAK_EVENT` → `SIGBREAK` → handle_interrupt 链路通。
+Once this document's direction is settled, it can be split into an ADR +
+implementation PRs:
+- The ADR lands at `docs/adr/000X-queue-pause-resume.md`, inheriting this
+  document's logic model.
+- The implementation PR breakdown follows the workflow discussed previously
+  (spike → backend skeleton → API → cmd → UI → docs).
+- Before implementation, run the Windows signal spike first, confirming the
+  `CTRL_BREAK_EVENT` → `SIGBREAK` → handle_interrupt chain works.

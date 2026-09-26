@@ -32,19 +32,19 @@ from torchvision import transforms
 _logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Flash Attention：可选加速；未装 / 不可用时无声 fallback 到 SDPA。
-# - `_USE_FLASH_ATTN` 默认 False —— 安装 flash_attn 后必须显式 set_flash_attn_enabled(True)
-# - cli.py / runtime/anima_train.py 启动期会调一次 enable，把状态打开（如果可用）
-# - 本模块是 anima_modeling.py 的 "owner"，那边 re-export 这套状态机
-# - **保留** RMSNorm 上的 `@torch.autocast('cuda', dtype=torch.float32)`：
-#   PR #17 删了它没给 loss 对照；数值稳定性约束不能拍脑袋丢
+# Flash Attention: optional speedup; silently falls back to SDPA when not installed / unavailable.
+# - `_USE_FLASH_ATTN` defaults to False -- once flash_attn is installed you must explicitly call set_flash_attn_enabled(True)
+# - cli.py / runtime/anima_train.py call enable once at startup to turn the state on (if available)
+# - This module is the "owner" of anima_modeling.py; that module re-exports this state machine
+# - **Keep** the `@torch.autocast('cuda', dtype=torch.float32)` on RMSNorm:
+#   PR #17 removed it without a loss comparison; don't drop numerical-stability constraints on a whim
 # ---------------------------------------------------------------------------
 _FLASH_ATTN_AVAILABLE = False
 _USE_FLASH_ATTN = False
 try:
     from flash_attn import flash_attn_func as _flash_attn_func  # type: ignore[import-not-found]
     _FLASH_ATTN_AVAILABLE = True
-except Exception:  # noqa: BLE001  flash_attn 未装是常态，BLE 是设计上的吞错
+except Exception:  # noqa: BLE001  flash_attn not being installed is the normal case; the broad except is intentional
     _flash_attn_func = None
 
 _XFORMERS_AVAILABLE = False
@@ -52,7 +52,7 @@ _USE_XFORMERS = False
 try:
     import xformers.ops as _xops  # type: ignore[import-not-found]
     _XFORMERS_AVAILABLE = True
-except Exception:  # noqa: BLE001  xformers 未装是常态，BLE 是设计上的吞错
+except Exception:  # noqa: BLE001  xformers not being installed is the normal case; the broad except is intentional
     _xops = None
 
 
@@ -109,32 +109,33 @@ def set_attention_backend(backend: str) -> str:
 
 
 def set_flash_attn_enabled(enabled: bool) -> bool:
-    """全局开关。返回最终生效值（flash_attn 没装 → 永远 False）。"""
+    """Global toggle. Returns the value actually in effect (always False if flash_attn isn't installed)."""
     return set_attention_backend("flash_attn" if enabled else "none") == "flash_attn"
 
 
 def set_xformers_enabled(enabled: bool) -> bool:
-    """全局开关。返回最终生效值（xformers 没装 → 永远 False）。"""
+    """Global toggle. Returns the value actually in effect (always False if xformers isn't installed)."""
     return set_attention_backend("xformers" if enabled else "none") == "xformers"
 
 
-# 同 (stage, shape) 只警告一次；避免训练时每个 step 都刷日志
+# Warn only once per (stage, shape); avoids flooding the log every training step
 _FLASH_FALLBACK_WARNED: set[str] = set()
 _XFORMERS_FALLBACK_WARNED: set[str] = set()
 
 
 def warn_flash_fallback(stage: str, shape: tuple, reason: str) -> None:
-    """flash_attn fast path 失败时记 warn-once（替代 PR #17 的 except: pass 静默吞错）。
+    """Log a warn-once when the flash_attn fast path fails (replaces PR #17's silent `except: pass`).
 
-    key 包含 stage + shape，让用户能区分是哪个层 / 哪种 batch 在 fallback。
-    跨模块使用（anima_modeling 也调），所以是 public API 不带下划线。
+    The key includes stage + shape so users can tell which layer / which batch shape is
+    falling back. Used across modules (anima_modeling calls it too), so it's public API
+    without a leading underscore.
     """
     key = f"{stage}:{shape}"
     if key in _FLASH_FALLBACK_WARNED:
         return
     _FLASH_FALLBACK_WARNED.add(key)
     _logger.warning(
-        "flash_attn fallback at %s shape=%s: %s（同 shape 只警告这一次）",
+        "flash_attn fallback at %s shape=%s: %s (will only warn once for this shape)",
         stage,
         shape,
         reason,
@@ -142,13 +143,13 @@ def warn_flash_fallback(stage: str, shape: tuple, reason: str) -> None:
 
 
 def warn_xformers_fallback(stage: str, shape: tuple, reason: str) -> None:
-    """xformers fast path 失败时记 warn-once。"""
+    """Log a warn-once when the xformers fast path fails."""
     key = f"{stage}:{shape}"
     if key in _XFORMERS_FALLBACK_WARNED:
         return
     _XFORMERS_FALLBACK_WARNED.add(key)
     _logger.warning(
-        "xformers fallback at %s shape=%s: %s（同 shape 只警告这一次）",
+        "xformers fallback at %s shape=%s: %s (will only warn once for this shape)",
         stage,
         shape,
         reason,
@@ -161,15 +162,15 @@ def try_flash_attn(
     v_BSHD: torch.Tensor,
     stage: str,
 ):
-    """统一 flash_attn 调用路径：尝试 fast path，失败时 warn-once 并让调用方走 fallback。
+    """Unified flash_attn call path: try the fast path, warn-once and let the caller fall back on failure.
 
-    返回 `(out, used)`：
-    - `used=True`：flash_attn 成功，`out` 是 [B, S, H, D] 形状的输出，调用方可能要 rearrange / o_proj
-    - `used=False`：未启用 / 未装 / 失败，调用方应自己跑 SDPA fallback
+    Returns `(out, used)`:
+    - `used=True`: flash_attn succeeded, `out` has shape [B, S, H, D]; the caller may need to rearrange / apply o_proj
+    - `used=False`: disabled / not installed / failed; the caller should run its own SDPA fallback
 
-    所有调用点共享同一份状态读取（`_USE_FLASH_ATTN` / `_flash_attn_func`），消除
-    跨模块 lazy import（anima_modeling 之前要 `from cosmos_predict2_modeling import
-    _USE_FLASH_ATTN` 每 forward 一次）。
+    All call sites share the same state reads (`_USE_FLASH_ATTN` / `_flash_attn_func`),
+    eliminating the cross-module lazy import (anima_modeling previously had to
+    `from cosmos_predict2_modeling import _USE_FLASH_ATTN` on every forward).
     """
     if _USE_FLASH_ATTN and _flash_attn_func is not None:
         try:
@@ -185,7 +186,7 @@ def try_xformers_attention(
     v_BSHD: torch.Tensor,
     stage: str,
 ):
-    """统一 xformers 调用路径：尝试 fast path，失败时 warn-once 并 fallback。"""
+    """Unified xformers call path: try the fast path, warn-once and fall back on failure."""
     if _USE_XFORMERS and _xops is not None:
         try:
             return _xops.memory_efficient_attention(q_BSHD, k_BSHD, v_BSHD), True
@@ -656,9 +657,10 @@ class Attention(nn.Module):
         v: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # attn_mask is None 时不传 kwarg：保持默认路径与改动前逐字节等价，且不破坏
-        # transformer_engine 后端（其 DotProductAttention 用 `attention_mask=`，无 `attn_mask=`）。
-        # 打包路径（navit）走 torch 后端，attn_op=torch_attention_op，接受 attn_mask=。
+        # Don't pass the kwarg when attn_mask is None: this keeps the default path byte-for-byte
+        # identical to before the change, and doesn't break the transformer_engine backend (its
+        # DotProductAttention takes `attention_mask=`, not `attn_mask=`).
+        # The packed path (navit) uses the torch backend, attn_op=torch_attention_op, which accepts attn_mask=.
         if attn_mask is None:
             result = self.attn_op(q, k, v)  # [B, S, H, D]
         else:
@@ -770,9 +772,10 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
         )
 
     def _rope_freqs(self, h_ntk_factor=None, w_ntk_factor=None, t_ntk_factor=None, device=None):
-        """(h, w, t) RoPE 频率 = 1/(10000·ntk)^dim_range。generate_embeddings 与打包
-        路径 _packed_rope_from_grid 共用同一公式；ntk_factor None 时用 self 默认，
-        device 非 None 时把 dim_range 搬到该设备（打包路径按 grid 设备取）。"""
+        """(h, w, t) RoPE frequencies = 1/(10000*ntk)^dim_range. generate_embeddings and the
+        packed path _packed_rope_from_grid share this same formula; when ntk_factor is None,
+        the self defaults are used, and when device is not None, dim_range is moved to that
+        device (the packed path picks it up from the grid's device)."""
         h_ntk = h_ntk_factor if h_ntk_factor is not None else self.h_ntk_factor
         w_ntk = w_ntk_factor if w_ntk_factor is not None else self.w_ntk_factor
         t_ntk = t_ntk_factor if t_ntk_factor is not None else self.t_ntk_factor

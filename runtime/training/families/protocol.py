@@ -1,12 +1,16 @@
-"""ModelFamily 行为契约（多模型 PR-2b；冻结面 = docs/design/multi-model/03 §4.1 + 04 §3-C4）。
+"""ModelFamily behavior contract (multi-model PR-2b; frozen surface =
+docs/design/multi-model/03 Sec 4.1 + 04 Sec 3-C4).
 
-九方法：load_dit / load_vae / load_text / prepare_text_cache / encode_text_for_batch
-/ forward_train / sample_image / lora_preset / lora_metadata，外加
-convert_lora_state_dict（默认恒等）。演化纪律：追加参数一律 keyword-only 带默认值，
-禁止 **kwargs 黑洞（03 §4.2）。
+Nine methods: load_dit / load_vae / load_text / prepare_text_cache /
+encode_text_for_batch / forward_train / sample_image / lora_preset /
+lora_metadata, plus convert_lora_state_dict (identity by default). Evolution
+rule: new parameters are always keyword-only with a default; no **kwargs
+black holes (03 Sec 4.2).
 
-共享循环七不变量（03 §2.7）由实现方保证：latent 恒 5D 且 T==1、t∈(0,1)、
-rectified flow 代数归循环、v_pred 同形、cond opaque、autocast 归循环、RNG 纪律。
+The shared loop's seven invariants (03 Sec 2.7) are guaranteed by
+implementers: latent is always 5D with T==1, t in (0,1), rectified-flow
+algebra stays in the loop, v_pred has the same shape, cond is opaque,
+autocast stays in the loop, RNG discipline.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from training.families.spec import ModelSpec
 class ModelFamily(Protocol):
     spec: ModelSpec
 
-    # ── 加载（models_phase + 全部旁路调用方，04 D8'）─────────────────────
+    # -- Loading (models_phase + all bypass callers, 04 D8') -----------------
     def load_dit(self, path: str, device, dtype, *,
                  attention_backend: str = "flash_attn", repo_root=None,
                  purpose: str = "train") -> Any: ...
@@ -32,7 +36,7 @@ class ModelFamily(Protocol):
                   t5_fast: bool = False, purpose: str = "train",
                   cache_enabled: bool = True) -> Any: ...
 
-    # ── 文本条件 ─────────────────────────────────────────────────────────
+    # -- Text conditioning -----------------------------------------------------
     def prepare_text_cache(self, captions: Iterable[str],
                            extra_prompts: Iterable[str], *, cache_entries=(),
                            cache_root=None, text=None, device=None,
@@ -42,12 +46,12 @@ class ModelFamily(Protocol):
                               device, dtype, *, comfy_encoding: bool = True,
                               kv_trim: bool = True) -> Any: ...
 
-    # ── 训练前向 / 采样 ──────────────────────────────────────────────────
+    # -- Training forward / sampling --------------------------------------------
     def forward_train(self, dit, noisy, t, cond, *, use_checkpoint: bool = False): ...
 
     def sample_image(self, *args, **kwargs): ...
 
-    # ── LoRA 产物 ────────────────────────────────────────────────────────
+    # -- LoRA artifacts ------------------------------------------------------------
     def lora_preset(self) -> dict[str, Any]: ...
 
     def lora_metadata(self) -> dict[str, str]: ...

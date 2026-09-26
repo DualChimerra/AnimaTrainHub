@@ -1,16 +1,19 @@
-"""Schedule-Free SOAP optimizer build wrapper（ADR 0003 PR-C）。
+"""Schedule-Free SOAP optimizer build wrapper (ADR 0003 PR-C).
 
-SOAP 预条件 + Schedule-Free 轨迹（Defazio et al., 2024, arxiv 2405.15682）。
-跟 PPSF 同属 schedule-free 系：内置 LR 调度，跟外部 lr_scheduler 互斥；暴露
-train()/eval()，由 trainer 的 optimizer_eval_mode + state/resume 守护统一处理。
-本模块同时暴露 validate(args) 给 PR-C registry 在启动期跑兼容性检查。
+SOAP preconditioning + Schedule-Free trajectory (Defazio et al., 2024, arxiv
+2405.15682). Like PPSF, this belongs to the schedule-free family: it has a
+built-in LR schedule that is mutually exclusive with an external lr_scheduler,
+and exposes train()/eval(), handled uniformly by the trainer's
+optimizer_eval_mode + state/resume guards.
+This module also exposes validate(args) for the PR-C registry to run a
+startup compatibility check.
 """
 
 from __future__ import annotations
 
 
 def validate(args) -> None:
-    """启动期兼容性检查：lr_scheduler 必须 none，否则直接 SystemExit。"""
+    """Startup compatibility check: lr_scheduler must be none, otherwise SystemExit."""
     lr_sched_cfg = (getattr(args, "lr_scheduler", "none") or "none").lower()
     if lr_sched_cfg != "none":
         raise SystemExit(
@@ -22,7 +25,7 @@ def validate(args) -> None:
 
 
 def build(args, params, lr: float, weight_decay: float):
-    """实例化 SOAPScheduleFree，读 soap_* / soap_sf_* 参数。"""
+    """Build a SOAPScheduleFree instance; reads the soap_* / soap_sf_* args."""
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(

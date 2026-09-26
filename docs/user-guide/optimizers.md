@@ -1,102 +1,100 @@
-# 优化器选型与起步参数
+# Optimizer selection and starting parameters
 
-各优化器的推荐起点 lr / weight_decay、以及从 AdamW 切换时的换算关系。schema 字段描述只写"参数是什么"，**调参建议在这里**。
+Recommended starting lr / weight_decay for each optimizer, plus conversion rules when switching from AdamW. The schema field descriptions only say "what the parameter is" — **tuning advice lives here**.
 
-## 总览
+## Overview
 
-| 优化器 | 推荐起点 lr | weight_decay | scheduler | state 显存 vs AdamW fp32 | 适用场景 |
+| Optimizer | Recommended starting lr | weight_decay | scheduler | State VRAM vs AdamW fp32 | Best for |
 |---|---|---|---|---|---|
-| **adamw** | 1e-4 | 0.01 | cosine / cosine_with_warmup | 100%（基线） | 默认基线，几乎不踩坑 |
-| **adamw8bit** | 同 adamw（1e-4）| 同 adamw（0.01）| 同 adamw | **≈ 25%**（两个动量都量化到 int8）| 显存吃紧；超参照搬 AdamW 不用换算 |
-| **lion** | ≈ AdamW lr / 3（1e-4 → 3e-5）| AdamW wd × 3-10（0.01 → 0.03-0.1）| cosine / cosine_with_warmup | **≈ 50%**（只 exp_avg）| 显存吃紧但又想固定 lr |
-| **automagic** | **1e-6**（必须；UI 切换时自动改）| 0（一般不开）| **none**（内部 per-param 自适应）| ≈ 50%（factored 2nd moment + int8 lr_mask）| 不想调 lr 又不想 Prodigy |
-| **prodigy** | 1.0（固定，UI 锁定）| 0.01 | constant 或 cosine | 比 AdamW 略大（多一个 d 状态）| 通用自适应，最稳的"不调 lr" |
-| **prodigy_plus_schedulefree** | 1.0（固定）| 0.0 | **none**（Schedule-Free 内部 averaging）| 比 Prodigy 大一些（averaged weights）| 解决 Prodigy mutation ep / 风格突变 |
-| **soap** | AdamW 量级（1e-4 ~ 3e-4）| 0.01 | cosine / cosine_with_warmup | **> AdamW**（exp_avg + exp_avg_sq + 每矩阵轴 Shampoo GG/Q）| 矩阵型 adapter（LoRA/LoKr）想更快拟合 |
-| **soap_sf** | AdamW 量级（1e-4 ~ 3e-4）| 0.01 | **none**（Schedule-Free averaging）| ≈ soap（z 替掉 exp_avg）| 要 SOAP 提速 + 不想调 LR 调度；**短训练 ≤ ~100 步改用 soap** |
+| **adamw** | 1e-4 | 0.01 | cosine / cosine_with_warmup | 100% (baseline) | Default baseline, almost no pitfalls |
+| **adamw8bit** | same as adamw (1e-4) | same as adamw (0.01) | same as adamw | **≈ 25%** (both moments quantized to int8) | Tight on VRAM; hyperparameters carry over from AdamW with no conversion |
+| **lion** | ≈ AdamW lr / 3 (1e-4 → 3e-5) | AdamW wd × 3-10 (0.01 → 0.03-0.1) | cosine / cosine_with_warmup | **≈ 50%** (only exp_avg) | Tight on VRAM but still want a fixed lr |
+| **automagic** | **1e-6** (mandatory; UI switches it automatically) | 0 (usually left off) | **none** (internal per-param adaptation) | ≈ 50% (factored 2nd moment + int8 lr_mask) | Don't want to tune lr, don't want Prodigy either |
+| **prodigy** | 1.0 (fixed, locked in the UI) | 0.01 | constant or cosine | Slightly more than AdamW (one extra `d` state) | General-purpose adaptive, the most reliable "don't tune lr" option |
+| **prodigy_plus_schedulefree** | 1.0 (fixed) | 0.0 | **none** (Schedule-Free handles averaging internally) | A bit more than Prodigy (averaged weights) | Fixes Prodigy's mutation epoch / style-jump issue |
+| **soap** | AdamW-scale (1e-4 ~ 3e-4) | 0.01 | cosine / cosine_with_warmup | **> AdamW** (exp_avg + exp_avg_sq + per-axis Shampoo GG/Q for each matrix) | Matrix-shaped adapters (LoRA/LoKr) that want faster convergence |
+| **soap_sf** | AdamW-scale (1e-4 ~ 3e-4) | 0.01 | **none** (Schedule-Free averaging) | ≈ soap (z replaces exp_avg) | Want SOAP's speedup plus no lr schedule to tune; **for very short runs (≤ ~100 steps) use soap instead** |
 
-> 显存说明：AdamW8bit（bitsandbytes）是真省显存基准（≈ AdamW fp32 的 25%）。Lion / Automagic 比 fp32 AdamW 省一半，但**不比 AdamW8bit 省**。
+> VRAM note: AdamW8bit (bitsandbytes) is the real VRAM-saving baseline (≈ 25% of AdamW fp32). Lion / Automagic save about half compared to fp32 AdamW, but **don't save more than AdamW8bit**.
 
-## AdamW8bit — 唯一不用重新调参的省显存选项
+## AdamW8bit — the only VRAM-saving option that needs no re-tuning
 
-更新数学与 AdamW 完全一致，省的是**状态存储**：`exp_avg` / `exp_avg_sq` 分块量化到 int8（每参数 8 字节 → 2 字节）。所以 `lr` / `betas` / `weight_decay` **照搬 AdamW，不需要任何换算** —— 这是它相对 Lion（lr 要除以 3）和 Automagic（lr 必须 1e-6）的实际优势。
+The update math is identical to AdamW; what it saves is **state storage**: `exp_avg` / `exp_avg_sq` are quantized to int8 in blocks (8 bytes per parameter → 2 bytes). So `lr` / `betas` / `weight_decay` carry over from AdamW **unchanged, with no conversion needed** — this is its real advantage over Lion (lr needs to be divided by 3) and Automagic (lr must be 1e-6).
 
-省多少（LoRA 训练的量级）：
+How much it saves (at LoRA-training scale):
 
-| 场景 | 可训练参数 | AdamW fp32 state | AdamW8bit state | 省 |
+| Scenario | Trainable params | AdamW fp32 state | AdamW8bit state | Saved |
 |---|---|---|---|---|
-| Krea 2 LoRA rank 32（全 264 层）| 117.3M | ≈ 0.87 GB | ≈ 0.22 GB | **≈ 0.65 GB** |
+| Krea 2 LoRA rank 32 (all 264 layers) | 117.3M | ≈ 0.87 GB | ≈ 0.22 GB | **≈ 0.65 GB** |
 | Krea 2 LoKr factor 8 / rank 32 | 14.7M | ≈ 0.11 GB | ≈ 0.03 GB | ≈ 0.08 GB |
-| Anima，rank 32 | 视 preset 而定 | 8 字节/参数 | 2 字节/参数 | 参数量 × 6 字节 |
+| Anima, rank 32 | Depends on preset | 8 bytes/param | 2 bytes/param | params × 6 bytes |
 
-在 12GB 卡上跑 Krea 2 **LoRA** 时这 0.65GB 是实打实的余量；**LoKr 参数量本来就
-只有 LoRA 的 1/8，优化器状态不构成压力，换 adamw8bit 意义不大**。24GB 卡通常
-两种都不必要。
+On a 12GB card, that 0.65GB is real headroom when running Krea 2 **LoRA**; **LoKr already has only 1/8 the parameter count of LoRA, so optimizer state isn't a pressure point — switching to adamw8bit doesn't buy much there**. On a 24GB card, neither is usually necessary.
 
-**依赖**：`bitsandbytes` 是可选依赖，默认不装（Windows 轮子并非总能装上）。选了 adamw8bit 但没装，训练启动期直接报错并给出安装命令，不会跑到一半才炸。装：`pip install bitsandbytes`。
+**Dependency**: `bitsandbytes` is an optional dependency and isn't installed by default (the Windows wheel doesn't always install cleanly). If you select adamw8bit without it installed, training fails immediately at startup with the install command shown — it won't run halfway through and then crash. To install: `pip install bitsandbytes`.
 
-**小张量不量化**：`min_8bit_size=4096` 以下的张量保持 fp32（量化收益小、精度损失相对大）。LoRA 的 A/B 矩阵远超此阈值，实际全部走 8-bit。
+**Small tensors aren't quantized**: tensors below `min_8bit_size=4096` stay in fp32 (quantization gains too little and the precision loss is relatively larger). LoRA's A/B matrices are far above this threshold, so in practice they're all quantized to 8-bit.
 
-**断点续训**：状态按标准 `state_dict()` / `load_state_dict()` 存取，int8 缓冲与量化映射一起进 ckpt。**但中途换优化器不行** —— adamw8bit 存的 ckpt 不能用 adamw 恢复（反之亦然），state 结构不同。换优化器要从头训或只 `resume_lora`（不带 `resume_state`）。
+**Resuming**: state is stored/loaded via the standard `state_dict()` / `load_state_dict()`, and the int8 buffers and quantization maps go into the checkpoint together. **But you can't switch optimizers mid-run** — a checkpoint saved with adamw8bit can't be resumed with adamw (and vice versa), since the state structures differ. To switch optimizers, either start over or use `resume_lora` only (without `resume_state`).
 
-## Lion — 从 AdamW 切换
+## Lion — switching from AdamW
 
-Lion 论文（Chen et al. 2023, [arxiv 2302.06675](https://arxiv.org/abs/2302.06675) §4.3）经验：
+Empirically, per the Lion paper (Chen et al. 2023, [arxiv 2302.06675](https://arxiv.org/abs/2302.06675) §4.3):
 
 > "Lion needs a smaller learning rate than AdamW, e.g. 3-10× smaller, and a larger weight decay, e.g. 3-10× larger, to maintain similar effective weight decay strength."
 
-| AdamW 参数 | Lion 推荐换算 |
+| AdamW value | Recommended Lion conversion |
 |---|---|
-| lr = 1e-4 | **lr ≈ 3e-5**（× 1/3）|
+| lr = 1e-4 | **lr ≈ 3e-5** (× 1/3) |
 | lr = 1e-5 | lr ≈ 3e-6 |
-| weight_decay = 0.01 | **weight_decay ≈ 0.03-0.1**（× 3-10）|
+| weight_decay = 0.01 | **weight_decay ≈ 0.03-0.1** (× 3-10) |
 
-**为什么**：Lion 的 update 是 `sign()` 后的固定大小（`±lr`），不像 AdamW 按梯度幅度缩放。同样的 lr 在 Lion 上每步走得更猛，所以要降。weight_decay 的解耦更新公式里有 lr 相乘，lr 降了就要把 wd 提起来才能维持等效衰减强度。
+**Why**: Lion's update is a fixed-size `sign()` step (`±lr`), unlike AdamW which scales by gradient magnitude. The same lr takes a much bigger step in Lion, so it needs to be lowered. Since the decoupled weight-decay update multiplies by lr, lowering lr means wd needs to go up to maintain the same effective decay strength.
 
-如果直接把 AdamW 1e-4 拿来用：训练初期 loss 大概率发散或卡死。AnimaLoraStudio 在 `create_lion` 检测到 lr ≥ 1e-4 时会打 warning。
+If you plug in AdamW's 1e-4 directly, loss will most likely diverge or stall early in training. AnimaLoraStudio's `create_lion` prints a warning when lr ≥ 1e-4 is detected.
 
-## Automagic — 必须 1e-6 起步
+## Automagic — must start at 1e-6
 
-Automagic（[Ostris](https://github.com/ostris/ai-toolkit)）走 per-parameter 自适应 lr，全程不需要 scheduler。**`lr` 字段是每个参数的初始学习率**，不是常规优化器那种全局 step size。
+Automagic ([Ostris](https://github.com/ostris/ai-toolkit)) uses per-parameter adaptive lr and needs no scheduler at all. **The `lr` field here is the initial per-parameter learning rate**, not the global step size you'd expect from a normal optimizer.
 
-- 上游 ostris / tdrussell 默认都是 `lr=1e-6`
-- `[automagic_min_lr, automagic_max_lr]` 默认 `[1e-7, 1e-3]`，每个参数自己在这个区间里靠 sign-agreement 自适应
-- 起点 lr 太高（如 AdamW 量级 1e-4）→ sign-agreement 调度需要很多 step 才能把 per-param lr 拉回工作区间，前期等价于 100× 跑飞
+- Upstream (ostris / tdrussell) both default to `lr=1e-6`
+- `[automagic_min_lr, automagic_max_lr]` defaults to `[1e-7, 1e-3]`; each parameter adapts within this range on its own via sign-agreement
+- If the starting lr is too high (e.g. AdamW-scale 1e-4), the sign-agreement schedule needs many steps to pull the per-param lr back into the working range — early on this is equivalent to running 100× too hot
 
-**UI 切换**：用户从其他优化器切到 Automagic 时，前端自动把 `learning_rate` 改写为 1e-6（仍可手动调）。保存配置 / CLI 直接传超过 1e-5 的值，训练启动期 `create_automagic` 打 warning，不强制改。
+**UI switching**: when a user switches from another optimizer to Automagic, the frontend automatically rewrites `learning_rate` to 1e-6 (still manually adjustable). Saving a config / passing a value above 1e-5 directly via CLI triggers a warning from `create_automagic` at training startup, but it isn't force-corrected.
 
-**已知行为**：`automagic_min_lr` / `automagic_max_lr` / `automagic_lr_bump` 是 instance global，**多 param group 时全局共享，不走 per-group**。当前 trainer 单组训练不受影响；未来若引入 LoRA+（B 矩阵 16× lr 类）多 group lr 调度，min/max/bump 仍是单值。这是上游 ostris/ai-toolkit + tdrussell/diffusion-pipe 一致的行为。
+**Known behavior**: `automagic_min_lr` / `automagic_max_lr` / `automagic_lr_bump` are instance globals — **shared across all param groups when there are multiple, not per-group**. The current trainer only has a single group so this doesn't affect it; if LoRA+-style multi-group lr scheduling (B matrix at 16× lr) is introduced in the future, min/max/bump will still be a single value. This matches upstream behavior in both ostris/ai-toolkit and tdrussell/diffusion-pipe.
 
-## Prodigy / PPSF — lr 锁 1.0
+## Prodigy / PPSF — lr locked to 1.0
 
-Prodigy 系列内部估计步长 `d`，**`lr` 字段必须为 1.0**（工厂会强制覆盖）。调参重点：
+The Prodigy family internally estimates its own step size `d`, so **the `lr` field must be 1.0** (the factory forces this). Tuning focuses on:
 
-- `prodigy_d_coef` / `ppsf_d_coef`：估出 d 的整体缩放系数。欠拟合调到 2.0+，过拟合 / 小数据集调到 0.5。
-- PPSF 比 Prodigy 多一个 `prodigy_steps` 字段：训练后期冻结 d 估计避免跳档，建议设为总步数的 1/4 ~ 1/2。
+- `prodigy_d_coef` / `ppsf_d_coef`: overall scaling factor for the estimated `d`. Push toward 2.0+ if underfitting, toward 0.5 if overfitting / on a small dataset.
+- PPSF has one extra field beyond Prodigy, `prodigy_steps`: freezes the `d` estimate in the later part of training to avoid jumps; recommended to set it to 1/4 ~ 1/2 of total steps.
 
-PPSF 用 Schedule-Free averaging，sample / save 前必须 `optimizer.eval()`，事后 `optimizer.train()`。Studio 内部用 `optimizer_eval_mode` context manager 自动处理，CLI 用户参考 `utils/optimizer_utils.py:optimizer_eval_mode`。
+PPSF uses Schedule-Free averaging, so `optimizer.eval()` must be called before sample/save and `optimizer.train()` afterward. Studio handles this internally via the `optimizer_eval_mode` context manager; CLI users should refer to `utils/optimizer_utils.py:optimizer_eval_mode`.
 
-## SOAP / SOAP-SF — 二阶预条件提拟合速度
+## SOAP / SOAP-SF — second-order preconditioning for faster convergence
 
-SOAP（Vyas et al. 2024, [arxiv 2409.11321](https://arxiv.org/abs/2409.11321)）= **Adam 跑在 Shampoo 的特征基里**：用梯度协方差的特征基旋转梯度，在该基里做标准 Adam，再旋转回来。对矩阵型参数（LoRA / LoKr 的低秩因子）拟合更快；相比纯 Shampoo，靠 `soap_precondition_frequency` 少刷新特征基省算力。**动机是拟合速度**，不要指望它改善纹理 / 画质本身——换 SOAP 是用显存换速度。
+SOAP (Vyas et al. 2024, [arxiv 2409.11321](https://arxiv.org/abs/2409.11321)) is **Adam running in Shampoo's eigenbasis**: it rotates the gradient into the eigenbasis of the gradient covariance, runs standard Adam there, then rotates back. This converges faster for matrix-shaped parameters (the low-rank factors of LoRA / LoKr); compared to pure Shampoo, it saves compute by refreshing the eigenbasis less often via `soap_precondition_frequency`. **The point is convergence speed**, not better texture/quality on its own — switching to SOAP trades VRAM for speed.
 
-`soap_sf` 在 SOAP 外面套 Schedule-Free（Defazio et al. 2024, *The Road Less Scheduled*, [arxiv 2405.15682](https://arxiv.org/abs/2405.15682)）：丢一阶动量，用 base 序列 z 与 Polyak 平均 x 的插值取代 LR 调度，所以 **`lr_scheduler` 固定 none**（启动期校验 fatal），sample / save 自动走 averaged x（`optimizer_eval_mode` 统一处理，跟 PPSF 一样）。
+`soap_sf` wraps SOAP in Schedule-Free (Defazio et al. 2024, *The Road Less Scheduled*, [arxiv 2405.15682](https://arxiv.org/abs/2405.15682)): it drops first-moment momentum and replaces the LR schedule with an interpolation between the base sequence z and the Polyak average x, so **`lr_scheduler` must be none** (validated fatally at startup), and sample/save automatically use the averaged x (handled uniformly by `optimizer_eval_mode`, same as PPSF).
 
-**lr**：SOAP 系用 AdamW 量级真实 lr（**不像 Prodigy 填 1.0**）。LoRA/LoKr 起步 1e-4 ~ 3e-4。
+**lr**: the SOAP family uses real AdamW-scale lr (**unlike Prodigy, don't put 1.0**). Start LoRA/LoKr at 1e-4 ~ 3e-4.
 
-**提速关键 = `soap_max_precond_dim`**（逐维阈值）：
+**The key speedup knob is `soap_max_precond_dim`** (per-axis threshold):
 
-- 某轴维度 ≤ 阈值 → 该轴建满秩二阶预条件；> 阈值 → 该轴退化为 Adam。
-- 设大（如 `10000`）让大特征维也做二阶 = **提速主来源**；设小（如 `256`）只预条件 rank 维 = SOAP-lite，省显存但丢掉大部分提速。
-- 配 `soap_precond_in_state: false` 把可重算的 GG/Q 剔出 ckpt 保持 state 小（从零训练不 resume 时零代价；resume 会冷重建特征基，有几步过渡）。
+- If an axis's dimension is ≤ the threshold, that axis gets a full-rank second-order preconditioner; if it's above the threshold, that axis degrades to plain Adam.
+- Setting it large (e.g. `10000`) lets large feature dimensions also get second-order treatment = **the main source of speedup**; setting it small (e.g. `256`) only preconditions the rank dimension = SOAP-lite, which saves VRAM but loses most of the speedup.
+- Combine with `soap_precond_in_state: false` to keep the recomputable GG/Q out of the checkpoint, keeping state small (zero cost when training from scratch without resuming; resuming requires a cold rebuild of the eigenbasis, with a few transitional steps).
 
-**短训练注意**：Schedule-Free 的 Polyak 平均在极短训练（≤ ~100 步）严重滞后（x ≈ 轨迹质心 = 欠拟合），那种 regime 用纯 `soap` 不要用 `soap_sf`；千步级训练 SF 正常，判图建议在 ~880 步以后。
+**Short-run caveat**: Schedule-Free's Polyak averaging lags badly on very short runs (≤ ~100 steps) — x ends up ≈ the centroid of the trajectory, i.e. underfit. In that regime use plain `soap`, not `soap_sf`; for runs in the thousands of steps, SF behaves normally, and it's best to judge sample quality after roughly step 880.
 
-## 选哪个
+## Which one to pick
 
-- **没头绪，想稳的**：AdamW + cosine_with_warmup，跟着 Anima 默认 preset 走
-- **显存吃紧 + 不想动 lr**：Lion，按上面换算把 lr 降 3×
-- **不想调 lr + 不想踩 Schedule-Free 坑**：Prodigy
-- **风格 LoRA 怕 mutation ep**：prodigy_plus_schedulefree
-- **per-param 细粒度自适应**：Automagic，记得起点 1e-6
-- **想要更快拟合（有显存预算）**：soap（带 scheduler）或 soap_sf（免调度），`soap_max_precond_dim` 设大；短训练用 soap
+- **No strong preference, want something reliable**: AdamW + cosine_with_warmup, follow the Anima default preset
+- **Tight on VRAM but don't want to touch lr**: Lion, divide lr by 3 per the conversion above
+- **Don't want to tune lr and don't want to deal with Schedule-Free quirks**: Prodigy
+- **Style LoRA worried about mutation epochs**: prodigy_plus_schedulefree
+- **Fine-grained per-param adaptation**: Automagic, remember to start at 1e-6
+- **Want faster convergence and have the VRAM budget**: soap (with a scheduler) or soap_sf (schedule-free); set `soap_max_precond_dim` large; use soap for short runs

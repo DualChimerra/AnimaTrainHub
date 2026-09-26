@@ -1,71 +1,56 @@
-# 0005 — 更新通道（master / dev）作为用户视图偏好，与 git 工作树状态解耦
+# 0005 — Update channel (master / dev) as a user view preference, decoupled from git worktree state
 
-**状态**：Accepted
-**日期**：2026-05-16
-**决策者**：@WalkingMeatAxolotl
+**Status**: Accepted
+**Date**: 2026-05-16
+**Decision makers**: @WalkingMeatAxolotl
 
-## 背景
+## Background
 
-ADR 0002（webui 自更新）落地后，Settings → 系统 → 版本面板有两个长期暗坑，在
-v0.8.0 release 直后被触发：
+After ADR 0002 (webui self-update) landed, the version panel in Settings → System had two long-standing latent issues, which surfaced right after the v0.8.0 release:
 
-### 现象
+### Symptoms
 
-用户做了 v0.8.0 release（dev → master + PR merge + 打 tag）后，本地 master
-还没 `git pull`。打开版本面板看到：
+After the user cut the v0.8.0 release (dev → master + PR merge + tag), before running `git pull` on local master, opening the version panel showed:
 
-| UI 元素 | 显示 | 用户解读 |
+| UI element | Displayed | User's interpretation |
 |---|---|---|
-| master 卡「你在这里」 | 我在 master | branch 名 = master |
-| master 卡 `v0.8.0` | 我装的是 v0.8.0 | `__version__` 字符串 |
-| master 卡「↑落后 2 commits」 | 我落后了 | git `rev-list --count` |
-| dev 卡「HEAD f6f202b」 | dev 顶端是这个 | 远端 |
-| dev 卡列表「● 当前」 | 我装的就是这个 | commit hash 比较 |
-| 「切到 dev (f6f202b)」按钮 | 可以切 | onDev=false |
-| `v0.8.0 → v0.8.0` 箭头 | 升级前后版本号一样？ |  |
+| master card "You are here" | I'm on master | branch name = master |
+| master card `v0.8.0` | I have v0.8.0 installed | `__version__` string |
+| master card "↑2 commits behind" | I'm behind | git `rev-list --count` |
+| dev card "HEAD f6f202b" | dev's tip is this | remote |
+| dev card list "● current" | this is what I have installed | commit hash comparison |
+| "Switch to dev (f6f202b)" button | I can switch | onDev=false |
+| `v0.8.0 → v0.8.0` arrow | same version before and after upgrade? |  |
 
-点「切到 dev (f6f202b)」 → preview 出现 → 确认 → 重启 → UI **没有变化**，
-仍然显示「master · 你在这里」。
+Clicking "Switch to dev (f6f202b)" → preview appears → confirm → restart → the UI **doesn't change**, still shows "master · You are here".
 
-### 两个根因
+### Two root causes
 
-1. **UI 用 git 词汇而不是产品语言**。
-   - `commits_ahead` 直接从后端 `git rev-list --count` 出来，前端原样显示
-     「↑落后 N commits」。
-   - 但用户视角的"落后"只有一个维度：版本号。版本号 v0.8.0 == v0.8.0 时根本
-     不存在"落后"。`__version__` 字符串与 commit hash 是两套独立维度，UI 把
-     两套维度混着展示就产生了 `v0.8.0 → v0.8.0` + 「落后 2 commits」的矛盾。
+1. **The UI used git vocabulary instead of product language.**
+   - `commits_ahead` came straight from the backend's `git rev-list --count`, and the frontend displayed it verbatim as "↑N commits behind."
+   - But from the user's point of view, "behind" has exactly one meaningful axis: the version number. When version v0.8.0 == v0.8.0, there is no "behind" at all. The `__version__` string and the commit hash are two independent axes, and mixing them in the UI produced the contradiction of `v0.8.0 → v0.8.0` alongside "2 commits behind."
 
-2. **"通道"概念绑死在 git 工作树状态上**。
-   - 「我在哪个通道」判定 = `git rev-parse --abbrev-ref HEAD`（branch 名）
-   - 「切换通道」实现 = `git reset --hard <ref>`（不动 branch 名）
-   - 两个机制大多数场景下"凑巧"能用：dev 通常比 master 领先，reset 后 commit
-     hash 变了，UI 看上去就"动了"。
-   - **release 直后例外**：本地 commit `f6f202b` 已经 == origin/dev HEAD（release
-     commit 本身在 dev 上做），切到 dev 是 no-op，branch 名也不变 → UI 永远
-     卡在「master · 你在这里」。
+2. **The "channel" concept was tied directly to git worktree state.**
+   - "Which channel am I on" was determined by `git rev-parse --abbrev-ref HEAD` (the branch name)
+   - "Switch channel" was implemented as `git reset --hard <ref>` (which doesn't change the branch name)
+   - The two mechanisms happened to work together in most cases: dev is usually ahead of master, so after a reset the commit hash changes and the UI appears to "move."
+   - **The exception is right after a release**: local commit `f6f202b` already equals origin/dev's HEAD (the release commit itself was made on dev), so switching to dev is a no-op, the branch name doesn't change either → the UI is permanently stuck on "master · You are here."
 
-更深的：UI 把 master 卡 + dev 卡**并排同屏**渲染，本应互斥的两个通道在视觉上
-变成两张同时活着的卡，让用户陷入「我究竟在哪个通道」的矛盾解读。
+Deeper still: the UI rendered the master card and the dev card **side by side on the same screen**, turning two channels that should be mutually exclusive into two cards that both look "live" at once, leaving users stuck in the contradictory question of "which channel am I actually on."
 
-## 决策
+## Decision
 
-**通道是用户视图偏好，不是 git 工作树状态**：
+**The channel is a user view preference, not git worktree state:**
 
-1. **用户偏好持久化为 `system.update_channel`**（`"stable"` / `"dev"`），存
-   `secrets.json`。**切 toggle 不触发任何 git 操作**，纯 UI 视图切换。
-2. **真正"切到 dev HEAD" / "更新到 vX.Y.Z" / "回滚"是独立按钮**，跟通道偏好
-   解耦 —— 用户可以"订阅 dev 通道做研发"但暂时"装着稳定版"。
-3. **同屏只展示当前选中通道的卡片**（不再 master + dev 并排）。
-4. **后端引入「装了什么」分类 `installed_kind`**（`stable` / `dev` / `custom`），
-   按 commit hash 比对推断，**取代前端依赖 `branch` 字段做产品判断**。
-5. **前端文案只用版本号 / 状态语言**，不出现 `commits` / `sha` / `branch` 等
-   git 词汇。"落后 N commits" → "有新稳定版 vX.Y.Z" / "已是最新" / dev 通道
-   改"N 项新更新"。
+1. **The user preference is persisted as `system.update_channel`** (`"stable"` / `"dev"`), stored in `secrets.json`. **Toggling it triggers no git operation at all** — it's a pure UI view switch.
+2. **The actual "switch to dev HEAD" / "update to vX.Y.Z" / "rollback" actions are separate buttons**, decoupled from the channel preference — a user can "subscribe to the dev channel to follow development" while still "running the stable build."
+3. **Only the card for the currently selected channel is shown on screen** (no more master + dev side by side).
+4. **The backend introduces an "what's actually installed" classification, `installed_kind`** (`stable` / `dev` / `custom`), inferred by comparing commit hashes, **replacing the frontend's reliance on the `branch` field for product-level judgments**.
+5. **Frontend copy uses only version-number / status language**, with no `commits` / `sha` / `branch` or other git vocabulary. "N commits behind" becomes "New stable version vX.Y.Z available" / "Up to date"; on the dev channel it becomes "N new updates."
 
-### 后端 API 形态
+### Backend API shape
 
-`VersionInfo`（`/api/system/version`）：
+`VersionInfo` (`/api/system/version`):
 
 ```python
 @dataclass
@@ -74,24 +59,23 @@ class VersionInfo:
     commit: str
     commit_short: str
     commit_time_iso: str
-    branch: str              # debug 用，前端不再做产品判断
+    branch: str              # for debugging only, frontend no longer makes product decisions from it
     tag: Optional[str]
     is_dirty: bool
     # ---- ADR 0005 ----
     installed_kind: str      # "stable" / "dev" / "custom"
-    installed_label: str     # "v0.8.0" / "dev @ f6f202b · 2026-05-16" / "自定义（feat/foo @ a1b2c3d）"
-    stable_version: Optional[str]  # "vX.Y.Z" 仅 stable 时填
+    installed_label: str     # "v0.8.0" / "dev @ f6f202b · 2026-05-16" / "custom (feat/foo @ a1b2c3d)"
+    stable_version: Optional[str]  # "vX.Y.Z", only set when stable
 ```
 
-分类规则（优先级）：
+Classification rules (in priority order):
 
-1. HEAD 命中 `vX.Y.Z` release tag → `stable`
-2. `__version__` 匹某 vX.Y.Z tag 且当前 commit 与 tag commit 的 **tree 一致** →
-   `stable`（覆盖 release 直后 release commit 在 dev、tag 在 merge commit 的场景）
+1. HEAD matches a `vX.Y.Z` release tag → `stable`
+2. `__version__` matches some vX.Y.Z tag and the current commit's **tree matches** the tag commit's tree → `stable` (covers the case right after a release, where the release commit lives on dev and the tag sits on the merge commit)
 3. commit == `origin/dev` HEAD → `dev`
-4. else → `custom`（feature branch / detached）
+4. else → `custom` (feature branch / detached)
 
-`UpdateCheckResult`（`/api/system/update_check`）：
+`UpdateCheckResult` (`/api/system/update_check`):
 
 ```python
 @dataclass
@@ -99,60 +83,48 @@ class UpdateCheckResult:
     channel: str
     current_commit: str
     latest_commit: str
-    commits_ahead: int       # 内部 debug 保留
-    has_update: bool         # 兼容字段 = (state == "update_available")
+    commits_ahead: int       # kept internally for debugging
+    has_update: bool         # compatibility field = (state == "update_available")
     latest_tag: Optional[str]
     checked_at: float
     # ---- ADR 0005 ----
     state: str               # "up_to_date" / "update_available" / "ahead" / "detached"
     installed_version: Optional[str]
     latest_version: Optional[str]
-    behind_count: int        # 给前端用的"N 项更新"数字
+    behind_count: int        # the "N updates" number the frontend uses
     error: Optional[str]
 ```
 
-state 推断：
-- **master 通道**：版本号优先（`installed_version == latest_version` → up_to_date），
-  没版本号（custom / dev）回落到 commit 比较
-- **dev 通道**：直接 commit hash 比较 + ahead/behind 计数
+`state` inference:
+- **master channel**: version number takes priority (`installed_version == latest_version` → up_to_date); falls back to commit comparison when there's no version number (custom / dev)
+- **dev channel**: direct commit hash comparison + ahead/behind count
 
-### 前端
+### Frontend
 
-- `formatMasterStateText(check)` / `formatDevStateText(check)`：纯函数把 state
-  + check 数据 → 用户可读文案
-- `shouldShowMasterUpdateButton(check)`：state=update_available 且有 latest_version
-- `isDevSwitchButtonDisabled(check)`：state=up_to_date → disabled
-- toggle 视觉切换走 `<button role="radio">`，写 `secrets.json` 但**不**调
-  `/api/system/update`
+- `formatMasterStateText(check)` / `formatDevStateText(check)`: pure functions turning state + check data into user-readable copy
+- `shouldShowMasterUpdateButton(check)`: state=update_available and latest_version is present
+- `isDevSwitchButtonDisabled(check)`: state=up_to_date → disabled
+- The toggle's visual switch goes through `<button role="radio">`, writes to `secrets.json` but **does not** call `/api/system/update`
 
-### 迁移
+### Migration
 
-旧 `system.show_dev_channel`：保留 pydantic 字段做兼容；
-`_migrate_legacy_schema` 一次性映射 `show_dev_channel=true → update_channel="dev"`，
-前端 PATCH 时同时写两个字段保持旧版本回滚兼容。
+The old `system.show_dev_channel`: kept as a pydantic field for compatibility; `_migrate_legacy_schema` does a one-time mapping of `show_dev_channel=true → update_channel="dev"`, and the frontend writes both fields on PATCH to stay compatible with older-version rollback.
 
-## 后果
+## Consequences
 
-### 正面
+### Positive
 
-- release 直后用户的版本面板能正确显示「已是最新 v0.8.0」+「与 dev HEAD 一致」，
-  不再有"落后 2 commits"+「切到 dev 没反应」的矛盾
-- UI 文案彻底脱离 git 词汇，对非 git 用户更友好
-- 「装了什么」与「订阅哪条通道」解耦后，未来支持"装稳定版但跟 dev 看预览"等
-  灵活组合时不需要再改架构
+- Right after a release, the user's version panel correctly shows "Up to date, v0.8.0" + "matches dev HEAD," with no more contradiction between "2 commits behind" and "switching to dev did nothing"
+- UI copy is entirely free of git vocabulary, friendlier to non-git users
+- Decoupling "what's installed" from "which channel is subscribed to" means future flexible combinations — like "running stable but watching dev previews" — won't require another architecture change
 
-### 负面 / 待评估
+### Negative / to be evaluated
 
-- `installed_kind=stable` 判定靠 `git diff --quiet` tree 比较，每次 `current_version()`
-  会多 1-2 个 git 调用。release 后短期内本地 tag 没 fetch 全时可能误判为 custom，
-  靠下次 `check_update` fetch tag 后自动纠正
-- 后端 `commits_ahead` / `has_update` 字段保留作兼容，但前端不再读 —— 任何外部
-  脚本读这俩字段的还能跑，可逐步迁移
+- `installed_kind=stable` detection relies on a `git diff --quiet` tree comparison, adding 1-2 extra git calls to every `current_version()` call. Shortly after a release, if local tags haven't fully been fetched yet, this can misclassify as custom, self-correcting after the next `check_update` fetches the tag
+- The backend's `commits_ahead` / `has_update` fields are kept for compatibility but no longer read by the frontend — any external script reading those fields still works, and can migrate gradually
 
-## 不在范围
+## Out of scope
 
-- "切到此 commit"（点 dev 列表里旧 commit 切过去）保留，但属于 dev 通道展开
-  区里的二级操作
-- 自动检查 + Topbar 红点维持 ADR 0002 的"只看 master"决定，不因通道偏好改
-- 完整翻译 Settings 页里其他地方的 git 词汇（譬如 secrets 里 wandb 同步状态）
-  不在此 ADR 范围
+- "Switch to this commit" (clicking an older commit in the dev list to jump to it) is kept, but as a secondary action inside the expanded dev-channel area
+- Automatic checks + the Topbar red dot keep ADR 0002's "only watch master" decision; this isn't changed by the channel preference
+- Fully translating the remaining git vocabulary elsewhere on the Settings page (e.g. wandb sync status under secrets) is out of scope for this ADR

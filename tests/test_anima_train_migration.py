@@ -1,12 +1,14 @@
-"""anima_train.py 迁移到 schema 驱动后的端到端回归测试。
+"""End-to-end regression tests for anima_train.py after its migration to schema-driven
+config.
 
-覆盖：
-    - parse_args 通过 bridge 生成的 parser 接受所有历史 CLI 别名
-    - apply_yaml_config 把 YAML 字段写入 args 时遵循「CLI 显式优先」语义
-    - config/train_template.yaml 能被完整加载，所有字段类型正确
+Covers:
+    - parse_args, through the bridge-generated parser, accepts all historical CLI aliases
+    - apply_yaml_config, when writing YAML fields into args, follows "CLI explicit wins"
+      semantics
+    - config/train_template.yaml can be fully loaded, with all field types correct
 
-注：这些测试导入 anima_train 模块，会触发 torch import (~3s)，因此用 module
-fixture 只导一次。
+Note: these tests import the anima_train module, which triggers a torch import (~3s),
+so a module-scoped fixture imports it only once.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import yaml
 
 @pytest.fixture(scope="module")
 def at():
-    """import anima_train 一次复用。"""
+    """import anima_train once and reuse it."""
     import importlib.util  # noqa: PLC0415
     repo_root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location(
@@ -31,12 +33,13 @@ def at():
 
 
 # ---------------------------------------------------------------------------
-# CLI 别名
+# CLI aliases
 # ---------------------------------------------------------------------------
 
 
 def test_legacy_cli_aliases_still_work(at, monkeypatch: pytest.MonkeyPatch) -> None:
-    """老脚本里 --transformer / --vae / --qwen / --t5-tokenizer / --lr 必须仍然能用。"""
+    """--transformer / --vae / --qwen / --t5-tokenizer / --lr from old scripts must
+    still work."""
     monkeypatch.setattr(sys, "argv", [
         "anima_train.py",
         "--transformer", "/x/t.safetensors",
@@ -56,12 +59,15 @@ def test_legacy_cli_aliases_still_work(at, monkeypatch: pytest.MonkeyPatch) -> N
 def test_args_has_t5_tokenizer_path_not_legacy_t5_tokenizer(
     at, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """回归：args 字段名是 t5_tokenizer_path，绝不能再出现 args.t5_tokenizer。
+    """Regression: the args field name is t5_tokenizer_path, args.t5_tokenizer must
+    never appear again.
 
-    Why: anima_train.py 路径解析阶段曾写成
-    `getattr(args, "t5_tokenizer", "")`，访问已迁移走的旧名，恒返回 ""，
-    把 yaml/CLI 填好的 t5_tokenizer_path 覆盖成空，导致 T5Tokenizer 静默
-    fallback 到联网下载 google/t5-v1_1-xxl —— 离线/弱网环境直接挂。
+    Why: anima_train.py's path resolution stage used to have
+    `getattr(args, "t5_tokenizer", "")`, accessing the old name that had already been
+    migrated away, which always returned "", overwriting the yaml/CLI-provided
+    t5_tokenizer_path with an empty string -- causing T5Tokenizer to silently fall back
+    to downloading google/t5-v1_1-xxl over the network -- which fails outright offline
+    or on weak connections.
     """
     monkeypatch.setattr(sys, "argv", [
         "anima_train.py",
@@ -70,13 +76,14 @@ def test_args_has_t5_tokenizer_path_not_legacy_t5_tokenizer(
     args = at.parse_args()
     assert args.t5_tokenizer_path == "/x/t5"
     assert not hasattr(args, "t5_tokenizer"), (
-        "args 不应有 t5_tokenizer 属性 —— schema 字段是 t5_tokenizer_path，"
-        "任何 getattr(args, 't5_tokenizer', ...) 都会拿到默认值并清空路径"
+        "args should not have a t5_tokenizer attribute -- the schema field is "
+        "t5_tokenizer_path; any getattr(args, 't5_tokenizer', ...) would get the "
+        "default value and wipe out the path"
     )
 
 
 def test_cli_only_flags_present(at, monkeypatch: pytest.MonkeyPatch) -> None:
-    """schema 之外的 CLI-only 开关必须保留。"""
+    """CLI-only flags outside the schema must be preserved."""
     monkeypatch.setattr(sys, "argv", [
         "anima_train.py",
         "--auto-install",
@@ -90,7 +97,8 @@ def test_cli_only_flags_present(at, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_deprecated_repeats_flags_silently_accepted(at, monkeypatch: pytest.MonkeyPatch) -> None:
-    """--repeats / --reg-repeats 已弃用但仍接受（不破坏旧脚本）。"""
+    """--repeats / --reg-repeats are deprecated but still accepted (doesn't break old
+    scripts)."""
     monkeypatch.setattr(sys, "argv", [
         "anima_train.py", "--repeats", "5", "--reg-repeats", "3",
     ])
@@ -100,21 +108,23 @@ def test_deprecated_repeats_flags_silently_accepted(at, monkeypatch: pytest.Monk
 
 
 def test_no_prefer_json_flips_default(at, monkeypatch: pytest.MonkeyPatch) -> None:
-    """bridge 自动从 prefer_json: bool=True 派生 --prefer-json / --no-prefer-json。
+    """The bridge automatically derives --prefer-json / --no-prefer-json from
+    prefer_json: bool=True.
 
-    刀 1 / R1 起 parse_args 是 sparse namespace（只含显式键）；schema 默认值
-    由 apply_yaml_config 经 TrainingConfig 统一补齐。
+    Since Cut 1 / R1, parse_args returns a sparse namespace (only explicit keys);
+    schema defaults are uniformly filled in by apply_yaml_config via TrainingConfig.
     """
     monkeypatch.setattr(sys, "argv", ["anima_train.py", "--no-prefer-json"])
     assert at.parse_args().prefer_json is False
     monkeypatch.setattr(sys, "argv", ["anima_train.py"])
     sparse = at.parse_args()
-    assert not hasattr(sparse, "prefer_json")  # 未显式传 → 不在 sparse namespace
+    assert not hasattr(sparse, "prefer_json")  # not explicitly passed -> not in the sparse namespace
     assert at.apply_yaml_config(sparse, {}).prefer_json is True
 
 
 # ---------------------------------------------------------------------------
-# YAML 合并（apply_yaml_config 返回归一后的新 namespace，不再原地改）
+# YAML merging (apply_yaml_config returns a new normalized namespace, no longer
+# mutates in place)
 # ---------------------------------------------------------------------------
 
 
@@ -132,8 +142,9 @@ def test_cli_wins_over_yaml(at, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cli_explicit_default_wins_over_yaml(at, monkeypatch: pytest.MonkeyPatch) -> None:
-    """显式传等于 schema 默认的值也算显式（SUPPRESS 精确判定；旧「值==默认值」
-    近似的盲区，epochs 默认 10）。"""
+    """Explicitly passing a value equal to the schema default still counts as
+    explicit (SUPPRESS gives exact detection; the old "value == default" approximation
+    had a blind spot here -- epochs defaults to 10)."""
     monkeypatch.setattr(sys, "argv", ["anima_train.py", "--epochs", "10"])
     args = at.apply_yaml_config(at.parse_args(), {"epochs": 99})
     assert args.epochs == 10
@@ -146,7 +157,8 @@ def test_unknown_yaml_keys_ignored(at, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_invalid_yaml_combo_exits(at, monkeypatch: pytest.MonkeyPatch) -> None:
-    """互斥组合经统一加载路径 fail-fast（刀 1 前 trainer 静默放行）。"""
+    """Mutually exclusive combinations fail fast through the unified loading path
+    (before Cut 1, the trainer silently let this through)."""
     monkeypatch.setattr(sys, "argv", ["anima_train.py"])
     with pytest.raises(SystemExit):
         at.apply_yaml_config(
@@ -156,6 +168,7 @@ def test_invalid_yaml_combo_exits(at, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# config/train_template.yaml 已随 CLI 工作流一并删除（Studio 改走 preset 池），
-# 这两条 fixture 测试同步移除。Studio 模式下 yaml 由 fork_preset_for_version 注入
-# 绝对路径，覆盖在 test_version_config / test_presets_io 等里。
+# config/train_template.yaml was removed together with the CLI workflow (Studio now
+# uses a preset pool instead); the two fixture tests for it were removed accordingly.
+# In Studio mode, yaml has its absolute path injected by fork_preset_for_version,
+# covered in test_version_config / test_presets_io etc.

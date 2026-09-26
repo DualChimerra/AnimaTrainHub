@@ -1,7 +1,7 @@
 /**
- * PauseProgressModal 单元测试（ADR 0006 PR-4 §4.3）。
+ * PauseProgressModal unit tests (ADR 0006 PR-4 4.3).
  *
- * 覆盖渲染 + 状态机基础；SSE / fake-timer 驱动 timeout 走另一条路径。
+ * Covers rendering + basic state machine; SSE / fake-timer drives the timeout path.
  */
 import { fireEvent, render, screen, act } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -110,7 +110,7 @@ describe('PauseProgressModal', () => {
       vi.advanceTimersByTime(31_000)
     })
     fireEvent.click(screen.getByText('queue.pauseProgress.terminate'))
-    // 给 promise 一次 microtask 通过
+    // let the promise resolve through one microtask
     await act(async () => {
       await Promise.resolve()
     })

@@ -1,4 +1,4 @@
-"""dataset → text_cache → optimizer 生命周期接线。"""
+"""dataset -> text_cache -> optimizer lifecycle wiring."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def test_cached_varlen_phase_collects_main_reg_and_deduplicates_fanout(tmp_path)
     assert extras == ["trigger, portrait", "blurry"]
     assert [e.image_path for e in kwargs["cache_entries"]] == [image_a, image_b]
     assert kwargs["cache_entries"][0].cache_path.parent == image_a.parent
-    # prompt 聚合缓存根 = task 档案，不是数据集 train/（否则被数据集扫描误触）
+    # prompt aggregate cache root = task archive, not the dataset's train/ (otherwise dataset scans would trigger it by mistake)
     assert kwargs["cache_root"] == task_dir
     assert kwargs["text"] is ctx.text_stack
     assert kwargs["device"] == "cuda"
@@ -95,7 +95,7 @@ def test_online_strategy_is_noop_and_does_not_scan_dataset(tmp_path):
     class _ExplodingDataset:
         @property
         def samples(self):  # pragma: no cover - access is the failure
-            raise AssertionError("online family 不应扫描 caption")
+            raise AssertionError("online family should not scan captions")
 
     family = _Family("online")
     ctx = TrainingContext(args=_args(tmp_path), family=family)
@@ -125,7 +125,7 @@ def test_cached_strategy_disabled_keeps_te_online_without_scanning(tmp_path):
     class _ExplodingDataset:
         @property
         def samples(self):  # pragma: no cover - access is the failure
-            raise AssertionError("关闭缓存后不应扫描 caption")
+            raise AssertionError("captions should not be scanned when the cache is disabled")
 
     args = _args(tmp_path)
     args.text_encoder_cache = False

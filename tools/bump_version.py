@@ -1,19 +1,19 @@
-"""release post 校验 + 版本号同步 + CHANGELOG.md 派生（ADR 0013）。
+"""Release post validation + version sync + CHANGELOG.md rendering (ADR 0013).
 
-changelog 来源 = `docs/announcements/` 下 `tag: release` 的 markdown post，
-一版一文件（双文件双语，工具只用中文 `<id>.md`）。编写指南见
-`docs/announcements/README.md`。本工具不创建 post —— 那是维护者发版时写 md 的事。
+Changelog source = the `tag: release` markdown posts in `docs/announcements/`,
+one file per version. Authoring guide: `docs/announcements/README.md`. This tool
+does not create posts; maintainers write the markdown when releasing.
 
 Subcommands:
-    validate         校验全部 release post 的 frontmatter（version/date/title/文件名自洽/唯一）
-    bump             同步「最高版本」release post 的 version 到 __init__.py / package.json /
-                     package-lock.json + 重写 CHANGELOG.md
-    render-changelog 仅从 release post 重写 CHANGELOG.md，不动版本号文件
-    verify-versions  跨文件 drift 检查：__init__.py / package.json / package-lock.json 必须一致
+    validate         check every release post's frontmatter (version/date/title/filename, uniqueness)
+    bump             sync the highest release post's version into __init__.py / package.json /
+                     package-lock.json + rewrite CHANGELOG.md
+    render-changelog rewrite CHANGELOG.md from the release posts only, version files untouched
+    verify-versions  cross-file drift check: __init__.py / package.json / package-lock.json must agree
 
 Examples:
     python tools/bump_version.py validate
-    python tools/bump_version.py bump                 # 取最高版本的 release post
+    python tools/bump_version.py bump                 # uses the highest release post
     python tools/bump_version.py bump --version 0.16.0
     python tools/bump_version.py render-changelog
     python tools/bump_version.py verify-versions
@@ -30,7 +30,7 @@ from typing import Any, Optional
 
 import yaml
 
-# Windows Python stdout 默认 cp936，打中文直接 UnicodeEncodeError。工具自带正确编码。
+# Windows consoles may default to a legacy code page; force UTF-8 output.
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         try:
@@ -49,7 +49,7 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][\w.\-]+)?$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-# ─── release post 加载 ──────────────────────────────────────────────────────
+# ─── release post loading ─────────────────────────────────────────────────────
 @dataclass
 class ReleasePost:
     version: str
@@ -60,7 +60,7 @@ class ReleasePost:
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    """`---\\n<yaml>\\n---\\n<body>` → (meta, body)。无 frontmatter → ({}, 全文)。"""
+    """`---\\n<yaml>\\n---\\n<body>` → (meta, body); no frontmatter → ({}, full text)."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}, text
@@ -85,12 +85,12 @@ def _semver_tuple(v: str) -> tuple[int, ...]:
 
 
 def load_release_posts() -> list[ReleasePost]:
-    """读 docs/announcements/ 下 `tag: release` 的中文 post，按 version 降序。"""
+    """The `tag: release` posts in docs/announcements/, newest version first."""
     posts: list[ReleasePost] = []
     if not ANNOUNCEMENTS_DIR.is_dir():
         return posts
     for p in sorted(ANNOUNCEMENTS_DIR.glob("*.md")):
-        if p.name.endswith(".en.md") or p.name.lower() == "readme.md":
+        if p.name.lower() in ("readme.md", "content-guide.md"):
             continue
         meta, body = _split_frontmatter(p.read_text(encoding="utf-8"))
         if meta.get("tag") != "release":
@@ -106,7 +106,7 @@ def load_release_posts() -> list[ReleasePost]:
     return posts
 
 
-# ─── 校验 ───────────────────────────────────────────────────────────────────
+# ─── validation ──────────────────────────────────────────────────────────────────
 @dataclass
 class ValidateIssue:
     level: str   # "error" | "warn"
@@ -130,34 +130,34 @@ class ValidateResult:
 
 
 def validate(posts: list[ReleasePost]) -> ValidateResult:
-    """校验 release post frontmatter。详见 docs/announcements/README.md。"""
+    """Validate release post frontmatter; see docs/announcements/README.md."""
     r = ValidateResult()
     if not posts:
-        r.add_error("/", "docs/announcements/ 下没有 tag: release 的 post")
+        r.add_error("/", "no tag: release posts in docs/announcements/")
         return r
 
     seen: set[str] = set()
     for post in posts:
         loc = post.filename
         if not SEMVER_RE.match(post.version):
-            r.add_error(f"{loc}.version", f"无效 semver：{post.version!r}")
+            r.add_error(f"{loc}.version", f"invalid semver: {post.version!r}")
         elif post.version in seen:
-            r.add_error(f"{loc}.version", f"重复版本 {post.version}")
+            r.add_error(f"{loc}.version", f"duplicate version {post.version}")
         else:
             seen.add(post.version)
 
         if not DATE_RE.match(post.date):
-            r.add_error(f"{loc}.date", f"date 必须是 ISO YYYY-MM-DD：{post.date!r}")
+            r.add_error(f"{loc}.date", f"date must be ISO YYYY-MM-DD: {post.date!r}")
         if not post.title:
-            r.add_error(f"{loc}.title", "title 必填")
+            r.add_error(f"{loc}.title", "title is required")
         if not post.body.strip():
-            r.add_warn(f"{loc}", "正文为空")
+            r.add_warn(f"{loc}", "empty body")
 
-        # 文件名约定：<date>-v<version>.md
+        # Filename convention: <date>-v<version>.md
         if DATE_RE.match(post.date) and SEMVER_RE.match(post.version):
             expect = f"{post.date}-v{post.version}.md"
             if post.filename != expect:
-                r.add_warn(f"{loc}", f"文件名建议 {expect}（与 frontmatter 自洽）")
+                r.add_warn(f"{loc}", f"filename should be {expect} (to match the frontmatter)")
     return r
 
 
@@ -167,23 +167,23 @@ def print_validate_result(r: ValidateResult) -> None:
     for i in r.issues:
         print(f"  {'✗' if i.level == 'error' else '!'} {i.location}: {i.message}")
     if not errors and not warns:
-        print("validate ok — 没有问题")
+        print("validate ok — no issues")
     elif not errors:
-        print(f"validate ok — {len(warns)} 个 warning（不阻塞）")
+        print(f"validate ok — {len(warns)} warning(s) (non-blocking)")
     else:
-        print(f"validate FAILED — {len(errors)} 个 error / {len(warns)} 个 warning")
+        print(f"validate FAILED — {len(errors)} error(s) / {len(warns)} warning(s)")
 
 
-# ─── CHANGELOG 派生 ─────────────────────────────────────────────────────────
+# ─── CHANGELOG rendering ────────────────────────────────────────────────────────
 def render_changelog(posts: list[ReleasePost]) -> str:
-    """从 release post（version 降序）拼出 CHANGELOG.md（ADR 0013）。"""
+    """Assemble CHANGELOG.md from release posts (newest first; ADR 0013)."""
     lines: list[str] = [
         "# Changelog",
         "",
-        "> **本文件由 [`tools/bump_version.py render-changelog`](tools/bump_version.py)"
-        " 从 [`docs/announcements/`](docs/announcements/) 的 `tag: release` post 自动派生**",
-        "> —— 请改那些 markdown，不要改本文件。编写指南见"
-        " [`docs/announcements/README.md`](docs/announcements/README.md)。",
+        "> **Generated by [`tools/bump_version.py render-changelog`](tools/bump_version.py)"
+        " from the `tag: release` posts in [`docs/announcements/`](docs/announcements/).**",
+        "> Edit those markdown files, not this one. Authoring guide:"
+        " [`docs/announcements/README.md`](docs/announcements/README.md).",
         "",
         "---",
         "",
@@ -205,7 +205,7 @@ def write_atomic(path: Path, content: str) -> None:
     tmp.replace(path)
 
 
-# ─── 版本号文件读写 ─────────────────────────────────────────────────────────
+# ─── version files ────────────────────────────────────────────────────────
 def _read_studio_version() -> Optional[str]:
     if not STUDIO_INIT_PATH.exists():
         return None
@@ -250,7 +250,7 @@ def _read_package_lock_version() -> Optional[str]:
 
 
 def _write_package_lock_version(new_version: str) -> bool:
-    """更新 lockfile 顶层 + packages[""] 两处 version（count=2，绝不动 deps 的 version）。"""
+    """Update the lockfile's top-level and packages[""] versions (count=2, never dependency versions)."""
     if not PACKAGE_LOCK_PATH.exists():
         return False
     txt = PACKAGE_LOCK_PATH.read_text(encoding="utf-8")
@@ -281,11 +281,11 @@ def cmd_render_changelog(_args: argparse.Namespace) -> int:
     posts = load_release_posts()
     r = validate(posts)
     if r.has_errors:
-        print("validate FAILED — render-changelog 拒绝执行：")
+        print("validate FAILED — render-changelog aborted:")
         print_validate_result(r)
         return 1
     write_atomic(CHANGELOG_PATH, render_changelog(posts))
-    print(f"[render] {CHANGELOG_PATH.relative_to(REPO_ROOT)} 重写完成（{len(posts)} 个版本）")
+    print(f"[render] {CHANGELOG_PATH.relative_to(REPO_ROOT)} rewritten ({len(posts)} versions)")
     return 0
 
 
@@ -293,20 +293,20 @@ def cmd_bump(args: argparse.Namespace) -> int:
     posts = load_release_posts()
     r = validate(posts)
     if r.has_errors:
-        print("validate FAILED — bump 拒绝执行：")
+        print("validate FAILED — bump aborted:")
         print_validate_result(r)
         return 1
     print_validate_result(r)
     if not posts:
-        print("没有 release post，bump 无事可做", file=sys.stderr)
+        print("no release posts, nothing to bump", file=sys.stderr)
         return 2
 
-    top_version = posts[0].version  # 已按 semver 降序
+    top_version = posts[0].version  # sorted by semver, descending
     if args.version and args.version != top_version:
         print(
-            f"--version={args.version} 与最高 release post 版本={top_version} 不符。\n"
-            "release post 是 source of truth；要 bump 到该版本，请先写"
-            f" docs/announcements/<date>-v{args.version}.md。",
+            f"--version={args.version} does not match the highest release post ({top_version}).\n"
+            "Release posts are the source of truth; to bump to this version, first write"
+            f" docs/announcements/<date>-v{args.version}.md.",
             file=sys.stderr,
         )
         return 2
@@ -318,18 +318,18 @@ def cmd_bump(args: argparse.Namespace) -> int:
     print(f"[bump] studio/web/package-lock.json: {_read_package_lock_version()} → {target}")
 
     if not _write_studio_version(target):
-        print("[bump] WARN: studio/__init__.py 没找到 __version__，跳过", file=sys.stderr)
+        print("[bump] WARN: no __version__ in studio/__init__.py, skipped", file=sys.stderr)
     if not _write_package_json_version(target):
-        print("[bump] WARN: package.json 没找到 version，跳过", file=sys.stderr)
+        print("[bump] WARN: no version in package.json, skipped", file=sys.stderr)
     if not _write_package_lock_version(target):
-        print("[bump] WARN: package-lock.json 没找到两处 version，跳过", file=sys.stderr)
+        print("[bump] WARN: package-lock.json lacks both version fields, skipped", file=sys.stderr)
 
     write_atomic(CHANGELOG_PATH, render_changelog(posts))
-    print(f"[bump] {CHANGELOG_PATH.relative_to(REPO_ROOT)} 重写完成")
+    print(f"[bump] {CHANGELOG_PATH.relative_to(REPO_ROOT)} rewritten")
 
     drift_rc = cmd_verify_versions(argparse.Namespace())
     if drift_rc != 0:
-        print("[bump] FAIL: 自检发现 drift，请人工核对", file=sys.stderr)
+        print("[bump] FAIL: self-check found version drift, please check manually", file=sys.stderr)
         return drift_rc
 
     print(f"\nnext: git add -A && git commit -m 'chore(release): {target}' && git tag v{target} && git push --tags")
@@ -337,7 +337,7 @@ def cmd_bump(args: argparse.Namespace) -> int:
 
 
 def cmd_verify_versions(_args: argparse.Namespace) -> int:
-    """跨文件 version drift 校验。四处必须一致；任一不等返 1。"""
+    """Cross-file version drift check: all four must match, otherwise return 1."""
     rows = [
         ("studio/__init__.py (__version__)", _read_studio_version()),
         ("studio/web/package.json (version)", _read_package_json_version()),
@@ -346,24 +346,24 @@ def cmd_verify_versions(_args: argparse.Namespace) -> int:
     ]
     distinct = {v for _, v in rows}
     if len(distinct) == 1 and None not in distinct:
-        print(f"[verify-versions] OK · 四处一致 = {distinct.pop()}")
+        print(f"[verify-versions] OK · all four match = {distinct.pop()}")
         return 0
-    print("[verify-versions] FAIL · 跨文件 version drift：", file=sys.stderr)
+    print("[verify-versions] FAIL · version drift across files:", file=sys.stderr)
     for label, value in rows:
         print(f"  {label:<55} = {value!r}", file=sys.stderr)
-    print("\n修法：跑 `python tools/bump_version.py bump` 重新同步，或手动校准。", file=sys.stderr)
+    print("\nFix: run `python tools/bump_version.py bump` to resync, or align them by hand.", file=sys.stderr)
     return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bump_version", description=__doc__.splitlines()[0] if __doc__ else "")
     sub = p.add_subparsers(dest="cmd")
-    sub.add_parser("validate", help="校验 release post frontmatter").set_defaults(func=cmd_validate)
-    sub.add_parser("render-changelog", help="从 release post 重写 CHANGELOG.md").set_defaults(func=cmd_render_changelog)
-    p_b = sub.add_parser("bump", help="同步版本号 + 重写 CHANGELOG.md")
-    p_b.add_argument("--version", help="期望目标版本（与最高 release post 不符则报错）", default=None)
+    sub.add_parser("validate", help="validate release post frontmatter").set_defaults(func=cmd_validate)
+    sub.add_parser("render-changelog", help="rewrite CHANGELOG.md from release posts").set_defaults(func=cmd_render_changelog)
+    p_b = sub.add_parser("bump", help="sync version numbers + rewrite CHANGELOG.md")
+    p_b.add_argument("--version", help="expected target version (error if it differs from the highest release post)", default=None)
     p_b.set_defaults(func=cmd_bump)
-    sub.add_parser("verify-versions", help="跨文件 version drift 检查（CI gate）").set_defaults(func=cmd_verify_versions)
+    sub.add_parser("verify-versions", help="cross-file version drift check (CI gate)").set_defaults(func=cmd_verify_versions)
     return p
 
 

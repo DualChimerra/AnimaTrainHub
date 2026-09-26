@@ -1,12 +1,13 @@
-"""AdapterProtocol：所有 LoRA 变体的统一接口（ADR 0003 PR-C）。
+"""AdapterProtocol: the unified interface for all LoRA variants (ADR 0003 PR-C).
 
-设计原则：
-- 必需 4 个方法（inject / get_param_groups / save / load）—— 所有 adapter 都要实现
-- 3 个可选 hook（on_step_begin / regularization_loss / excludes_weight_decay）——
-  默认 no-op；动态/per-step 行为类变体（T-LoRA / AdaLoRA / OFT 等）按需 override
-- runtime_checkable —— 测试可以直接 `isinstance(adapter, AdapterProtocol)` 验
+Design principles:
+- 4 required methods (inject / get_param_groups / save / load) -- every adapter must implement these
+- 3 optional hooks (on_step_begin / regularization_loss / excludes_weight_decay) --
+  no-op by default; dynamic/per-step variants (T-LoRA / AdaLoRA / OFT etc.) override as needed
+- runtime_checkable -- tests can verify directly with `isinstance(adapter, AdapterProtocol)`
 
-hook 设计参考 ADR 0003 "Case 3-5" 章节里 T-LoRA / OFT / Ortho-Hydra 的真实需求。
+The hook design follows the real-world needs of T-LoRA / OFT / Ortho-Hydra described in the
+"Case 3-5" section of ADR 0003.
 """
 
 from __future__ import annotations
@@ -21,67 +22,69 @@ from torch import Tensor, nn
 
 @dataclass(frozen=True)
 class StepContext:
-    """每 micro-batch 前向开始时传给 adapter.on_step_begin 的最小上下文。
+    """The minimal context passed to adapter.on_step_begin at the start of each micro-batch forward pass.
 
-    最小化字段：只传 hook 真正会用的（避免 dataclass 字段爆炸 + 让 hook
-    实现不依赖 TrainingContext 全部内部状态）。
+    Fields are kept minimal: only what hooks actually use (to avoid dataclass field
+    bloat and to keep hook implementations independent of TrainingContext's full
+    internal state).
     """
     global_step: int
     total_steps: Optional[int]
     epoch: int
-    sigma_t: Tensor          # shape [B]，本 micro-batch 的 sigma
-    args: object             # parse_args 出来的 Namespace；按需读字段
+    sigma_t: Tensor          # shape [B], sigma for this micro-batch
+    args: object             # the Namespace from parse_args; read fields as needed
 
 
 @runtime_checkable
 class AdapterProtocol(Protocol):
-    """LoRA / LoKr / LoHa / 论文级变体共用接口。
+    """Shared interface for LoRA / LoKr / LoHa / paper-level variants.
 
-    用 Protocol 而不是 ABC：现有 AnimaLycorisAdapter 已经实现了前 4 个必需方法
-    （duck-typed），不想强制用户继承。runtime_checkable 让单测 `isinstance`
-    校验仍然能用。
+    Uses Protocol rather than ABC: the existing AnimaLycorisAdapter already implements
+    the first 4 required methods (duck-typed), and we don't want to force users to
+    inherit. runtime_checkable keeps `isinstance` checks usable in unit tests.
     """
 
-    # ─── 必需 ───
+    # --- Required ---
     def inject(self, model: nn.Module) -> None:
-        """把 LoRA 层注入到 model（替换 Linear 等）。"""
+        """Inject LoRA layers into the model (replacing Linear etc.)."""
         ...
 
     def get_param_groups(self, weight_decay: float) -> list[dict]:
-        """返回 optimizer param_groups。一组或多组（LoRA+ 可分 A/B 不同 lr，
-        Ortho-Hydra 可单独 router lr）。"""
+        """Return the optimizer param_groups. One or more groups (LoRA+ can split A/B
+        into different lrs, Ortho-Hydra can give the router its own lr)."""
         ...
 
     def save(self, path: Path) -> None:
-        """落盘 safetensors。"""
+        """Save to safetensors on disk."""
         ...
 
     def load(self, path: Path) -> None:
-        """读取 safetensors。"""
+        """Load from safetensors."""
         ...
 
-    # ─── 可选 hook：默认 no-op；按需 override ───
+    # --- Optional hooks: no-op by default; override as needed ---
 
     def on_step_begin(self, ctx: StepContext) -> None:
-        """每 micro-batch 前向之前调用。
+        """Called before each micro-batch forward pass.
 
-        T-LoRA / AdaLoRA / B-LoRA 在此按 sigma_t / step 调整 rank mask、
-        激活子集、列丢弃等"运行时结构调整"。默认 no-op。
+        T-LoRA / AdaLoRA / B-LoRA use this to adjust the rank mask, active subset,
+        column dropout, etc. ("runtime structural adjustment") based on sigma_t / step.
+        No-op by default.
         """
         return None
 
     def regularization_loss(self, ctx: StepContext) -> Optional[Tensor]:
-        """返回要加到主 loss 上的正则项；None=无。
+        """Return a regularization term to add to the main loss; None = none.
 
-        OFT 返回 orthogonality penalty；Ortho-Hydra 返回 expert balance loss；
-        默认 None。train_loop 收到 None 时不做任何额外操作。
+        OFT returns an orthogonality penalty; Ortho-Hydra returns an expert balance loss;
+        None by default. When train_loop receives None it does nothing extra.
         """
         return None
 
     def excludes_weight_decay(self, param_name: str) -> bool:
-        """该 param 是否应排除 weight_decay。
+        """Whether this param should be excluded from weight_decay.
 
-        替代原代码 `injector.use_lokr` 硬编码检查。LoKr 实现里：
-        return "w1" in param_name。默认 False。
+        Replaces the old hardcoded `injector.use_lokr` check. In the LoKr implementation:
+        return "w1" in param_name. False by default.
         """
         return False

@@ -1,11 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useRef, useState, type ReactNode } from 'react'
+import Popover, { MenuItems } from './Popover'
 
 export interface KebabItem {
   label: string
   onSelect: () => void
   tone?: 'err'
   disabled?: boolean
+  icon?: ReactNode
+  /** Draws a divider above this row. */
+  divider?: boolean
 }
 
 const DotsIcon = (
@@ -15,15 +18,14 @@ const DotsIcon = (
 )
 
 const TRIGGER_CLASS = {
-  kebab: 'ds-kebab hover:bg-sunken hover:text-fg-primary transition-colors',
-  icon: 'ds-iconbtn hover:text-fg-primary transition-colors',
-  group: 'ds-ico hover:text-fg-primary transition-colors',
+  kebab: 'ds-kebab',
+  icon: 'ds-iconbtn',
+  group: 'ds-ico',
 } as const
 
-/** The mockup's ⋯ button (.kebab) with a small action menu. Closes on an
- *  outside click, Escape, scroll, or after picking an item. Clicks never bubble
- *  to a surrounding clickable card or row. The menu is portalled with fixed
- *  positioning so cards with overflow:hidden never clip it. */
+/** The mockup's ⋯ button (.kebab) with a small action menu (shared Popover:
+ *  closes on an outside click, Escape, scroll, or after picking an item).
+ *  Clicks never bubble to a surrounding clickable card or row. */
 export default function KebabMenu({ label, items, className = '', trigger = 'kebab' }: {
   /** aria-label for the trigger, e.g. "Действия проекта". */
   label: string
@@ -34,74 +36,26 @@ export default function KebabMenu({ label, items, className = '', trigger = 'keb
   trigger?: keyof typeof TRIGGER_CLASS
 }) {
   const [open, setOpen] = useState(false)
-  const rootRef = useRef<HTMLSpanElement | null>(null)
-  const menuRef = useRef<HTMLDivElement | null>(null)
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      const n = e.target as Node
-      if (!rootRef.current?.contains(n) && !menuRef.current?.contains(n)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    const onScroll = (e: Event) => { if (!menuRef.current?.contains(e.target as Node)) setOpen(false) }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    window.addEventListener('scroll', onScroll, true)
-    window.addEventListener('resize', onScroll)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-      window.removeEventListener('scroll', onScroll, true)
-      window.removeEventListener('resize', onScroll)
-    }
-  }, [open])
-
-  // Right-aligned under the trigger; above it when there is no room below.
-  useLayoutEffect(() => {
-    if (!open || !rootRef.current || !menuRef.current) return
-    const a = rootRef.current.getBoundingClientRect()
-    const m = menuRef.current.getBoundingClientRect()
-    const left = Math.max(8, Math.min(a.right - m.width, window.innerWidth - m.width - 8))
-    const top = a.bottom + 4 + m.height <= window.innerHeight - 8 ? a.bottom + 4 : Math.max(8, a.top - 4 - m.height)
-    setPos({ left, top })
-  }, [open])
+  const btnRef = useRef<HTMLButtonElement | null>(null)
 
   return (
-    <span ref={rootRef} className={`relative inline-flex ${className}`} onClick={(e) => e.stopPropagation()}>
+    <span className={`relative inline-flex ${className}`} onClick={(e) => e.stopPropagation()}>
       <button
+        ref={btnRef}
         type="button"
-        className={TRIGGER_CLASS[trigger]}
+        className={`${TRIGGER_CLASS[trigger]}${open ? ' ds-is-open' : ''}`}
         aria-label={label}
+        title={label}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setPos(null); setOpen((v) => !v) }}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((v) => !v) }}
       >
         {DotsIcon}
       </button>
-      {open && createPortal(
-        <div
-          ref={menuRef}
-          role="menu"
-          className="fixed z-[80] py-1 rounded-[10px] border border-dim bg-elevated shadow-lg"
-          style={{ minWidth: 180, ...(pos ?? { left: 0, top: 0, visibility: 'hidden' as const }) }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {items.map((it) => (
-            <button
-              key={it.label}
-              type="button"
-              role="menuitem"
-              disabled={it.disabled}
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(false); it.onSelect() }}
-              className={`block w-full text-left whitespace-nowrap px-3 py-1.5 text-[12.5px] hover:bg-sunken disabled:opacity-40 disabled:cursor-default ${it.tone === 'err' ? 'text-err' : 'text-fg-primary'}`}
-            >
-              {it.label}
-            </button>
-          ))}
-        </div>,
-        document.body,
+      {open && btnRef.current && (
+        <Popover anchor={btnRef.current} align="end" minWidth={190} onClose={() => setOpen(false)} ariaLabel={label}>
+          <MenuItems items={items} onClose={() => setOpen(false)} />
+        </Popover>
       )}
     </span>
   )

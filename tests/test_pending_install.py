@@ -1,6 +1,7 @@
-"""PR-S2.1 — pending_install marker 读写 + apply_pending 调度。
+"""PR-S2.1 — pending_install marker read/write + apply_pending scheduling.
 
-不真跑 pip：torch_setup.reinstall 用 monkeypatch 替成假实现验证流程。
+Doesn't actually run pip: torch_setup.reinstall is monkeypatched with a fake
+implementation to verify the flow.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from studio.services.runtime import pending_install
 
 @pytest.fixture
 def isolated_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """每个测试独立 marker 路径，避免互相污染。"""
+    """Each test gets its own marker path, to avoid cross-contamination."""
     marker = tmp_path / ".pending-pip-install.json"
     monkeypatch.setattr(pending_install, "STUDIO_DATA", tmp_path)
     monkeypatch.setattr(pending_install, "PENDING_MARKER", marker)
@@ -29,7 +30,7 @@ def test_register_writes_marker(isolated_marker: Path) -> None:
 
 def test_register_overwrites_previous(isolated_marker: Path) -> None:
     pending_install.register_torch_reinstall("cu118")
-    pending_install.register_torch_reinstall("cu128")  # 覆盖
+    pending_install.register_torch_reinstall("cu128")  # overwrite
     assert pending_install.read_pending()["target"] == "cu128"
 
 
@@ -50,7 +51,7 @@ def test_clear_pending_removes_marker(isolated_marker: Path) -> None:
 
 
 def test_clear_pending_no_marker_no_error(isolated_marker: Path) -> None:
-    """没 marker 时 clear 也应静默成功。"""
+    """clear should also succeed silently when there's no marker."""
     pending_install.clear_pending()
     assert not isolated_marker.exists()
 
@@ -58,7 +59,7 @@ def test_clear_pending_no_marker_no_error(isolated_marker: Path) -> None:
 def test_apply_pending_no_marker_is_noop(
     isolated_marker: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """没 pending → 不应触发 torch_setup.reinstall。"""
+    """No pending → should not trigger torch_setup.reinstall."""
     from studio.services.runtime import torch as torch_setup
     called: list[str] = []
     monkeypatch.setattr(torch_setup, "reinstall", lambda t: called.append(t))
@@ -69,7 +70,7 @@ def test_apply_pending_no_marker_is_noop(
 def test_apply_pending_runs_torch_reinstall_and_clears(
     isolated_marker: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """有 pending=torch → 调 reinstall + 清 marker。"""
+    """pending=torch → calls reinstall + clears the marker."""
     pending_install.register_torch_reinstall("cu128")
     from studio.services.runtime import torch as torch_setup
     captured: list[str] = []
@@ -87,7 +88,7 @@ def test_apply_pending_runs_torch_reinstall_and_clears(
     monkeypatch.setattr(torch_setup, "reinstall", fake_reinstall)
     pending_install.apply_pending()
     assert captured == ["cu128"]
-    assert not isolated_marker.exists()  # 成功后清掉
+    assert not isolated_marker.exists()  # cleared after success
     out = capsys.readouterr().out
     assert "torch 重装完成" in out
 
@@ -95,7 +96,7 @@ def test_apply_pending_runs_torch_reinstall_and_clears(
 def test_apply_pending_keeps_marker_on_failure(
     isolated_marker: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """reinstall 抛 RuntimeError → marker 保留，下次启动重试。"""
+    """reinstall raises RuntimeError → marker is kept, retried on next start."""
     pending_install.register_torch_reinstall("cu128")
     from studio.services.runtime import torch as torch_setup
 
@@ -104,7 +105,7 @@ def test_apply_pending_keeps_marker_on_failure(
 
     monkeypatch.setattr(torch_setup, "reinstall", fake_reinstall)
     pending_install.apply_pending()
-    # marker 保留
+    # marker is kept
     assert isolated_marker.exists()
     assert pending_install.read_pending()["target"] == "cu128"
     err = capsys.readouterr().err
@@ -115,7 +116,7 @@ def test_apply_pending_keeps_marker_on_failure(
 def test_apply_pending_unknown_kind_clears_marker(
     isolated_marker: Path, capsys
 ) -> None:
-    """未知 kind → warn + 清 marker（防止永久卡住）。"""
+    """Unknown kind → warn + clear the marker (avoids getting stuck forever)."""
     isolated_marker.write_text(
         '{"kind": "modelscope", "target": "auto"}', encoding="utf-8"
     )

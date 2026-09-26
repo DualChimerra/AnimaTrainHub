@@ -1,7 +1,7 @@
-"""data_exports 目录列出（PR-6 commit 1 从 server.py 抽出）。
+"""Listing of the data_exports directory (extracted from server.py in PR-6 commit 1).
 
-1 route：
-    GET /api/data-exports    列出 DATA_EXPORTS 下的 zip / yaml / json 文件
+1 route:
+    GET /api/data-exports    list the zip / yaml / json files under DATA_EXPORTS
 """
 from __future__ import annotations
 

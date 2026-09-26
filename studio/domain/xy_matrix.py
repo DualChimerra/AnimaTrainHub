@@ -1,52 +1,56 @@
-"""XY 矩阵 schema —— 轴枚举 + axis spec + matrix spec + 值校验。
+"""XY matrix schema — axis enum + axis spec + matrix spec + value validation.
 
-设计：单 task 内循环全图（一次 model load 摊销 ~30s 启动成本）。前端拿到
-samples[].xy={xi,yi,xv,yv} 元数据按 (yi, xi) 排成 grid 渲染。
+Design: loop over all images within a single task (amortizes the ~30s model-load
+startup cost once). The frontend arranges the returned samples[].xy={xi,yi,xv,yv}
+metadata into a grid by (yi, xi).
 
-轴值类型按 axis 枚举派生：
+Axis value types are derived from the axis enum:
   lora_scale / cfg_scale → float
   steps                  → int
-  lora_ckpt              → str (ckpt 文件路径)
+  lora_ckpt              → str (checkpoint file path)
 
-历史注：lora_ckpt 轴 v1 因 AnimaLycorisAdapter 缺 unhook 接口未实现；
-detach()（utils/lycoris_adapter.py）+ CACHE.apply_loras 重 inject 路径之
-后补上（runtime/anima_daemon.py:_run_xy）。
+History note: the lora_ckpt axis wasn't implemented in v1 because
+AnimaLycorisAdapter lacked an unhook interface; it was added later once
+detach() (utils/lycoris_adapter.py) plus the CACHE.apply_loras re-inject path
+became available (runtime/anima_daemon.py:_run_xy).
 
-轴行为：
-  lora_scale：全局轴，遍历所有 adapters 把 multiplier 都覆盖为 cell 值
-              （旧版只改 lora_configs[lora_index]，已废弃）。
-  lora_ckpt：cell 内 mutate lora_configs[lora_index].path 然后调
-              CACHE.apply_loras 重 inject（detach + reload state_dict）。
+Axis behavior:
+  lora_scale: a global axis — iterates over all adapters and overrides every
+              multiplier with the cell value (the old version only changed
+              lora_configs[lora_index]; that's now deprecated).
+  lora_ckpt:  mutates lora_configs[lora_index].path within the cell, then calls
+              CACHE.apply_loras to re-inject (detach + reload state_dict).
 
-注意：不使用 `from __future__ import annotations`——Pydantic v2 + Python 3.12+
-在延迟求值模式下会将 typing._SpecialForm 当成 schema key，触发 AttributeError。
+Note: does NOT use `from __future__ import annotations` — under Pydantic v2 +
+Python 3.12+'s deferred evaluation, that would turn typing._SpecialForm into a
+schema key and raise AttributeError.
 """
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 XYAxisType = Literal[
-    "lora_scale",   # 把所有 LoRA 的 multiplier 都设成轴值（全局）
-    "steps",        # 不同采样步数
-    "cfg_scale",    # 不同 CFG
-    "lora_ckpt",    # 同一 LoRA 训练过程的不同 step/epoch ckpt（找过拟合拐点）
+    "lora_scale",   # sets every LoRA's multiplier to the axis value (global)
+    "steps",        # varies the sampling step count
+    "cfg_scale",    # varies CFG
+    "lora_ckpt",    # different step/epoch checkpoints from the same LoRA training run (for spotting overfitting)
 ]
 
 
 class XYAxisSpec(BaseModel):
-    """单轴定义：axis 枚举 + values 列表 + (lora_ckpt 时) lora_index。"""
+    """Single-axis definition: axis enum + values list + (for lora_ckpt) lora_index."""
 
     model_config = ConfigDict(extra="forbid")
-    axis: XYAxisType = Field(..., description="轴绑定的字段")
-    values: list[Any] = Field(..., min_length=1, description="此轴扫描的值列表")
+    axis: XYAxisType = Field(..., description="The field this axis is bound to")
+    values: list[Any] = Field(..., min_length=1, description="List of values this axis sweeps over")
     lora_index: Optional[int] = Field(
         None, ge=0,
-        description="axis=lora_ckpt 时指定改 lora_configs 哪一项的 path",
+        description="When axis=lora_ckpt, selects which lora_configs entry's path to modify",
     )
 
 
 class XYMatrixSpec(BaseModel):
-    """XY 矩阵：x 轴必填，y 可选（None = 单轴 N×1 退化成一行）。"""
+    """XY matrix: x axis is required, y is optional (None = single-axis N×1, degenerating to a single row)."""
 
     model_config = ConfigDict(extra="forbid")
     x: XYAxisSpec
@@ -54,11 +58,11 @@ class XYMatrixSpec(BaseModel):
 
 
 def _check_axis_values(axis: XYAxisSpec) -> None:
-    """按 axis 枚举校验 values 类型（浮点 / 整数 / 字符串）。"""
+    """Validate the values type per the axis enum (float / int / string)."""
     int_axes = {"steps"}
     float_axes = {"lora_scale", "cfg_scale"}
-    str_axes = {"lora_ckpt"}  # ckpt 路径列表
-    needs_lora_index = {"lora_ckpt"}  # lora_scale 改为全局轴，不再需要
+    str_axes = {"lora_ckpt"}  # list of checkpoint paths
+    needs_lora_index = {"lora_ckpt"}  # lora_scale became a global axis, so it no longer needs this
 
     if axis.axis in int_axes:
         for v in axis.values:

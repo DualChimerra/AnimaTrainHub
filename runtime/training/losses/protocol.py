@@ -1,13 +1,14 @@
-"""LossProtocol：所有训练 loss 的统一接口（ADR 0003 plugin registry）。
+"""LossProtocol: the unified interface for all training losses (ADR 0003 plugin registry).
 
-设计模仿 training/timestep_samplers/protocol.py 和 training/adapters/protocol.py：
-- 必需 1 个方法：compute(pred, target, t) -> Tensor
+Modeled on training/timestep_samplers/protocol.py and training/adapters/protocol.py:
+- 1 required method: compute(pred, target, t) -> Tensor
 
-加新 loss 步骤（参考 ADR 0003 PR-C registry 模式）：
-1. 写 training/losses/{name}.py 含 `build(args) -> LossProtocol`
-2. losses/__init__.py 的 BUILDERS 字典加一行
-3. studio/schema.py 的 `loss_type: Literal[...]` 加枚举值 + 该 loss 专属字段
-4. 完。phases/optimizer.py / loop.py / TrainingContext 0 改动。
+To add a new loss (follows the ADR 0003 PR-C registry pattern):
+1. Write training/losses/{name}.py with `build(args) -> LossProtocol`.
+2. Add a line to the BUILDERS dict in losses/__init__.py.
+3. Add the enum value (and any dedicated fields) to the
+   `loss_type: Literal[...]` in studio/schema.py.
+4. Done -- zero changes needed in phases/optimizer.py / loop.py / TrainingContext.
 """
 
 from __future__ import annotations
@@ -19,16 +20,20 @@ import torch
 
 @runtime_checkable
 class LossProtocol(Protocol):
-    """训练 loss 统一接口。
+    """Unified interface for training losses.
 
-    用 Protocol 而不是 ABC：mse 用纯函数包装 / huber 用 class 实现，
-    不想强制继承。runtime_checkable 让单测 `isinstance` 校验仍能用。
+    Uses Protocol instead of ABC: mse is a plain function wrapper, huber is a
+    class, and we don't want to force inheritance. runtime_checkable keeps
+    unit-test `isinstance` checks working.
 
-    **签名稳定性约定**：当前 compute(pred, target, t) 是 v1 签名。未来若引入
-    LPIPS / SNR-aware / classifier-free guidance 等需要额外上下文的 loss，
-    会以 keyword-only `*, ctx=None` 形式追加（向后兼容；不传时旧实现继续工作）。
-    新写的 loss 实现建议提前预留 `def compute(self, pred, target, t, *, ctx=None)`
-    签名以避免未来 break；调用方（loop.py）目前不传 ctx，传时机另行公告。
+    **Signature stability contract**: compute(pred, target, t) is the current
+    v1 signature. If future losses need extra context (LPIPS / SNR-aware /
+    classifier-free guidance, etc.), it will be appended as a keyword-only
+    `*, ctx=None` (backward compatible; old implementations keep working when
+    it's not passed). New loss implementations are encouraged to pre-declare
+    `def compute(self, pred, target, t, *, ctx=None)` to avoid a future break;
+    the caller (loop.py) doesn't pass ctx yet, and when it starts will be
+    announced separately.
     """
 
     def compute(
@@ -37,10 +42,10 @@ class LossProtocol(Protocol):
         target: torch.Tensor,
         t: torch.Tensor,
     ) -> torch.Tensor:
-        """返回 per-element loss tensor，shape 与 pred/target 一致（不做 reduction）。
+        """Return a per-element loss tensor, same shape as pred/target (no reduction applied).
 
-        pred / target — Flow Matching velocity 预测 vs 目标，shape (B, C, *spatial)
-        t              — 当前 batch 的时间步 (B,)，仅 t-dependent loss 需要；
-                         mse / constant-δ huber 可忽略
+        pred / target -- Flow Matching velocity prediction vs. target, shape (B, C, *spatial)
+        t              -- the current batch's timestep (B,), only needed by t-dependent losses;
+                          mse / constant-delta huber can ignore it
         """
         ...

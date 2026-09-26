@@ -1,19 +1,25 @@
-"""测试出图常驻 daemon：复用模型加载，避免每次出图 30-60s reload。
+"""Resident daemon for test generation: reuses the loaded model to avoid a 30-60s
+reload on every generate.
 
-设计要点：
-  - daemon 是个常驻 subprocess（runtime/anima_daemon.py），由 server 进程内的
-    InferenceDaemon 类管理；JSON-over-stdio 协议，stderr 走日志
-  - lazy spawn：第一次有 generate task 来时才起；起来后保持 alive 直到
-    server 关闭、用户主动 unload、或 GPU 让位（commit 12）
-  - 一次跑一个 task（队列由 supervisor 喂；daemon 内部不排队），完成后回 idle
-  - 协议（line-delimited JSON）：
-      stdin  → {"id": "<req_id>", "action": "generate"|"unload"|"ping", ...}
-      stdout → {"id": "<req_id>"|"_evt", "kind": "started"|"image_done"|
+Design highlights:
+  - The daemon is a resident subprocess (runtime/anima_daemon.py), managed by the
+    InferenceDaemon class inside the server process; JSON-over-stdio protocol,
+    with stderr routed to logs
+  - Lazy spawn: only started when the first generate task arrives; once started it
+    stays alive until the server shuts down, the user manually unloads it, or it
+    yields the GPU (commit 12)
+  - Runs one task at a time (the queue is fed by the supervisor; the daemon itself
+    doesn't queue), returning to idle once done
+  - Protocol (line-delimited JSON):
+      stdin  -> {"id": "<req_id>", "action": "generate"|"unload"|"ping", ...}
+      stdout -> {"id": "<req_id>"|"_evt", "kind": "started"|"image_done"|
                  "done"|"error"|"loaded"|"unloaded", ...}
-  - image_done 事件 payload 含 base64 PNG bytes（commit 10 起）；reader
-    把它解码进 generate_cache，再把"瘦身版"事件（去 b64）转发给 supervisor
-    callback，避免大 payload 进日志/SSE 链路
-  - reader thread 把 stdout 事件分发回 callback；调用方（supervisor）注册 callback
+  - The image_done event payload includes base64 PNG bytes (as of commit 10); the
+    reader decodes it into generate_cache, then forwards a "slimmed down" version
+    of the event (with b64 stripped) to the supervisor callback, keeping the large
+    payload out of the logging/SSE pipeline
+  - A reader thread dispatches stdout events back to the callback; the caller (the
+    supervisor) registers the callback
 """
 from __future__ import annotations
 
@@ -36,15 +42,15 @@ from . import disk_cache as generate_cache
 
 logger = logging.getLogger(__name__)
 
-# Daemon 状态机
-STATE_STOPPED = "stopped"      # 子进程未启动 / 已退出
-STATE_STARTING = "starting"    # spawn 中，未收到 ready 信号
-STATE_IDLE = "idle"            # daemon 活着等命令；模型可能已 load 也可能未 load
-STATE_BUSY = "busy"            # daemon 正在跑一个 task
-STATE_UNLOADING = "unloading"  # 收到 unload 指令，等 unloaded 事件
+# Daemon state machine
+STATE_STOPPED = "stopped"      # child process not started / has exited
+STATE_STARTING = "starting"    # spawning, ready signal not yet received
+STATE_IDLE = "idle"            # daemon alive and waiting for commands; model may or may not be loaded
+STATE_BUSY = "busy"            # daemon is currently running a task
+STATE_UNLOADING = "unloading"  # received the unload command, waiting for the unloaded event
 
 
-# Daemon 进程脚本路径
+# Path to the daemon process script
 _DAEMON_SCRIPT = REPO_ROOT / "runtime" / "anima_daemon.py"
 
 
@@ -53,34 +59,40 @@ EventCallback = Callable[[dict[str, Any]], None]
 
 @dataclass
 class _ActiveTask:
-    """daemon 当前在跑的 task（或刚提交还没收到 started 事件的 task）。"""
+    """The task the daemon is currently running (or one just submitted that hasn't
+    received a started event yet)."""
     task_id: int
     request_id: str
     on_event: EventCallback
-    # 决策 #15：task 启动时冻结 secrets.generate.save_test_images，避免中途切开关
-    # 导致一 task 内一半 cache 一半 disk。enqueueGenerate 写 cfg.save_test_images_at_dispatch
-    # → submit_task 读出来存这里 → _handle_image_done 决定 SSE delivery 子字段
+    # Decision #15: freeze secrets.generate.save_test_images when the task starts,
+    # to avoid a mid-task setting flip leaving one task half in cache, half on
+    # disk. enqueueGenerate writes cfg.save_test_images_at_dispatch ->
+    # submit_task reads it and stores it here -> _handle_image_done uses it to
+    # decide the SSE delivery sub-field.
     save_to_disk: bool = False
-    # 前端构造的 GenerateParamsSnapshot dict；image_done 时跟 PNG bytes 一起
-    # 塞进加密 cache payload header，list_index 时返回给前端历史栏回填用。
-    # 走 config.json 透传：路由 → supervisor → daemon.submit_task → 这里。
+    # The GenerateParamsSnapshot dict built by the frontend; on image_done it's
+    # tucked into the encrypted cache payload header alongside the PNG bytes, and
+    # returned to the frontend at list_index time to backfill the history rail.
+    # Passed through via config.json: route -> supervisor -> daemon.submit_task ->
+    # here.
     params_snapshot: dict[str, Any] = field(default_factory=dict)
-    # 'single' | 'xy'；前端历史栏分组用，从 params_snapshot.mode 派生
+    # 'single' | 'xy'; used by the frontend history rail for grouping, derived
+    # from params_snapshot.mode
     mode: str = "single"
     started_at: float = field(default_factory=time.time)
 
 
 class InferenceDaemon:
-    """测试出图 daemon 的服务端代理。线程安全。
+    """Server-side proxy for the test-generation daemon. Thread-safe.
 
-    使用模式（singleton）：
+    Usage pattern (singleton):
         d = InferenceDaemon()
         d.start()
         d.submit_task(task_id=42, config={...}, on_event=cb)
-        # ...等 cb 收到 done 事件
+        # ...wait for cb to receive the done event
         d.stop()
 
-    `on_event` 收到的事件 dict 形如：
+    Event dicts received by `on_event` look like:
         {"kind": "started", "task_id": 42}
         {"kind": "image_done", "task_id": 42, "filename": "gen_0000_p0_c0_s42.png",
                                 "path": "/tmp/anima_gen_42/..."}
@@ -88,8 +100,8 @@ class InferenceDaemon:
         {"kind": "error", "task_id": 42, "message": "..."}
     """
 
-    READY_TIMEOUT = 30.0  # 子进程 import 完成给 ready 的最长等待
-    UNLOAD_TIMEOUT = 60.0  # unload 后等 unloaded 事件最长
+    READY_TIMEOUT = 30.0  # max wait for the ready signal after the child process starts importing
+    UNLOAD_TIMEOUT = 60.0  # max wait for the unloaded event after requesting unload
 
     def __init__(self, *, script_path: Optional[Path] = None) -> None:
         self._script = script_path or _DAEMON_SCRIPT
@@ -101,26 +113,30 @@ class InferenceDaemon:
         self._stderr_thread: Optional[threading.Thread] = None
         self._active: Optional[_ActiveTask] = None
         self._req_seq = 0
-        # 全局 listener（用于 daemon 状态变化：loaded / unloaded / 进程崩溃）
+        # Global listeners (for daemon state changes: loaded / unloaded / process crash)
         self._global_listeners: list[EventCallback] = []
-        # daemon stderr ring buffer + 增量 listener（UI 抽屉用，跨多次 start/stop 持续）
+        # Daemon stderr ring buffer + incremental listeners (used by the UI drawer,
+        # persists across multiple start/stop cycles)
         self._log_lock = threading.Lock()
         self._log_buffer: collections.deque[dict[str, Any]] = collections.deque(maxlen=2000)
         self._log_seq = 0
         self._log_listeners: list[EventCallback] = []
-        # idle timeout：daemon 闲 N 秒（模型已 load）自动 unload 释放 VRAM。
-        # 0 = 关闭。supervisor 在 spawn 后通过 sync_idle_timeout_from_secrets() 注入；
-        # PUT /api/secrets 后 router 也会调一次同步。
+        # Idle timeout: auto-unload to free VRAM after the daemon has been idle
+        # (with the model loaded) for N seconds. 0 = disabled. The supervisor
+        # injects this after spawn via sync_idle_timeout_from_secrets(); the
+        # router also re-syncs it once after PUT /api/secrets.
         self._idle_timeout_seconds: float = 0.0
         self._idle_timer: Optional[threading.Timer] = None
-        # 任务超时兜底（用户反馈：generate 卡死整机只能重启）：任务开始后
-        # 超 N 秒未完成 → 硬杀 daemon 进程（卡死场景协议级 cancel 无效）。
-        # reader 线程 EOF → _handle_proc_exit 自动标 error + 状态复位。
-        # 0 = 关闭（默认）。
+        # Task timeout fallback (based on user reports of a stuck generate
+        # requiring a full machine restart): if a task hasn't finished N seconds
+        # after starting, hard-kill the daemon process (protocol-level cancel is
+        # useless once it's truly stuck). The reader thread hitting EOF ->
+        # _handle_proc_exit automatically marks it error and resets state.
+        # 0 = disabled (default).
         self._task_timeout_seconds: float = 0.0
         self._task_timer: Optional[threading.Timer] = None
 
-    # ---------------------------------------------------------------- 状态
+    # ---------------------------------------------------------------- State
     @property
     def state(self) -> str:
         with self._lock:
@@ -137,7 +153,7 @@ class InferenceDaemon:
 
     @property
     def is_model_loaded(self) -> bool:
-        """模型是否在 VRAM 里（commit 12 GPU 让位判定用）。"""
+        """Whether the model is in VRAM (used by the commit 12 GPU-yield check)."""
         with self._lock:
             return self._model_loaded
 
@@ -145,12 +161,13 @@ class InferenceDaemon:
         with self._lock:
             self._global_listeners.append(cb)
 
-    # --------------------------------------------------------------- idle 自动卸载
+    # --------------------------------------------------------------- idle auto-unload
     def set_idle_timeout_seconds(self, seconds: float) -> None:
-        """设置 daemon 闲置自动 unload 的超时（秒）。0 = 关闭。
+        """Set the timeout (seconds) for auto-unloading the daemon when idle. 0 = disabled.
 
-        定时器只在 daemon idle + 模型已 load + 进程存活 时跑；进 busy / 模型卸了 /
-        进程死了 都会自动 cancel。无需调用方关心。
+        The timer only runs while the daemon is idle + the model is loaded + the
+        process is alive; entering busy / the model being unloaded / the process
+        dying all auto-cancel it. Callers don't need to worry about this.
         """
         secs = max(0.0, float(seconds))
         with self._lock:
@@ -160,12 +177,14 @@ class InferenceDaemon:
             self._reschedule_idle_timer_locked()
 
     def sync_idle_timeout_from_secrets(self) -> None:
-        """从 secrets.generate 读出 idle / 任务超时配置并应用。
+        """Read the idle / task timeout settings from secrets.generate and apply them.
 
-        失败（文件坏 / 字段缺）走 fallback：不改当前值，记一行 warning。
+        On failure (corrupt file / missing field), falls back to leaving the
+        current value unchanged and logs a warning.
         """
         try:
-            # 局部 import 避免 services/inference → infrastructure 模块层循环
+            # Local import to avoid a module-layer cycle between services/inference
+            # and infrastructure
             from ...infrastructure import secrets as _secrets
             gen = _secrets.load().generate
             minutes = int(gen.idle_timeout_minutes)
@@ -181,10 +200,12 @@ class InferenceDaemon:
             self._task_timeout_seconds = max(0, task_minutes) * 60.0
 
     def _reschedule_idle_timer_locked(self) -> None:
-        """根据当前状态重置 idle timer。**必须持 self._lock 调用。**
+        """Reset the idle timer based on current state. **Must be called while
+        holding self._lock.**
 
-        cancel 旧 timer；当 timeout>0 + IDLE + 模型 loaded + 进程存活 时起新 timer。
-        其余情况只 cancel 不重启（包括 BUSY / UNLOADING / STOPPED / 模型未 load）。
+        Cancels the old timer; starts a new one when timeout>0 + IDLE + model
+        loaded + process alive. In every other case (including BUSY / UNLOADING /
+        STOPPED / model not loaded), it only cancels without restarting.
         """
         old = self._idle_timer
         if old is not None:
@@ -206,7 +227,7 @@ class InferenceDaemon:
             timer.start()
 
     def _cancel_task_timer_locked(self) -> None:
-        """取消任务超时 timer。**必须持 self._lock 调用。**"""
+        """Cancel the task timeout timer. **Must be called while holding self._lock.**"""
         if self._task_timer is not None:
             try:
                 self._task_timer.cancel()
@@ -215,12 +236,14 @@ class InferenceDaemon:
             self._task_timer = None
 
     def _on_task_timeout(self, req_id: str) -> None:
-        """任务超时兜底：仍在跑同一任务 → 硬杀 daemon 进程。
+        """Task timeout fallback: if this same task is still running, hard-kill the
+        daemon process.
 
-        卡死场景（整机换页 / GPU hang）协议级 cancel 无效，只能进程级
-        kill；reader 线程随后 EOF → _handle_proc_exit 标 error + 状态
-        复位，下次任务自动重新 spawn。触发瞬间任务可能刚完成——按
-        request_id 复核后再杀。
+        In a truly stuck scenario (a hung page / GPU hang), protocol-level cancel
+        is useless -- only a process-level kill works; the reader thread then hits
+        EOF -> _handle_proc_exit marks it error and resets state, and the next
+        task auto-respawns the daemon. The task might have just finished right as
+        this fires -- re-verify by request_id before killing.
         """
         with self._lock:
             active = self._active
@@ -241,10 +264,11 @@ class InferenceDaemon:
             logger.exception("task-timeout kill failed")
 
     def _on_idle_timeout(self) -> None:
-        """idle timer 到期回调：仍 idle+loaded 时触发 unload。
+        """Idle timer expiry callback: triggers unload if still idle+loaded.
 
-        触发瞬间状态可能已变（其他线程刚 submit_task / 手动 unload）；
-        重新检查再走 request_unload，避免冗余协议消息。
+        State may have already changed by the moment this fires (another thread
+        just called submit_task / a manual unload); re-check before calling
+        request_unload, to avoid a redundant protocol message.
         """
         with self._lock:
             should_unload = (
@@ -261,9 +285,9 @@ class InferenceDaemon:
         except Exception:
             logger.exception("auto unload from idle timer failed")
 
-    # --------------------------------------------------------------- 生命周期
+    # --------------------------------------------------------------- Lifecycle
     def start(self) -> None:
-        """spawn daemon 子进程；已在跑直接返回。"""
+        """Spawn the daemon child process; returns immediately if already running."""
         with self._lock:
             if self._state != STATE_STOPPED:
                 return
@@ -276,8 +300,9 @@ class InferenceDaemon:
         env.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         env.setdefault("TRANSFORMERS_VERBOSITY", "error")
         env.setdefault("DIFFUSERS_VERBOSITY", "error")
-        # xformers 的 triton 探测会把无害的 ImportError traceback 打进 daemon
-        # 日志抽屉；本 app 的 xformers 路径不用 triton kernel，无条件短路。
+        # xformers's triton probe would dump a harmless ImportError traceback into
+        # the daemon log drawer; this app's xformers path doesn't use triton
+        # kernels, so short-circuit it unconditionally.
         _xformers_svc.disable_triton_probe(env)
 
         creationflags = 0
@@ -309,7 +334,7 @@ class InferenceDaemon:
 
         with self._lock:
             self._proc = proc
-            # reader thread 处理 stdout（协议）
+            # reader thread handles stdout (the protocol)
             self._reader_thread = threading.Thread(
                 target=self._read_stdout_loop,
                 args=(proc,),
@@ -317,7 +342,7 @@ class InferenceDaemon:
                 daemon=True,
             )
             self._reader_thread.start()
-            # stderr thread 把日志转发到本进程 logger
+            # stderr thread forwards log lines to this process's logger
             self._stderr_thread = threading.Thread(
                 target=self._read_stderr_loop,
                 args=(proc,),
@@ -326,7 +351,7 @@ class InferenceDaemon:
             )
             self._stderr_thread.start()
 
-        # 等 ready
+        # wait for ready
         deadline = time.time() + self.READY_TIMEOUT
         while time.time() < deadline:
             with self._lock:
@@ -338,13 +363,13 @@ class InferenceDaemon:
         raise TimeoutError(f"daemon not ready in {self.READY_TIMEOUT}s")
 
     def stop(self, timeout: float = 10.0) -> None:
-        """关闭 daemon 子进程。优雅 → 强杀。"""
+        """Shut down the daemon child process. Graceful first, then force-kill."""
         with self._lock:
             proc = self._proc
             if proc is None:
                 self._state = STATE_STOPPED
                 return
-        # 关 stdin → daemon 主循环 EOF 退出
+        # close stdin -> the daemon's main loop exits on EOF
         try:
             if proc.stdin:
                 proc.stdin.close()
@@ -366,7 +391,7 @@ class InferenceDaemon:
             self._active = None
             self._reschedule_idle_timer_locked()
 
-    # ----------------------------------------------------------------- 提交
+    # ----------------------------------------------------------------- Submission
     def submit_task(
         self,
         *,
@@ -375,9 +400,10 @@ class InferenceDaemon:
         output_dir: str,
         on_event: EventCallback,
     ) -> str:
-        """提交一个 generate task 给 daemon。daemon 必须 idle。
+        """Submit a generate task to the daemon. The daemon must be idle.
 
-        返回 request_id。同步发命令；后续事件通过 on_event 异步推。
+        Returns request_id. The command is sent synchronously; subsequent events
+        are pushed asynchronously via on_event.
         """
         with self._lock:
             if self._state != STATE_IDLE:
@@ -401,7 +427,7 @@ class InferenceDaemon:
             )
             self._state = STATE_BUSY
             self._reschedule_idle_timer_locked()
-            # 任务超时兜底 timer（0=关闭）
+            # task timeout fallback timer (0 = disabled)
             self._cancel_task_timer_locked()
             if self._task_timeout_seconds > 0:
                 timer = threading.Timer(
@@ -414,8 +440,10 @@ class InferenceDaemon:
             assert self._proc is not None and self._proc.stdin is not None
             stdin = self._proc.stdin
 
-        # snapshot 是 server 内部协议字段，不传给 daemon 子进程（避免下游
-        # config schema 校验拒未知字段；下划线前缀本就提示"server-only"）。
+        # snapshot is a server-internal protocol field; not passed to the daemon
+        # child process (to avoid the downstream config schema validation
+        # rejecting an unknown field; the underscore prefix already signals
+        # "server-only").
         if "_anima_params_snapshot_" in config:
             config = {k: v for k, v in config.items() if k != "_anima_params_snapshot_"}
         msg = {
@@ -438,7 +466,8 @@ class InferenceDaemon:
         return req_id
 
     def cancel_active_task(self, task_id: int) -> bool:
-        """请求取消当前 generate task；daemon 保持常驻，模型缓存不卸载。"""
+        """Request cancellation of the current generate task; the daemon stays
+        resident and the cached model isn't unloaded."""
         with self._lock:
             active = self._active
             if self._state != STATE_BUSY or active is None or active.task_id != task_id:
@@ -460,9 +489,11 @@ class InferenceDaemon:
         return True
 
     def request_unload(self) -> None:
-        """通知 daemon 卸载模型（释放 VRAM）。daemon 处理完会推 unloaded 事件。
+        """Notify the daemon to unload the model (freeing VRAM). Once done, the
+        daemon pushes an unloaded event.
 
-        commit 9 不暴露给前端；为 commit 12 GPU 让位 / commit 13 手动卸载预留。
+        Not exposed to the frontend as of commit 9; reserved for commit 12's GPU
+        yielding / commit 13's manual unload.
         """
         with self._lock:
             if self._state == STATE_STOPPED:
@@ -480,9 +511,9 @@ class InferenceDaemon:
         except Exception:
             logger.exception("failed to send unload")
 
-    # ----------------------------------------------------------- 内部 reader
+    # ----------------------------------------------------------- Internal readers
     def _read_stdout_loop(self, proc: subprocess.Popen) -> None:
-        """读 daemon stdout 行 → JSON 解析 → 分发。"""
+        """Read daemon stdout lines -> parse JSON -> dispatch."""
         assert proc.stdout is not None
         try:
             for raw_line in proc.stdout:
@@ -501,15 +532,18 @@ class InferenceDaemon:
             self._handle_proc_exit(proc)
 
     def _read_stderr_loop(self, proc: subprocess.Popen) -> None:
-        """daemon stderr → ring buffer + log listeners。
+        """daemon stderr -> ring buffer + log listeners.
 
-        不打 terminal —— 通过 UI 抽屉查看（/api/generate/daemon/logs 拉历史，
-        daemon_log_line SSE 推增量）。terminal 安静、需要时再开抽屉。
+        Not printed to the terminal -- viewed through the UI drawer instead
+        (/api/generate/daemon/logs fetches history, daemon_log_line SSE pushes
+        deltas). Keeps the terminal quiet; open the drawer when you need it.
 
-        B-4.5: reader 崩溃后 daemon 仍活着但 stderr 不再被消费 → UI 抽屉永远空
-        + daemon OOM / 模型加载报错全看不到。改造：crash 后自动 restart 一次；
-        restart 也炸再标 STOPPED 并 emit warning event。proc 仍存活 + reader 死
-        → silent failure 是最严重的可观测性 hole。
+        B-4.5: if the reader crashes, the daemon keeps running but its stderr
+        stops being consumed -> the UI drawer stays empty forever and daemon
+        OOM / model-loading errors become completely invisible. Fix: auto-restart
+        once after a crash; if the restart also blows up, mark STOPPED and emit a
+        warning event. proc still alive + reader dead is the worst kind of
+        observability hole.
         """
         assert proc.stderr is not None
         attempt = 0
@@ -520,17 +554,17 @@ class InferenceDaemon:
                     line = raw_line.rstrip()
                     if line:
                         self._append_log(line)
-                # 正常 EOF（proc 退出 stderr 关闭）— 退出 loop
+                # normal EOF (proc exited, stderr closed) -- exit the loop
                 return
             except Exception:
                 logger.exception(
                     "daemon stderr reader crashed (attempt %d/2)", attempt
                 )
                 if attempt < 2 and proc.poll() is None:
-                    # 短暂 backoff 再 restart 本 loop
+                    # brief backoff, then restart this loop
                     time.sleep(0.5)
                     continue
-        # 两次都 crash 且 proc 还活着 → daemon 处于不可观测状态
+        # both attempts crashed and proc is still alive -> the daemon is now unobservable
         if proc.poll() is None:
             logger.error(
                 "daemon stderr reader gave up after 2 attempts; daemon (pid=%d) "
@@ -540,13 +574,14 @@ class InferenceDaemon:
             for cb in list(self._log_listeners):
                 try:
                     cb({"ts": time.time(), "seq": -1,
-                        "line": "[stderr reader stopped — daemon log no longer captured]"})
+                        "line": "[stderr reader stopped -- daemon log no longer captured]"})
                 except Exception:
                     logger.exception("daemon log listener failed during stderr-down emit")
 
     # ----------------------------------------------------------- log buffer
     def _append_log(self, line: str) -> None:
-        """收 daemon stderr 一行 → ring buffer + 推给 listeners（线程安全）。"""
+        """Receive one line of daemon stderr -> ring buffer + push to listeners
+        (thread-safe)."""
         entry = {"ts": time.time(), "line": line}
         with self._log_lock:
             self._log_buffer.append(entry)
@@ -561,9 +596,11 @@ class InferenceDaemon:
                 logger.exception("daemon log listener failed")
 
     def read_logs(self, since_seq: int = 0, limit: int = 2000) -> dict[str, Any]:
-        """返回 ring buffer 历史。since_seq>0 时只返新于该 seq 的行（增量）。"""
+        """Return ring buffer history. When since_seq>0, only returns lines newer
+        than that seq (delta)."""
         with self._log_lock:
-            # buffer 里存的没带 seq，按 buffer 末尾 = _log_seq - 1 反推
+            # entries stored in the buffer don't carry a seq; derive it by working
+            # backward from buffer end = _log_seq - 1
             total = self._log_seq
             start_seq = max(0, total - len(self._log_buffer))
             entries = []
@@ -577,27 +614,29 @@ class InferenceDaemon:
         return {"entries": entries, "next_seq": total}
 
     def add_log_listener(self, cb: EventCallback) -> None:
-        """注册 daemon log 增量 listener；cb(entry) 收到 {ts, line, seq}。"""
+        """Register a daemon log delta listener; cb(entry) receives {ts, line, seq}."""
         with self._log_lock:
             self._log_listeners.append(cb)
 
     def _handle_event(self, msg: dict[str, Any]) -> None:
-        """分发协议消息。task 事件路由到 _active.on_event；全局事件给 listeners。"""
+        """Dispatch a protocol message. Task events route to _active.on_event;
+        global events go to the listeners."""
         kind = msg.get("kind")
         msg_id = msg.get("id")
 
         if msg_id == "_evt":
-            # daemon 全局状态事件
+            # a daemon global state event
             with self._lock:
                 if kind == "ready":
                     self._state = STATE_IDLE
                     self._model_loaded = False
                 elif kind == "loaded":
-                    self._model_loaded = True  # 状态保持 IDLE
+                    self._model_loaded = True  # state stays IDLE
                 elif kind == "unloaded":
                     self._state = STATE_IDLE
                     self._model_loaded = False
-                # `loaded` 进入 idle+loaded → 启动 idle timer；`unloaded` 模型走 → cancel
+                # `loaded` entering idle+loaded -> start the idle timer; `unloaded`
+                # (model gone) -> cancel it
                 if kind in ("ready", "loaded", "unloaded"):
                     self._reschedule_idle_timer_locked()
             for cb in list(self._global_listeners):
@@ -607,21 +646,26 @@ class InferenceDaemon:
                     logger.exception("global listener failed")
             return
 
-        # task 事件
+        # task events
         with self._lock:
             active = self._active
         if active is None or active.request_id != msg_id:
             logger.warning("event for unknown request: %s", msg_id)
             return
 
-        # commit 10：image_done 含 base64 PNG → 入 cache，转发瘦身版（无 b64）
-        # commit 14：preview_step 含 base64 JPEG → 直接透传给 callback（不入 cache，
-        #   前端 SSE 收到立刻 <img src="data:..."> 显示当前步预览；done/最终图
-        #   会替换它）
-        # 决策 #14：image_done 加 `delivery: 'disk' | 'cache'` 子字段，前端按此
-        # 走 POST /api/generate/save 落盘（disk）or 直接 add CacheEntry（cache）。
-        # 仍走 cache 中转（持久模式下 cache 是落盘前的临时存放，前端落盘成功后
-        # 用户可手动删 cache 或等 LRU 自然剔）。
+        # commit 10: image_done carries base64 PNG -> goes into the cache, a
+        # slimmed-down version (without b64) is forwarded
+        # commit 14: preview_step carries base64 JPEG -> passed straight through
+        #   to the callback (not cached; the frontend's SSE displays it
+        #   immediately as <img src="data:...">  as the current step's preview;
+        #   done/the final image replaces it)
+        # Decision #14: image_done gets a `delivery: 'disk' | 'cache'` sub-field
+        # so the frontend knows whether to POST /api/generate/save to persist it
+        # to disk, or just add a CacheEntry directly (cache). Both still route
+        # through the cache as a staging point (in persistent mode, the cache is
+        # temporary storage before the disk write; once the frontend's disk write
+        # succeeds, the user can manually clear the cache entry or let LRU evict
+        # it naturally).
         forward_msg = msg
         if kind == "image_done" and "image_b64" in msg:
             filename = msg.get("filename") or ""
@@ -639,14 +683,16 @@ class InferenceDaemon:
             forward_msg = {k: v for k, v in msg.items() if k != "image_b64"}
             forward_msg["delivery"] = "disk" if active.save_to_disk else "cache"
 
-        # done/error/canceled 先切状态，再回调 —— 让 callback 内查询 is_busy/state 时
-        # 看到准确的 IDLE 状态（commit 13 daemon_state_changed 依赖这个顺序）
+        # For done/error/canceled, flip state before invoking the callback -- so
+        # that if the callback queries is_busy/state, it sees the correct IDLE
+        # state (commit 13's daemon_state_changed depends on this ordering)
         if kind in ("done", "error", "canceled"):
             with self._lock:
                 self._active = None
                 self._state = STATE_IDLE
                 self._cancel_task_timer_locked()
-                # task 完成回 idle；模型还在 → 重启 idle 倒计时
+                # task finished, back to idle; if the model is still loaded, restart
+                # the idle countdown
                 self._reschedule_idle_timer_locked()
 
         try:
@@ -655,7 +701,8 @@ class InferenceDaemon:
             logger.exception("task on_event handler failed")
 
     def _handle_proc_exit(self, proc: subprocess.Popen) -> None:
-        """子进程退出处理：标 STOPPED + 给 active task 推 error + 通知 listeners。"""
+        """Handle child process exit: mark STOPPED + push error to the active task
+        + notify listeners."""
         rc = proc.wait()
         logger.warning("inference daemon exited rc=%d", rc)
         with self._lock:
@@ -686,13 +733,13 @@ class InferenceDaemon:
                 logger.exception("listener failed on proc exit")
 
 
-# Singleton 句柄；server 启动时初始化（lazy spawn）
+# Singleton handle; initialized on server startup (lazy spawn)
 _INSTANCE: Optional[InferenceDaemon] = None
 _INSTANCE_LOCK = threading.Lock()
 
 
 def get_daemon() -> InferenceDaemon:
-    """返回单例 daemon 实例（懒构造）。"""
+    """Return the singleton daemon instance (lazily constructed)."""
     global _INSTANCE
     with _INSTANCE_LOCK:
         if _INSTANCE is None:
@@ -701,7 +748,7 @@ def get_daemon() -> InferenceDaemon:
 
 
 def reset_daemon_for_test() -> None:
-    """测试用：清掉 singleton 让下个测试拿干净实例。"""
+    """For tests: clear the singleton so the next test gets a clean instance."""
     global _INSTANCE
     with _INSTANCE_LOCK:
         if _INSTANCE is not None:

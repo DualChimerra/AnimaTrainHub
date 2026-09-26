@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { TranslatedTag } from './tagDisplay/TranslatedTag'
 import { TagSuggestList } from './tagSuggest/TagSuggestList'
 import { useTagSuggest } from './tagSuggest/useTagSuggest'
 
@@ -110,7 +109,7 @@ export default function TagStatsPanel({
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
           <input className="ds-inp" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t('tagStats.filterPlaceholder')} aria-label={t('tagStats.filterPlaceholder')} />
         </span>
-        <select className="ds-inp" style={{ width: 74, flex: 'none' }} value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label={t('tagStats.sortLabel')}>
+        <select className="ds-inp" style={{ width: 104, flex: 'none' }} value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label={t('tagStats.sortLabel')}>
           <option value="count_desc">{t('tagStats.sortCountDesc')}</option>
           <option value="count_asc">{t('tagStats.sortCountAsc')}</option>
           <option value="name_asc">{t('tagStats.sortNameAsc')}</option>
@@ -151,7 +150,7 @@ export default function TagStatsPanel({
             >
               <div className="ds-kv" style={{ padding: '0 0 3px' }}>
                 <span className="ds-k ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isTrigger ? 'var(--green-text)' : picked ? 'var(--ink)' : undefined }}>
-                  <TranslatedTag tag={tag} />
+                  {tag}
                 </span>
                 <span className="ds-v">{c}</span>
               </div>

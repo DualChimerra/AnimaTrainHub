@@ -1,15 +1,16 @@
-"""预处理状态 manifest（单 JSON 文件，version 级）。
+"""Preprocess status manifest (single JSON file, per version).
 
-设计见 [ADR 0010](../../docs/adr/0010-preprocess-train-scope.md)
-（supersedes ADR 0004 — 老的项目级 preprocess/manifest.json 已只剩只读
-fallback 给 ensure_train_manifest 老项目迁移用，不再 mutation）。
+Design: see [ADR 0010](../../docs/adr/0010-preprocess-train-scope.md)
+(supersedes ADR 0004 - the old project-level preprocess/manifest.json is now
+read-only, kept only as a fallback source for ensure_train_manifest to
+migrate old projects; nothing mutates it anymore).
 
-简而言之
+In short
 --------
-`projects/{id}-{slug}/versions/{label}/train/manifest.json` 记录该 version
-train/ 下每张图的 origin + 状态。
+`projects/{id}-{slug}/versions/{label}/train/manifest.json` records, for that
+version's train/ directory, each image's origin + status.
 
-schema（写入用）— 极简：
+Schema (as written) - deliberately minimal:
 
     {
       "images": {
@@ -19,17 +20,17 @@ schema（写入用）— 极简：
       }
     }
 
-字段：
-- entry key = train/ 下的 POSIX 相对路径 `"{folder}/{filename}"`
-- `origin` = 该图回溯到 `download/` 里的源文件名（multi-crop 派生共享 origin）
-- `processed` = 是否经过 upscale / crop（worker 写 True；curate 复制不写）
-- `kind: "duplicate_removed"` 标记人工审核确认跳过；不删 train/ 物理文件
+Fields:
+- entry key = POSIX-style relative path under train/, `"{folder}/{filename}"`
+- `origin` = the source filename this image traces back to in `download/` (multi-crop derivatives share an origin)
+- `processed` = whether it went through upscale/crop (the worker sets True; a plain curate copy doesn't set it)
+- `kind: "duplicate_removed"` marks a manually reviewed skip; the physical file in train/ is not deleted
 
-「manifest 没记的图」= 隐式 original（train/ 文件由 curate 阶段刚复制进来）。
+An image with no manifest entry is an implicit original (its train/ file was just copied in by the curate stage).
 
-并发写
-------
-服务端单进程，没跨进程写者：`threading.Lock` 串行化进程内所有 mutation。
+Concurrent writes
+-----------------
+Single server process, no cross-process writers: a `threading.Lock` serializes all in-process mutations.
 """
 from __future__ import annotations
 
@@ -45,12 +46,12 @@ from . import masks as train_masks
 MANIFEST_NAME = "manifest.json"
 DUPLICATE_REMOVED_KIND = "duplicate_removed"
 
-# 进程内串行锁。所有 mutation 必须 `with _LOCK:`；read 不需要（json.load 原子）。
+# In-process serialization lock. Every mutation must go `with _LOCK:`; reads don't need it (json.load is atomic).
 _LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
-# 路径
+# paths
 # ---------------------------------------------------------------------------
 
 
@@ -59,7 +60,7 @@ def manifest_path(project_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 读 / 写
+# read / write
 # ---------------------------------------------------------------------------
 
 
@@ -68,10 +69,11 @@ def _empty_manifest() -> dict[str, Any]:
 
 
 def load(project_dir: Path) -> dict[str, Any]:
-    """读 manifest；不存在或损坏 → 空 manifest（不抛）。
+    """Read the manifest; missing or corrupt -> empty manifest (never raises).
 
-    单次 read 不上锁——`json.load` 原子，最坏情况是读到旧版本，不会读到半写入。
-    `_atomic_write` 用 tmp+rename 保证 rename 是原子的。
+    A single read takes no lock - `json.load` is atomic, so the worst case is
+    reading a stale version, never a half-written one. `_atomic_write` uses
+    tmp+rename so the rename itself is atomic.
     """
     path = manifest_path(project_dir)
     if not path.exists():
@@ -82,46 +84,46 @@ def load(project_dir: Path) -> dict[str, Any]:
             return _empty_manifest()
         return raw
     except (OSError, json.JSONDecodeError):
-        # 损坏不抛——下次写时会覆盖成合法的；上游一致看到空 manifest
+        # Don't raise on corruption - the next write overwrites it with something valid; callers consistently see an empty manifest until then
         return _empty_manifest()
 
 
 def _atomic_write(path: Path, data: dict[str, Any]) -> None:
-    """tmp+rename 原子写。同分区写入 + os.replace 保证 reader 永远看到完整 JSON。"""
+    """Atomic tmp+rename write. Same-partition write + os.replace guarantees readers always see complete JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(
         json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    os.replace(tmp, path)  # 跨平台原子 rename
+    os.replace(tmp, path)  # cross-platform atomic rename
 
 
 # ---------------------------------------------------------------------------
-# Resolver — 下游统一入口
+# Resolver - unified downstream entry point
 # ---------------------------------------------------------------------------
 
 
 def entry_origin(entry: dict[str, Any], fallback_name: str) -> str:
-    """从一条 entry 提取 origin（指向 download/{...} 的文件名）。
+    """Extract origin from an entry (the filename under download/{...} it points to).
 
-    缺 `origin` 则用 entry 自身的 key（1:1 同名兜底）。
+    Falls back to the entry's own key if `origin` is missing (1:1 same-name assumption).
     """
     return entry.get("origin") or fallback_name
 
 
 def is_duplicate_removed_entry(entry: Optional[dict[str, Any]]) -> bool:
-    """是否为人工去重审核确认跳过的 manifest entry。"""
+    """Whether a manifest entry was manually reviewed and confirmed as a skip during dedup."""
     return bool(entry and entry.get("kind") == DUPLICATE_REMOVED_KIND)
 
 
 def resolve(project_dir: Path, name: str) -> Optional[Path]:
-    """给定产物文件名（如 `foo.png`），返回它实际指向的磁盘路径。
+    """Given a product filename (e.g. `foo.png`), return the disk path it actually refers to.
 
-    隐式 original   → `download/{name}`（即使该图不存在；resolver 不做存在性检查）
-    manifest 有 entry → `preprocess/{name}`
+    Implicit original -> `download/{name}` (even if the file doesn't exist; the resolver doesn't check existence)
+    Has a manifest entry -> `preprocess/{name}`
 
-    存在性由调用方按需 `.exists()` 检查——这样列图时一次 stat 即可，不重复。
+    Callers check existence with `.exists()` as needed - this way listing images only needs one stat, no duplicates.
     """
     m = load(project_dir)
     entry = m["images"].get(name)
@@ -131,11 +133,11 @@ def resolve(project_dir: Path, name: str) -> Optional[Path]:
 
 
 def resolve_origin(project_dir: Path, download_name: str) -> list[Path]:
-    """反向 resolve：给一个 download/{name}，列出 preprocess/ 里所有派生产物。
+    """Reverse resolve: given a download/{name}, list every derivative product under preprocess/.
 
-    - manifest 有 processed entries with `origin == download_name` → 返回它们 [preprocess/X]
-    - 只有 duplicate_removed entries 追溯到该 origin → 返回 []（下游跳过）
-    - 没有匹配 entry → 回退到 [download/download_name]（隐式 original）
+    - Manifest has processed entries with `origin == download_name` -> return them [preprocess/X]
+    - Only duplicate_removed entries trace back to this origin -> return [] (downstream skips it)
+    - No matching entry -> fall back to [download/download_name] (implicit original)
     """
     m = load(project_dir)
     removed = False
@@ -155,21 +157,25 @@ def resolve_origin(project_dir: Path, download_name: str) -> list[Path]:
 
 
 def get_entry(project_dir: Path, name: str) -> Optional[dict[str, Any]]:
-    """读单条 entry（不存在返 None）。给 thumb endpoint resolve_origin fallback 用。"""
+    """Read a single entry (None if missing). Used by the thumb endpoint's resolve_origin fallback."""
     m = load(project_dir)
     return m["images"].get(name)
 
 
 # ---------------------------------------------------------------------------
-# ADR 0010 — per-version train/ manifest（fallback 重建）
+# ADR 0010 - per-version train/ manifest (fallback rebuild)
 #
-# 新模型把 preprocess 产物落到 versions/{label}/train/，状态记到同位
-# manifest.json。本节只暴露 fallback 入口：第一次访问某 version 的 train
-# manifest 时，按老 project 级 preprocess/manifest.json 隐式重建。
+# The current model writes preprocess products to versions/{label}/train/,
+# with status recorded in the manifest.json alongside it. This section only
+# exposes the fallback entry point: the first time a version's train
+# manifest is accessed, it's implicitly rebuilt from the old project-level
+# preprocess/manifest.json.
 #
-# 详 docs/adr/0010-preprocess-train-scope.md + docs/design/preprocess-train-scope-plan.md §3.2。
-# 重写逻辑只读老 manifest 元数据，不复制图像 bytes（train/ 已是处理后产物
-# 由 curate 阶段复制进去，新模型唯一丢失的是 origin 反查关系）。
+# See docs/adr/0010-preprocess-train-scope.md + docs/design/preprocess-train-scope-plan.md
+# section 3.2. The rebuild only reads the old manifest's metadata, it doesn't
+# copy image bytes (train/ already holds the processed products, copied in by
+# the curate stage; the only thing the new model loses is the origin
+# back-reference).
 # ---------------------------------------------------------------------------
 
 TRAIN_MANIFEST_VERSION = 2
@@ -180,14 +186,16 @@ def train_manifest_path(project_dir: Path, version_label: str) -> Path:
 
 
 def _scan_train_images(train_dir: Path) -> set[str]:
-    """递归 train_dir 一级 sub-folder 收集图片相对路径（POSIX 形式）。
+    """Collect image relative paths (POSIX form) from train_dir's immediate sub-folders.
 
-    LoRA 训练用 repeat folder 结构：`train/1_data/X.png` 而不是 `train/X.png`
-    （`{N_label}/{image}` 由 dataset_config.toml 解析）。manifest entry key
-    用 POSIX 相对路径表达跨 folder 唯一性（同名图可在多个 folder 重复出现）。
+    LoRA training uses a repeat-folder layout: `train/1_data/X.png`, not
+    `train/X.png` (`{N_label}/{image}` is what dataset_config.toml parses).
+    Manifest entry keys use the POSIX relative path to disambiguate across
+    folders (the same filename can legitimately appear in more than one
+    folder).
 
-    根目录直接放的图忽略（不该有，但防御）；非 image 文件（caption .txt /
-    arbitrary）也忽略。
+    Images placed directly at the root are ignored (shouldn't happen, but
+    defensive); non-image files (caption .txt / anything else) are also ignored.
     """
     from ..dataset.scan import IMAGE_EXTS
 
@@ -206,18 +214,22 @@ def _scan_train_images(train_dir: Path) -> set[str]:
 def _build_train_manifest_from_legacy(
     legacy: dict[str, Any], train_rel_paths: set[str]
 ) -> dict[str, Any]:
-    """从老 project 级 manifest 抽出 train/ 里实际存在的图的 origin 关系。
+    """Extract origin relationships for images that actually exist under train/, from the old project-level manifest.
 
-    老 manifest entry name 是平铺产物名（如 `X.png`，不含 folder 前缀）。
-    新 train/ 实际位置在 sub-folder 里（如 `1_data/X.png`）。匹配规则：
+    The old manifest's entry names are flat product names (e.g. `X.png`, no
+    folder prefix). The new train/ layout puts them in a sub-folder (e.g.
+    `1_data/X.png`). Matching rule:
 
-    - 按文件名（rel path 的末段）建索引
-    - 老 entry name 找到任意同名 train 文件 → 用该 train rel path 作新 key
-    - 跨 sub-folder 同名 → 给每个匹配的 rel path 各加一条 entry（保守，让
-      用户在 UI 自决；罕见但合法）
+    - Index by filename (the last path segment)
+    - If an old entry's name matches any train file with the same name, use
+      that train relative path as the new key
+    - If the same name appears in multiple sub-folders, add one entry per
+      matching relative path (conservative - let the user decide in the UI;
+      rare but valid)
 
-    跳过：(1) train/ 没匹配文件名的 entry、(2) duplicate_removed 老 entry
-    （人工去重审核状态不跨模型迁移；新模型走 version 级独立记录）。
+    Skipped: (1) old entries with no matching filename under train/, (2) old
+    duplicate_removed entries (manual dedup-review state doesn't migrate
+    across models; the new model tracks it per-version independently).
     """
     by_filename: dict[str, list[str]] = {}
     for rel in train_rel_paths:
@@ -243,42 +255,46 @@ def _build_train_manifest_from_legacy(
 
 
 def ensure_train_manifest(project_dir: Path, version_label: str) -> Path:
-    """幂等：保证 versions/{label}/train/manifest.json 存在；返回路径。
+    """Idempotent: ensures versions/{label}/train/manifest.json exists; returns its path.
 
-    Fallback 重建规则（详 ADR 0010 §决策）：
+    Fallback rebuild rules (see ADR 0010 "Decision" section):
 
-    1. 目标已存在 → 直接返回（O(1) stat，热路径无开销）
-    2. 不存在 + 老 `preprocess/manifest.json` 存在 → 按 train/ 实际文件名
-       匹配老 entry origin 重建 v2 schema
-    3. 老 manifest 也不存在 / 损坏 → 写空 v2 manifest
+    1. Target already exists -> return it directly (O(1) stat, no overhead on the hot path)
+    2. Doesn't exist + the old `preprocess/manifest.json` exists -> rebuild a
+       v2-schema manifest by matching train/'s actual filenames against the
+       old entries' origins
+    3. Old manifest also missing / corrupt -> write an empty v2 manifest
 
-    train/ 目录不存在时**也会创建**（首次访问该 version 时该目录可能还空）。
+    The train/ directory is also **created** if missing (it may still be
+    empty the first time this version is accessed).
 
-    所有 train manifest read 入口都该先过这一道（防御性，幂等代价 = 1 次
-    stat）。fork version 时（`versions.py:create_version`）也显式调一次防止
-    源 manifest 损坏。
+    Every train manifest read path should go through this first (defensive;
+    the idempotent cost is one stat). Forking a version
+    (`versions.py:create_version`) also calls it explicitly to protect
+    against a corrupt source manifest.
 
-    PR-1 范围：本函数 + 测试。**调用点的接入在 PR-2 范围**（manifest 模块
-    瘦身时一并接进所有 read/write 入口）。
+    PR-1 scope: this function + tests. **Wiring it into call sites is PR-2
+    scope** (done alongside slimming down the manifest module, across all
+    read/write entry points).
     """
     target = train_manifest_path(project_dir, version_label)
     if target.exists():
         return target
 
     train_dir = target.parent
-    legacy_path = manifest_path(project_dir)  # 项目级老 manifest
+    legacy_path = manifest_path(project_dir)  # old project-level manifest
 
     with _LOCK:
-        # 双检查：拿锁后再看一次（可能别人刚建完）
+        # Double-check after acquiring the lock (someone else may have just created it)
         if target.exists():
             return target
 
         train_dir.mkdir(parents=True, exist_ok=True)
 
-        # 收集 train/ 里的图（递归一级 sub-folder，LoRA repeat folder 结构）
+        # Collect images under train/ (immediate sub-folders, LoRA repeat-folder layout)
         train_rel_paths = _scan_train_images(train_dir)
 
-        # 读老 manifest（不存在 / 损坏 → 空，跟 load() 一致语义）
+        # Read the old manifest (missing / corrupt -> empty, same semantics as load())
         legacy: dict[str, Any]
         if legacy_path.exists():
             try:
@@ -295,20 +311,24 @@ def ensure_train_manifest(project_dir: Path, version_label: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# ADR 0010 — train-scope manifest API
+# ADR 0010 - train-scope manifest API
 #
-# 项目 scope 老 API 已删；本节是当前唯一 mutation API。
+# The old project-scope API has been removed; this section is the sole
+# mutation API today.
 #
-# 关键语义：
-# - manifest 落 `versions/{label}/train/manifest.json`
-# - entry key 用 **POSIX 相对路径**（如 `"1_data/X.png"`），表达 LoRA repeat
-#   folder 结构（`train/{N_label}/{image}`）；跨 folder 同名图各自独立 entry
-# - `train_restore(name)` = 从 `download/{entry.origin}` 复制覆盖回 `train/{name}`
-#   （不是删 entry；详 ADR 0010 §Restore 语义）；缺 origin 文件时 → no_origin 列表
-# - `train_add_processed` size 兜底 stat `train/{name}`
-# - 所有 train_xxx 进 mutation 前先调 ensure_train_manifest（防御性，幂等）
+# Key semantics:
+# - the manifest lives at `versions/{label}/train/manifest.json`
+# - entry keys are **POSIX relative paths** (e.g. `"1_data/X.png"`),
+#   expressing the LoRA repeat-folder layout (`train/{N_label}/{image}`);
+#   same-name images in different folders get independent entries
+# - `train_restore(name)` = copy `download/{entry.origin}` back over
+#   `train/{name}` (it does not delete the entry; see ADR 0010's Restore
+#   semantics section); if the origin file is missing, the name goes on the
+#   no_origin list
+# - `train_add_processed` falls back to stat'ing `train/{name}` for size
+# - every train_xxx mutation calls ensure_train_manifest first (defensive, idempotent)
 #
-# 锁仍用模块单 `_LOCK`（version 写不频繁，单锁可接受）。
+# Still using the single module-level `_LOCK` (version writes are infrequent, a single lock is fine).
 # ---------------------------------------------------------------------------
 
 
@@ -321,10 +341,11 @@ def _empty_train_manifest() -> dict[str, Any]:
 
 
 def _read_train_target(target: Path) -> dict[str, Any]:
-    """读 train manifest 文件（target 已知存在）；损坏 → 空 v2 manifest。
+    """Read a train manifest file (target already known to exist); corrupt -> empty v2 manifest.
 
-    设计跟老 `load()` 一致——损坏不抛，下次写时覆盖。callers 内部用，跟
-    `ensure_train_manifest` 配套（callers 已 ensure 过 target 存在）。
+    Same design as the old `load()` - doesn't raise on corruption, gets
+    overwritten on the next write. Used internally by callers alongside
+    `ensure_train_manifest` (callers have already ensured target exists).
     """
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
@@ -339,9 +360,9 @@ def _read_train_target(target: Path) -> dict[str, Any]:
 
 
 def train_load(project_dir: Path, version_label: str) -> dict[str, Any]:
-    """读 train manifest；不存在则 fallback 重建（详 ADR 0010 §Fallback 重建机制）。
+    """Read the train manifest; rebuilds via fallback if missing (see ADR 0010's fallback rebuild section).
 
-    返回完整 manifest dict `{"version": 2, "images": {...}}`。
+    Returns the full manifest dict `{"version": 2, "images": {...}}`.
     """
     target = ensure_train_manifest(project_dir, version_label)
     return _read_train_target(target)
@@ -356,7 +377,7 @@ def train_get_entry(
 def train_all_processed(
     project_dir: Path, version_label: str
 ) -> dict[str, dict[str, Any]]:
-    """非 duplicate_removed 的 entry。"""
+    """Entries that are not duplicate_removed."""
     m = train_load(project_dir, version_label)
     return {
         name: entry
@@ -387,7 +408,7 @@ def train_duplicate_removed_origins(
     }
 
 
-# ---- mutation（必须 with _LOCK）-----------------------------------------
+# ---- mutation (must be `with _LOCK`) -------------------------------------
 
 
 def train_add_processed(
@@ -396,15 +417,16 @@ def train_add_processed(
     name: str,
     meta: dict[str, Any],
 ) -> None:
-    """记录一张已处理图（train scope）。
+    """Record one processed image (train scope).
 
-    schema：采纳 `origin / mtime / size / processed`，其他字段（model/scale/
-    action/...）丢弃。size 兜底 stat `train/{name}`。
+    Schema: keeps `origin / mtime / size / processed`, drops any other
+    fields (model/scale/action/...). Size falls back to stat'ing `train/{name}`.
 
-    `processed: bool`（ADR 0010 fixup 2026-06-04）：worker upscale/crop 完成
-    后传 `meta["processed"] = True` 标记，curate 时 `copy_download_to_train`
-    不传（默认 False 不写字段）。前端用这个字段画"已处理"徽章；详 ADR 0010
-    §状态从字段差异隐含推断。
+    `processed: bool` (ADR 0010 fixup 2026-06-04): the worker passes
+    `meta["processed"] = True` after finishing an upscale/crop; a plain
+    curate-stage `copy_download_to_train` doesn't pass it (defaults to False,
+    field omitted). The frontend uses this field to draw the "processed"
+    badge; see ADR 0010's section on inferring status from field differences.
     """
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)
@@ -436,13 +458,15 @@ def train_replace_with_crops(
     source_name: str,
     outputs: list[dict[str, Any]],
 ) -> None:
-    """multi-crop fan-out：把 `source_name` 替换成 N 个 crop 产物 entry。
+    """Multi-crop fan-out: replace `source_name` with N crop-product entries.
 
-    操作跟老 `replace_with_crops` 一致——找出所有 origin 与 source_name 匹配
-    的旧 entry + source_name 自身全部删除，写入 N 个新 entry（origin 沿用
-    旧 entry origin 或回退 source_name）。
+    Same operation as the old `replace_with_crops` - finds every old entry
+    whose origin matches source_name, plus source_name itself, deletes them
+    all, and writes N new entries (origin carried over from the old entry, or
+    falling back to source_name).
 
-    磁盘文件（train/{name}.png 等）由调用方负责，本函数只动 manifest。
+    Disk files (train/{name}.png etc.) are the caller's responsibility; this
+    function only touches the manifest.
     """
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)
@@ -461,7 +485,7 @@ def train_replace_with_crops(
                 "mtime": o.get("mtime", now),
                 "size": int(o.get("size", 0)),
             }
-            # crop 派生本质是处理操作（ADR 0010 fixup）
+            # a crop derivative is inherently a processing operation (ADR 0010 fixup)
             if o.get("processed", True):
                 entry["processed"] = True
             m["images"][o["name"]] = entry
@@ -473,16 +497,18 @@ def train_mark_duplicate_removed(
     version_label: str,
     names: list[str],
 ) -> dict[str, list[str]]:
-    """去重移除（train scope）：物理删除 train/{name} + caption sidecar，manifest
-    entry 改为 `kind=duplicate_removed` 作 tombstone（用于总览页"已删除"tab +
-    `train_restore_duplicate_removed` 恢复）。
+    """Dedup removal (train scope): physically deletes train/{name} + its
+    caption sidecar, and rewrites the manifest entry as a `kind=duplicate_removed`
+    tombstone (used by the overview page's "removed" tab + `train_restore_duplicate_removed`).
 
-    下游 tagging / training 直接扫 `train/`，物理删除保证图不再出现在 caption
-    队列 / dataset_config 列表里。
+    Downstream tagging / training scan `train/` directly, so physically
+    deleting the file guarantees it no longer shows up in the caption queue
+    or dataset_config listing.
 
-    每个 version 独立审核（manifest 是 version 级）。fork 时整树复制
-    （ADR 0007 `_copytree("train")`）只带物理文件——tombstone 同样会复制因为
-    manifest 也在 train/ 下。
+    Each version is reviewed independently (the manifest is per-version).
+    Forking a version copies the whole tree (ADR 0007 `_copytree("train")`)
+    including physical files only - the tombstone is copied along with it
+    since the manifest also lives under train/.
     """
     removed: list[str] = []
     missing: list[str] = []
@@ -511,7 +537,7 @@ def train_mark_duplicate_removed(
             else:
                 missing.append(name)
                 continue
-            # 物理删图 + caption sidecar + mask sidecar
+            # physically delete the image + caption sidecar + mask sidecar
             if src.is_file():
                 try:
                     src.unlink()
@@ -541,14 +567,15 @@ def train_restore_duplicate_removed(
     version_label: str,
     names: list[str],
 ) -> dict[str, list[str]]:
-    """撤销去重移除：从 `download/{entry.origin}` 复制图 + caption 覆盖回
-    `train/{name}`，并删 manifest entry。
+    """Undo a dedup removal: copy the image + caption back from
+    `download/{entry.origin}` over `train/{name}`, and delete the manifest entry.
 
-    返回三组：
-    - `restored`：成功复原（download 原图存在并已复制覆盖）
-    - `missing`：name 没 entry 或 entry 不是 duplicate_removed
-    - `no_origin`：entry 是 duplicate_removed 但 `download/{origin}` 物理文件
-      缺失——entry 保留，调用方提示用户从外部 import 原图
+    Returns three groups:
+    - `restored`: successfully restored (the download original exists and was copied over)
+    - `missing`: name has no entry, or the entry isn't duplicate_removed
+    - `no_origin`: the entry is duplicate_removed but `download/{origin}` is
+      physically missing - the entry is kept, caller should prompt the user
+      to import the original externally
     """
     import shutil
 
@@ -578,7 +605,7 @@ def train_restore_duplicate_removed(
             except OSError:
                 no_origin.append(name)
                 continue
-            # caption 跟随：download/{origin_stem}.{ext} → train/{name_stem}.{ext}
+            # caption follows along: download/{origin_stem}.{ext} -> train/{name_stem}.{ext}
             origin_stem = Path(origin).stem
             for ext in (".txt", ".json"):
                 cap_src = download_dir / f"{origin_stem}{ext}"
@@ -598,22 +625,27 @@ def train_restore(
     version_label: str,
     names: list[str],
 ) -> dict[str, list[str]]:
-    """复原：从 `download/{entry.origin}` 复制覆盖回 `train/{folder}/{origin}`。
+    """Restore: copy `download/{entry.origin}` back over `train/{folder}/{origin}`.
 
-    Multi-crop fan-out 折叠：若 `name` 是某 fan-out 组的成员（同 folder 内多个
-    entry 共享同一 origin），整组被复原到 `train/{folder}/{origin}` 一张图，
-    sibling 物理文件 + manifest entry + caption sidecar 一并清理。这保证撤销
-    a_0/a_1 不会得到"两张同名 A 副本"。
+    Multi-crop fan-out is collapsed: if `name` is a member of a fan-out group
+    (multiple entries in the same folder sharing an origin), the whole group
+    is restored down to a single `train/{folder}/{origin}` image; sibling
+    physical files, manifest entries, and caption sidecars are all cleaned up
+    together. This guarantees restoring a_0/a_1 never leaves you with "two
+    copies of the same image A".
 
-    Caption 跟随：从 `download/{origin_stem}.{ext}` 拷到
-    `train/{folder}/{origin_stem}.{ext}`（`.txt` / `.json`）。
+    Caption follows along: copied from `download/{origin_stem}.{ext}` to
+    `train/{folder}/{origin_stem}.{ext}` (`.txt` / `.json`).
 
-    返回三组：
-    - `restored`：成功复原的 *输入* name（fan-out 组里其他 sibling 即使被一并
-      清理也单独 list 在 restored 里，方便 UI 对账）
-    - `missing`：name 在 manifest 没 entry（且不在已被本批次清理过的 sibling 里）
-    - `no_origin`：entry 存在但 `download/{origin}` 物理文件缺失——UI 应该
-      给用户三选项（拖入替换 / 保留处理后版本 / 从 train 移除）
+    Returns three groups:
+    - `restored`: the *input* names that were successfully restored (other
+      siblings in a fan-out group are listed individually here too, even
+      though they were cleaned up as a side effect, so the UI can reconcile)
+    - `missing`: name has no manifest entry (and wasn't already cleaned up as
+      a sibling earlier in this batch)
+    - `no_origin`: entry exists but `download/{origin}` is physically missing
+      - the UI should offer the user three choices (drag in a replacement /
+        keep the processed version / remove from train)
     """
     import shutil
 
@@ -624,7 +656,7 @@ def train_restore(
     target = train_manifest_path(project_dir, version_label)
     download_dir = project_dir / "download"
     train_dir = _train_dir(project_dir, version_label)
-    # batch 内 already-handled siblings（避免重复 copy / 误报 missing）
+    # siblings already handled within this batch (avoid duplicate copies / false missing)
     handled: set[str] = set()
     with _LOCK:
         m = _read_train_target(target)
@@ -642,7 +674,7 @@ def train_restore(
             if not src.is_file():
                 no_origin.append(name)
                 continue
-            # 找 fan-out 组：同 folder 下 origin 一致的全部 entry
+            # find the fan-out group: every entry in the same folder sharing this origin
             group: list[str] = [
                 k for k, e in m["images"].items()
                 if (k.rsplit("/", 1)[0] if "/" in k else "") == folder
@@ -650,7 +682,7 @@ def train_restore(
             ]
             dst_rel = f"{folder}/{origin}" if folder else origin
             dst = train_dir / dst_rel
-            # 删 sibling 物理 + caption（dst 本身先不删——下面 copy 会覆盖）
+            # delete sibling physical files + captions (leave dst itself alone - the copy below overwrites it)
             for sib in group:
                 if sib == dst_rel:
                     continue
@@ -673,7 +705,7 @@ def train_restore(
             except OSError:
                 no_origin.append(name)
                 continue
-            # caption sidecar 跟随
+            # caption sidecar follows along
             origin_stem = Path(origin).stem
             for ext in (".txt", ".json"):
                 cap_src = download_dir / f"{origin_stem}{ext}"
@@ -682,10 +714,11 @@ def train_restore(
                         shutil.copy2(cap_src, dst.with_suffix(ext))
                     except OSError:
                         pass
-            # mask sidecar：restore 语义 = 回到 download 原点，整组 mask
-            # 一律作废（D8，即便尺寸恰好吻合也删——可预测性优先）
+            # mask sidecar: restore means going back to the download original,
+            # so the whole group's masks are invalidated (D8 - deleted even if
+            # the size happens to still match; predictability wins)
             train_masks.delete_masks_for(train_dir, {*group, dst_rel})
-            # manifest：删整组 + 写新 entry at dst_rel
+            # manifest: delete the whole group + write a new entry at dst_rel
             for sib in group:
                 m["images"].pop(sib, None)
             try:
@@ -710,13 +743,15 @@ def train_swap_entry(
     new_name: str,
     meta: dict[str, Any],
 ) -> None:
-    """原子替换 train manifest entry：删 `old_name`，写 `new_name`。
+    """Atomically replace a train manifest entry: delete `old_name`, write `new_name`.
 
-    给 worker 在 upscale 输出扩展名变化时用（如 src=`1_data/X.jpg` →
-    dst=`1_data/X.png`），避免 manifest 残留 dangling 老 entry。
+    Used by the worker when an upscale output's extension changes (e.g.
+    src=`1_data/X.jpg` -> dst=`1_data/X.png`), so the manifest doesn't keep a
+    dangling old entry.
 
-    `meta` 跟 `train_add_processed` 一致——只采纳 origin/mtime/size，其他丢弃。
-    size 兜底 stat `train/{new_name}`。
+    `meta` follows the same rules as `train_add_processed` - only
+    origin/mtime/size are kept, everything else is dropped. Size falls back
+    to stat'ing `train/{new_name}`.
     """
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)
@@ -747,11 +782,12 @@ def train_remove_entries(
     version_label: str,
     names: list[str],
 ) -> int:
-    """批量删 train manifest entries（按 entry key）。返回实际删除数。
+    """Bulk-delete train manifest entries (by entry key). Returns the number actually removed.
 
-    给 `curation.remove_from_train` 用：用户从 train 删一张 download 原图时，
-    后者按 origin 反查得到 N 个派生 rel path（multi-crop fan-out），一次性
-    pop + 原子写盘比逐条 mutation 高效。
+    Used by `curation.remove_from_train`: when a user deletes a download
+    original from train, the caller looks up the N derived relative paths by
+    origin (multi-crop fan-out), and a single pop-and-write is more efficient
+    than mutating one entry at a time.
     """
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)
@@ -767,15 +803,19 @@ def train_remove_entries(
 
 
 def train_clear_all(project_dir: Path, version_label: str) -> None:
-    """清空本 version 的 train manifest 状态——只清 manifest 文件，**不动**
-    train/ 物理文件。
+    """Clear this version's train manifest state - only clears the manifest
+    file, does **not** touch physical files under train/.
 
-    跟老 `clear_all` 语义不同——老的删 preprocess/ PNG 物理产物；新模型下
-    train/ 是训练数据本身，删物理文件 = 删训练集，不该由"清空预处理状态"
-    引发。调用方如果想完全重做预处理，应该改成"对每张图调 train_restore"
-    （复原到 download 原图），不调本函数。
+    Different semantics from the old `clear_all` - that one deleted the
+    physical preprocess/ PNG products; under the current model, train/ *is*
+    the training data itself, so deleting physical files would mean deleting
+    the training set, which "clearing preprocess status" should never
+    trigger. If a caller wants to fully redo preprocessing, it should call
+    `train_restore` on each image instead (restoring the download original),
+    not this function.
 
-    本函数提供给极端场景（manifest 损坏到不可读）做"清零重建"用。
+    This function exists for the extreme case where the manifest is
+    corrupted beyond reading, to "zero and rebuild".
     """
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)

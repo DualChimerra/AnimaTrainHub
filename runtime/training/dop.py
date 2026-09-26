@@ -1,30 +1,38 @@
-"""DOP —— Differential Output Preservation（差分输出保持）。
+"""DOP -- Differential Output Preservation.
 
-来源：kohya-ss/sd-scripts PR #1710 与 ostris/ai-toolkit 的同名功能。
+Source: kohya-ss/sd-scripts PR #1710 and the feature of the same name in ostris/ai-toolkit.
 
-**要解决的问题。** 风格 LoRA 训练完经常有两个毛病：一是触发词不在提示词里也照样
-改图（风格「漏」得到处都是）；二是把数据集里的内容（同一个典型角色、同一种背景）
-一起搬进生成结果，也就是「不是把风格贴上去，而是把数据集抄过来」。
+**The problem this solves.** Style LoRA training often ends up with two flaws: first,
+the trigger word affects the image even when it's absent from the prompt (the style
+"leaks" everywhere); second, content from the dataset (the same recurring character,
+the same background) gets carried into generated results too -- in other words, "the
+style gets copied in wholesale instead of being applied on top."
 
-**传统做法**是正则集：另外准备一堆中性图片，让 LoRA 学着别动它们。麻烦在于图从哪来、
-和训练集分布差多少都要操心。
+**The traditional approach** is a regularization set: prepare a separate batch of
+neutral images and train the LoRA not to touch them. The hassle is where those images
+come from, and how far their distribution is from the training set.
 
-**DOP 换了个思路**：不需要额外图片。拿**同一批训练图**，把 caption 里的触发词去掉，
-然后
+**DOP takes a different approach**: no extra images needed. Take the **same batch of
+training images**, strip the trigger word out of the caption, then:
 
-1. 关掉适配器跑一次前向 → 这就是「底模本来会画成什么样」（no_grad，当参照）；
-2. 开着适配器跑同样的输入 → 现在 LoRA 会画成什么样；
-3. 两者的 MSE 作为惩罚项加进总 loss。
+1. Run a forward pass with the adapter disabled -> this is "what the base model would
+   draw anyway" (no_grad, used as the reference);
+2. Run the same input with the adapter enabled -> what LoRA draws now;
+3. Add the MSE between the two as a penalty term to the total loss.
 
-于是 LoRA 被同时教两件事：**带触发词 = 我的风格；不带触发词 = 我什么都不改**。
-内容（角色、姿势、背景）在两条分支里完全相同，所以「抄内容」这条路拿不到任何奖励——
-这正是「风格贴上去而不是抄过来」想要的约束。
+This teaches the LoRA two things at once: **with the trigger word = my style; without
+the trigger word = I change nothing**. The content (character, pose, background) is
+identical on both branches, so "copying content" gets no reward on either path --
+which is exactly the constraint needed for "apply the style on top, don't copy the
+content."
 
-**代价**：每个启用 DOP 的 step 多两次前向（一次 no_grad 参照 + 一次带梯度），
-约 2-2.5× 单步耗时。``dop_ratio`` 可以只在一部分 step 上启用来换回速度。
+**Cost**: each step with DOP enabled runs two extra forward passes (one no_grad
+reference + one with gradients), roughly 2-2.5x the per-step time. ``dop_ratio`` lets
+you enable it on only a fraction of steps to trade some of that speed back.
 
-**范围（v1）**：标准 rectified flow 路径。NaViT 打包（逐图 cross 需要重新打包）与
-LeapAlign（自带目标函数）在 schema 层互斥，不静默跳过。
+**Scope (v1)**: the standard rectified flow path. NaViT packing (which needs
+per-image cross-attention repacking) and LeapAlign (which brings its own objective)
+are mutually exclusive with DOP at the schema level -- they don't silently get skipped.
 """
 
 from __future__ import annotations
@@ -40,14 +48,18 @@ logger = logging.getLogger(__name__)
 
 
 def strip_trigger(caption: str, trigger: str) -> str:
-    """从 caption 里去掉触发词，得到「保持分支」用的提示词。
+    """Strip the trigger word out of a caption to get the prompt used by the preservation branch.
 
-    两遍处理，因为触发词在本项目的混合 caption 里有两种出现形态：
+    Done in two passes, because in this project's hybrid captions the trigger word
+    shows up in two forms:
 
-    1. **独立的 tag**（``@mystyle, 1girl, solo, ...``）—— 按逗号切开后整块丢弃；
-    2. **夹在自然语言句子里** —— 按词边界删除，再收拾多余空格。
+    1. As a **standalone tag** (``@mystyle, 1girl, solo, ...``) -- dropped as a whole
+       chunk after splitting on commas;
+    2. **Embedded in a natural-language sentence** -- removed at word boundaries, with
+       leftover whitespace cleaned up afterward.
 
-    大小写不敏感。触发词为空时原样返回（调用方负责 fail-fast，见 schema 校验）。
+    Case-insensitive. Returns the caption unchanged when the trigger is empty (the
+    caller is responsible for fail-fast behavior here, see the schema validation).
     """
     trig = (trigger or "").strip()
     if not trig:
@@ -60,14 +72,15 @@ def strip_trigger(caption: str, trigger: str) -> str:
     ]
     text = ",".join(kept)
 
-    # 词边界删除残留（\b 对 '@' 开头的触发词不成立，故自己写前后界）
+    # Remove leftovers at word boundaries (\b doesn't work for triggers starting with
+    # '@', so the boundaries are written out by hand)
     pattern = re.compile(
         r"(?<![\w@])" + re.escape(trig) + r"(?![\w])",
         flags=re.IGNORECASE,
     )
     text = pattern.sub("", text)
 
-    # 收拾删除后留下的 ",  ,"、行首逗号、重复空格
+    # Clean up leftover ",  ,", leading commas, and repeated spaces after removal
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"(,\s*){2,}", ", ", text)
     text = text.strip().strip(",").strip()
@@ -79,7 +92,7 @@ def preservation_captions(captions: Sequence[str], trigger: str) -> list[str]:
 
 
 def has_trigger(captions: Sequence[str], trigger: str) -> bool:
-    """本批 caption 里是否真的出现过触发词（用于启动期自检与告警）。"""
+    """Whether the trigger word actually appears in this batch of captions (used for the startup self-check and warning)."""
     trig = (trigger or "").strip().lower()
     if not trig:
         return False
@@ -87,12 +100,13 @@ def has_trigger(captions: Sequence[str], trigger: str) -> bool:
 
 
 def assert_adapter_supports_dop(injector: Any) -> None:
-    """DOP 需要适配器能临时关掉自己；不支持就在启动期报错而不是训到一半才发现。"""
+    """DOP needs the adapter to be able to temporarily disable itself; error out at startup instead of discovering this mid-training."""
     if not hasattr(injector, "disabled"):
         raise RuntimeError(
-            f"DOP 需要适配器实现 disabled() 上下文（临时把缩放置 0 跑「无 LoRA」参照前向），"
-            f"当前适配器 {type(injector).__name__} 没有。"
-            f"请关闭 dop_enabled，或给该适配器补上 disabled()。"
+            f"DOP requires the adapter to implement a disabled() context manager "
+            f"(temporarily zeroing the scale to run a 'no LoRA' reference forward pass), "
+            f"but the current adapter {type(injector).__name__} does not have one. "
+            f"Either turn off dop_enabled, or add disabled() to this adapter."
         )
 
 
@@ -106,13 +120,15 @@ def compute_dop_loss(
     cross_wo_trigger: torch.Tensor,
     use_checkpoint: bool = False,
 ) -> torch.Tensor:
-    """保持损失：MSE(带适配器的预测, 关掉适配器的预测)，同一输入、同一无触发词条件。
+    """Preservation loss: MSE(prediction with adapter, prediction with adapter disabled), same input, same trigger-free condition.
 
-    参照分支在 ``no_grad`` + ``injector.disabled()`` 里跑，所以它是常量目标，
-    梯度只从「带适配器」那一支回流——正是我们想约束的对象。
+    The reference branch runs inside ``no_grad`` + ``injector.disabled()``, so it's a
+    constant target -- gradients only flow back through the "with adapter" branch,
+    which is exactly what we want to constrain.
 
-    复用主 step 的 ``noisy`` / ``t``：噪声档由采样器决定，DOP 不该另立一套分布，
-    否则保持约束只作用在某个窄噪声段上。
+    Reuses the main step's ``noisy`` / ``t``: the noise level is determined by the
+    sampler, and DOP shouldn't set up a separate distribution of its own, or the
+    preservation constraint would only apply to a narrow slice of noise levels.
     """
     with torch.no_grad():
         with injector.disabled():
@@ -126,7 +142,7 @@ def compute_dop_loss(
 
 
 def should_apply(ratio: float, rng) -> bool:
-    """按 dop_ratio 掷骰子。1.0 = 每个 step 都做；0 = 从不（等于关闭）。"""
+    """Roll the dice according to dop_ratio. 1.0 = every step; 0 = never (equivalent to disabled)."""
     r = 1.0 if ratio is None else float(ratio)
     if r >= 1.0:
         return True

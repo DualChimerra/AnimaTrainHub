@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Outlet, useMatch, useNavigate, useParams } from 'react-router-dom'
+import { Outlet, useLocation, useMatch, useNavigate, useParams } from 'react-router-dom'
 import { api, type ProjectDetail } from '../../api/client'
 import { useProjectCtxSetter, useSelectedProjectSetter } from '../../context/ProjectContext'
 import { useDialog } from '../../components/Dialog'
@@ -40,6 +40,7 @@ export default function ProjectLayout() {
   //（如 Curation 的 view 缓存守卫不会因 vid 变化重拉）。Overview / Download 是
   // project 作用域（Overview 另有自己的 selectedVid 本地态），不跟切。
   const inVersionScope = useMatch('/projects/:pid/v/:vid/*') != null
+  const location = useLocation()
 
   const reload = useCallback(async () => {
     if (!Number.isFinite(projectId)) return
@@ -237,14 +238,14 @@ export default function ProjectLayout() {
 
   return (
     <div className="flex flex-col h-full">
-      <Outlet key={inVersionScope ? activeVersion?.id ?? -1 : 'project'} context={{
+      <StepOutlet stepKey={`${inVersionScope ? activeVersion?.id ?? -1 : 'project'}:${location.pathname}`} context={{
         project,
         activeVersion,
         reload,
         onCreateVersion: (forkFromVid?: number) => setCreating({ forkFrom: forkFromVid ?? null }),
         creatingVersionBusy: creatingBusy,
         setVersionSwitchGuard,
-      }} />
+      }} remountKey={inVersionScope ? activeVersion?.id ?? -1 : 'project'} />
       {creating && (
         <NewVersionDialog
           existingLabels={project.versions.map((v) => v.label)}
@@ -261,6 +262,20 @@ export default function ProjectLayout() {
           onCancel={() => setShowExportDialog(false)}
         />
       )}
+    </div>
+  )
+}
+
+/** Step outlet that eases in on every step change; `remountKey` still forces a
+ *  full remount when the active version changes (see inVersionScope above). */
+function StepOutlet({ stepKey, remountKey, context }: {
+  stepKey: string
+  remountKey: string | number
+  context: unknown
+}) {
+  return (
+    <div key={stepKey} className="ds-page-anim flex flex-col flex-1 min-h-0">
+      <Outlet key={remountKey} context={context} />
     </div>
   )
 }
@@ -306,26 +321,34 @@ export function NewVersionDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="bg-elevated border border-subtle rounded-2xl w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl"
+        className="ds-modal"
+        style={{ width: 'min(460px, 92vw)' }}
       >
-        <h2 className="m-0 text-lg font-semibold">{t('layout.newVersionTitle')}</h2>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-fg-tertiary font-mono">label</span>
+        <div className="ds-modal-head">
+          <span className="ds-optcard-ico" style={{ background: 'var(--green)', color: 'var(--green-ink)' }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="8" r="2.4" /><path d="M6 8.4v7.2" /><path d="M18 10.4c0 3.4-3.2 3.9-6 4.4" /></svg>
+          </span>
+          <h2 className="ds-modal-title">{t('layout.newVersionTitle')}</h2>
+        </div>
+        <label className="ds-modal-field">
+          <span className="ds-modal-label">{t('layout.versionName')}</span>
           <input
             autoFocus
             value={label}
             onChange={(e) => { setLabel(e.target.value); setErr(null) }}
-            className="input input-mono"
+            className="ds-inp"
+            style={{ height: 36 }}
             placeholder={t('layout.labelPlaceholder')}
           />
         </label>
         {existingVersions.length > 0 && (
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-fg-tertiary font-mono">{t('layout.forkFrom')}</span>
+          <label className="ds-modal-field">
+            <span className="ds-modal-label">{t('layout.forkFrom')}</span>
             <select
               value={forkFrom}
               onChange={(e) => setForkFrom(e.target.value)}
-              className="input"
+              className="ds-inp"
+              style={{ height: 36 }}
             >
               <option value="">{t('layout.forkBlank')}</option>
               {existingVersions.map((v) => (
@@ -335,27 +358,16 @@ export function NewVersionDialog({
               ))}
             </select>
             {forkFrom !== '' && (
-              <p className="m-0 text-xs text-fg-tertiary">
-                {t('layout.forkNote')}
-              </p>
+              <span className="ds-kpi-meta">{t('layout.forkNote')}</span>
             )}
           </label>
         )}
-        {err && <p className="m-0 text-sm text-err">{err}</p>}
-        <div className="flex gap-2 justify-end">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={busy}
-            className="btn btn-secondary"
-          >
+        {err && <div className="ds-note ds-err" style={{ padding: '8px 11px' }}>{err}</div>}
+        <div className="ds-modal-foot">
+          <button type="button" onClick={onCancel} disabled={busy} className="ds-ctl">
             {t('common.cancel')}
           </button>
-          <button
-            type="submit"
-            disabled={busy}
-            className="btn btn-primary"
-          >
+          <button type="submit" disabled={busy} className="ds-btn-primary" style={{ minWidth: 110 }}>
             {busy ? t('layout.creatingBtn') : t('common.create')}
           </button>
         </div>

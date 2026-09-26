@@ -1,11 +1,14 @@
-"""测试公共配置：保证 `import studio.*` / `import train_monitor` / `import anima_*` 能找到。
+"""Shared test configuration: makes sure `import studio.*` / `import train_monitor` /
+`import anima_*` can be found.
 
-`train_monitor` 和 `anima_*`（train / generate / daemon / reg_ai）都在 `runtime/`，
-没改成包导入（仍是裸脚本风格），所以要把 `runtime/` 注入 sys.path。
+`train_monitor` and `anima_*` (train / generate / daemon / reg_ai) all live in `runtime/`,
+which was never converted to package imports (still bare-script style), so `runtime/`
+needs to be injected into sys.path.
 
-PR-1 C4 加 _isolate_studio_logging session fixture：让 api/lifespan、cli.main、
-workers/_base.worker_main 在被测试触发时不真装 setup_logging（防污染 caplog
-+ 防写真 studio_data/logs/）。详 fixture docstring。"""
+PR-1 C4 adds the _isolate_studio_logging session fixture: keeps api/lifespan, cli.main,
+and workers/_base.worker_main from actually installing setup_logging when triggered by
+tests (avoids polluting caplog + avoids writing real studio_data/logs/). See the fixture
+docstring for details."""
 from __future__ import annotations
 import os
 import sys
@@ -22,17 +25,20 @@ for _p in (REPO_ROOT, REPO_ROOT / "runtime"):
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_studio_logging(tmp_path_factory: pytest.TempPathFactory):
-    """PR-1 C4 — 测试期间业务代码 setup_logging 全部 noop（保 caplog 干净）。
+    """PR-1 C4 -- makes application-code setup_logging a full no-op during tests
+    (keeps caplog clean).
 
-    业务入口（api/lifespan / cli.main / workers/_base.worker_main）会在自身
-    启动时调 setup_logging。测试触发任何一处（比如 TestClient(app) 跑 lifespan）
-    会装真 file handler 写 repo studio_data/logs/，污染。设 env 让 setup_logging
-    顶部 early return。
+    Application entry points (api/lifespan / cli.main / workers/_base.worker_main) call
+    setup_logging during their own startup. Any test that triggers one of these (e.g.
+    TestClient(app) running lifespan) would install a real file handler that writes to
+    the repo's studio_data/logs/, polluting it. Setting this env var makes setup_logging
+    early-return at the top.
 
-    测 setup_logging 自身的 tests/test_logging_setup.py 用 monkeypatch.delenv
-    单独解除该 env。
+    tests/test_logging_setup.py, which tests setup_logging itself, uses
+    monkeypatch.delenv to unset this env var on its own.
     """
     os.environ["ANIMA_LOGGING_NO_BOOTSTRAP"] = "1"
-    # 同时设 ANIMA_LOG_DIR 兜底（万一某测试自己显式调 setup_logging 不传 log_dir）
+    # Also set ANIMA_LOG_DIR as a fallback (in case some test explicitly calls
+    # setup_logging without passing log_dir)
     os.environ["ANIMA_LOG_DIR"] = str(tmp_path_factory.mktemp("studio_logs"))
     yield

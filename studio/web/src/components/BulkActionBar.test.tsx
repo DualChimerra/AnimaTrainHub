@@ -35,9 +35,9 @@ function renderBar(overrides: Partial<ComponentProps<typeof BulkActionBar>> = {}
   return { onApply }
 }
 
-// 触发 op 后会弹 confirm modal —— 点里面的"确认"按钮才真正 apply。
+// Triggering an op pops a confirm modal - only clicking its "Confirm" button actually applies it.
 const confirmInModal = async (user: UserEvent) => {
-  const ok = await screen.findByRole('button', { name: '确认' })
+  const ok = await screen.findByRole('button', { name: 'Confirm' })
   await user.click(ok)
 }
 
@@ -46,8 +46,8 @@ describe('BulkActionBar (with confirm modal)', () => {
     const user = userEvent.setup()
     const { onApply } = renderBar()
 
-    await user.type(screen.getByLabelText('要添加的 tag'), 'warm')
-    await user.click(screen.getByRole('button', { name: '添加' }))
+    await user.type(screen.getByLabelText('Tags to add'), 'warm')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
     await confirmInModal(user)
 
     expect(onApply).toHaveBeenCalledOnce()
@@ -57,13 +57,13 @@ describe('BulkActionBar (with confirm modal)', () => {
     expect(updates.has('c.png')).toBe(false)
   })
 
-  it('switching position toggle to "尾部" appends instead of prepends', async () => {
+  it('switching position toggle to "Back" appends instead of prepends', async () => {
     const user = userEvent.setup()
     const { onApply } = renderBar()
 
-    await user.click(screen.getByRole('button', { name: '尾部' }))
-    await user.type(screen.getByLabelText('要添加的 tag'), 'warm')
-    await user.click(screen.getByRole('button', { name: '添加' }))
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    await user.type(screen.getByLabelText('Tags to add'), 'warm')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
     await confirmInModal(user)
 
     const updates = onApply.mock.calls[0][0] as Map<string, string[]>
@@ -74,8 +74,8 @@ describe('BulkActionBar (with confirm modal)', () => {
     const user = userEvent.setup()
     const { onApply } = renderBar()
 
-    await user.type(screen.getByLabelText('要删除的 tag'), 'cat')
-    await user.click(screen.getByRole('button', { name: '删除' }))
+    await user.type(screen.getByLabelText('Tags to remove'), 'cat')
+    await user.click(screen.getByRole('button', { name: 'Remove' }))
     await confirmInModal(user)
 
     const updates = onApply.mock.calls[0][0] as Map<string, string[]>
@@ -90,7 +90,7 @@ describe('BulkActionBar (with confirm modal)', () => {
 
     await user.type(screen.getByPlaceholderText('old'), 'cat')
     await user.type(screen.getByPlaceholderText('new'), 'feline')
-    await user.click(screen.getByRole('button', { name: '替换' }))
+    await user.click(screen.getByRole('button', { name: 'Replace' }))
     await confirmInModal(user)
 
     const updates = onApply.mock.calls[0][0] as Map<string, string[]>
@@ -105,7 +105,7 @@ describe('BulkActionBar (with confirm modal)', () => {
     const user = userEvent.setup()
     const { onApply } = renderBar({ cache: dupCache, selectedKeys: ['a.png'] })
 
-    await user.click(screen.getByRole('button', { name: '去重' }))
+    await user.click(screen.getByRole('button', { name: 'Dedupe' }))
     await confirmInModal(user)
 
     const updates = onApply.mock.calls[0][0] as Map<string, string[]>
@@ -116,10 +116,10 @@ describe('BulkActionBar (with confirm modal)', () => {
     const user = userEvent.setup()
     const { onApply } = renderBar()
 
-    await user.type(screen.getByLabelText('要添加的 tag'), 'warm')
-    await user.click(screen.getByRole('button', { name: '添加' }))
+    await user.type(screen.getByLabelText('Tags to add'), 'warm')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
 
-    const cancel = await screen.findByRole('button', { name: '取消' })
+    const cancel = await screen.findByRole('button', { name: 'Cancel' })
     await user.click(cancel)
 
     expect(onApply).not.toHaveBeenCalled()
@@ -127,14 +127,14 @@ describe('BulkActionBar (with confirm modal)', () => {
 
   it('all op buttons disabled when nothing selected', () => {
     renderBar({ selectedKeys: [] })
-    expect(screen.getByRole('button', { name: '添加' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '删除' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '替换' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '去重' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Replace' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Dedupe' })).toBeDisabled()
   })
 
   it('select-all-images button uses image-specific label', () => {
     renderBar()
-    expect(screen.getByRole('button', { name: '全选图片' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Select all images' })).toBeInTheDocument()
   })
 })

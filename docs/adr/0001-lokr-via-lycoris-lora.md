@@ -1,120 +1,120 @@
-# 0001 — LoKr 适配器走 lycoris-lora，不切到 sd-scripts
+# 0001 — LoKr adapter goes through lycoris-lora, not a switch to sd-scripts
 
-**状态**：Accepted
-**日期**：2025
-**决策者**：仓库 maintainer
+**Status**: Accepted
+**Date**: 2025
+**Decision makers**: repo maintainer
 
-## 背景
+## Background
 
-当时仓库内有自实现的 `LoRALayer` / `LoKrLayer` / `LoRALinear` / `LoRAInjector`（`anima_train.py:875–1100`），是 LyCORIS 官方 LoKr 的简化重写，只覆盖了官方约 30% 特性面。要继续做 LoRA 工具集，必须扩能力（DoRA / dropout / LoHa / 多 GPU 等），三个方向：
+At the time, the repo had its own hand-rolled `LoRALayer` / `LoKrLayer` / `LoRALinear` / `LoRAInjector` (`anima_train.py:875–1100`), a simplified rewrite of the official LyCORIS LoKr that only covered about 30% of the official feature surface. To keep building out the LoRA toolset, more capability was needed (DoRA / dropout / LoHa / multi-GPU, etc.), and there were three directions:
 
-1. **继续在仓库内手写**——加一个特性补一个类
-2. **接 [`lycoris-lora`](https://github.com/KohakuBlueleaf/LyCORIS) 官方包**——保留 anima_train 训练循环、监控、Studio 后端
-3. **整体切到 [`kohya-ss/sd-scripts`](https://github.com/kohya-ss/sd-scripts)**——废弃 anima_train，复用 sd-scripts 的训练核心
+1. **Keep hand-writing it in-repo** — add a class for every new feature
+2. **Adopt the official [`lycoris-lora`](https://github.com/KohakuBlueleaf/LyCORIS) package** — keep the anima_train training loop, monitoring, and Studio backend
+3. **Switch entirely to [`kohya-ss/sd-scripts`](https://github.com/kohya-ss/sd-scripts)** — retire anima_train, reuse sd-scripts' training core
 
-约束：
-- Studio 是产品形态的核心（项目 / 版本 / 流水线 / SSE 监控）；切训练后端不能让 Studio 被边缘化为「sd-scripts 的 Web GUI」
-- 老 ckpt 兼容**不是**强约束（用户可以重训）
-- 维护者人力有限；想要"装 pip 即用"，避免长期维护 fork
+Constraints:
+- Studio is the core of the product (projects / versions / pipeline / SSE monitoring); switching the training backend must not marginalize Studio into "a web GUI for sd-scripts"
+- Backward compatibility with old checkpoints is **not** a hard constraint (users can retrain)
+- Maintainer bandwidth is limited; the goal is "pip install and go," avoiding a long-term fork to maintain
 
-## 候选方案
+## Candidate approaches
 
-### 方案 A — 继续手写
+### Approach A — Keep hand-writing it
 
-在现有自实现上补 DoRA / rs-LoRA / dropout / Conv2d / Tucker。
+Add DoRA / rs-LoRA / dropout / Conv2d / Tucker on top of the existing homegrown implementation.
 
-**优点**：完全自己掌控；无新依赖。
-**缺点**：每个新特性都是一笔工作；与社区生态（ComfyUI / sd-scripts / kohya-ss GUI）字段不对齐；自实现已经有隐性 bug（`_find_factor` 的 silent fallback to 1，让 LoKr 退化为 LoRA + 参数量爆炸）。
+**Pros**: full control; no new dependency.
+**Cons**: every new feature is its own chunk of work; field names don't align with the community ecosystem (ComfyUI / sd-scripts / kohya-ss GUI); the homegrown implementation already has a latent bug (`_find_factor` silently falls back to 1, degrading LoKr into LoRA with an exploded parameter count).
 
-### 方案 B — 接 lycoris-lora 官方包
+### Approach B — Adopt the official lycoris-lora package
 
-把 `LoRAInjector` 替换为 `create_lycoris(...) + apply_preset(ANIMA_PRESET)`，保留训练循环、optimizer、监控、断点续训等所有非适配器逻辑。
+Replace `LoRAInjector` with `create_lycoris(...) + apply_preset(ANIMA_PRESET)`, keeping the training loop, optimizer, monitoring, checkpoint resume, and all other non-adapter logic as-is.
 
-**已验证可行**：
-- `LycorisNetwork(module, ...)` 接受任意单一 `nn.Module`，不依赖 SD/SDXL pipeline，接受 DiT
-- `target_name` 接受当前层名列表（fnmatch + regex）
-- 通过 `apply_preset({...})` 自定义层选择，绕过 PRESET 字典里的 SD 预设
-- 与 PyTorch 标准 `state_dict` 互操作；ComfyUI LyCORIS 加载器直接读
-- 依赖体积：纯 Python ~200KB，仅依赖 `einops` / `safetensors` / `torch`（已装）
+**Already verified feasible**:
+- `LycorisNetwork(module, ...)` accepts any single `nn.Module`, doesn't depend on an SD/SDXL pipeline, and accepts a DiT
+- `target_name` accepts a list of current layer names (fnmatch + regex)
+- `apply_preset({...})` lets you customize layer selection, bypassing the SD presets baked into the PRESET dict
+- Interoperates with standard PyTorch `state_dict`; ComfyUI's LyCORIS loader reads it directly
+- Dependency footprint: pure Python, ~200KB, only depends on `einops` / `safetensors` / `torch` (already installed)
 
-**预估工时**：4–5 个工作日（不含老 ckpt 迁移）
+**Estimated effort**: 4–5 working days (excluding old checkpoint migration)
 
-### 方案 C — 切到 sd-scripts
+### Approach C — Switch to sd-scripts
 
-把 `anima_train.py` 替换为 sd-scripts 的 `anima_train_network.py`，借力 kohya 团队的持续更新。
+Replace `anima_train.py` with sd-scripts' `anima_train_network.py`, leveraging the kohya team's ongoing updates.
 
-**Studio ↔ 训练 现有耦合面**（5 个文件接口，无函数级调用）：
-| 接口 | 文件 | 当前协议 |
+**Current Studio ↔ training coupling surface** (5 file-level interfaces, no function-level calls):
+| Interface | File | Current protocol |
 |---|---|---|
-| 启动命令 | `studio/supervisor.py` | `subprocess: python anima_train.py --config X.yaml --monitor-state-file Y.json` |
-| 训练配置 | `versions/{label}/config.yaml` | `studio/schema.py:TrainingConfig` 字段直接 dump |
-| 进度状态 | `versions/{label}/monitor_state.json` | anima_train 写，Studio 轮询 mtime |
-| 训练日志 | `studio_data/logs/task_*.log` | stdout 重定向，Studio `LogTailer` 行级追加 |
-| 采样图 | `versions/{label}/output/samples/*.png` | anima_train 写，Studio HTTP 代理 |
+| Launch command | `studio/supervisor.py` | `subprocess: python anima_train.py --config X.yaml --monitor-state-file Y.json` |
+| Training config | `versions/{label}/config.yaml` | `studio/schema.py:TrainingConfig` fields dumped directly |
+| Progress state | `versions/{label}/monitor_state.json` | written by anima_train, Studio polls mtime |
+| Training logs | `studio_data/logs/task_*.log` | stdout redirected, Studio `LogTailer` appends line by line |
+| Sample images | `versions/{label}/output/samples/*.png` | written by anima_train, Studio proxies over HTTP |
 
-切 sd-scripts = 这 5 个接口的协议全部要重定义。
+Switching to sd-scripts means redefining the protocol for all 5 of these interfaces.
 
-**改动量**：
-- 🟡 中：`schema.py:TrainingConfig` 整张重写（80+ 字段映射）；`argparse_bridge` 改 schema → TOML 双输出；`supervisor` 命令构造 + accelerate 配置生成；测试套件全部重写
-- 🔴 大：**进度监控必须重做**——sd-scripts 不写 monitor_state.json，只 stdout 打印 tqdm。要么写脆弱的 stdout 解析器（方案 A），要么 fork sd-scripts 加 patch（方案 B），要么向上游提 PR（方案 C）。这是最大且最容易出问题的工作量
-- 🔴 中：断点续训机制重做（state.pt 概念废弃，改 accelerate 的 save_state 目录）
-- 🔴 中：sample 图监控改为目录扫描（不再有事件推送）
+**Scope of change**:
+- 🟡 Medium: full rewrite of `schema.py:TrainingConfig` (80+ field mappings); `argparse_bridge` changed to dual-output schema → TOML; `supervisor` command construction + accelerate config generation; entire test suite rewritten
+- 🔴 Large: **progress monitoring has to be rebuilt from scratch** — sd-scripts doesn't write monitor_state.json, it only prints tqdm to stdout. Options are a fragile stdout parser (approach A), forking sd-scripts to add a patch (approach B), or upstreaming a PR (approach C). This is the biggest and most failure-prone chunk of work
+- 🔴 Medium: checkpoint-resume mechanism rebuilt (the state.pt concept goes away, replaced by accelerate's save_state directory)
+- 🔴 Medium: sample image monitoring becomes directory scanning (no more event push)
 
-**预估工时**：3–5 周
+**Estimated effort**: 3–5 weeks
 
-**能拿到的额外能力**：
-- 多 GPU（accelerate）
+**Extra capabilities gained**:
+- Multi-GPU (accelerate)
 - `--blocks_to_swap` VRAM offload
 - Adafactor + fused backward
 - `--unsloth_offload_checkpointing`
-- 多种 timestep 采样（sigma / sigmoid / shift / flux_shift）
-- 多种 loss（l1 / l2 / huber / smooth_l1）
-- per-module rank/lr (`network_reg_dims`)
-- kohya 团队持续更新
+- Multiple timestep sampling modes (sigma / sigmoid / shift / flux_shift)
+- Multiple loss functions (l1 / l2 / huber / smooth_l1)
+- Per-module rank/lr (`network_reg_dims`)
+- Ongoing updates from the kohya team
 
-**会失去的**：
-- `state.pt` 简洁的断点续训语义
-- `update_monitor()` 主动推送的丰富监控字段
-- 自己写训练循环的灵活性（如未来加自定义 loss / sampler）
-- Studio 作为「端到端流水线」的产品定位
+**What would be lost**:
+- `state.pt`'s clean checkpoint-resume semantics
+- The rich monitoring fields actively pushed by `update_monitor()`
+- The flexibility of owning the training loop (e.g. adding a custom loss/sampler in the future)
+- Studio's product positioning as an "end-to-end pipeline"
 
-## 决策
+## Decision
 
-**采用方案 B**：接 lycoris-lora 官方包，保留 anima_train 训练循环。
+**Approach B**: adopt the official lycoris-lora package, keep the anima_train training loop.
 
-## 理由
+## Rationale
 
-- **成本/收益最优**：4–5 天 vs 3–5 周。lycoris-lora 给到 LoHa / DoRA / dropout / rs-LoRA 等绝大多数缺失特性；多 GPU 等 sd-scripts 独有能力当前不是阻塞需求
-- **保留产品形态**：Studio 仍然是端到端流水线；监控 SSE 协议、断点续训语义、训练循环全部不动。切 sd-scripts 会把 Studio 从「产品」降级为「sd-scripts 的 Web GUI」
-- **可逆**：方案 B 是工作分支策略，未合并前可随时弃；合并后发现问题可 `git revert` PR 回退到 master 实现。**方案 C 不可逆**——schema 完全重写后没法回头
-- **生态对齐**：lycoris-lora 输出的权重 ComfyUI / sd-scripts / kohya-ss GUI 都直接读，自动获得字段对齐
-- **依赖轻**：lycoris-lora 是纯 Python ~200KB，仅依赖 einops / safetensors / torch（已装），无新增系统依赖
-- **`_find_factor` 隐性 bug 顺带修掉**：自实现的 factor 搜索集合 `[target, 4, 2, 1]` 过窄，遇到不能整除的维度会 silent fallback 到 1，LoKr 退化为满矩阵 LoRA + 参数量爆炸。lycoris 的 `factorization()` 算法更稳健
+- **Best cost/benefit**: 4–5 days vs 3–5 weeks. lycoris-lora delivers most of the missing features — LoHa / DoRA / dropout / rs-LoRA — while sd-scripts-only capabilities like multi-GPU aren't currently a blocking need
+- **Preserves the product shape**: Studio stays an end-to-end pipeline; the monitoring SSE protocol, checkpoint-resume semantics, and training loop are all untouched. Switching to sd-scripts would downgrade Studio from "product" to "a web GUI for sd-scripts"
+- **Reversible**: approach B is a working-branch strategy that can be abandoned any time before merge; if problems surface after merging, `git revert` the PR to fall back to the master implementation. **Approach C is not reversible** — once the schema is fully rewritten there's no going back
+- **Ecosystem alignment**: weights produced by lycoris-lora are read directly by ComfyUI / sd-scripts / kohya-ss GUI, giving automatic field alignment
+- **Light dependency**: lycoris-lora is pure Python, ~200KB, depends only on einops / safetensors / torch (already installed), no new system dependencies
+- **Fixes the `_find_factor` latent bug as a side effect**: the homegrown factor search set `[target, 4, 2, 1]` was too narrow — dimensions that don't divide evenly silently fall back to 1, degrading LoKr into a full-matrix LoRA with an exploded parameter count. lycoris's `factorization()` algorithm is more robust
 
-## 后果
+## Consequences
 
-### 已落地
+### Already implemented
 
-- `lycoris-lora>=3.0` 加入依赖
-- `utils/lycoris_adapter.py`（`AnimaLycorisAdapter`）封装 lycoris 调用，替换自实现
-- `utils/lycoris_patch.py` patch lycoris-lora 3.4.0 `LokrModule.get_weight` rank_dropout device bug（v0.5.0 修复，详见 CHANGELOG）
-- Schema 暴露 `lora_algo` / `lora_dora` / `lora_rs` / `lora_dropout` / `lora_rank_dropout` / `lora_module_dropout` 等字段
-- ComfyUI 加载验证通过；保存权重前缀 `lora_unet_*` 与下游对齐
+- `lycoris-lora>=3.0` added as a dependency
+- `utils/lycoris_adapter.py` (`AnimaLycorisAdapter`) wraps lycoris calls, replacing the homegrown implementation
+- `utils/lycoris_patch.py` patches a `LokrModule.get_weight` rank_dropout device bug in lycoris-lora 3.4.0 (fixed upstream in v0.5.0, see CHANGELOG)
+- Schema exposes `lora_algo` / `lora_dora` / `lora_rs` / `lora_dropout` / `lora_rank_dropout` / `lora_module_dropout` and other fields
+- ComfyUI loading verified; saved weight prefix `lora_unet_*` aligned with downstream consumers
 
-### 新增的约束
+### New constraints
 
-- `lycoris-lora` 升级 API 变化时需要跟进；requirements 锁 `lycoris-lora>=3.0,<4.0` 防止 major 升级
-- 老 ckpt 不兼容；旧分支 ckpt 加载会报清晰错误，提示重训
+- Need to track `lycoris-lora` API changes on upgrade; requirements pin `lycoris-lora>=3.0,<4.0` to prevent a major-version upgrade from landing silently
+- Old checkpoints are incompatible; loading a checkpoint from the old branch produces a clear error prompting a retrain
 
-### 暂未做（仍可独立追加）
+### Not yet done (can still be added independently)
 
-- Conv2d / Tucker 支持（Anima 是纯 DiT，主干 + TE + LLM Adapter 全是 `nn.Linear`，VAE 冻结，当前不需要）
-- IA³ / GLoRA / BOFT 等冷门算法
-- 多 GPU；如果未来确实需要，再单独开 ADR 评估是否切 sd-scripts
+- Conv2d / Tucker support (Anima is pure DiT — the backbone, TE, and LLM adapter are all `nn.Linear`, the VAE is frozen — not currently needed)
+- Uncommon algorithms like IA³ / GLoRA / BOFT
+- Multi-GPU; if genuinely needed in the future, open a separate ADR to evaluate switching to sd-scripts
 
-## 参考
+## References
 
-- 官方源：[KohakuBlueleaf/LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS)
-- 论文：*Navigating Text-To-Image Customization* (ICLR 2024)，LoKr 节在 §3.3
-- 实现：`utils/lycoris_adapter.py`、`utils/lycoris_patch.py`
-- v0.5.0 的 `attention_backend` 整合（PR #21）建立在本 ADR 落地基础上
+- Official source: [KohakuBlueleaf/LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS)
+- Paper: *Navigating Text-To-Image Customization* (ICLR 2024), LoKr covered in §3.3
+- Implementation: `utils/lycoris_adapter.py`, `utils/lycoris_patch.py`
+- The `attention_backend` consolidation in v0.5.0 (PR #21) builds on this ADR

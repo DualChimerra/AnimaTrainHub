@@ -1,47 +1,47 @@
-# 文档
+# Documentation
 
-文档分五类，对应不同使用场景：
+Docs are split into five categories, each for a different use case:
 
-| 目录 | 给谁看 | 维护节奏 |
+| Directory | Audience | Update cadence |
 |---|---|---|
-| [`user-guide/`](user-guide/) | 用户、社区贡献者 | 跟着行为变更随时更 |
-| [`architecture/`](architecture/) | 开发者，要改代码或排查 bug | 架构调整时更 |
-| [`adr/`](adr/) | 想知道「为什么是这样」的人 | 新决策时新增；老决策不改写，只追加状态 |
-| [`design/`](design/) | 想了解某个 ADR 怎么讨论出来的人 | 设计阶段持续更新；ADR 落地后冻结作为参考 |
-| [`todo/`](todo/) | 维护者；记"现在做不了、未来要检查"的事 | 触发条件到了再回来处理或归档 |
+| [`user-guide/`](user-guide/) | Users, community contributors | Updated whenever behavior changes |
+| [`architecture/`](architecture/) | Developers changing code or debugging | Updated on architecture changes |
+| [`adr/`](adr/) | Anyone who wants to know "why is it this way" | New entries added for new decisions; old ones are never rewritten, only get a status appended |
+| [`design/`](design/) | Anyone who wants to see how an ADR's discussion played out | Updated continuously during the design phase; frozen as a reference once the ADR lands |
+| [`todo/`](todo/) | Maintainers; notes on "can't do this now, revisit later" | Revisited or archived once the trigger condition is met |
 
-> **不在这里**：版本变更见根目录 [`CHANGELOG.md`](../CHANGELOG.md)；Studio 内部模块结构见 [`studio/README.md`](../studio/README.md)。
+> **Not here**: version changes are in the root [`CHANGELOG.md`](../CHANGELOG.md); Studio's internal module structure is in [`studio/README.md`](../studio/README.md).
 
 ---
 
 ## User guide
 
-| 文档 | 内容 |
+| Doc | Contents |
 |---|---|
-| [tagging-guide.md](user-guide/tagging-guide.md) | Anima 标签格式、最佳实践、tag 顺序 |
-| [training-tips.md](user-guide/training-tips.md) | 训练参数、显存配置矩阵、过拟合/欠拟合排查、ComfyUI 用法 |
-| [regularization.md](user-guide/regularization.md) | 正则集生成原理（tag 分布贪心搜索 + AR 聚类） |
-| [caption-format.md](user-guide/caption-format.md) | JSON caption 格式 + 分类 shuffle |
-| [custom-models.md](user-guide/custom-models.md) | 用自己的底模 / VAE / 文本编码器权重，以及本地底模的工作模式 |
+| [tagging-guide.md](user-guide/tagging-guide.md) | Anima tag format, best practices, tag ordering |
+| [training-tips.md](user-guide/training-tips.md) | Training parameters, VRAM configuration matrix, over/underfitting troubleshooting, ComfyUI usage |
+| [regularization.md](user-guide/regularization.md) | How regularization-set generation works (tag-distribution greedy search + AR clustering) |
+| [caption-format.md](user-guide/caption-format.md) | JSON caption format + category shuffling |
+| [custom-models.md](user-guide/custom-models.md) | Using your own base model / VAE / text encoder weights, and how local base models work |
 
 ## Architecture
 
-| 文档 | 内容 |
+| Doc | Contents |
 |---|---|
-| [studio-pipeline.md](architecture/studio-pipeline.md) | 跨步骤架构总览：数据模型、目录布局、SQLite schema、secrets、SSE 事件、Tagger 抽象、Preset 池 |
+| [studio-pipeline.md](architecture/studio-pipeline.md) | Cross-cutting architecture overview: data model, directory layout, SQLite schema, secrets, SSE events, tagger abstraction, preset pool |
 
 ## Architecture Decision Records (ADR)
 
-历史决策记录。记录「我们为什么选 X 而不选 Y」，已落地的就是历史，**不删**——保留是为了未来想反悔时知道当初的取舍。
+Historical decision records. They document "why we chose X over Y" — once landed, they're history and **are never deleted**; they're kept so that if we ever want to revisit the choice, we know what the original trade-offs were.
 
-| ADR | 状态 | 内容 |
+| ADR | Status | Contents |
 |---|---|---|
-| [0001-lokr-via-lycoris-lora.md](adr/0001-lokr-via-lycoris-lora.md) | Accepted（2025） | LoKr 改走官方 lycoris-lora 库，而不是切到 sd-scripts |
+| [0001-lokr-via-lycoris-lora.md](adr/0001-lokr-via-lycoris-lora.md) | Accepted (2025) | Switched LoKr to the official lycoris-lora library instead of moving to sd-scripts |
 
-详见 [adr/README.md](adr/README.md)。
+See [adr/README.md](adr/README.md) for details.
 
 ---
 
-## 本地草稿
+## Local drafts
 
-`docs/_local/` 已加入 `.gitignore`。在仓库内随手记笔记、写未定稿设计、临时 TODO，放这个目录就不会污染提交。
+`docs/_local/` is listed in `.gitignore`. Use it for scratch notes, unfinished design writeups, or temporary TODOs within the repo without polluting commits.

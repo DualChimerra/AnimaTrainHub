@@ -1,39 +1,46 @@
 #!/usr/bin/env python3
-"""mem_probe —— 内存/显存峰值定位探针（Windows 优先）。
+"""mem_probe -- memory/VRAM peak localization probe (Windows-first).
 
-目的：定位「训练 sample / 测试 generate 偶发卡死 + 系统提交虚拟内存暴涨 20-30G」。
-关键判据是：那一坨内存到底在 **GPU 侧**（被 WDDM 镜像成 system commit）还是
-**CPU/host 侧**。本探针每隔 --interval 秒同时采样：
+Purpose: localize "training sample / test generate occasionally hangs + system committed
+virtual memory spikes by 20-30GB". The key discriminant is whether that chunk of memory sits
+on the **GPU side** (mirrored into system commit by WDDM) or the **CPU/host side**. This probe
+samples both, every --interval seconds:
 
-  - 系统提交（Commit Charge）：GetPerformanceInfo().CommitTotal —— 即任务管理器
-    「性能 > 内存 > 已提交」那条，也就是用户看到暴涨的那个数。
-  - 目标进程私有提交（PrivateUsage ≈ 任务管理器进程「提交大小」）。
-  - GPU 显存：NVML（无则回退 nvidia-smi），device 级 used/total + 尽量给 per-pid。
+  - System commit (Commit Charge): GetPerformanceInfo().CommitTotal -- the same number Task
+    Manager shows under "Performance > Memory > Committed", i.e. the one the user sees spiking.
+  - Target process private commit (PrivateUsage, roughly Task Manager's process "Commit size").
+  - GPU VRAM: NVML (falls back to nvidia-smi if unavailable), device-level used/total, plus
+    per-pid when possible.
 
-每帧算 Δ（与上一帧之差）。当 |Δcommit| 或 |Δgpu_used| 超过 --spike-gb 时，打印
-醒目告警 + 一句**判据**：
+Computes the delta each frame (difference from the previous frame). When |Δcommit| or
+|Δgpu_used| exceeds --spike-gb, prints a loud warning plus a one-line **verdict**:
 
-  - Δgpu ≈ Δcommit  → GPU 分配被 WDDM 镜像到 commit（显存侧爆，多半是某次卷积
-    workspace / 大 bucket 分辨率；8G 卡上会直接 OOM 走分块所以没事，大显存卡反而
-    吃满 commit 卡死）。
-  - Δcommit ≫ Δgpu  → CPU/host 侧分配（pinned 内存 / 巨大 CPU 张量 / 泄漏）。
+  - Δgpu ≈ Δcommit  -> a GPU allocation got mirrored into commit by WDDM (VRAM-side blowup,
+    usually some convolution workspace / a large bucket resolution; on an 8G card this just
+    falls back to chunked processing via OOM so it's fine, but a large-VRAM card instead fills
+    up commit and hangs).
+  - Δcommit >> Δgpu  -> a CPU/host-side allocation (pinned memory / a huge CPU tensor / a leak).
 
-可选 --pyspy：抓到 spike 时自动 `py-spy dump --pid <pid>`，零侵入拿到当时正在
-执行的 Python 调用栈（需 `pip install py-spy`）。
+Optional --pyspy: automatically runs `py-spy dump --pid <pid>` when a spike is caught, giving a
+zero-intrusion snapshot of the Python call stack executing at that moment (requires
+`pip install py-spy`).
 
-全程写 CSV（--out），事后可画图/比对。
+Writes a CSV the whole time (--out), for plotting/comparison afterward.
 
-用法
-----
-1) 先把训练/出图跑起来，拿到那个 python 进程的 PID（任务管理器 / `tasklist`）。
-2) 另开一个终端：
+Usage
+-----
+1) Start training/generation first, and get that python process's PID (Task Manager / `tasklist`).
+2) In another terminal:
      python tools/mem_probe.py --pid <PID> --interval 0.25 --spike-gb 4 --pyspy
-   或不知道 PID 时按名字挑（选私有提交最大的 python）：
+   or if you don't know the PID, pick by name (selects the python process with the largest
+   private commit):
      python tools/mem_probe.py --name python --interval 0.25 --spike-gb 4
-3) 复现卡死。看终端的 [SPIKE] 行 + 末尾 SUMMARY，或事后读 mem_probe.csv。
+3) Reproduce the hang. Watch the [SPIKE] lines in the terminal + the SUMMARY at the end, or read
+   mem_probe.csv afterward.
 
-依赖：psutil（强烈建议）。NVML(pynvml) 可选；没有就用 nvidia-smi。系统提交用
-ctypes 直接读，无需第三方。
+Dependencies: psutil (strongly recommended). NVML (pynvml) is optional; falls back to
+nvidia-smi if absent. System commit is read directly via ctypes, no third-party dependency
+needed for that.
 """
 
 from __future__ import annotations
@@ -56,7 +63,7 @@ except Exception:  # noqa: BLE001
     psutil = None
 
 
-# ---------------------------------------------------------------- 系统提交（Commit Charge）
+# ---------------------------------------------------------------- System commit (Commit Charge)
 class _PERFORMANCE_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("cb", wintypes.DWORD),
@@ -77,7 +84,7 @@ class _PERFORMANCE_INFORMATION(ctypes.Structure):
 
 
 def system_commit_bytes() -> tuple[float, float, float]:
-    """返回 (CommitTotal, CommitLimit, CommitPeak) 字节。仅 Windows。"""
+    """Returns (CommitTotal, CommitLimit, CommitPeak) in bytes. Windows only."""
     pi = _PERFORMANCE_INFORMATION()
     pi.cb = ctypes.sizeof(pi)
     ok = ctypes.windll.psapi.GetPerformanceInfo(ctypes.byref(pi), pi.cb)
@@ -87,12 +94,12 @@ def system_commit_bytes() -> tuple[float, float, float]:
     return pi.CommitTotal * ps, pi.CommitLimit * ps, pi.CommitPeak * ps
 
 
-# ---------------------------------------------------------------- 目标进程
+# ---------------------------------------------------------------- Target process
 def resolve_pid(pid: int | None, name: str | None) -> int:
     if pid:
         return pid
     if psutil is None:
-        sys.exit("未装 psutil 且未给 --pid，无法按名字查找。请装 psutil 或传 --pid。")
+        sys.exit("psutil is not installed and no --pid was given, cannot look up by name. Install psutil or pass --pid.")
     name_l = (name or "python").lower()
     best, best_priv = None, -1
     for p in psutil.process_iter(["name"]):
@@ -104,15 +111,15 @@ def resolve_pid(pid: int | None, name: str | None) -> int:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     if best is None:
-        sys.exit(f"找不到名字含 '{name_l}' 的进程；用 --pid 指定。")
-    print(f"[mem_probe] 按名字 '{name_l}' 选中 PID={best}（私有提交最大）")
+        sys.exit(f"No process found with a name containing '{name_l}'; specify one with --pid.")
+    print(f"[mem_probe] Selected PID={best} by name '{name_l}' (largest private commit)")
     return best
 
 
 def proc_mem_bytes(proc) -> tuple[float, float]:
-    """(private/commit, working_set) 字节。"""
+    """(private/commit, working_set) in bytes."""
     mi = proc.memory_info()
-    # psutil Windows: memory_info() 含 private(PrivateUsage) 与 rss(WorkingSet)
+    # psutil on Windows: memory_info() has both private (PrivateUsage) and rss (WorkingSet)
     private = getattr(mi, "private", getattr(mi, "pagefile", mi.vms))
     return float(private), float(mi.rss)
 
@@ -133,7 +140,7 @@ class _GpuReader:
         self.smi = shutil.which("nvidia-smi")
 
     def read(self, target_pid: int) -> tuple[float, float, float]:
-        """返回 (used, total, proc_used) 字节；proc_used 取不到时为 -1。"""
+        """Returns (used, total, proc_used) in bytes; proc_used is -1 when unavailable."""
         if self.nvml is not None:
             try:
                 m = self.nvml.nvmlDeviceGetMemoryInfo(self.handle)
@@ -143,7 +150,7 @@ class _GpuReader:
                         if pr.pid == target_pid and pr.usedGpuMemory not in (None, 0):
                             proc_used = float(pr.usedGpuMemory)
                 except Exception:  # noqa: BLE001
-                    pass  # WDDM 下 per-pid 常不可用
+                    pass  # per-pid is often unavailable under WDDM
                 return float(m.used), float(m.total), proc_used
             except Exception:  # noqa: BLE001
                 pass
@@ -162,10 +169,11 @@ class _GpuReader:
         return -1.0, -1.0, -1.0
 
 
-# ---------------------------------------------------------------- 主循环
+# ---------------------------------------------------------------- main loop
 def main() -> None:
-    # 控制台可能是 cp932/gbk 等非 utf-8（本机即 cp932）；中文 print 会 UnicodeEncodeError
-    # 把探针自己搞崩。统一改 utf-8 + errors=replace。
+    # The console may be cp932/gbk or some other non-utf-8 codepage (this machine uses cp932);
+    # non-ASCII print output would raise UnicodeEncodeError and crash the probe itself.
+    # Force utf-8 + errors=replace uniformly.
     for _s in (sys.stdout, sys.stderr):
         try:
             _s.reconfigure(encoding="utf-8", errors="replace")  # py3.7+
@@ -173,29 +181,29 @@ def main() -> None:
             pass
 
     if os.name != "nt":
-        print("[mem_probe] 注意：系统提交读数走 Windows API；非 Windows 上仅 GPU/进程可用。")
+        print("[mem_probe] Note: the system commit reading uses the Windows API; on non-Windows only GPU/process readings are available.")
 
-    ap = argparse.ArgumentParser(description="内存/显存峰值定位探针")
-    ap.add_argument("--pid", type=int, default=None, help="目标进程 PID")
-    ap.add_argument("--name", type=str, default="python", help="按名字找（--pid 优先）")
+    ap = argparse.ArgumentParser(description="Memory/VRAM peak localization probe")
+    ap.add_argument("--pid", type=int, default=None, help="target process PID")
+    ap.add_argument("--name", type=str, default="python", help="find by name (--pid takes priority)")
     ap.add_argument("--gpu-index", type=int, default=0)
-    ap.add_argument("--interval", type=float, default=0.25, help="采样间隔秒")
-    ap.add_argument("--spike-gb", type=float, default=4.0, help="Δcommit/Δgpu 超过此值(GB)即告警")
+    ap.add_argument("--interval", type=float, default=0.25, help="sampling interval in seconds")
+    ap.add_argument("--spike-gb", type=float, default=4.0, help="warn when Δcommit/Δgpu exceeds this value (GB)")
     ap.add_argument("--out", type=str, default="mem_probe.csv")
-    ap.add_argument("--pyspy", action="store_true", help="spike 时自动 py-spy dump 目标进程栈")
+    ap.add_argument("--pyspy", action="store_true", help="automatically py-spy dump the target process's stack on a spike")
     args = ap.parse_args()
 
     pid = resolve_pid(args.pid, args.name)
     if psutil is None:
-        sys.exit("本脚本需要 psutil 取进程内存：pip install psutil")
+        sys.exit("This script needs psutil to read process memory: pip install psutil")
     try:
         proc = psutil.Process(pid)
     except psutil.NoSuchProcess:
-        sys.exit(f"PID {pid} 不存在。")
+        sys.exit(f"PID {pid} does not exist.")
     gpu = _GpuReader(args.gpu_index)
     pyspy = shutil.which("py-spy") if args.pyspy else None
     if args.pyspy and not pyspy:
-        print("[mem_probe] 未找到 py-spy，--pyspy 忽略（pip install py-spy）")
+        print("[mem_probe] py-spy not found, ignoring --pyspy (pip install py-spy)")
 
     fields = ["t_rel_s", "sys_commit_GB", "sys_commit_limit_GB", "sys_commit_pct",
               "proc_private_GB", "proc_wset_GB", "gpu_used_GB", "gpu_total_GB",
@@ -205,7 +213,7 @@ def main() -> None:
     w.writerow(fields)
 
     print(f"[mem_probe] PID={pid} GPU#{args.gpu_index} interval={args.interval}s "
-          f"spike>{args.spike_gb}G → {args.out}  (Ctrl+C 结束)")
+          f"spike>{args.spike_gb}G -> {args.out}  (Ctrl+C to stop)")
 
     t0 = time.perf_counter()
     prev_commit = prev_gpu = None
@@ -215,7 +223,7 @@ def main() -> None:
     try:
         while True:
             if not proc.is_running():
-                print("[mem_probe] 目标进程已退出，停止。")
+                print("[mem_probe] Target process has exited, stopping.")
                 break
             t = time.perf_counter() - t0
             try:
@@ -240,13 +248,13 @@ def main() -> None:
 
             note = ""
             if abs(d_commit) >= args.spike_gb or abs(d_gpu) >= args.spike_gb:
-                # 判据
+                # verdict
                 if gused >= 0 and abs(d_gpu) >= args.spike_gb and abs(d_commit - d_gpu) <= max(2.0, 0.3 * abs(d_gpu)):
-                    verdict = "GPU侧(WDDM镜像到commit)"
+                    verdict = "GPU side (WDDM-mirrored into commit)"
                 elif abs(d_commit) >= args.spike_gb and (gused < 0 or abs(d_commit) - abs(d_gpu) >= args.spike_gb):
-                    verdict = "CPU/host侧"
+                    verdict = "CPU/host side"
                 else:
-                    verdict = "混合/待查"
+                    verdict = "mixed/inconclusive"
                 note = f"SPIKE {verdict} dCommit={d_commit:+.1f}G dGPU={d_gpu:+.1f}G"
                 line = (f"[SPIKE] t={t:7.2f}s  {verdict}  "
                         f"Δcommit={d_commit:+.1f}G  Δgpu={d_gpu:+.1f}G  "
@@ -261,9 +269,9 @@ def main() -> None:
                             text=True, timeout=15, stderr=subprocess.STDOUT)
                         with open("mem_probe_pyspy.log", "a", encoding="utf-8") as pf:
                             pf.write(f"\n===== SPIKE t={t:.2f}s {verdict} =====\n{dump}\n")
-                        print("[mem_probe] py-spy 栈已追加到 mem_probe_pyspy.log")
+                        print("[mem_probe] py-spy stack appended to mem_probe_pyspy.log")
                     except Exception as e:  # noqa: BLE001
-                        print(f"[mem_probe] py-spy dump 失败: {e}")
+                        print(f"[mem_probe] py-spy dump failed: {e}")
 
             w.writerow([f"{t:.3f}",
                         f"{commit/GB:.3f}" if commit >= 0 else "",
@@ -277,20 +285,20 @@ def main() -> None:
             f.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:
-        print("\n[mem_probe] 手动停止。")
+        print("\n[mem_probe] Stopped manually.")
     finally:
         f.close()
         print("\n" + "=" * 60 + "\nSUMMARY")
-        print(f"  峰值 系统提交 commit : {peak['commit']/GB:.1f} G")
-        print(f"  峰值 进程私有提交     : {peak['private']/GB:.1f} G")
-        print(f"  峰值 GPU used        : {peak['gpu']/GB:.1f} G" if peak['gpu'] >= 0 else "  GPU 不可读")
-        print(f"  CSV                  : {os.path.abspath(args.out)}")
+        print(f"  Peak system commit         : {peak['commit']/GB:.1f} G")
+        print(f"  Peak process private commit: {peak['private']/GB:.1f} G")
+        print(f"  Peak GPU used               : {peak['gpu']/GB:.1f} G" if peak['gpu'] >= 0 else "  GPU unreadable")
+        print(f"  CSV                         : {os.path.abspath(args.out)}")
         if spikes:
-            print(f"  捕获 {len(spikes)} 次 spike：")
+            print(f"  Captured {len(spikes)} spike(s):")
             for s in spikes:
                 print("    " + s)
         else:
-            print("  未捕获 spike（没复现，或 --spike-gb 设太高）。")
+            print("  No spikes captured (didn't reproduce, or --spike-gb was set too high).")
         print("=" * 60)
 
 

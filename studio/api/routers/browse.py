@@ -1,9 +1,9 @@
-"""文件浏览 / 数据集扫描 / 缩略图（PR-5 从 server.py 抽出）。
+"""File browsing / dataset scanning / thumbnails (extracted from server.py in PR-5).
 
-3 routes：
-    GET /api/datasets             扫描数据集目录（缺省 = repo_root/dataset）
-    GET /api/browse               目录浏览（PathPicker 用，allow_outside_repo=True）
-    GET /api/datasets/thumbnail   单图缩略图（仅 REPO_ROOT 内）
+3 routes:
+    GET /api/datasets             scan a dataset directory (default = repo_root/dataset)
+    GET /api/browse               directory browsing (for PathPicker, allow_outside_repo=True)
+    GET /api/datasets/thumbnail   single-image thumbnail (REPO_ROOT only)
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ router = APIRouter()
 
 @router.get("/api/datasets")
 def get_datasets(path: str = "") -> dict[str, Any]:
-    """扫描数据集目录。`?path=` 指定根目录；缺省 = repo_root/dataset。"""
+    """Scan a dataset directory. `?path=` sets the root; default = repo_root/dataset."""
     root = Path(path) if path else REPO_ROOT / "dataset"
     if not root.is_absolute():
         root = (REPO_ROOT / root).resolve()
@@ -32,11 +32,12 @@ def get_datasets(path: str = "") -> dict[str, Any]:
 
 @router.get("/api/browse")
 def browse_dir(path: str = "") -> dict[str, Any]:
-    """目录浏览（给前端 path picker 用）。缺省 = REPO_ROOT。
+    """Directory browsing (for the frontend path picker). Default = REPO_ROOT.
 
-    PathPicker 设计本就是给用户选外部模型路径用的（云端机器把模型放数据盘），
-    所以这里 allow_outside_repo=True；安全边界在 list_dir 本身（只读 entries
-    名字+类型，不返回内容）。
+    PathPicker is designed for users to pick external model paths (cloud machines
+    keep models on a separate data disk), so allow_outside_repo=True here; the
+    security boundary lives in list_dir itself (it only reads entry names + types,
+    never returns file contents).
     """
     target = Path(path) if path else REPO_ROOT
     if not target.is_absolute():
@@ -46,10 +47,11 @@ def browse_dir(path: str = "") -> dict[str, Any]:
 
 @router.get("/api/datasets/thumbnail")
 def get_dataset_thumbnail(folder: str, name: str) -> FileResponse:
-    """返回 dataset 缩略图（实际是原图，前端用 CSS 缩放）。
+    """Return a dataset thumbnail (actually the original image; the frontend scales it with CSS).
 
-    `folder` 可以是绝对路径或相对路径（用户在 dataset 浏览器里点出来的），
-    `name` 必须是单一文件名（不含分隔符）。最终路径必须在 REPO_ROOT 内。
+    `folder` can be an absolute or relative path (picked by the user in the
+    dataset browser), `name` must be a single filename (no separators). The
+    resolved path must stay inside REPO_ROOT.
     """
     _errors._validate_component_or_400(name)
     p = (Path(folder) / name).resolve()

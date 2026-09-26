@@ -7,19 +7,13 @@ import { __setStateForTest } from '../../tagDict/store'
 import { TagSuggestList } from './TagSuggestList'
 import { useTagSuggest } from './useTagSuggest'
 
-/** 注入一个小词典（绕过网络），让 findSuggestions 有东西可匹配。 */
+/** Seed a small tag list (no network) so findSuggestions has matches. */
 function seedDict() {
-  const entries = new Map<string, string[]>([
-    ['solo', ['单人']],
-    ['long hair', ['长发']],
-  ])
-  const tagKeys = Array.from(entries.keys())
+  const tagKeys = ['solo', 'long hair']
   __setStateForTest({
     status: 'ready',
-    entries,
     tagKeys,
     compactedKeys: tagKeys.map((t) => t.replace(/[\s_]/g, '')),
-    reverse: [],
     meta: null,
     error: null,
   })

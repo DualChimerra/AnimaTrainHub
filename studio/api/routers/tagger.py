@@ -1,7 +1,7 @@
-"""Tagger 可用性检查（PR-6 commit 1 从 server.py 抽出）。
+"""Tagger availability check (extracted from server.py in PR-6 commit 1).
 
-1 route：
-    GET /api/tagger/{name}/check    检查指定 tagger 是否可用（wd14 / cltagger / llm）
+1 route:
+    GET /api/tagger/{name}/check    checks whether the given tagger is available (wd14 / cltagger / llm)
 """
 from __future__ import annotations
 

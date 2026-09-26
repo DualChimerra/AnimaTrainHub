@@ -1,11 +1,12 @@
-"""utils 历史目录。
+"""Legacy ``utils`` directory.
 
-新代码不要在此添加内容——training 相关请去 ``runtime/training/``，算法实现
-（lycoris / 未来 T-LoRA 等）的归宿待 [[utils-full-refactor-plan-postponed]]
-完整重构决定（见 memory）。
+Don't add new code here -- training-related code goes in ``runtime/training/``.
+Where algorithm implementations (lycoris / future T-LoRA etc.) should ultimately live is
+pending the full [[utils-full-refactor-plan-postponed]] refactor decision (see memory).
 
-本模块**故意保持空**：早期版本在这里 eager re-export 五个子模块（dataset /
-model_utils / checkpoint / comfyui_loader / optimizer_utils），触发 torchvision
-链式 import，是测试基础设施的长期痛点。死代码已删除；剩余活模块仍可通过
-``from utils.X import ...`` 子模块路径访问。
+This module is **deliberately left empty**: early versions eagerly re-exported five
+submodules here (dataset / model_utils / checkpoint / comfyui_loader / optimizer_utils),
+which triggered a chained torchvision import and was a long-standing pain point for the
+test infrastructure. The dead code has been removed; the remaining live submodules are
+still reachable via ``from utils.X import ...`` submodule paths.
 """

@@ -1,7 +1,8 @@
-"""comfy_qwen3 encoder checkpoint key 过滤（select_encoder_state_dict）。
+"""comfy_qwen3 encoder checkpoint key filtering (select_encoder_state_dict).
 
-完整 encoder 28 层实例化太重，单测只覆盖纯函数：缺 key 硬错、多余 key
-（如非 tied embeddings 变体的 lm_head.weight）过滤通过。
+Instantiating the full 28-layer encoder is too heavy, so the unit test only
+covers the pure function: a missing key raises hard, and an extra key (e.g.
+lm_head.weight from a non-tied-embeddings variant) is filtered out cleanly.
 """
 
 from __future__ import annotations

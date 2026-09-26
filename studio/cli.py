@@ -1,13 +1,13 @@
-"""跨平台启动器：替代 studio.bat 用 Python 管理前后端进程。
+"""Cross-platform launcher: replaces studio.bat, manages front/back-end processes in Python.
 
-子命令：
-    run    构建前端（如缺）+ 起后端（默认）
-    dev    前后端开发模式（Vite 5173 + uvicorn 8765 --reload，并行）
-    build  仅构建前端
-    test   依次跑 pytest + vitest
+Subcommands:
+    run    build the frontend (if missing) + start the backend (default)
+    dev    front/back-end dev mode (Vite 5173 + uvicorn 8765 --reload, in parallel)
+    build  build the frontend only
+    test   run pytest then vitest
 
-入口：
-    python -m studio                       # 等同 run
+Entry points:
+    python -m studio                       # same as run
     python -m studio dev
     python -m studio build
 """
@@ -37,17 +37,18 @@ NODE_MODULES = WEB_DIR / "node_modules"
 
 
 # ---------------------------------------------------------------------------
-# 工具
+# Utilities
 # ---------------------------------------------------------------------------
 
 
 def find_npm() -> Optional[str]:
-    """Windows 优先 .cmd（CreateProcess 可直接跑），.ps1 兜底；Linux/Mac 走裸名。
+    """On Windows prefer .cmd (CreateProcess can run it directly), fall back to .ps1; on Linux/Mac use the bare name.
 
-    注意不要把裸 ``npm`` 放在 Windows 候选首位：Node.js 官方安装包在
-    ``C:\\Program Files\\nodejs\\`` 同时铺了 ``npm`` (Git Bash 用的 bash 脚本)
-    / ``npm.cmd`` / ``npm.ps1`` 三份，``shutil.which("npm")`` 在 Windows 上
-    会先吃裸名那份，subprocess 直接报 WinError 193（不是有效 Win32 应用）。
+    Don't put the bare ``npm`` name first in the Windows candidate list: the
+    official Node.js installer drops ``npm`` (a bash script, for Git Bash)
+    / ``npm.cmd`` / ``npm.ps1`` all in ``C:\\Program Files\\nodejs\\``, and
+    ``shutil.which("npm")`` on Windows picks the bare-name one first, which
+    makes subprocess fail immediately with WinError 193 (not a valid Win32 app).
     """
     candidates = ("npm.cmd", "npm.ps1", "npm") if os.name == "nt" else ("npm",)
     for candidate in candidates:
@@ -58,7 +59,7 @@ def find_npm() -> Optional[str]:
 
 
 def find_python() -> str:
-    """优先用当前解释器（venv 已激活则自然指对）。"""
+    """Prefer the current interpreter (points at the right one automatically if a venv is active)."""
     return sys.executable
 
 
@@ -67,26 +68,30 @@ _PIP_MIRROR = "https://mirrors.cloud.tencent.com/pypi/simple/"
 
 
 def _say(msg: str, level: str = "info") -> None:
-    """统一 CLI 用户输出入口（ADR-0009 PR-3 C4）。
+    """Single entry point for CLI user-facing output (ADR-0009 PR-3 C4).
 
-    保 print 路径（ADR-0009 round 2 §1.3 决策 — CLI 5s 短命周期落盘价值低；
-    用户终端看 `[studio] ...` 比 logger 默认 format 清爽；capsys 测试 UX 优先）。
-    本 wrapper 给未来加 verbose 控制 / 着色留单一入口；现在等价于带前缀的 print。
+    Keeps the plain-print path (ADR-0009 round 2 §1.3 decision — the CLI's
+    process lives ~5s, so writing to a log file has little value; users see
+    `[studio] ...` in their terminal, which is cleaner than the logger's
+    default format; capsys-based tests also favor plain UX).
+    This wrapper gives us a single place to add verbose control / coloring
+    later; right now it's equivalent to a prefixed print.
 
     level:
-      - "info" / "success" → stdout，`[studio] ` 前缀
-      - "warning" / "error" → stderr，`[studio] ` 前缀
+      - "info" / "success" -> stdout, `[studio] ` prefix
+      - "warning" / "error" -> stderr, `[studio] ` prefix
     """
     file = sys.stderr if level in ("warning", "error") else sys.stdout
-    # 注意：不能用 f"[studio] {msg}"，否则被批量 _say 替换正则误伤。
+    # Note: don't use f"[studio] {msg}" here, or a bulk regex-replace of _say calls could mangle it.
     print("[studio] " + str(msg), file=file, flush=True)
 
 
 def _npm_argv(npm: str, args: list[str]) -> list[str]:
-    """拼出真正可被 subprocess 执行的 argv。
+    """Build the argv that subprocess can actually execute.
 
-    ``.ps1`` 无法被 ``CreateProcess`` 直接拉起，必须包 ``powershell.exe -File``；
-    ``.cmd`` 和裸名（Linux）直接拼即可。
+    ``.ps1`` can't be launched directly by ``CreateProcess``, so it must be
+    wrapped in ``powershell.exe -File``; ``.cmd`` and the bare name (Linux)
+    can just be used as-is.
     """
     if npm.lower().endswith(".ps1"):
         return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", npm, *args]
@@ -94,7 +99,7 @@ def _npm_argv(npm: str, args: list[str]) -> list[str]:
 
 
 def _npm_call(npm: str, args: list[str], cwd: str, timeout: int = 180) -> int:
-    """运行 npm 命令；超时则 kill 并返回 1。"""
+    """Run an npm command; kill it and return 1 on timeout."""
     proc = subprocess.Popen(_npm_argv(npm, args), cwd=cwd)
     try:
         return proc.wait(timeout=timeout)
@@ -129,12 +134,12 @@ def npm_install_if_missing(npm: str) -> int:
     except ValueError:
         rel = NODE_MODULES
     if package_files_changed:
-        _say("studio/web/package.json 或 package-lock.json 比 node_modules 新，运行 npm install...")
+        _say("studio/web/package.json or package-lock.json is newer than node_modules, running npm install...")
     else:
-        _say(f"{rel} 不完整或不存在，运行 npm install（3 分钟超时）...")
+        _say(f"{rel} is missing or incomplete, running npm install (3 min timeout)...")
     rc = _npm_call(npm, ["install"], str(WEB_DIR), timeout=180)
     if rc != 0:
-        _say(f"npm install 失败或超时，切换国内源 ({_NPM_MIRROR}) 重试...")
+        _say(f"npm install failed or timed out, retrying with the China mirror ({_NPM_MIRROR})...")
         rc = subprocess.call(
             _npm_argv(npm, ["install", "--registry", _NPM_MIRROR]),
             cwd=str(WEB_DIR),
@@ -143,10 +148,10 @@ def npm_install_if_missing(npm: str) -> int:
 
 
 def _pip_install(args: list[str]) -> int:
-    """运行 pip install；失败时切换阿里云镜像重试。"""
+    """Run pip install; retry with the Aliyun mirror on failure."""
     rc = subprocess.call([find_python(), "-m", "pip", "install"] + args)
     if rc != 0:
-        _say(f"pip install 失败，切换国内源 ({_PIP_MIRROR}) 重试...")
+        _say(f"pip install failed, retrying with the China mirror ({_PIP_MIRROR})...")
         rc = subprocess.call(
             [find_python(), "-m", "pip", "install"] + args
             + ["-i", _PIP_MIRROR],
@@ -155,7 +160,7 @@ def _pip_install(args: list[str]) -> int:
 
 
 def _ensure_python_deps() -> int:
-    """检查关键包（fastapi）是否安装，缺失时自动补装 requirements.txt。"""
+    """Check whether the key package (fastapi) is installed; if missing, install requirements.txt."""
     req = REPO_ROOT / "requirements.txt"
     if not req.exists():
         return 0
@@ -165,22 +170,22 @@ def _ensure_python_deps() -> int:
             return 0
     except Exception:
         pass
-    _say("检测到 fastapi 缺失，重新安装 Python 依赖（requirements.txt）...")
+    _say("fastapi is missing, reinstalling Python dependencies (requirements.txt)...")
     return _pip_install(["-r", str(req)])
 
 
 def npm_build(npm: str) -> int:
-    _say("构建前端 (npm run build)...")
+    _say("Building the frontend (npm run build)...")
     return subprocess.call(_npm_argv(npm, ["run", "build"]), cwd=str(WEB_DIR))
 
 
 # ---------------------------------------------------------------------------
-# 子进程协调
+# Subprocess coordination
 # ---------------------------------------------------------------------------
 
 
 class ProcGroup:
-    """同时管理多个子进程；任一进程退出或收到信号都把全部干掉。"""
+    """Manages several subprocesses at once; if any one exits or a signal arrives, kills them all."""
 
     def __init__(self) -> None:
         self.procs: list[tuple[str, subprocess.Popen]] = []
@@ -195,10 +200,10 @@ class ProcGroup:
         creationflags = 0
         preexec_fn = None
         if os.name == "nt":
-            # CREATE_NEW_PROCESS_GROUP 让我们能给整个组发 CTRL_BREAK_EVENT
+            # CREATE_NEW_PROCESS_GROUP lets us send CTRL_BREAK_EVENT to the whole group
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         else:
-            # POSIX 下放进新进程组，杀的时候用 killpg
+            # On POSIX, put it in a new process group so killpg can be used to kill it
             preexec_fn = os.setsid  # type: ignore[assignment]
         proc = subprocess.Popen(
             cmd,
@@ -211,15 +216,15 @@ class ProcGroup:
         return proc
 
     def wait_any(self) -> int:
-        """阻塞到任一进程退出，返回该进程的 exit code。"""
+        """Block until any process exits, and return that process's exit code."""
         while True:
             for label, p in self.procs:
                 rc = p.poll()
                 if rc is not None:
-                    _say(f"{label} 退出 (rc={rc})")
+                    _say(f"{label} exited (rc={rc})")
                     return rc
             try:
-                # 让 KeyboardInterrupt 有机会触发
+                # give KeyboardInterrupt a chance to fire
                 threading.Event().wait(0.5)
             except KeyboardInterrupt:
                 return 130
@@ -231,7 +236,7 @@ class ProcGroup:
         for label, p in self.procs:
             if p.poll() is not None:
                 continue
-            _say(f"停止 {label}...")
+            _say(f"Stopping {label}...")
             try:
                 if os.name == "nt":
                     p.send_signal(signal.CTRL_BREAK_EVENT)
@@ -243,41 +248,42 @@ class ProcGroup:
             try:
                 p.wait(timeout=grace)
             except subprocess.TimeoutExpired:
-                _say(f"{label} 超时未退出，强杀")
+                _say(f"{label} did not exit in time, killing it")
                 p.kill()
 
 
 # ---------------------------------------------------------------------------
-# 命令实现
+# Command implementations
 # ---------------------------------------------------------------------------
 
 
 def _print_npm_install_hint() -> None:
-    """`find_npm()` 返回 None 时打印平台相关安装提示。
+    """Print a platform-specific install hint when `find_npm()` returns None.
 
-    放 stderr，与 `[studio] 错误：找不到 npm` 同流；root 环境去掉 sudo（直接 root 跑装包）。
+    Goes to stderr, alongside `[studio] Error: npm not found`; on a root
+    environment the sudo prefix is dropped (root can install packages directly).
     """
-    _say("错误：找不到 npm。请安装 Node.js 18+", "error")
+    _say("Error: npm not found. Please install Node.js 18+", "error")
     if os.name == "nt":
         print(
-            "  Windows：前往 https://nodejs.org 下载安装包，"
-            "或用 winget install OpenJS.NodeJS.LTS",
+            "  Windows: go to https://nodejs.org to download the installer, "
+            "or run winget install OpenJS.NodeJS.LTS",
             file=sys.stderr,
         )
     else:
         sudo = "" if (hasattr(os, "getuid") and os.getuid() == 0) else "sudo "
         print(
-            f"  Ubuntu/Debian：curl -fsSL https://deb.nodesource.com/setup_22.x "
+            f"  Ubuntu/Debian: curl -fsSL https://deb.nodesource.com/setup_22.x "
             f"| {sudo}bash - && {sudo}apt-get install -y nodejs",
             file=sys.stderr,
         )
         print(
-            "  或使用 nvm（无需 sudo）："
+            "  Or use nvm (no sudo needed): "
             "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh "
             "| bash && nvm install --lts",
             file=sys.stderr,
         )
-    print("  安装后重新运行本命令。", file=sys.stderr)
+    print("  Re-run this command after installing.", file=sys.stderr)
 
 
 def cmd_build(_args: argparse.Namespace) -> int:
@@ -295,7 +301,7 @@ def cmd_build(_args: argparse.Namespace) -> int:
 
 
 def _current_git_head() -> Optional[str]:
-    """当前仓库 HEAD commit hash；非 git 仓 / 没有 git 命令 → None。"""
+    """Current repo HEAD commit hash; not a git repo / no git command -> None."""
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -312,8 +318,9 @@ def _current_git_head() -> Optional[str]:
 
 
 def _write_build_marker() -> None:
-    """build 成功后把 HEAD 写到 dist/.built-from。云上下次启动直接对比 HEAD
-    决定是否重建，绕开「git pull 不更新 mtime」的坑。"""
+    """After a successful build, write HEAD to dist/.built-from. On the next
+    cloud startup we can just compare HEAD to decide whether to rebuild,
+    sidestepping the "git pull doesn't update mtime" pitfall."""
     head = _current_git_head()
     if not head:
         return
@@ -324,7 +331,7 @@ def _write_build_marker() -> None:
 
 
 def _spawn_browser_opener(url: str, *, delay: float = 1.0) -> None:
-    """后台等服务起来后用默认浏览器打开 url；失败静默。"""
+    """In the background, wait for the service to come up, then open url in the default browser; fail silently."""
 
     def _wait_and_open() -> None:
         deadline = time.monotonic() + 30.0
@@ -349,26 +356,30 @@ def _spawn_browser_opener(url: str, *, delay: float = 1.0) -> None:
 
 
 def _apply_pending_install() -> None:
-    """启动期处理 server 进程不能完成的 pip 安装请求（torch 重装）。
+    """At startup, handle pip-install requests (torch reinstall) that the server process couldn't complete itself.
 
-    必须在 `_check_torch_cuda` 之前跑：那里会 import torch，之后 .pyd 被锁就装不动了。
-    失败不抛 —— pending_install.apply_pending 内部已打印错误，让 launcher 继续起。
+    Must run before `_check_torch_cuda`: that function imports torch, after
+    which the .pyd file is locked and can no longer be reinstalled.
+    Doesn't raise on failure -- pending_install.apply_pending already prints
+    its own errors, so the launcher can keep starting.
     """
     try:
         from studio.services.runtime import pending_install  # noqa: PLC0415
         pending_install.apply_pending()
     except Exception as exc:  # noqa: BLE001
         print(
-            f"[studio] 警告：处理 pending 安装请求时异常（{exc}），跳过",
+            f"[studio] Warning: exception while processing a pending install request ({exc}), skipping",
             file=sys.stderr,
         )
 
 
 def _try_enable_flash_attn() -> None:
-    """启动期检查 flash_attn 是否装好；装好就开 cosmos / anima 状态机。
+    """At startup, check whether flash_attn is installed; if so, enable the cosmos / anima state machine.
 
-    没装就 silently skip（_check_torch_cuda 不重复提示，flash_attn 是 nice-to-have）。
-    动态 import 避免拖慢 cli import 时间（cosmos_predict2_modeling 加载触发 torch import）。
+    Silently skips if not installed (_check_torch_cuda already covers this,
+    flash_attn is just a nice-to-have). Uses a dynamic import to avoid
+    slowing down cli import time (loading cosmos_predict2_modeling triggers
+    a torch import).
     """
     try:
         from studio.services.runtime import flash_attention as flash_attention_setup  # noqa: PLC0415
@@ -376,29 +387,31 @@ def _try_enable_flash_attn() -> None:
             return
         from modeling.anima.cosmos_predict2_modeling import set_flash_attn_enabled  # noqa: PLC0415
         if set_flash_attn_enabled(True):
-            _say("flash_attn 启用")
+            _say("flash_attn enabled")
         else:
-            # 装了 flash_attn 但 set_flash_attn_enabled 拒绝（_FLASH_ATTN_AVAILABLE=False）
-            # 通常意味着 import 时挂了（CUDA 版本不匹配等）；不噪声只 stderr 警告
+            # flash_attn is installed but set_flash_attn_enabled refused
+            # (_FLASH_ATTN_AVAILABLE=False), usually meaning the import failed
+            # (CUDA version mismatch, etc.); warn on stderr without more noise
             print(
-                "[studio] 警告：flash_attn 已安装但模型层 import 失败，"
-                "继续走 SDPA fallback",
+                "[studio] Warning: flash_attn is installed but the model-layer import "
+                "failed, falling back to SDPA",
                 file=sys.stderr,
             )
     except Exception as exc:  # noqa: BLE001
-        # Studio 启动不能为这一项加速 fail；记 warn 但放行
+        # A failure here must not fail Studio's startup; log a warning and continue
         print(
-            f"[studio] 警告：flash_attn 启用时异常（{exc}），跳过加速",
+            f"[studio] Warning: exception while enabling flash_attn ({exc}), skipping the speedup",
             file=sys.stderr,
         )
 
 
 def _report_lycoris_kernels() -> None:
-    """打印 LyCORIS 4 的 adapter-kernel 选择，不触发 JIT 编译。
+    """Print LyCORIS 4's adapter-kernel selection without triggering JIT compilation.
 
-    ``available_backends`` 只探测模块是否可导入；真正的 shape/device 选择仍由
-    LyCORIS 每次调用完成。这里用 ``preferred`` 而不是 ``active``，避免把尚未
-    首次编译的 Triton kernel 描述成已经执行过。
+    ``available_backends`` only detects whether a module can be imported;
+    the actual shape/device selection is still done by LyCORIS on each call.
+    We use ``preferred`` here rather than ``active`` to avoid describing a
+    Triton kernel as already compiled when it hasn't run for the first time yet.
     """
     try:
         from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
@@ -407,7 +420,7 @@ def _report_lycoris_kernels() -> None:
     except PackageNotFoundError:
         return
     except Exception as exc:  # noqa: BLE001
-        print(f"[studio] LyCORIS 状态读取失败（{exc}）", file=sys.stderr)
+        print(f"[studio] Failed to read LyCORIS status ({exc})", file=sys.stderr)
         return
 
     try:
@@ -417,7 +430,7 @@ def _report_lycoris_kernels() -> None:
         preferred = resolve_backend()
     except Exception as exc:  # noqa: BLE001
         print(
-            f"[studio] 警告：LyCORIS {lycoris_version} kernel backend 初始化失败（{exc}）",
+            f"[studio] Warning: LyCORIS {lycoris_version} kernel backend init failed ({exc})",
             file=sys.stderr,
         )
         return
@@ -433,7 +446,7 @@ def _report_lycoris_kernels() -> None:
     fused = ",".join(name for name in available if name in {"triton", "tilelang"}) or "none"
     triton_label = f" · Triton {triton_version}" if triton_version else ""
     _say(
-        f"LoRA kernels：LyCORIS {lycoris_version} · preferred={preferred} "
+        f"LoRA kernels: LyCORIS {lycoris_version} · preferred={preferred} "
         f"· fused={fused}{triton_label}"
     )
 
@@ -474,8 +487,8 @@ def _ensure_windows_triton() -> None:
     if target is None:
         if torch_minor is not None:
             print(
-                f"[studio] 警告：暂无 torch {torch_minor[0]}.{torch_minor[1]} "
-                "对应的 Windows Triton pin；LyCORIS 将自动回退",
+                f"[studio] Warning: no Windows Triton pin for torch {torch_minor[0]}.{torch_minor[1]} "
+                "yet; LyCORIS will fall back automatically",
                 file=sys.stderr,
             )
         return
@@ -503,39 +516,39 @@ def _ensure_windows_triton() -> None:
     )
     if _pip_install([requirement]) != 0:
         print(
-            "[studio] 警告：Triton 安装失败；LyCORIS 将使用 compile/eager fallback",
+            "[studio] Warning: Triton install failed; LyCORIS will use the compile/eager fallback",
             file=sys.stderr,
         )
 
 
 def _check_torch_cuda() -> None:
-    """启动期检查 torch 是否能用 CUDA；CPU-only torch 跑训练 / 出图会极慢。
+    """Check at startup whether torch can use CUDA; CPU-only torch makes training / generation extremely slow.
 
-    四种状态：
-    - CUDA 可用                       → 一行 OK
-    - torch 是 CPU-only build + 有 GPU → 大警告 + 重装命令（最常见误装）
-    - torch 是 CPU-only build + 无 GPU → 一行 info（用户确实在 CPU 机器上）
-    - torch 是 CUDA build 但 cuda 不可用 → 警告（驱动 / WSL 问题）
+    Four states:
+    - CUDA available                     -> one-line OK
+    - torch is a CPU-only build + has GPU -> big warning + reinstall command (most common mistake)
+    - torch is a CPU-only build + no GPU  -> one-line info (user is genuinely on a CPU machine)
+    - torch is a CUDA build but cuda unavailable -> warning (driver / WSL issue)
 
-    `torch.version.cuda` 在 CPU-only wheel 上是 None；在 cu* wheel 上是 "12.8" 等。
-    用它区分误装与驱动问题。
+    `torch.version.cuda` is None on a CPU-only wheel, and something like "12.8"
+    on a cu* wheel. Used here to distinguish a wrong install from a driver issue.
     """
     try:
         import torch  # noqa: PLC0415
     except ImportError:
-        return  # _ensure_python_deps 会在更早路径处理
+        return  # handled earlier by _ensure_python_deps
 
     if torch.cuda.is_available():
         try:
             name = torch.cuda.get_device_name(0)
         except Exception:  # noqa: BLE001
             name = "?"
-        _say(f"torch {torch.__version__}（GPU: {name}）")
+        _say(f"torch {torch.__version__} (GPU: {name})")
         return
 
     cuda_build = getattr(torch.version, "cuda", None)
     if cuda_build is None:
-        # CPU-only wheel：进一步判断本机是否其实有 NVIDIA GPU（误装）
+        # CPU-only wheel: check whether this machine actually has an NVIDIA GPU (wrong install)
         try:
             from studio.services.runtime import onnxruntime as onnxruntime_setup  # noqa: PLC0415
             has_gpu = bool(onnxruntime_setup.detect_cuda().get("available"))
@@ -543,36 +556,38 @@ def _check_torch_cuda() -> None:
             has_gpu = False
         if has_gpu:
             print(
-                f"[studio] 警告：检测到 NVIDIA GPU，但当前安装的是 CPU-only 版 PyTorch "
-                f"({torch.__version__})。\n"
-                f"        训练 / 出图将跑在 CPU 上，速度极慢（单步常需数十秒）。\n"
-                f"        请卸载后重装 CUDA 版：\n"
+                f"[studio] Warning: an NVIDIA GPU was detected, but the installed PyTorch "
+                f"is a CPU-only build ({torch.__version__}).\n"
+                f"        Training / generation will run on the CPU, which is extremely slow "
+                f"(often tens of seconds per step).\n"
+                f"        Uninstall and reinstall the CUDA build:\n"
                 f"          pip uninstall torch torchvision -y\n"
-                f"          # 按你的 CUDA 版本选；如 CUDA 12.8：\n"
+                f"          # pick the index matching your CUDA version, e.g. CUDA 12.8:\n"
                 f"          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128",
                 file=sys.stderr,
             )
         else:
             print(
-                f"[studio] torch {torch.__version__}（CPU-only build，未检测到 NVIDIA GPU）"
+                f"[studio] torch {torch.__version__} (CPU-only build, no NVIDIA GPU detected)"
             )
         return
 
-    # CUDA build 但运行时不可用：驱动 / WSL / 容器问题
+    # CUDA build but not usable at runtime: driver / WSL / container issue
     print(
-        f"[studio] 警告：torch {torch.__version__}（CUDA {cuda_build} build），"
-        f"但 torch.cuda.is_available()=False。\n"
-        f"        可能原因：NVIDIA 驱动未安装 / 版本过低 / WSL 缺 CUDA 支持。",
+        f"[studio] Warning: torch {torch.__version__} (CUDA {cuda_build} build), "
+        f"but torch.cuda.is_available()=False.\n"
+        f"        Possible causes: NVIDIA driver missing/outdated, or WSL missing CUDA support.",
         file=sys.stderr,
     )
 
 
 def _check_onnxruntime() -> None:
-    """启动期 onnxruntime 状态检查（仅 detect，不装包）。
+    """Check onnxruntime status at startup (detect only, doesn't install anything).
 
-    对齐 xformers / flash-attention：未装时 silent skip（Tagging 页选 WD14 /
-    CLTagger 会有徽章 + 引导按钮）。已装则打一行状态；CPU 包 + 有 GPU 走
-    warn，提醒用户去 Settings 切 GPU 版。
+    Mirrors xformers / flash-attention: silently skip if not installed (the
+    Tagging page's WD14 / CLTagger picker shows a badge + setup button
+    instead). If installed, print one status line; a CPU package with a GPU
+    present warns and points the user at Settings to switch to the GPU build.
     """
     try:
         from studio.services.runtime import onnxruntime as onnxruntime_setup
@@ -584,45 +599,50 @@ def _check_onnxruntime() -> None:
         installed = rt.get("installed") or "?"
         ver = rt.get("version") or "?"
         if rt.get("cuda_available"):
-            _say(f"onnxruntime: {installed}=={ver}（CUDA EP 可用）")
+            _say(f"onnxruntime: {installed}=={ver} (CUDA EP available)")
             return
 
         cuda = onnxruntime_setup.detect_cuda()
         if cuda.get("available"):
             _say(
-                f"检测到 NVIDIA GPU 但 onnxruntime 只有 CPU EP（installed={installed}）。"
-                f"WD14 / CLTagger 打标会跑 CPU（较慢）。可在 Settings → ONNX Runtime 重装为 GPU 版。",
+                f"NVIDIA GPU detected but onnxruntime only has the CPU EP (installed={installed}). "
+                f"WD14 / CLTagger tagging will run on CPU (slower). You can reinstall the GPU build "
+                f"from Settings -> ONNX Runtime.",
                 "warning",
             )
         else:
-            _say(f"onnxruntime: {installed}=={ver}（CPU only，未检测到 NVIDIA GPU）")
+            _say(f"onnxruntime: {installed}=={ver} (CPU only, no NVIDIA GPU detected)")
 
     except Exception as exc:  # noqa: BLE001
-        _say(f"onnxruntime 状态检查异常（已忽略）: {exc}", "error")
+        _say(f"onnxruntime status check raised an exception (ignored): {exc}", "error")
 
 
 WEB_SRC = WEB_DIR / "src"
 
 
 def _web_dist_is_stale() -> bool:
-    """dist 是否落后于 src。两道检查并联，任一说 stale 就重建。
+    """Whether dist is behind src. Two checks run in parallel; either one saying stale triggers a rebuild.
 
-    1) git HEAD 比对：build 时把 HEAD 写到 dist/.built-from，启动时对比当前
-       HEAD。云上 git pull 之后 HEAD 一定变，触发重建——这条是为了兜底
-       "git pull 不更新文件 mtime" 在某些 git 版本下不可靠的坑。
-    2) mtime 比对：dist/index.html 旧于 src/ 树或 package.json 等关键文件。
-       这条是为了兜底本地未 commit 的修改——HEAD 不变但磁盘上的文件确实
-       新过 dist，应当重建。
+    1) git HEAD comparison: the build writes HEAD to dist/.built-from, and we
+       compare it against the current HEAD at startup. After a `git pull` on
+       a cloud instance HEAD always changes, triggering a rebuild -- this is
+       the fallback for "`git pull` doesn't update file mtimes" being
+       unreliable on some git versions.
+    2) mtime comparison: dist/index.html is older than the src/ tree or key
+       files like package.json. This is the fallback for uncommitted local
+       edits -- HEAD hasn't changed but files on disk are genuinely newer
+       than dist, so it should still rebuild.
 
-    曾经把 mtime 降级成 fallback（HEAD 一致就跳过），导致本地编辑后
-    `studio run` 看不到变化。改并联后云上 git pull 行为不受影响，本地 dev
-    iteration 也不需要每改完都 commit。
+    mtime used to be a fallback only checked when HEAD matched, which meant
+    local edits didn't show up in `studio run`. Running both in parallel
+    doesn't change cloud `git pull` behavior, and local dev iteration no
+    longer needs a commit after every change.
     """
     dist_index = WEB_DIST / "index.html"
     if not dist_index.exists():
         return True
 
-    # 第一道：git HEAD 比对
+    # Check 1: git HEAD comparison
     marker = WEB_DIST / ".built-from"
     head = _current_git_head()
     if head and marker.exists():
@@ -633,14 +653,14 @@ def _web_dist_is_stale() -> bool:
         except OSError:
             pass
 
-    # 第二道：mtime 比对
+    # Check 2: mtime comparison
     try:
         dist_mtime = dist_index.stat().st_mtime
         src_latest = max(
             (p.stat().st_mtime for p in WEB_SRC.rglob("*") if p.is_file()),
             default=0.0,
         )
-        # package.json / vite.config 改了也算
+        # also count changes to package.json / vite.config etc.
         for f in (WEB_DIR / "package.json", WEB_DIR / "vite.config.ts", WEB_DIR / "tsconfig.json"):
             if f.exists():
                 src_latest = max(src_latest, f.stat().st_mtime)
@@ -654,16 +674,21 @@ def _web_dist_is_stale() -> bool:
 
 _RESTART_FLAG = REPO_ROOT / "tmp" / "restart"
 
-# PR-D — installer 自检（ADR 0002）。cmd_run 入口快照这三个文件的 sha256；
-# 每次 server 退出 + 收到 restart 请求时再算一次，任一变化 → 返回退出码 42
-# 让 wrapper（studio.sh / studio.bat）整体 exec 自己。原因：
+# PR-D -- installer self-check (ADR 0002). cmd_run snapshots the sha256 of
+# these three files at entry; each time the server exits and a restart is
+# requested, it recomputes them, and any change makes it return exit code 42
+# so the wrapper (studio.sh / studio.bat) re-execs itself entirely. Why:
 #
-# - cli.py 本身变更 → 旧 python 进程加载的是旧 cli.py，next-iteration 的 inner
-#   loop 仍走老逻辑；只有让 wrapper 重新拉 `python -m studio` 才能拿到新 cli.py。
-# - studio.sh / studio.bat 变更 → bash 已把 loop 体加载进内存，cmd.exe 也可能
-#   缓存 .bat 解析结果；必须让 shell 进程 exec 自己拿到新 wrapper。
+# - cli.py itself changed -> the old python process still has the old cli.py
+#   loaded, so the next-iteration inner loop would keep running the old
+#   logic; only having the wrapper re-run `python -m studio` picks up the
+#   new cli.py.
+# - studio.sh / studio.bat changed -> bash already has the loop body loaded
+#   into memory, and cmd.exe may also cache its .bat parse; the shell
+#   process itself must exec itself to pick up the new wrapper.
 #
-# 三个文件中任一变化都走同一协议（最简单 / 最稳）。
+# Any change across the three files goes through the same protocol (simplest
+# / most robust).
 _INSTALLER_FILES: tuple[Path, ...] = (
     REPO_ROOT / "studio" / "cli.py",
     REPO_ROOT / "studio.sh",
@@ -673,8 +698,9 @@ _INSTALLER_RELOAD_EXIT_CODE = 42
 
 
 def _installer_hashes() -> dict[str, Optional[str]]:
-    """快照 installer 文件 sha256。文件不存在 → 值为 None（跨平台：Linux 上
-    studio.bat 不存在，Windows 上 studio.sh 不存在；存在性也算入比对）。"""
+    """Snapshot the sha256 of the installer files. Missing file -> value is None
+    (cross-platform: studio.bat doesn't exist on Linux, studio.sh doesn't
+    exist on Windows; existence itself is part of the comparison)."""
     result: dict[str, Optional[str]] = {}
     for p in _INSTALLER_FILES:
         try:
@@ -685,54 +711,59 @@ def _installer_hashes() -> dict[str, Optional[str]]:
 
 
 def _maybe_force_torch(args: argparse.Namespace) -> int:
-    """--torch <tag> 指定时，检查当前安装是否匹配；不匹配则立即重装（流式输出）。
-    仅在 launcher 启动期调一次，重装完由 restart 机制加载新 torch。"""
+    """When --torch <tag> is given, check whether the current install matches;
+    if not, reinstall immediately (streamed output). Only called once at
+    launcher startup; the restart mechanism loads the new torch afterward."""
     tag = getattr(args, 'torch', None)
     if not tag:
         return 0
     from studio.services.runtime import torch as torch_setup  # noqa: PLC0415
     current = torch_setup.detect_torch()
-    current_build = current.get('cuda_build') or ('未安装' if not current.get('installed') else 'unknown')
+    current_build = current.get('cuda_build') or ('not installed' if not current.get('installed') else 'unknown')
     if current.get('installed') and current.get('cuda_build') == tag:
-        _say(f"torch 已是 {tag}，跳过重装")
+        _say(f"torch is already {tag}, skipping reinstall")
         return 0
-    _say(f"--torch {tag} 指定（当前: {current_build}），开始重装...")
-    _say("提示：按 Ctrl+C 可跳过")
+    _say(f"--torch {tag} requested (current: {current_build}), reinstalling...")
+    _say("Tip: press Ctrl+C to skip")
     try:
         res = torch_setup.reinstall(tag, stream=True)
-        _say(f"torch 重装完成: {res.get('version')} ({res.get('tag')})")
+        _say(f"torch reinstall complete: {res.get('version')} ({res.get('tag')})")
         return 0
     except KeyboardInterrupt:
-        print("\n[studio] 用户中断，跳过 torch 重装", file=sys.stderr)
+        print("\n[studio] Interrupted by user, skipping torch reinstall", file=sys.stderr)
         return 0
     except RuntimeError as exc:
-        _say(f"torch 重装失败: {exc}", "error")
+        _say(f"torch reinstall failed: {exc}", "error")
         return 1
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """`run` 主循环。
+    """The `run` main loop.
 
-    内层 loop：每次 server 退出后检查 `tmp/restart` 标志（由 server 端
-    `/api/system/restart` 写）。存在则删除标志 + 重走 bootstrap + 重起 server；
-    不存在则跳出，正常退出。
+    Inner loop: after each server exit, check the `tmp/restart` flag
+    (written by the server side's `/api/system/restart`). If present, delete
+    the flag, redo bootstrap, and restart the server; if absent, break out
+    and exit normally.
 
-    重启协议详见 `docs/adr/0002-webui-self-update.md`。外层 shell wrapper
-    (`studio.sh` / `studio.bat`) 也有同样的 loop 兜底（cli.py 异常退出但
-    flag 还在的场景），并且响应退出码 42 把自己 exec 一遍（PR-D installer
-    自检：当 cli.py / studio.sh / studio.bat 本身被 update 修改后，需要从
-    磁盘重新加载 wrapper + Python 解释器）。
+    See `docs/adr/0002-webui-self-update.md` for the restart protocol. The
+    outer shell wrapper (`studio.sh` / `studio.bat`) has the same loop as a
+    fallback (for when cli.py exits abnormally but the flag is still there),
+    and reacts to exit code 42 by re-execing itself (PR-D installer
+    self-check: when cli.py / studio.sh / studio.bat itself was modified by
+    an update, the wrapper + Python interpreter need to be reloaded from
+    disk).
 
-    冷启动只打开一次浏览器；重启时复用已存在的 webui 标签页（前端轮询
-    `/api/health` 自动 reconnect），不重复弹新窗口。
+    The browser only opens once on a cold start; on restart it reuses the
+    existing webui tab (the frontend polls `/api/health` and reconnects
+    automatically) instead of popping a new window.
     """
     opened_browser = False
-    # --torch 强制重装（仅首次，不在 restart 循环里重复）
+    # force-reinstall via --torch (only on the first pass, not repeated inside the restart loop)
     rc = _maybe_force_torch(args)
     if rc != 0:
         return rc
-    # PR-D：快照启动期 installer 文件 sha256；server 退出后重算，变化则
-    # 退出码 42 让 wrapper 整体 exec 自己。
+    # PR-D: snapshot the installer files' sha256 at startup; recompute after
+    # the server exits, and exit code 42 makes the wrapper re-exec itself.
     startup_installer = _installer_hashes()
     while True:
         rc = _ensure_python_deps()
@@ -741,12 +772,12 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         if not args.no_build:
             if not WEB_DIST.exists():
-                _say("studio/web/dist 不存在，先构建前端...")
+                _say("studio/web/dist is missing, building the frontend first...")
                 rc = cmd_build(args)
                 if rc != 0:
                     return rc
             elif _web_dist_is_stale():
-                _say("studio/web/dist 比 src 旧（git pull 后未重建？），重新构建前端...")
+                _say("studio/web/dist is older than src (not rebuilt after git pull?), rebuilding the frontend...")
                 rc = cmd_build(args)
                 if rc != 0:
                     return rc
@@ -758,7 +789,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         _report_lycoris_kernels()
         _check_onnxruntime()
         url = f"http://{args.host}:{args.port}/"
-        _say(f"启动后端 → {url}")
+        _say(f"Starting the backend -> {url}")
         if not args.no_browser and not opened_browser:
             _spawn_browser_opener(url)
             opened_browser = True
@@ -767,30 +798,33 @@ def cmd_run(args: argparse.Namespace) -> int:
                 [find_python(), "-m", "studio.server", "--host", args.host, "--port", str(args.port)]
             )
         except KeyboardInterrupt:
-            # 终端 Ctrl+C：CTRL_C_EVENT 同时广播给 server 子进程（它自己走
-            # graceful shutdown）；父进程这边阻塞在 wait 的 KeyboardInterrupt
-            # 要等子进程退干净后才抛出来。用户主动停机，不打 traceback。
-            _say("已停止（Ctrl+C）")
+            # Terminal Ctrl+C: CTRL_C_EVENT is broadcast to the server
+            # subprocess too (which does its own graceful shutdown); the
+            # parent's blocking wait only raises KeyboardInterrupt after the
+            # child has fully exited. This is a deliberate user stop, so no
+            # traceback.
+            _say("Stopped (Ctrl+C)")
             return 130
 
         if not _RESTART_FLAG.exists():
             return rc
 
-        # PR-D：installer 自检。restart flag 存在的前提下，若 cli.py /
-        # studio.sh / studio.bat 任一变化，**保留** flag 并返回 42，让 wrapper
-        # 走 exec self 路径。flag 保留是关键 —— wrapper 检测到 (exit==42 &&
-        # flag exists) 才会 re-exec；只剩 flag 而 exit!=42 则走普通 restart。
+        # PR-D: installer self-check. With the restart flag present, if
+        # cli.py / studio.sh / studio.bat changed, **keep** the flag and
+        # return 42 so the wrapper takes the exec-self path. Keeping the flag
+        # matters -- the wrapper only re-execs when it sees (exit==42 && flag
+        # exists); flag alone with exit!=42 is a normal restart.
         if _installer_hashes() != startup_installer:
-            _say("检测到 launcher 文件更新（cli.py / studio.sh / studio.bat），"
-                  "退出码 42 让 wrapper 重新加载...")
+            _say("Detected an update to a launcher file (cli.py / studio.sh / studio.bat), "
+                  "exiting with code 42 so the wrapper reloads...")
             return _INSTALLER_RELOAD_EXIT_CODE
 
-        # 收到重启请求：删除标志 + loop 回去重新 bootstrap
+        # Restart requested: delete the flag and loop back to bootstrap again
         try:
             _RESTART_FLAG.unlink()
         except OSError:
             pass
-        _say("收到重启请求，重新启动...")
+        _say("Restart requested, restarting...")
 
 
 def cmd_dev(args: argparse.Namespace) -> int:
@@ -835,7 +869,7 @@ def cmd_dev(args: argparse.Namespace) -> int:
             f"backend → http://{args.host}:{args.port}/"
         )
         if not args.no_browser:
-            # dev 模式打开 Vite 端口（HMR 能用），不开 backend 端口
+            # dev mode opens the Vite port (so HMR works), not the backend port
             _spawn_browser_opener(frontend_url, delay=2.0)
         rc = pg.wait_any()
     finally:
@@ -844,50 +878,56 @@ def cmd_dev(args: argparse.Namespace) -> int:
 
 
 def cmd_test(_args: argparse.Namespace) -> int:
-    """跑 pytest + vitest。任一失败 → 非零退出。"""
+    """Run pytest + vitest. Any failure -> non-zero exit."""
     _say("pytest...")
     rc = subprocess.call([find_python(), "-m", "pytest", "tests/"], cwd=str(REPO_ROOT))
     if rc != 0:
         return rc
     npm = find_npm()
     if not npm:
-        _say("跳过 vitest (未安装 npm)")
+        _say("Skipping vitest (npm not installed)")
         return 0
     if not NODE_MODULES.exists():
-        _say("跳过 vitest (node_modules 缺失，先 npm install)")
+        _say("Skipping vitest (node_modules missing, run npm install first)")
         return 0
     _say("vitest...")
     return subprocess.call(_npm_argv(npm, ["run", "test"]), cwd=str(WEB_DIR))
 
 
 # ---------------------------------------------------------------------------
-# 运行模式（Colab / Local）
+# Runtime mode (Colab / Local)
 # ---------------------------------------------------------------------------
 
-# 这里刻意不 import studio.infrastructure.runtime_mode：build_parser() 在
-# argparse 构造期就要这个元组，而 infrastructure 会连带拉起 pydantic /
-# paths（几百毫秒 + 会建目录）。取值集合是两个字面量，重复一次比换来一条
-# import 边划算；真正的解析逻辑仍然只有 runtime_mode 一份（下面函数内 import）。
+# Deliberately not importing studio.infrastructure.runtime_mode here:
+# build_parser() needs this tuple while constructing argparse, and
+# infrastructure would drag in pydantic / paths too (a few hundred ms, plus
+# it creates directories). The value set is just two literals, so duplicating
+# it once is cheaper than adding that import edge; the actual resolution
+# logic still lives only in runtime_mode (imported inside the function below).
 _RUNTIME_MODES: tuple[str, ...] = ("local", "colab")
 
 
 def _apply_runtime_mode_defaults(args: argparse.Namespace) -> None:
-    """把 `--host` / `--no-browser` 的默认值按运行模式补齐（就地改 args）。
+    """Fill in `--host` / `--no-browser` defaults based on the runtime mode (mutates args in place).
 
-    - `--mode` 显式传入时先写进 `ALS_RUNTIME_MODE`，这样 server 子进程（
-      `python -m studio.server`，继承环境）和 UI 看到的是同一个模式。
-    - `local`：127.0.0.1 + 自动开浏览器 —— 浏览器和进程同机，绑 0.0.0.0 等于
-      把训练面板暴露给整个局域网，不该是默认。
-    - `colab`：0.0.0.0 + 不开浏览器 —— notebook 的端口代理要从容器外连进来，
-      而容器里根本没有浏览器可开（webbrowser.open 会静默失败或卡住）。
+    - When `--mode` is passed explicitly, it's written to `ALS_RUNTIME_MODE`
+      first, so the server subprocess (`python -m studio.server`, which
+      inherits the environment) and the UI see the same mode.
+    - `local`: 127.0.0.1 + auto-open browser -- the browser and process are
+      on the same machine, so binding 0.0.0.0 would expose the training
+      panel to the whole LAN, which shouldn't be the default.
+    - `colab`: 0.0.0.0 + no browser -- the notebook's port proxy connects in
+      from outside the container, and there's no browser to open inside the
+      container anyway (webbrowser.open would fail silently or hang).
 
-    用户显式给的值永远优先：`--host` 非 None、`--no-browser` 已置位都不覆盖。
+    An explicit user-provided value always wins: neither a non-None `--host`
+    nor an already-set `--no-browser` gets overridden.
     """
     mode = getattr(args, "mode", None)
     if mode:
         os.environ["ALS_RUNTIME_MODE"] = mode
 
-    from .infrastructure import runtime_mode  # noqa: PLC0415 — 见上方注释
+    from .infrastructure import runtime_mode  # noqa: PLC0415 -- see comment above
 
     effective = runtime_mode.effective()
     args.runtime_mode = effective
@@ -899,94 +939,101 @@ def _apply_runtime_mode_defaults(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 入口
+# Entry point
 # ---------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="studio", description="AnimaTrainHub 启动器")
+    p = argparse.ArgumentParser(prog="studio", description="AnimaTrainHub launcher")
     sub = p.add_subparsers(dest="cmd")
 
-    p_run = sub.add_parser("run", help="构建前端（如缺）+ 起后端")
-    # host 默认值留 None，由 _apply_runtime_mode_defaults 按运行模式补：
-    # local → 127.0.0.1（只本机可达），colab → 0.0.0.0（notebook 代理要能连）。
-    # 显式 --host 永远优先。
+    p_run = sub.add_parser("run", help="Build the frontend (if missing) + start the backend")
+    # host default stays None; _apply_runtime_mode_defaults fills it in by
+    # runtime mode: local -> 127.0.0.1 (local machine only), colab -> 0.0.0.0
+    # (the notebook's proxy needs to reach it). An explicit --host always wins.
     p_run.add_argument("--host", default=None,
-                       help="绑定地址（默认按运行模式：local=127.0.0.1 / colab=0.0.0.0）")
+                       help="Bind address (default by runtime mode: local=127.0.0.1 / colab=0.0.0.0)")
     p_run.add_argument("--port", type=int, default=8765)
     p_run.add_argument("--mode", choices=list(_RUNTIME_MODES), default=None,
-                       help="强制运行模式（local / colab）。等价于设 "
-                            "ALS_RUNTIME_MODE，会锁死 UI 里的模式选择。")
+                       help="Force a runtime mode (local / colab). Equivalent to setting "
+                            "ALS_RUNTIME_MODE; also locks the mode picker in the UI.")
     p_run.add_argument("--no-build", action="store_true",
-                       help="即使 dist 不存在也不自动 build")
+                       help="Don't auto-build even if dist is missing")
     p_run.add_argument("--no-browser", action="store_true",
-                       help="启动后不自动打开浏览器")
+                       help="Don't auto-open a browser after starting")
     p_run.add_argument("--skip-pending", action="store_true",
-                       help="跳过 pending pip 安装（torch 重装等），直接启动")
+                       help="Skip pending pip installs (torch reinstall, etc) and start right away")
     p_run.add_argument("--torch", metavar="TAG",
-                       help="强制指定 torch CUDA 版本（cu128/cu126/cu124/cu118/cpu），"
-                            "与当前不符时自动重装。CPU 租赁机预装 GPU torch 时使用。")
+                       help="Force a torch CUDA build (cu128/cu126/cu124/cu118/cpu); "
+                            "reinstalls automatically if it doesn't match. Useful on CPU rental "
+                            "machines that come with GPU torch preinstalled.")
     p_run.set_defaults(func=cmd_run)
 
-    p_dev = sub.add_parser("dev", help="前后端开发模式")
+    p_dev = sub.add_parser("dev", help="Frontend + backend dev mode")
     p_dev.add_argument("--host", default=None,
-                       help="绑定地址（默认按运行模式：local=127.0.0.1 / colab=0.0.0.0）")
+                       help="Bind address (default by runtime mode: local=127.0.0.1 / colab=0.0.0.0)")
     p_dev.add_argument("--mode", choices=list(_RUNTIME_MODES), default=None,
-                       help="强制运行模式（local / colab）")
+                       help="Force a runtime mode (local / colab)")
     p_dev.add_argument("--port", type=int, default=8765,
-                       help="后端 uvicorn 端口（默认 8765）")
+                       help="Backend uvicorn port (default 8765)")
     p_dev.add_argument("--fe-port", type=int, default=5173,
-                       help="前端 Vite 开发服务器端口（默认 5173）")
+                       help="Frontend Vite dev server port (default 5173)")
     p_dev.add_argument("--no-browser", action="store_true",
-                       help="启动后不自动打开浏览器")
+                       help="Don't auto-open a browser after starting")
     p_dev.add_argument("--skip-pending", action="store_true",
-                       help="跳过 pending pip 安装（torch 重装等），直接启动")
+                       help="Skip pending pip installs (torch reinstall, etc) and start right away")
     p_dev.add_argument("--torch", metavar="TAG",
-                       help="强制指定 torch CUDA 版本（cu128/cu126/cu124/cu118/cpu）")
+                       help="Force a torch CUDA build (cu128/cu126/cu124/cu118/cpu)")
     p_dev.set_defaults(func=cmd_dev)
 
-    p_build = sub.add_parser("build", help="仅构建前端")
+    p_build = sub.add_parser("build", help="Build the frontend only")
     p_build.set_defaults(func=cmd_build)
 
-    p_test = sub.add_parser("test", help="跑 pytest + vitest")
+    p_test = sub.add_parser("test", help="Run pytest + vitest")
     p_test.set_defaults(func=cmd_test)
 
     return p
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    # 第三方库缓存收进 `<仓库>/.cache/`（本 fork，见 infrastructure/local_cache.py）。
+    # Redirect third-party library caches into `<repo>/.cache/` (this fork's
+    # convention, see infrastructure/local_cache.py).
     #
-    # 必须在任何 pip / npm / server 子进程之前 —— 下面 `args.func(args)` 里就会
-    # 起它们，环境变量得先就位。放在 main() 而不是 import 期：import 期会在
-    # 测试收集阶段就写环境变量并在仓库里建 .cache/，而它买到的只是「有人直接
-    # import cmd_build」这种非用户路径。用户显式设过的值不覆盖，
-    # `ALS_SYSTEM_CACHES=1` 整体关闭。
+    # Must run before any pip / npm / server subprocess -- `args.func(args)`
+    # below will spawn them, so the env vars need to be in place first. This
+    # lives in main() rather than at import time: doing it at import time
+    # would set the env vars and create .cache/ in the repo during test
+    # collection too, which only benefits the non-user path of "someone
+    # directly imports cmd_build". Values the user explicitly set aren't
+    # overridden; `ALS_SYSTEM_CACHES=1` disables this entirely.
     from .infrastructure import local_cache
 
     local_cache.apply(REPO_ROOT)
 
     parser = build_parser()
     args_list = list(argv) if argv is not None else sys.argv[1:]
-    # 没有子命令时默认 run（如 studio.sh --port 6006 → run --port 6006）。
-    # 找第一个不以 '-' 开头的参数，判断是否是已知子命令；不是则插入 run。
+    # Default to run when no subcommand is given (e.g. studio.sh --port 6006
+    # -> run --port 6006). Find the first argument not starting with '-' and
+    # check whether it's a known subcommand; if not, insert 'run'.
     _subcmds = {'run', 'dev', 'build', 'test'}
     _first_pos = next((a for a in args_list if not a.startswith('-')), None)
     if _first_pos not in _subcmds:
         args_list = ['run'] + args_list
     args = parser.parse_args(args_list)
-    # PR-1 C4: 统一日志体系 (ADR-0009)。file=False — CLI 是 5s 短命周期，
-    # 启动信息不进 studio.log（用户决定 — round 2 §1.3）。console=True 让
-    # logger.x 调用走人读 stderr；现有 48 处 print() 不动（PR-3 _say() wrapper
-    # 收编）。env ANIMA_LOGGING_NO_BOOTSTRAP=1 时 noop（测试态）。
+    # PR-1 C4: unified logging (ADR-0009). file=False -- the CLI process only
+    # lives ~5s, so startup info doesn't go into studio.log (decided in round
+    # 2 §1.3). console=True routes logger.x calls to stderr for humans; the
+    # existing 48 print() call sites are left alone (folded in by the PR-3
+    # _say() wrapper). Env ANIMA_LOGGING_NO_BOOTSTRAP=1 makes this a no-op
+    # (test mode).
     from .infrastructure.logging import setup_logging
     setup_logging(f"cli:{args.cmd}", file=False, console=True)
-    # run / dev 才有 host / browser 概念；build / test 没有这些属性。
+    # host / browser concepts only apply to run / dev; build / test don't have these attributes.
     if args.cmd in ("run", "dev"):
         _apply_runtime_mode_defaults(args)
-        _say(f"运行模式：{args.runtime_mode}"
-             + ("（Colab / 云端 notebook）" if args.runtime_mode == "colab"
-                else "（本机）"))
+        _say(f"Runtime mode: {args.runtime_mode}"
+             + (" (Colab / cloud notebook)" if args.runtime_mode == "colab"
+                else " (local machine)"))
     return args.func(args)
 
 

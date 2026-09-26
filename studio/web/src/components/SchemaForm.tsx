@@ -20,7 +20,7 @@ interface Props {
   /** 字段右侧额外按钮槽（如「↺ 重置为全局默认」）。仅对 string/path 字段
    * 生效；按字段名查表。 */
   fieldSuffixes?: Record<string, React.ReactNode>
-  /** false（默认）= 简单模式，隐藏 advanced=true 的字段。 */
+  /** false = hide fields marked advanced. The app always shows everything. */
   advancedMode?: boolean
   /** Render only these schema groups (a tab of the Train page). */
   groupKeys?: string[]
@@ -59,7 +59,7 @@ export function visibleSchemaGroups(
  * 依赖当前 values。
  */
 export default function SchemaForm({
-  schema, values, onChange, disabledFields, disabledHints, autoHints, fieldSuffixes, advancedMode = false,
+  schema, values, onChange, disabledFields, disabledHints, autoHints, fieldSuffixes, advancedMode = true,
   groupKeys, fieldFilter, baseline, afterField, emptyHint,
 }: Props) {
   const { t } = useTranslation()
@@ -172,12 +172,10 @@ export default function SchemaForm({
     if (fields.length === 0) return null
     rendered += fields.length
     return (
-      <section key={key} id={`schema-group-${key}`} className="scroll-mt-4">
-        <div className="ds-subgroup">
-          <span className="ds-sg-name">{groupLabel}</span>
-          <span className="ds-sg-key">{key}</span>
-          <span style={{ flex: 1 }} />
-          <span className="ds-kpi-meta">{t('schema.fieldCount', { n: fields.length, count: fields.length })}</span>
+      <section key={key} id={`schema-group-${key}`} className="ds-fgroup">
+        <div className="ds-fgroup-head">
+          <span className="ds-fgroup-title">{groupLabel}</span>
+          <span className="ds-fgroup-count">{t('schema.fieldCount', { n: fields.length, count: fields.length })}</span>
         </div>
         {fields.map((name) => {
           const prop = props[name]
@@ -241,10 +239,10 @@ export default function SchemaForm({
   })
 
   return (
-    <div>
+    <div className="ds-fgroups">
       {sections}
       {rendered === 0 && emptyHint && (
-        <div className="ds-empty" style={{ margin: 17 }}>{emptyHint}</div>
+        <div className="ds-empty">{emptyHint}</div>
       )}
       {pendingImpact && (
         <RuleImpactDialog

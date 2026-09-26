@@ -1,4 +1,4 @@
-"""数据集扫描 + /api/datasets 端点测试。"""
+"""Dataset scanning + /api/datasets endpoint tests."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,7 +11,7 @@ from studio.services.dataset import scan as datasets
 def _touch_image(folder: Path, name: str, size: int = 8) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     p = folder / name
-    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * size)  # 假 PNG header
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * size)  # fake PNG header
     return p
 
 
@@ -50,7 +50,7 @@ def test_cached_latent_invalidates_when_resolution_bucket_changes(tmp_path: Path
 
 
 def test_cached_latent_keeps_third_party_caption_fallback(tmp_path: Path) -> None:
-    """Phase 2 resolver 抽取不能把 duck-typed dataset 的 caption 变成空串。"""
+    """Phase 2 resolver extraction must not turn a duck-typed dataset's caption into an empty string."""
     pytest.importorskip("torch")
     import numpy as np
 
@@ -81,10 +81,11 @@ def test_cached_latent_keeps_third_party_caption_fallback(tmp_path: Path) -> Non
 
 
 def test_cached_latent_invalidates_when_flip_augment_added(tmp_path: Path) -> None:
-    """老 cache（只有 latent，无 latent_flipped）+ flip_augment=True → 失效重 encode。
+    """Old cache (only latent, no latent_flipped) + flip_augment=True -> invalidated, re-encode.
 
-    旧版本静默把 cache 阶段那次随机翻转 baked 进 npz，导致 50% 数据被永久镜像
-    污染；新版要求 flip_augment=True 时 npz 必须同时有 latent + latent_flipped。
+    The old version silently baked that cache-stage random flip into the npz, permanently
+    mirroring 50% of the data; the new version requires that when flip_augment=True, the
+    npz must have both latent + latent_flipped.
     """
     pytest.importorskip("torch")
     from PIL import Image
@@ -96,7 +97,7 @@ def test_cached_latent_invalidates_when_flip_augment_added(tmp_path: Path) -> No
     Image.new("RGB", (1024, 1024), color=(127, 127, 127)).save(img_path)
     img_path.with_suffix(".txt").write_text("1girl", encoding="utf-8")
     npz_path = img_path.with_suffix(".npz")
-    # 老格式 cache：只有 latent，无 latent_flipped
+    # Old-format cache: only latent, no latent_flipped
     np.savez(
         npz_path,
         latent=np.zeros((16, 1, 128, 128), dtype=np.float32),
@@ -115,10 +116,10 @@ def test_cached_latent_invalidates_when_flip_augment_added(tmp_path: Path) -> No
     cached.bucket_for_index = []
     cached.flip_augment = True
 
-    # flip_augment=True 但 npz 缺 latent_flipped → 失效（强制重 encode）
+    # flip_augment=True but npz is missing latent_flipped -> invalid (forces re-encode)
     assert cached._is_cache_valid(img_path, npz_path) is False
 
-    # 补全 latent_flipped → 有效
+    # Add latent_flipped -> valid
     np.savez(
         npz_path,
         latent=np.zeros((16, 1, 128, 128), dtype=np.float32),
@@ -130,9 +131,10 @@ def test_cached_latent_invalidates_when_flip_augment_added(tmp_path: Path) -> No
 
 
 def test_cached_latent_accepts_double_cache_with_flip_off(tmp_path: Path) -> None:
-    """双份 cache + flip_augment=False → 仍有效（不强制再 encode；只读 latent）。
+    """Double cache + flip_augment=False -> still valid (no forced re-encode; only latent is read).
 
-    避免用户切 flip 开关时反复重 encode；双份是单份的超集。
+    Avoids repeated re-encoding when the user flips the flip toggle; the double cache is a
+    superset of the single one.
     """
     pytest.importorskip("torch")
     from PIL import Image
@@ -167,14 +169,15 @@ def test_cached_latent_accepts_double_cache_with_flip_off(tmp_path: Path) -> Non
 
 
 class _FakeVAEModel:
-    """Mock VAE：encode 把 pixel mean / first-pixel signature 写进 latent，
-    让测试能区分『原图 latent』vs『flipped latent』。"""
+    """Mock VAE: encode writes the pixel mean / first-pixel signature into the latent,
+    letting the test distinguish 'original latent' vs 'flipped latent'."""
     def encode(self, pixels_5d, scale):
         import torch
         # pixels_5d: [B, C, T=1, H, W]
         b, c, t, h, w = pixels_5d.shape
-        # 签名：取第一行的第一个像素值 + 最后一个像素值，写进 latent 头两个 channel
-        # flip 后这俩会对调 → 区分有无 flip
+        # Signature: take the first row's first pixel value + last pixel value, write into
+        # the first two latent channels
+        # After a flip these two swap -> lets us tell flipped from unflipped
         first = pixels_5d[:, 0:1, :, :, 0:1].mean(dim=(2, 3, 4), keepdim=True)
         last = pixels_5d[:, 0:1, :, :, -1:].mean(dim=(2, 3, 4), keepdim=True)
         latent = torch.zeros(b, 16, 1, h // 8, w // 8, dtype=pixels_5d.dtype)
@@ -189,15 +192,17 @@ class _FakeVAE:
         self.scale = 1.0
 
     def encode(self, pixels):
-        # 镜像 VAEWrapper.encode 的非分块路径（CPU 小图不触发分块）
+        # Mirrors VAEWrapper.encode's non-tiled path (small CPU images don't trigger tiling)
         return self.model.encode(pixels, self.scale)
 
 
 def test_cached_latent_encodes_both_flipped_and_unflipped_when_flip_aug(tmp_path: Path) -> None:
-    """flip_augment=True → cache 阶段对每张图 encode 两次，npz 同时有 latent + latent_flipped。
+    """flip_augment=True -> the cache stage encodes each image twice, npz has both
+    latent + latent_flipped.
 
-    用 mock VAE 把图像第一列/最后一列 mean 编进 latent 签名，验证两份 latent 是
-    精确镜像对（latent[0,0,0,0,0] / latent[0,1,0,0,0] 在 flipped 版本里对调）。
+    Uses a mock VAE that encodes the image's first/last column mean into the latent
+    signature, verifying the two latents are an exact mirror pair (latent[0,0,0,0,0] /
+    latent[0,1,0,0,0] swap in the flipped version).
     """
     pytest.importorskip("torch")
     import torch
@@ -207,7 +212,7 @@ def test_cached_latent_encodes_both_flipped_and_unflipped_when_flip_aug(tmp_path
     from runtime.training.dataset import BucketManager, CachedLatentDataset, ImageDataset
 
     img_path = tmp_path / "asym.png"
-    # 第一列纯红 (255,0,0)，最后一列纯蓝 (0,0,255)，区分明显
+    # First column pure red (255,0,0), last column pure blue (0,0,255) - clearly distinct
     img = Image.new("RGB", (256, 256), color=(127, 127, 127))
     for y in range(256):
         img.putpixel((0, y), (255, 0, 0))
@@ -223,22 +228,24 @@ def test_cached_latent_encodes_both_flipped_and_unflipped_when_flip_aug(tmp_path
     with np.load(npz_path) as data:
         assert "latent" in data.files
         assert "latent_flipped" in data.files
-        # 原图：第一列红（pixel→[-1, 1] 范围内 R 通道高），最后一列蓝（B 通道高）
-        # mock encode 用 channel-0 mean 当签名；R=1.0/G=B=-1.0 → mean = -1/3
-        # 翻转后第一列变蓝、最后一列变红，签名对调
+        # Original: first column red (high R channel in [-1, 1] pixel range), last column
+        # blue (high B channel)
+        # mock encode uses the channel-0 mean as the signature; R=1.0/G=B=-1.0 -> mean = -1/3
+        # After flipping, the first column becomes blue and the last becomes red - signatures swap
         sig_orig_first = float(data["latent"][0, 0, 0, 0])
         sig_orig_last = float(data["latent"][1, 0, 0, 0])
         sig_flip_first = float(data["latent_flipped"][0, 0, 0, 0])
         sig_flip_last = float(data["latent_flipped"][1, 0, 0, 0])
-        # flipped 的 first 应当等于 orig 的 last（左右调换），反之亦然
+        # flipped's first should equal orig's last (left/right swapped), and vice versa
         assert abs(sig_flip_first - sig_orig_last) < 1e-5
         assert abs(sig_flip_last - sig_orig_first) < 1e-5
-        # 且 first ≠ last（确保签名真的有区分性，不是 mock 永远写 0）
+        # and first != last (confirms the signature is actually distinguishing, not the
+        # mock always writing 0)
         assert abs(sig_orig_first - sig_orig_last) > 1e-3
 
 
 def test_cached_latent_encodes_single_when_flip_aug_off(tmp_path: Path) -> None:
-    """flip_augment=False → npz 只有 latent，不浪费时间编 flipped 版本。"""
+    """flip_augment=False -> npz has only latent, no time wasted encoding a flipped version."""
     pytest.importorskip("torch")
     import torch
     import numpy as np
@@ -261,7 +268,8 @@ def test_cached_latent_encodes_single_when_flip_aug_off(tmp_path: Path) -> None:
 
 
 class _CountingVAEModel:
-    """Mock VAE：每次 encode 把调用次数 +1，让测试能数 VAE 实际被调用了几次。"""
+    """Mock VAE: each encode call increments a counter, letting the test count how many
+    times the VAE was actually invoked."""
     def __init__(self):
         self.encode_calls = 0
         self.batch_sizes = []
@@ -280,14 +288,14 @@ class _CountingVAE:
         self.scale = 1.0
 
     def encode(self, pixels):
-        # 镜像 VAEWrapper.encode 的非分块路径（CPU 小图不触发分块）
+        # Mirrors VAEWrapper.encode's non-tiled path (small CPU images don't trigger tiling)
         return self.model.encode(pixels, self.scale)
 
 
 def test_cached_latent_dedupes_repeats_in_encode_pass(tmp_path: Path) -> None:
-    """per-folder repeat (5_concept) 让 samples 列表里同一张图重复 N 次；
-    cache 阶段必须按 npz_path 去重 — 每张唯一图只 encode 一次，
-    而不是按 repeat 倍数反复 VAE encode 同一张图、反复覆盖同一 npz。
+    """per-folder repeat (5_concept) makes the same image appear N times in the samples
+    list; the cache stage must dedupe by npz_path - each unique image is encoded exactly
+    once, instead of repeatedly VAE-encoding and overwriting the same npz repeat times.
     """
     pytest.importorskip("torch")
     import torch
@@ -304,24 +312,24 @@ def test_cached_latent_dedupes_repeats_in_encode_pass(tmp_path: Path) -> None:
 
     bucket_mgr = BucketManager(256, min_reso=256, max_reso=256, step=64)
     dataset = ImageDataset(tmp_path, 256, bucket_mgr)
-    # repeat 展开：2 张图 × 5 = 10 个 samples
+    # repeat expansion: 2 images x 5 = 10 samples
     assert len(dataset.samples) == 10
 
     vae = _CountingVAE()
     CachedLatentDataset(dataset, vae, device="cpu", dtype=torch.float32)
 
-    # 唯一图 2 张 × flip_augment=False，默认 cache_batch_size=1 逐张 → 2 次（不是 10 次）
+    # 2 unique images x flip_augment=False, default cache_batch_size=1 one at a time -> 2 calls (not 10)
     assert vae.model.encode_calls == 2, (
-        f"期望 2 次 encode（唯一图数）,实际 {vae.model.encode_calls} 次 — "
-        "_build_cache 没按 npz_path 去重，对同一张图按 repeat 倍数重复编码"
+        f"expected 2 encode calls (unique image count), got {vae.model.encode_calls} - "
+        "_build_cache did not dedupe by npz_path, re-encoding the same image repeat times"
     )
     assert vae.model.batch_sizes == [1, 1]
-    # 唯一 npz 文件 = 2
+    # unique npz files = 2
     assert len(list(folder.glob("*.npz"))) == 2
 
 
 def test_cached_latent_dedupes_repeats_with_flip_aug(tmp_path: Path) -> None:
-    """repeat + flip_augment：唯一图 × 2（flip/不 flip 各一次），不是 repeat × 2。"""
+    """repeat + flip_augment: unique images x 2 (once flipped, once not), not repeat x 2."""
     pytest.importorskip("torch")
     import torch
     from PIL import Image
@@ -337,20 +345,20 @@ def test_cached_latent_dedupes_repeats_with_flip_aug(tmp_path: Path) -> None:
 
     bucket_mgr = BucketManager(256, min_reso=256, max_reso=256, step=64)
     dataset = ImageDataset(tmp_path, 256, bucket_mgr, flip_augment=True)
-    assert len(dataset.samples) == 6  # 2 × 3
+    assert len(dataset.samples) == 6  # 2 x 3
 
     vae = _CountingVAE()
     CachedLatentDataset(dataset, vae, device="cpu", dtype=torch.float32)
 
-    # 2 张唯一图 × 2 (flip/不 flip) = 4 次，不是 6 × 2 = 12 次
+    # 2 unique images x 2 (flip/no flip) = 4 calls, not 6 x 2 = 12 calls
     assert vae.model.encode_calls == 4, (
-        f"期望 4 次 encode（2 唯一 × flip/不 flip）,实际 {vae.model.encode_calls} 次"
+        f"expected 4 encode calls (2 unique x flip/no flip), got {vae.model.encode_calls}"
     )
     assert vae.model.batch_sizes == [1, 1, 1, 1]
 
 
 def test_cached_latent_respects_cache_batch_size(tmp_path: Path) -> None:
-    """vae_cache_batch_size 控制缓存阶段每次送入 VAE 的同尺寸图片数量。"""
+    """vae_cache_batch_size controls how many same-size images are fed to the VAE per call during the cache stage."""
     pytest.importorskip("torch")
     import torch
     from PIL import Image
@@ -372,8 +380,8 @@ def test_cached_latent_respects_cache_batch_size(tmp_path: Path) -> None:
 
 
 def test_cached_latent_getitem_picks_flipped_per_random(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """flip_augment=True 时 __getitem__ 按 random 50% 取 latent_flipped；
-    flip_augment=False 时永远取 latent（即使 npz 有 flipped 也忽略）。
+    """When flip_augment=True, __getitem__ picks latent_flipped with 50% random chance;
+    when flip_augment=False, it always picks latent (ignoring flipped even if present in npz).
     """
     pytest.importorskip("torch")
     import torch
@@ -391,23 +399,23 @@ def test_cached_latent_getitem_picks_flipped_per_random(tmp_path: Path, monkeypa
     dataset = ImageDataset(tmp_path, 256, bucket_mgr, flip_augment=True)
     cached = CachedLatentDataset(dataset, _FakeVAE(), device="cpu", dtype=torch.float32)
 
-    # 注入显式的 latent / latent_flipped 值便于分辨
+    # Inject explicit latent / latent_flipped values so they're easy to distinguish
     npz_path = img_path.with_suffix(".npz")
     latent_orig = np.full((16, 1, 32, 32), 1.0, dtype=np.float32)
     latent_flip = np.full((16, 1, 32, 32), 2.0, dtype=np.float32)
     np.savez(npz_path, latent=latent_orig, latent_flipped=latent_flip, bucket_w=256, bucket_h=256)
 
-    # random.random() > 0.5 控制选 flipped；patch 成 0.9 (>0.5) → flipped
+    # random.random() > 0.5 controls picking flipped; patch to 0.9 (>0.5) -> flipped
     monkeypatch.setattr(dataset_mod.random, "random", lambda: 0.9)
     item = cached[0]
     assert float(item["latent"][0, 0, 0, 0]) == 2.0  # flipped
 
-    # patch 成 0.1 (<0.5) → 原图
+    # patch to 0.1 (<0.5) -> original
     monkeypatch.setattr(dataset_mod.random, "random", lambda: 0.1)
     item = cached[0]
-    assert float(item["latent"][0, 0, 0, 0]) == 1.0  # 原图
+    assert float(item["latent"][0, 0, 0, 0]) == 1.0  # original
 
-    # flip_augment=False 时永远取原图（即使 npz 有 flipped 和 random=0.9）
+    # flip_augment=False always picks the original (even if npz has flipped and random=0.9)
     cached.flip_augment = False
     monkeypatch.setattr(dataset_mod.random, "random", lambda: 0.9)
     item = cached[0]
@@ -415,9 +423,11 @@ def test_cached_latent_getitem_picks_flipped_per_random(tmp_path: Path, monkeypa
 
 
 def test_image_dataset_get_with_flip_independent_of_random_state(tmp_path: Path) -> None:
-    """get_with_flip 不读 self.flip_augment，也不掷骰子 —— 用于 cache 双份编码。
+    """get_with_flip does not read self.flip_augment, nor does it roll any dice - it's used
+    for the cache's double encoding pass.
 
-    flip=False / flip=True 必须得到精确镜像对，否则 cache 会写入随机性，污染数据。
+    flip=False / flip=True must produce an exact mirror pair, otherwise the cache would
+    write in randomness and corrupt the data.
     """
     pytest.importorskip("torch")
     import random as _random

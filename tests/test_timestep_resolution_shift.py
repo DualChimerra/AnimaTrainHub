@@ -1,14 +1,19 @@
-"""timestep shift 分辨率修正（timestep_shift_resolution_aware）单测。
+"""Unit tests for the timestep shift resolution correction (timestep_shift_resolution_aware).
 
-覆盖：
-  1) apply_resolution_shift：基准档恒等 / 大图升 t、小图降 t / 公式数值点。
-  2) Möbius 乘法复合律：先全局 shift 再分辨率修正 == 一次乘积 shift（正交性依据）。
-  3) per-sample 向量：一个 batch 内不同 token 数各得各的修正。
-  4) 端点 clamp：极端 token 比不越出 (1e-4, 1-1e-4)。
-  5) latent_token_counts：批量网格 tensor 与 NaViT 异构 latent 列表两种输入。
-  6) config：默认 off、可开。
+Covers:
+  1) apply_resolution_shift: identity at the base resolution / t goes up for
+     larger images, down for smaller ones / numeric points of the formula.
+  2) Möbius multiplicative composition law: applying a global shift then the
+     resolution correction == a single combined-product shift (basis for
+     orthogonality).
+  3) per-sample vector: within one batch, samples with different token counts
+     each get their own correction.
+  4) endpoint clamp: extreme token ratios never leave (1e-4, 1-1e-4).
+  5) latent_token_counts: both batched grid-tensor input and NaViT's
+     heterogeneous latent-list input.
+  6) config: defaults to off, can be enabled.
 
-CPU-only、无 GPU：CI（Linux 无 GPU）可跑。
+CPU-only, no GPU required: runs fine in CI (Linux, no GPU).
 """
 from __future__ import annotations
 
@@ -23,7 +28,7 @@ from training.timestep_sampling import (
 )
 
 
-# --------------------------------------------------------- 公式性质
+# --------------------------------------------------------- formula properties
 def test_identity_at_base_tokens():
     t = torch.linspace(0.05, 0.95, 10)
     out = apply_resolution_shift(t, [4096] * 10, 4096)
@@ -31,7 +36,7 @@ def test_identity_at_base_tokens():
 
 
 def test_direction_and_known_values():
-    # 4× token → s=2；1/4 token → s=0.5。t=0.5 处解析值 2/3 与 1/3。
+    # 4x tokens -> s=2; 1/4 tokens -> s=0.5. Analytic value at t=0.5 is 2/3 and 1/3.
     t = torch.full((4,), 0.5)
     up = apply_resolution_shift(t, [4096 * 4] * 4, 4096)
     down = apply_resolution_shift(t, [4096 // 4] * 4, 4096)
@@ -41,9 +46,11 @@ def test_direction_and_known_values():
 
 
 def test_composes_multiplicatively_with_global_shift():
-    """Möbius 偏移按 s 乘法复合：全局 shift(s1) 后再分辨率修正(s2) == shift(s1·s2)。
+    """Möbius shifts compose multiplicatively in s: global shift(s1) followed by resolution correction(s2) == shift(s1*s2).
 
-    这是"全局 timestep_shift 仍是基准档校准值、本修正只补分辨率差"的数学依据。
+    This is the mathematical basis for "the global timestep_shift remains the
+    base-resolution calibration value, and this correction only makes up the
+    resolution difference."
     """
     t = torch.linspace(0.05, 0.95, 17)
     s1, n, base = 3.0, 16384, 4096  # s2 = sqrt(16384/4096) = 2
@@ -67,15 +74,15 @@ def test_bounds_clamped():
     assert torch.all(out >= 1e-4) and torch.all(out <= 1 - 1e-4)
 
 
-# --------------------------------------------------------- token 计数口径
+# --------------------------------------------------------- token counting convention
 def test_latent_token_counts_batched_tensor():
-    # 1024px → latent 128×128 → 64×64 token = 4096（与 CachedLatentDataset 口径一致）
+    # 1024px -> latent 128x128 -> 64x64 tokens = 4096 (matches CachedLatentDataset's convention)
     lat = torch.zeros(3, 16, 1, 128, 128)
     assert latent_token_counts(lat) == [4096, 4096, 4096]
 
 
 def test_latent_token_counts_navit_list():
-    # NaViT 异构列表：5D [1,C,T,h,w] 与 4D [C,T,h,w] 都按最后两维算
+    # NaViT heterogeneous list: both 5D [1,C,T,h,w] and 4D [C,T,h,w] are computed from the last two dims
     lst = [torch.zeros(1, 16, 1, 62, 93), torch.zeros(16, 1, 48, 48)]
     assert latent_token_counts(lst) == [31 * 46, 24 * 24]
 

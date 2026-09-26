@@ -1,7 +1,7 @@
-"""A4 — reg_dedup 模块单测：scan_for_dedup + purge_paths。
+"""A4 -- reg_dedup module unit tests: scan_for_dedup + purge_paths.
 
-scan 用真的 PIL 图触发 duplicates 算法；purge_paths 不做 traversal 校验，
-全靠调用方约定（worker 自己生成的路径必合法）。
+scan uses real PIL images to exercise the duplicates algorithm; purge_paths does no
+traversal validation -- it relies entirely on the caller's contract (the worker's own generated paths must be valid).
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def test_scan_for_dedup_distinct_images_no_groups(tmp_path: Path) -> None:
 
 
 def test_scan_for_dedup_identical_images_returns_n_minus_1(tmp_path: Path) -> None:
-    """3 张同像素图 → 1 张保留、2 张待删。"""
+    """3 pixel-identical images -> 1 kept, 2 pending deletion."""
     rdir = tmp_path / "reg" / "5_concept"
     rdir.mkdir(parents=True)
     img = Image.new("RGB", (128, 128), (255, 128, 64))
@@ -56,7 +56,7 @@ def test_scan_for_dedup_identical_images_returns_n_minus_1(tmp_path: Path) -> No
 
     to_delete = reg_dedup.scan_for_dedup(rdir.parent)
     assert len(to_delete) == 2
-    # 留 1 张 + 删 2 张；不强保证留哪张，只要剩下的 stem 是合法的就行
+    # keep 1 + delete 2; which one is kept isn't guaranteed, only that the remaining stem is valid
     remaining = {p.stem for p in rdir.glob("*.png")} - {Path(r).stem for r in to_delete}
     assert len(remaining) == 1
 
@@ -87,9 +87,9 @@ def test_purge_paths_writes_deleted_ids_and_updates_meta(tmp_path: Path) -> None
         rdir, ["5_concept/42.png", "5_concept/99.png"]
     )
     assert r["count"] == 2
-    # .deleted_ids.json 含两个 stem
+    # .deleted_ids.json contains both stems
     assert reg_dedup.reg_builder.read_deleted_ids(rdir) == {"42", "99"}
-    # meta.actual_count 递减到 0
+    # meta.actual_count decremented to 0
     m = reg_builder.read_meta(rdir)
     assert m.actual_count == 0
 
@@ -97,7 +97,7 @@ def test_purge_paths_writes_deleted_ids_and_updates_meta(tmp_path: Path) -> None
 def test_purge_paths_missing_file_silently_skipped(tmp_path: Path) -> None:
     rdir = tmp_path / "reg"
     rdir.mkdir()
-    # 不存在 / 路径合法 → 不报错，count=0
+    # missing / valid path -> no error, count=0
     r = reg_dedup.purge_paths(rdir, ["5_concept/ghost.png"])
     assert r["count"] == 0
     assert r["deleted"] == []

@@ -1,305 +1,347 @@
-# AGENTS.md — 项目代码质量与协作公约
+# AGENTS.md — Project code quality and collaboration conventions
 
-**受众**：所有改这个仓库代码的人和工具——AI agent（Claude Code / Codex /
-Cursor / Copilot / ...）、社区 contributor、maintainer。
-**目标**：让 6 个月后接手代码的人不痛苦。可维护性优先于聪明。
+**Audience**: everyone and everything that touches this repo's code — AI agents
+(Claude Code / Codex / Cursor / Copilot / ...), community contributors, maintainers.
+**Goal**: make life painless for whoever picks up this code 6 months from now.
+Maintainability beats cleverness.
 
-**入口**：本文路径 `docs/AGENTS.md`，从 [`README.md`](../README.md) 的「协作公约」段、
-[`CONTRIBUTING.md`](../CONTRIBUTING.md) 的「给 AI agent 的额外说明」段都可达。
+**Entry point**: this doc lives at `docs/AGENTS.md`, reachable from the
+"Collaboration conventions" section of [`README.md`](../README.md) and the
+"Additional notes for AI agents" section of [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
-如果你想让 AI 工具每次自动加载本文，可在 working tree 根目录建（不会进 git
-的）`CLAUDE.md` 或 `AGENTS.md`，单行写 `@docs/AGENTS.md` 即可。
+If you want AI tools to auto-load this doc every time, create a (gitignored)
+`CLAUDE.md` or `AGENTS.md` at the working-tree root with a single line:
+`@docs/AGENTS.md`.
 
-人类贡献者请同时看 [`CONTRIBUTING.md`](../CONTRIBUTING.md)（流程 / 分支 /
-commit / PR / release）。本文不重复，只写代码质量、一致性、可维护性、
-跨工具协作的约定。
+Human contributors should also read [`CONTRIBUTING.md`](../CONTRIBUTING.md) (process /
+branching / commits / PRs / releases). This document doesn't repeat that — it only
+covers code quality, consistency, maintainability, and cross-tool collaboration
+conventions.
 
-**适用分级**：本文的对齐协议（§1）与自检清单（§5）按改动规模分级。
-小改动（typo / 文档 / 单行 fix / 重命名 / 改 copy）不必走完整流程；
-中大改动（新 feature / UI 新增 / 跨模块 / schema 改）才走完整流程。
-规范目的是减少误会与返工，不确定时优先问 maintainer，不要被条款本身卡住。
-
----
-
-## 0. 第一原则
-
-1. **可维护性优先于巧妙**：宁可 5 行有名字的函数，不要 1 行嵌套 lambda。
-   现在写的代码 6 个月后还得有人读懂。
-2. **一致性 > 个人审美**：仓库已有约定（命名、目录、import 方向、错误处理
-   模式、组件复用），跟着走。不"顺手优化"成别的风格。
-3. **改之前先 grep**：你想新建的组件 / helper / fixture / CLI / registry，
-   90% 概率已经有了。先搜。`useProjectCtx` / `SchemaForm` / `PathPicker` /
-   `Toast` / `ImageGrid` / `TagEditor` / `OnnxTaggerBase` /
-   `useLocalStorageState` 都已存在。
-4. **改外部算法前先 verify 论文 / 上游**：InfoNoise / Prodigy / LyCORIS
-   这类外部论文实现，不要凭直觉"修正"。先查论文、上游 issue、原作者
-   commit，再加单测把公式 codify（参考 `tests/test_infonoise.py`）。
-5. **数据流：作者写时规范化**：项目偏好结构化 yaml/schema + 工具校验 +
-   派生 markdown（见 `release_notes.yaml` → `CHANGELOG.md`）。**不要**
-   引入 runtime 解析 free-form 文本的设计。
-6. **小步走**：一个 PR = 一个 unit of work。无关改动会让 review 难做。
+**Scope by change size**: the alignment protocol (§1) and pre-PR checklist (§5) in
+this document are scaled to the size of the change. Small changes (typos / docs /
+one-line fixes / renames / copy edits) don't need the full process; medium/large
+changes (new features / new UI / cross-module / schema changes) do. The point of
+these conventions is to reduce misunderstandings and rework — when in doubt, ask the
+maintainer rather than getting stuck on the letter of the rule.
 
 ---
 
-## 1. 开工前对齐协议（防需求漂移）
+## 0. First principles
 
-**适用范围**：加 feature / 改 UI/UX 流程 / 跨模块 / schema 改动。
-**不适用**：typo / 文档 / 单行 bug fix / 重命名 / 改 copy / 仅加测试 —— 这些直接动手即可。
+1. **Maintainability over cleverness**: prefer a 5-line named function over a
+   1-line nested lambda. Someone still has to be able to read the code you write
+   today, 6 months from now.
+2. **Consistency > personal taste**: this repo already has conventions (naming,
+   directory layout, import direction, error-handling patterns, component reuse) —
+   follow them. Don't "opportunistically improve" things into a different style.
+3. **Grep before you build**: whatever component / helper / fixture / CLI / registry
+   you're about to create, there's a 90% chance it already exists. Search first.
+   `useProjectCtx` / `SchemaForm` / `PathPicker` / `Toast` / `ImageGrid` /
+   `TagEditor` / `OnnxTaggerBase` / `useLocalStorageState` all already exist.
+4. **Verify the paper / upstream before touching external algorithms**: for external
+   paper implementations like InfoNoise / Prodigy / LyCORIS, don't "correct" them by
+   intuition. Check the paper, upstream issues, and the original author's commits
+   first, then add a unit test to codify the formula (see `tests/test_infonoise.py`
+   for an example).
+5. **Data flow: normalize at authoring time**: this project prefers structured
+   yaml/schema + tooling validation + derived markdown (see `release_notes.yaml` ->
+   `CHANGELOG.md`). **Do not** introduce a design that parses free-form text at
+   runtime.
+6. **Take small steps**: one PR = one unit of work. Unrelated changes make review
+   harder.
 
-属于适用情况时，AI 先和作者对齐。对齐失败就停，不要"边写边问"，
-更不要"先写一版再说"。
+---
 
-### 1.1 AI 要主动做的复述
+## 1. Pre-work alignment protocol (guards against scope drift)
 
-写代码前，用一段话回答给作者看（让作者能立刻发现你理解错了）：
+**Applies to**: adding features / changing UI-UX flows / cross-module changes /
+schema changes.
+**Does not apply to**: typos / docs / one-line bug fixes / renames / copy edits /
+test-only additions — just go ahead and make these directly.
+
+When it applies, the AI should align with the author first. If alignment fails,
+stop — don't "write while asking," and definitely don't "write a version first and
+see."
+
+### 1.1 The restatement the AI should proactively produce
+
+Before writing code, answer the following in a short paragraph for the author to
+review (so they can immediately catch a misunderstanding):
 
 ```
-我理解这个任务是：
-- 解决什么问题：[一句话]
-- 用户从哪条路径进入：[页面 / CLI 命令 / 哪个 step]
-- 用户看到的行为变化：[操作前 → 操作后]
-- 影响的文件：[列表，路径精确]
-- 数据 / schema / SSE 是否受影响：[是 / 否 + 哪几个]
-- 测试覆盖方式：[regression / 新测试 / 手测]
-- 不在范围内：[作者可能误以为也做了的事，明确排除]
+My understanding of this task is:
+- What problem it solves: [one sentence]
+- Entry point for the user: [page / CLI command / which step]
+- User-visible behavior change: [before -> after]
+- Files affected: [list, exact paths]
+- Does it affect data / schema / SSE: [yes/no + which ones]
+- Test coverage approach: [regression / new tests / manual testing]
+- Out of scope: [things the author might assume are also included, explicitly excluded]
 ```
 
-### 1.2 AI 要主动追问的情况
+### 1.2 Situations where the AI should proactively ask follow-up questions
 
-- **作者给的是症状不是根因**："这个按钮点了没反应"——是 handler 没绑？
-  网络错？state 没更新？先定位再问"你期望它做什么"
-- **UI/UX 描述含糊**："加个按钮"——放哪？什么样式？点了什么效果？
-  跟现有页面的哪个组件相似？**不要凭猜**，看
-  [`architecture/studio-pipeline.md`](architecture/studio-pipeline.md)
-  的 Sidebar / Stepper 结构，看现有页面（如 `studio/web/src/pages/`）的
-  风格再问
-- **要改的代码刚改过 / PR 还没合**：先看相关 PR 的讨论上下文，避免推翻
-  没几天前的决定
-- **作者似乎不知道现有约束**：例如要在 `loop.py` 加 `if optimizer_type ==
-  "xxx"`——这违反 plugin 边界（见 §3.4），先告知作者，给替代方案
+- **The author describes a symptom, not a root cause**: "this button doesn't do
+  anything when clicked" — is the handler not wired up? A network error? State not
+  updating? Locate the cause first, then ask "what do you expect it to do?"
+- **The UI/UX description is vague**: "add a button" — where? What style? What
+  happens on click? Which existing component on the page does it resemble?
+  **Don't guess** — look at the Sidebar/Stepper structure in
+  [`architecture/studio-pipeline.md`](architecture/studio-pipeline.md), look at the
+  style of existing pages (e.g. `studio/web/src/pages/`), then ask.
+- **The code you're about to change was just changed, or its PR hasn't merged yet**:
+  check the relevant PR's discussion context first, to avoid overturning a decision
+  made just days ago.
+- **The author doesn't seem to know about an existing constraint**: e.g. they want
+  to add `if optimizer_type == "xxx"` in `loop.py` — this violates the plugin
+  boundary (see §3.4); tell the author and offer an alternative.
 
-### 1.3 不要做的
+### 1.3 What not to do
 
-- ❌ 不要默认作者完整描述了需求 —— 多数情况下作者给了 50%，AI 要把另
-  50% 问出来或显式标记成"我假设是 X"
+- ❌ Don't assume the author has fully described the requirement — in most cases
+  the author gave you 50%; the AI should either ask for the other 50% or explicitly
+  flag "I'm assuming X."
 
 ---
 
-## 2. 规范文件地图（按场景查）
+## 2. Spec-file map (look things up by scenario)
 
-| 场景 | 看哪里 |
+| Scenario | Where to look |
 |---|---|
-| 开 PR / 切分支 / 写 commit message | [CONTRIBUTING.md](../CONTRIBUTING.md) |
-| 发版 / 写 release notes / 改版本号 | [release-notes-spec.md](release-notes-spec.md) + [CONTRIBUTING.md §Release 流程](../CONTRIBUTING.md) |
-| 加 / 改训练栈（LoRA 变体 / optimizer / scheduler / sampler / loss） | [runtime/training/README.md](../runtime/training/README.md) + [adr/0003-anima-train-refactor.md](adr/0003-anima-train-refactor.md) |
-| 加 / 改 Studio Web 功能 | [architecture/studio-pipeline.md](architecture/studio-pipeline.md) + [studio/README.md](../studio/README.md) |
-| 加新依赖 / 改默认行为 / 接口 / schema | 写 ADR：[adr/README.md](adr/README.md) |
-| 改了用户能感知的行为 | [user-guide/](user-guide/) 同步更新 |
-| 看历史决策 | [adr/0001-0005](adr/)，**老 ADR 不删不改写**，只追加状态 |
-| 写 / 改测试 | [tests/conftest.py](../tests/conftest.py)（`runtime/` 已注入 sys.path） |
+| Opening a PR / branching / writing commit messages | [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| Cutting a release / writing release notes / bumping version numbers | [release-notes-spec.md](release-notes-spec.md) + [CONTRIBUTING.md § Release process](../CONTRIBUTING.md) |
+| Adding / changing the training stack (LoRA variants / optimizer / scheduler / sampler / loss) | [runtime/training/README.md](../runtime/training/README.md) + [adr/0003-anima-train-refactor.md](adr/0003-anima-train-refactor.md) |
+| Adding / changing Studio Web features | [architecture/studio-pipeline.md](architecture/studio-pipeline.md) + [studio/README.md](../studio/README.md) |
+| Adding a new dependency / changing default behavior / interfaces / schema | Write an ADR: [adr/README.md](adr/README.md) |
+| Changed user-visible behavior | Update the corresponding section under [user-guide/](user-guide/) |
+| Looking up historical decisions | [adr/0001-0005](adr/) — **old ADRs are never deleted or rewritten**, only get a status appended |
+| Writing / changing tests | [tests/conftest.py](../tests/conftest.py) (`runtime/` is already injected into sys.path) |
 
 ---
 
-## 3. 项目特有的强约定（通用知识不写，只写这里独有的）
+## 3. Project-specific hard conventions (general knowledge omitted — only what's unique here)
 
-### 3.1 依赖方向（单向，反向禁止）
+### 3.1 Dependency direction (one-way, reverse is forbidden)
 
 ```
-models  →  utils  →  runtime  →  studio  →  tools
+models  ->  utils  ->  runtime  ->  studio  ->  tools
 ```
 
-- `utils/` 不 import `runtime/` 或 `studio/`
-- `runtime/training/` → `utils/`，反向不发生
-- `studio/services/inference_core` 复用 `utils/lycoris_adapter`，正因为
-  后者不绑训练上下文
+- `utils/` does not import `runtime/` or `studio/`
+- `runtime/training/` -> `utils/`, never the reverse
+- `studio/services/inference_core` reuses `utils/lycoris_adapter` precisely because
+  the latter isn't tied to a training context
 
-### 3.2 Sister script 契约
+### 3.2 Sister-script contract
 
-`runtime/anima_daemon.py` / `anima_generate.py` / `anima_reg_ai.py` 通过
-`import anima_train as _T` 拿 7 个名字（`find_diffusion_pipe_root` /
-`load_anima_model` / `load_vae` / `load_text_encoders` / `sample_image` /
-`enable_xformers` / `resolve_path_best_effort`）。
+`runtime/anima_daemon.py` / `anima_generate.py` / `anima_reg_ai.py` get 7 names via
+`import anima_train as _T` (`find_diffusion_pipe_root` / `load_anima_model` /
+`load_vae` / `load_text_encoders` / `sample_image` / `enable_xformers` /
+`resolve_path_best_effort`).
 
-`runtime/anima_train.py` 顶层 re-export 是契约，**可加不可减不可改签名**。
-`tests/test_anima_generate_xy.py` 会捕获破坏。
+The top-level re-exports in `runtime/anima_train.py` are a contract: **you may add
+to them, but never remove or change their signatures**.
+`tests/test_anima_generate_xy.py` will catch violations.
 
-### 3.3 单一权威源（改这里 → 跑同步工具，不要手改派生文件）
+### 3.3 Single source of truth (change it here -> run the sync tool, don't hand-edit derived files)
 
-| 权威源 | 派生 / 引用方 | 同步方式 |
+| Source of truth | Derived from / referenced by | How to sync |
 |---|---|---|
-| `studio/__init__.py:__version__` | FastAPI `/api/health` → Sidebar | 同步 `studio/web/package.json` + `README.md` badge + 「## 版本」段 |
-| `release_notes.yaml` | `CHANGELOG.md`、GitHub Release Body | `python tools/bump_version.py bump --version X.Y.Z` |
-| `studio/schema.py:TrainingConfig` | `argparse_bridge` 生成 argparse、前端 `SchemaForm` 渲染、4 个 `validate_schema_consistency()` 校验 | 改字段时跟 4 个 plugin registry（adapters / optimizers / schedulers / losses）的 Literal 枚举**一起改**，启动期会拒 |
-| `studio/secrets.py` schema | `/api/secrets` + Settings 7 tab 表单 | Pydantic 模型 + 前端表单同时改 |
+| `studio/__init__.py:__version__` | FastAPI `/api/health` -> Sidebar | Sync `studio/web/package.json` + the `README.md` badge + the "## Version" section |
+| `release_notes.yaml` | `CHANGELOG.md`, GitHub Release Body | `python tools/bump_version.py bump --version X.Y.Z` |
+| `studio/schema.py:TrainingConfig` | `argparse_bridge`-generated argparse, the frontend `SchemaForm` renderer, 4 `validate_schema_consistency()` checks | When changing a field, change it **together with** the Literal enums in the 4 plugin registries (adapters / optimizers / schedulers / losses) — startup will reject a mismatch |
+| `studio/secrets.py` schema | `/api/secrets` + the Settings 7-tab form | Change the Pydantic model and the frontend form together |
 
-### 3.4 训练栈插件边界（ADR 0003）
+### 3.4 Training-stack plugin boundary (ADR 0003)
 
-加变体（LoRA 类型 / optimizer / scheduler / sampler / loss）走 plugin
-registry，**不动** `main()` / `phases/` / `loop.py` / `context.py`。完整
-步骤见 [`runtime/training/README.md`](../runtime/training/README.md)。
+Adding a variant (LoRA type / optimizer / scheduler / sampler / loss) goes through
+the plugin registry — **don't touch** `main()` / `phases/` / `loop.py` /
+`context.py`. Full steps in
+[`runtime/training/README.md`](../runtime/training/README.md).
 
-防回归：`test_plugin_registry.py` 会拒以下字面量出现在错误位置：
-- `phases/optimizer.py` 不该含 `if optimizer_type == "xxx"`
-- `phases/models.py` 不该 `AnimaLycorisAdapter(...)`
-- `sampling.py` 不该 `if sampler_name == "xxx"`
+Regression guard: `test_plugin_registry.py` rejects these literals appearing in the
+wrong place:
+- `phases/optimizer.py` must not contain `if optimizer_type == "xxx"`
+- `phases/models.py` must not contain `AnimaLycorisAdapter(...)`
+- `sampling.py` must not contain `if sampler_name == "xxx"`
 
-### 3.5 SSE 事件约定
+### 3.5 SSE event convention
 
-加新事件类型：
-1. 在 [architecture/studio-pipeline.md §6](architecture/studio-pipeline.md) 的事件目录表**先登记一行**
-2. Backend 走 `studio/event_bus.py` 的 `bus.publish`
-3. Worker 子进程发 typed 事件：往 stdout 写 `__EVENT__:<type>:<json>`，
-   supervisor 自动注入 `job_id / project_id / version_id / kind`，worker
-   **不要也不能**伪造这几个字段
-4. Frontend 走 `useEventStream`（共享连接），不要自己开 `EventSource`
+To add a new event type:
+1. **Register a row first** in the event catalog table in
+   [architecture/studio-pipeline.md §6](architecture/studio-pipeline.md)
+2. Backend goes through `bus.publish` in `studio/event_bus.py`
+3. Worker subprocesses emit typed events by writing `__EVENT__:<type>:<json>` to
+   stdout; the supervisor automatically injects `job_id / project_id / version_id /
+   kind` — the worker **should not and cannot** forge these fields
+4. The frontend uses `useEventStream` (a shared connection) — don't open your own
+   `EventSource`
 
-### 3.6 Stage 推进
+### 3.6 Stage advancement
 
-后端权威，前端只读。写在 `studio/projects.py:advance_stage()`。前端
-Stepper 高亮按 stage + version.stats 派生。**不要**在前端 mutate stage，
-**不要**绕过 advance_stage 直接 update DB。
+The backend is authoritative; the frontend is read-only. Lives in
+`studio/projects.py:advance_stage()`. The frontend Stepper's highlighted step is
+derived from stage + version.stats. **Do not** mutate stage on the frontend, and
+**do not** bypass `advance_stage` to update the DB directly.
 
-### 3.7 Tagger 抽象
+### 3.7 Tagger abstraction
 
-新 ONNX tagger 继承 `OnnxTaggerBase` 自动拿线程池调度、GPU EP fallback、
-模型解析。注册到 tagger registry，UI 自动列出。**不要**平行实现 ONNX
-调度逻辑。
+New ONNX taggers subclass `OnnxTaggerBase` to automatically get thread-pool
+scheduling, GPU EP fallback, and model resolution. Register with the tagger
+registry and the UI lists it automatically. **Do not** implement parallel ONNX
+scheduling logic.
 
 ---
 
-## 4. Commit / PR 边界
+## 4. Commit / PR boundaries
 
-### 4.1 一个 PR = 一件事
+### 4.1 One PR = one thing
 
-- 加新 feature **不顺手** refactor 别处
-- 修 bug **不顺手** 改命名 / 风格 / 无关代码
-- 看到要改的代码周围有 typo —— 留给单独的 docs/chore PR
+- Adding a new feature **doesn't** opportunistically refactor something else
+- Fixing a bug **doesn't** opportunistically rename things / change style /
+  touch unrelated code
+- Spot a typo near code you're changing? Leave it for a separate docs/chore PR
 
-### 4.2 多功能 PR 要警告
+### 4.2 Multi-purpose PRs should trigger a warning
 
-如果 AI 发现作者让你做的事**实际**包含 ≥ 2 个互相不依赖的 unit（典型信号：
-两组改动可以各自独立合入、影响不同模块、动机不同），**先警告作者**：
+If the AI finds that what the author is asking for **actually** consists of ≥ 2
+independent units (typical signals: the two groups of changes could be merged
+separately, affect different modules, or have different motivations), **warn the
+author first**:
 
 ```
-注意：这个任务看上去是 N 件事：
-1. [描述] —— 影响 [文件]
-2. [描述] —— 影响 [文件]
+Note: this task looks like it's actually N things:
+1. [description] — affects [files]
+2. [description] — affects [files]
 
-合并提交会让 review / revert / cherry-pick 变难。建议拆成 N 个 PR。
-要继续合并提交吗？合并的理由是什么？
+Bundling them into one commit will make review / revert / cherry-pick harder.
+Consider splitting into N PRs.
+Do you want to bundle them anyway? What's the reason?
 ```
 
-只有作者给出有效理由（必须原子改动、否则中间态会崩、强耦合）才合并。
-理由写进 PR 描述。
+Only bundle them if the author gives a valid reason (must be an atomic change,
+otherwise an intermediate state would break, or they're tightly coupled). Record
+the reason in the PR description.
 
 ---
 
-## 5. PR 提交前自检
+## 5. Pre-PR self-check
 
-适用：中大改动。小改动（typo / 文档 / 重命名 / 仅加测试）跳过本节。
+Applies to: medium/large changes. Small changes (typos / docs / renames /
+test-only additions) skip this section.
 
-**始终检查**：
+**Always check**:
 
-- 一个 PR 只做一件事；包含多件时理由写进描述
-- 改动跟开工前对齐的目标一致，没有滑坡
-- 没有"顺手"改的无关代码
-- commit message / PR title 是 Conventional Commits 格式
-- bug fix 加了 regression test；feat 加了测试覆盖
+- The PR does exactly one thing; if it bundles more, the reason is in the description
+- The change matches what was aligned on before starting — no scope creep
+- No unrelated "opportunistic" changes
+- Commit message / PR title follows Conventional Commits format
+- Bug fixes include a regression test; features include test coverage
 
-**按改动类型 trigger**：
+**Triggered by change type**:
 
-- 用户可见行为变化 → `release_notes.yaml` 加 entry（summary ≤ 80 字符，plain text）
-- 改了用户能感知的行为 → `docs/user-guide/` 对应章节同步
-- 改了单一权威源（version / schema / secrets / SSE event）→ 派生方都同步
-- 改了 plugin registry / sister script / Stepper → 见 §8 陷阱清单确认无回归
-- UI 改动 → 截图放进 PR 描述
-- 触发 ADR 条件（§7）→ 已起草新 ADR
+- User-visible behavior change -> add an entry to `release_notes.yaml` (summary <= 80 characters, plain text)
+- Changed user-perceptible behavior -> update the corresponding `docs/user-guide/` section
+- Changed a single source of truth (version / schema / secrets / SSE event) -> sync all derived places
+- Changed the plugin registry / a sister script / the Stepper -> check the §8 pitfalls list to confirm there's no regression
+- UI change -> include screenshots in the PR description
+- Triggers an ADR condition (§7) -> a new ADR has been drafted
 
-CI 已覆盖，AI 不必重复手测：本地 tsc / lint / pytest / vitest / plugin registry 启动校验。
+CI already covers this — the AI doesn't need to re-run these manually: local tsc /
+lint / pytest / vitest / plugin-registry startup validation.
 
-发现违反时列出相关项跟作者确认，不要静默通过。
-
----
-
-## 6. 底线与建议
-
-### 6.1 硬性约束
-
-- ❌ 不直接 push `master`
-- ❌ 不 `--no-verify` / 跳测试 / disable lint —— 失败修根因
-- ❌ 不在 backend 之外的层直连 SQLite（只走 `studio/db.py`）
-
-### 6.2 强烈建议避免（review 时会请你拆 / 改）
-
-- 在 bug fix PR 里顺手 refactor
-- 为"漂亮"改无关代码 / 风格 / 命名
-- mock 已有 `tests/conftest.py` fixture 能覆盖的东西
-- hardcode 版本号 / 路径 / schema 字段名（见 §3.3 单一权威源）
-
-### 6.3 设计原则
-
-- 不引入"runtime 解析 free-form 文本"的数据流（用 yaml/schema + 工具校验）
-- 不"修正"外部论文实现凭直觉(先 verify 论文 / 上游)
-- 不为假想的未来需求加抽象（三处相似代码再抽）
+If you find a violation, list the relevant items and confirm with the author — don't
+silently let it pass.
 
 ---
 
-## 7. 决策记录（ADR）触发条件
+## 6. Hard limits and strong recommendations
 
-**必须**写新 ADR：
-- 加 / 换核心依赖（torch backend / 训练框架 / DB / 模型库）
-- 改 SQLite schema 中已有表的列含义（不是加列，是改）
-- 改 secrets.json schema 字段含义
-- 改默认行为（如默认 sampler / attention backend）
-- 移除已发布的端点 / CLI flag / schema 字段
-- 跨模块重大重构（如 ADR 0003）
+### 6.1 Hard constraints
 
-**不需要** ADR：bug fix / 加新功能（行为可选，默认关）/ 重命名内部函数 /
-新组件 / 测试 / 文档。
+- ❌ Never push directly to `master`
+- ❌ Never `--no-verify` / skip tests / disable lint — fix the root cause of a failure
+- ❌ Never connect directly to SQLite from a layer outside the backend (only go
+  through `studio/db.py`)
 
-模板见 [adr/README.md](adr/README.md)。**已 Accepted 的 ADR
-正文不改**，只能在状态行追加 `Superseded by #N` / `Deprecated`。
+### 6.2 Strongly discouraged (reviewers will ask you to split / rework)
+
+- Opportunistic refactors inside a bug-fix PR
+- Changing unrelated code / style / naming for "prettiness"
+- Mocking things that an existing `tests/conftest.py` fixture already covers
+- Hardcoding version numbers / paths / schema field names (see §3.3 Single source of truth)
+
+### 6.3 Design principles
+
+- Don't introduce a data flow that "parses free-form text at runtime" (use yaml/schema + tooling validation)
+- Don't "correct" an external paper implementation by intuition (verify the paper / upstream first)
+- Don't add abstraction for imagined future needs (abstract only after you see three similar pieces of code)
 
 ---
 
-## 8. 陷阱清单（AI / 新 contributor 容易踩）
+## 7. Architecture Decision Record (ADR) trigger conditions
 
-| 陷阱 | 后果 | 防御 |
+**Must** write a new ADR for:
+- Adding / swapping a core dependency (torch backend / training framework / DB / model library)
+- Changing the meaning of an existing column in the SQLite schema (not adding a column — changing one)
+- Changing the meaning of a field in the secrets.json schema
+- Changing default behavior (e.g. the default sampler / attention backend)
+- Removing a released endpoint / CLI flag / schema field
+- A major cross-module refactor (like ADR 0003)
+
+**Does not need** an ADR: bug fixes / new features that are opt-in and default-off
+/ renaming internal functions / new components / tests / docs.
+
+Template in [adr/README.md](adr/README.md). **The body of an Accepted ADR is never
+changed** — only append `Superseded by #N` / `Deprecated` to its status line.
+
+---
+
+## 8. Pitfalls checklist (easy for AI / new contributors to trip on)
+
+| Pitfall | Consequence | Defense |
 |---|---|---|
-| 改 Stepper 步骤只改了 `components/ProjectStepper.tsx` | UI 不变（那是死代码）；该改的是 `Sidebar.tsx` 内联版 | grep step 字符串找全部渲染点 |
-| 在 `Sidebar.tsx` 硬编码版本号 | 与 `/api/health` 不一致 | 永远从 `/api/health` fetch |
-| 在 `runtime/training/loop.py` 加 `if optimizer_type == "xxx"` | 破坏 plugin 边界；`test_plugin_registry.py` 拒 | 加 plugin 走 `BUILDERS` dict |
-| 改 `runtime/anima_train.py` re-export 的 7 个名字 | sister script 崩 | 顶层 re-export 可加不可减 |
-| `release_notes.yaml` 写 `summary: "**bold**"` | `bump_version.py validate` 拒 | summary 是 plain text，强调放 detail |
-| Hotfix PR 里塞 feature | dev 上未 release 的功能被绑死 | hotfix 严格只修 1 个 bug |
-| WD14 / CLTagger 重写 ONNX 调度 | 已有 `OnnxTaggerBase` 抽象 | 继承基类 |
-| 加 SSE 事件类型不在事件目录登记 | 前后端不知道事件存在 | 按 §3.5 流程，在 architecture/studio-pipeline.md §6 表先登记 |
+| Changing the Stepper steps only in `components/ProjectStepper.tsx` | No visible UI change (that's dead code) — the actual place to change is the inline version in `Sidebar.tsx` | grep for the step strings to find every render site |
+| Hardcoding a version number in `Sidebar.tsx` | Goes out of sync with `/api/health` | Always fetch from `/api/health` |
+| Adding `if optimizer_type == "xxx"` in `runtime/training/loop.py` | Breaks the plugin boundary; `test_plugin_registry.py` rejects it | Add plugins through the `BUILDERS` dict |
+| Changing one of the 7 re-exported names in `runtime/anima_train.py` | Breaks sister scripts | Top-level re-exports can be added to, never removed |
+| Writing `summary: "**bold**"` in `release_notes.yaml` | `bump_version.py validate` rejects it | `summary` is plain text; put emphasis in `detail` |
+| Sneaking a feature into a hotfix PR | Ties an unreleased dev feature to the hotfix | Hotfixes strictly fix exactly 1 bug |
+| Reimplementing ONNX scheduling for WD14 / CLTagger | `OnnxTaggerBase` already provides this abstraction | Subclass the base class |
+| Adding an SSE event type without registering it in the event catalog | Frontend and backend won't know the event exists | Follow the §3.5 process — register it in the architecture/studio-pipeline.md §6 table first |
 
 ---
 
-## 9. AI 的协作角色
+## 9. The AI's role in collaboration
 
-AI agent 在帮 contributor 改这个项目时承担三件事：
+When helping a contributor change this project, an AI agent has three
+responsibilities:
 
-1. **指出项目特有的约束**：单一权威源、依赖方向、plugin 边界、sister
-   script 契约、Stage 推进等。这些是文档化的项目知识，contributor 不一
-   定都看过，AI 在动手前主动 cite §3 对应章节。
-2. **遇到违反约束的要求时给替代方案**：如果 contributor 想加
-   `if optimizer_type == "lion"` 字面量分支，AI 解释 §3.4 plugin 边界
-   并给出走 `BUILDERS` dict 的写法，不默默照做也不直接拒绝。
-3. **提交 PR 前过一遍 §5 自检**：把检查结果交给 contributor。最终决定
-   权在 contributor / maintainer，AI 不替他们做合 / 不合 / 重做的决定。
+1. **Point out project-specific constraints**: single sources of truth, dependency
+   direction, plugin boundaries, sister-script contracts, stage advancement, etc.
+   These are documented project knowledge that a contributor may not have seen —
+   the AI should proactively cite the relevant §3 section before starting work.
+2. **Offer an alternative when a request violates a constraint**: if a contributor
+   wants to add a literal `if optimizer_type == "lion"` branch, the AI explains the
+   §3.4 plugin boundary and offers the `BUILDERS`-dict approach instead of silently
+   complying or flatly refusing.
+3. **Run through the §5 checklist before submitting a PR**: hand the check results
+   to the contributor. The final decision to merge / not merge / redo belongs to the
+   contributor / maintainer — the AI doesn't make that call for them.
 
 ---
 
-## 10. 维护这份文档
+## 10. Maintaining this document
 
-- AI / contributor 老踩同一个坑 → 加到 §8 陷阱清单
-- 团队约定变了 → 改这里 + 同步 CONTRIBUTING / ADR / spec
-- 新增一类规范文件 → §2 文件地图加一行
-- 加新 agent 工具支持（如 Cursor `.cursor/rules/`）→ 在其约定路径放
-  stub 指向本文，**不要**复制内容（会漂移）
-- 不要让本文膨胀成第二本 CONTRIBUTING —— 价值在**指路 + 项目特有
-  约定**，不是复制内容
-- 通用 AI 工具已知的（type hints / pathlib / f-string / TS strict /
-  hooks rules 这种）**不要**写进来 —— 写了等于噪音
+- The AI / contributors keep hitting the same pitfall -> add it to the §8 pitfalls list
+- Team conventions change -> update this doc + sync CONTRIBUTING / ADR / spec
+- A new category of spec file is added -> add a row to the §2 file map
+- Adding support for a new agent tool (e.g. Cursor's `.cursor/rules/`) -> put a stub
+  at its conventional path pointing to this doc, **don't** copy the content (it will
+  drift)
+- Don't let this document balloon into a second CONTRIBUTING — its value is in
+  **pointing the way + project-specific conventions**, not duplicated content
+- Things any general-purpose AI tool already knows (type hints / pathlib / f-strings
+  / TS strict / hooks rules, etc.) **should not** be written in here — that's just
+  noise

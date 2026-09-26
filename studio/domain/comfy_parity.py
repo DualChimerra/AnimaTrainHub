@@ -46,9 +46,10 @@ def force_comfy_parity_runtime_config(
     else:
         out["attention_backend"] = str(out.get("attention_backend") or "none")
     out["mixed_precision"] = COMFY_PARITY_MIXED_PRECISION
-    # VAE 精度是用户选项（settings.generate.vae_precision），不强制覆盖：
-    # bf16 默认对齐 ComfyUI 在现代 GPU 上的 auto VAE dtype；fp32 留给想用
-    # 全精度 decode 的用户（会触发 decode 前的模块 offload）。
+    # VAE precision is a user option (settings.generate.vae_precision), not forced:
+    # bf16 is the default, matching ComfyUI's auto VAE dtype on modern GPUs; fp32 is
+    # left for users who want full-precision decode (which triggers module offload
+    # before decoding).
     out["vae_precision"] = str(out.get("vae_precision") or DEFAULT_VAE_PRECISION)
     out["text_encoder_backend"] = COMFY_PARITY_TEXT_ENCODER_BACKEND
     out["t5_tokenizer_backend"] = "fast"

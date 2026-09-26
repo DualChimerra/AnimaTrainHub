@@ -1,6 +1,6 @@
-"""预设 CRUD + 导入导出 + schema（PR-5 从 server.py 抽出）。
+"""Preset CRUD + import/export + schema (PR-5, extracted from server.py).
 
-13 routes：
+13 routes:
     GET  /api/schema                            TrainingConfig JSON schema + GROUP_ORDER
     GET  /api/presets                           list
     GET  /api/presets/{name}                    read
@@ -12,8 +12,8 @@
     POST /api/presets/import-from-data-exports  import from data_exports/
     POST /api/presets/import-from-path          import from absolute server path
     POST /api/presets/import                    upload + parse + schema validate
-    *    /api/configs                           308 redirect → /api/presets （legacy）
-    *    /api/configs/{rest:path}               308 redirect → /api/presets/{rest}（legacy）
+    *    /api/configs                           308 redirect -> /api/presets (legacy)
+    *    /api/configs/{rest:path}               308 redirect -> /api/presets/{rest} (legacy)
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ router = APIRouter()
 
 @router.get("/api/schema")
 def get_schema() -> dict[str, Any]:
-    """返回 TrainingConfig 的 JSON Schema + 分组顺序，前端据此渲染表单。"""
+    """Return TrainingConfig's JSON Schema + group order, which the frontend uses to render the form."""
     schema = TrainingConfig.model_json_schema()
     _apply_feature_flags(schema)
     return {
@@ -57,22 +57,26 @@ def get_schema() -> dict[str, Any]:
 
 @router.post("/api/schema/preview-yaml")
 def preview_config_yaml_endpoint(body: dict[str, Any]) -> dict[str, Any]:
-    """当前表单 config → 与保存后落盘文件同一序列化路径的 yaml 文本(R4)。
+    """Current form config -> yaml text using the same serialization path as the saved
+    on-disk file (R4).
 
-    取代前端 pruneInactiveConfig + configToYaml 双镜像:预览不再「声称一致」
-    而是物理一致。纯计算不落盘;tolerant 修复语义与保存一致。
+    Replaces the frontend's pruneInactiveConfig + configToYaml double mirror: the preview
+    no longer just "claims to match" the saved file, it's physically identical. Pure
+    computation, nothing is persisted; tolerant-fixup semantics match saving.
     """
     return {"yaml": presets_io.preview_config_yaml_text(dict(body.get("config") or {}))}
 
 
 def _apply_feature_flags(schema: dict[str, Any]) -> None:
-    """按 SystemConfig 的实验性 flag 动态调整 schema（只影响 UI 渲染）。
+    """Dynamically adjust the schema based on SystemConfig's experimental flags (affects
+    only UI rendering).
 
-    Automagic v2 未正式发布：flag 关闭时给 automagic_variant 打 hidden（值仍
-    透传，CLI/yaml 不受影响）。agreement_threshold 的 show_when 含
-    automagic_variant==v2，variant 隐藏后停在默认 v1 自然不显示，无需处理。
-    启用方式：手改 studio_data/secrets.json 的 system.enable_automagic_v2，
-    Settings 页故意不渲染该开关。
+    Automagic v2 isn't officially released yet: when the flag is off, automagic_variant
+    is marked hidden (the value still passes through, CLI/yaml are unaffected).
+    agreement_threshold's show_when includes automagic_variant==v2, so once variant is
+    hidden it stays on the default v1 and naturally doesn't show -- nothing else to
+    handle. Enabled by manually editing system.enable_automagic_v2 in
+    studio_data/secrets.json; the Settings page deliberately doesn't render this toggle.
     """
     from ...infrastructure import secrets as secrets_infra
 
@@ -119,7 +123,7 @@ def duplicate_preset_endpoint(name: str, body: DuplicateRequest) -> dict[str, st
 
 @router.get("/api/presets/{name}/download")
 def download_preset(name: str) -> FileResponse:
-    """端到端文件 I/O：直接返回 `studio_data/presets/{name}.yaml` 原文件。"""
+    """End-to-end file I/O: returns the raw `studio_data/presets/{name}.yaml` file directly."""
     path = presets_io.preset_path(name)
     if not path.exists():
         raise NotFoundError(
@@ -131,7 +135,7 @@ def download_preset(name: str) -> FileResponse:
 
 @router.post("/api/presets/{name}/export")
 def export_preset_to_data_exports(name: str, body: PresetExportBody) -> dict[str, Any]:
-    """把当前预设表单完整参数校验后保存到 data_exports/。"""
+    """Fully validate the current preset form's parameters, then save to data_exports/."""
     DATA_EXPORTS.mkdir(parents=True, exist_ok=True)
     dest = _errors._unique_data_export_path(f"{name}.yaml", (".yaml", ".yml"))
     path = presets_io.write_preset(dest.stem, body.config, DATA_EXPORTS)
@@ -140,7 +144,7 @@ def export_preset_to_data_exports(name: str, body: PresetExportBody) -> dict[str
 
 @router.post("/api/presets/import-from-data-exports")
 def import_preset_from_data_exports(body: PresetImportBody) -> dict[str, Any]:
-    """从 data_exports/ 里的 yaml/json 预设导入到用户预设池。"""
+    """Import a yaml/json preset from data_exports/ into the user's preset pool."""
     src = _errors._data_export_path(body.filename, (".yaml", ".yml", ".json"))
     if not src.exists():
         raise NotFoundError(
@@ -168,7 +172,7 @@ def import_preset_from_data_exports(body: PresetImportBody) -> dict[str, Any]:
 
 @router.post("/api/presets/import-from-path")
 def import_preset_from_path(body: PresetImportFromPathBody) -> dict[str, Any]:
-    """从服务器绝对路径导入预设（yaml/yml/json）。"""
+    """Import a preset (yaml/yml/json) from an absolute path on the server."""
     from pathlib import Path
     src = Path(body.path)
     if not src.is_file():
@@ -202,13 +206,14 @@ def import_preset_from_path(body: PresetImportFromPathBody) -> dict[str, Any]:
 
 @router.post("/api/presets/import")
 async def import_preset(file: UploadFile = File(...)) -> dict[str, Any]:
-    """接 .yaml/.yml/.json 上传 → 解析 + schema 校验 → 落盘到 `suggested_name`。
+    """Accept a .yaml/.yml/.json upload -> parse + schema validate -> save to `suggested_name`.
 
-    无冲突 → write_preset 直接写,返回 200 `{name, path}`。
-    冲突(`suggested_name.yaml` 已存在)→ 409 + 结构化 detail
-    `{message, config, suggested_name}`,前端 ImportConflictDialog 让用户选
-    覆盖 / 另存为 / 取消,选定后走 PUT /api/presets/{name} 完成落盘。
-    解析/校验失败 → 400/422。
+    No conflict -> write_preset writes it directly, returns 200 `{name, path}`.
+    Conflict (`suggested_name.yaml` already exists) -> 409 + structured detail
+    `{message, config, suggested_name}`; the frontend's ImportConflictDialog lets the user
+    choose overwrite / save as / cancel, and the chosen option goes through
+    PUT /api/presets/{name} to finish saving.
+    Parse/validation failure -> 400/422.
     """
     raw = await file.read()
     config, suggested = presets_io.parse_preset_bytes(raw, file.filename or "")
@@ -226,8 +231,8 @@ async def import_preset(file: UploadFile = File(...)) -> dict[str, Any]:
     return {"name": suggested, "path": str(path)}
 
 
-# 旧 /api/configs/* 端点保留为 308 redirect（保护任何外部脚本）。
-# 308 保持 method + body，所以 PUT/POST/DELETE 都能透明转发。
+# The old /api/configs/* endpoints are kept as a 308 redirect (protects any external scripts).
+# 308 preserves method + body, so PUT/POST/DELETE all forward transparently.
 @router.api_route(
     "/api/configs",
     methods=["GET", "POST", "PUT", "DELETE"],

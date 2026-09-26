@@ -17,7 +17,6 @@ import SchemaForm from '../../components/SchemaForm'
 import { useToast } from '../../components/Toast'
 import { schemaEnumLabel } from '../../lib/schema'
 import { useSettingsDrawer } from '../../lib/SettingsDrawer'
-import { useAdvancedMode } from '../../lib/useAdvancedMode'
 import {
   PRESET_NAME_RE,
   defaultsFromSchema,
@@ -137,7 +136,6 @@ export default function PresetsPage() {
   const [filter, setFilter] = useState('')
   const [summaryFormat, setSummaryFormat] = useState<'yaml' | 'toml'>('yaml')
   const [previewYaml, setPreviewYaml] = useState('')
-  const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
   const newNameInputRef = useRef<HTMLInputElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -742,22 +740,6 @@ export default function PresetsPage() {
                 {isNew ? t('presets.newPresetBtn') : <>{t('presets.editPrefix')} · <span className="mono">{selected}</span></>}
               </h2>
               <span style={{ flex: 1 }} />
-              <span className="ds-seg">
-                <button
-                  type="button"
-                  onClick={() => advancedMode && toggleAdvancedMode()}
-                  className={`ds-seg-item${!advancedMode ? ' ds-is-active' : ''}`}
-                >
-                  {t('train.simpleMode')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => !advancedMode && toggleAdvancedMode()}
-                  className={`ds-seg-item${advancedMode ? ' ds-is-active' : ''}`}
-                >
-                  {t('train.advancedMode')}
-                </button>
-              </span>
               <button type="button" onClick={() => setEditorOpen(false)} className="ds-kebab" aria-label={t('common.cancel')}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
               </button>
@@ -822,7 +804,6 @@ export default function PresetsPage() {
                   disabledHints={disabledHints}
                   autoHints={autoHints}
                   fieldSuffixes={fieldSuffixes}
-                  advancedMode={advancedMode}
                 />
               )}
 

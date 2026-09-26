@@ -13,8 +13,8 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('[ErrorBoundary]', error, info)
-    // ADR-0009 PR-3 C3: 上报到 /api/client-errors → studio.log studio.client logger。
-    // silent swallow on fail（防 ErrorBoundary 已经在 catch state 时再炸第二次）。
+    // ADR-0009 PR-3 C3: report to /api/client-errors -> studio.log studio.client logger.
+    // Silent swallow on fail (avoids blowing up a second time while ErrorBoundary is already in catch state).
     try {
       reportClientError({
         kind: 'react.boundary',
@@ -23,15 +23,16 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
         componentStack: info.componentStack ?? undefined,
       })
     } catch {
-      // 上报本身炸了也吞
+      // Swallow failures from the reporting call itself too
     }
   }
 
   render() {
     if (this.state.error) {
-      // ADR-0009 PR-3 C3: 显示最近一次 API 4xx/5xx 的 trace_id 末 8 字符
-      // （ErrorBoundary 自己拿不到 traceId — 用前端 lastApiTraceId 兜底）。
-      // 用户截图给开发：grep 这串能定位整条 trace 链路。
+      // ADR-0009 PR-3 C3: shows the last 8 characters of the trace_id from the
+      // most recent API 4xx/5xx (ErrorBoundary can't get traceId itself -- falls
+      // back to the frontend's lastApiTraceId). The user can screenshot it for
+      // developers: grepping this string locates the whole trace chain.
       const traceId = getLastApiTraceId()
       const traceSuffix = traceId ? traceId.slice(-8) : null
       return (

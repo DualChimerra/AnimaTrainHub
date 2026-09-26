@@ -1,14 +1,15 @@
-"""模型 catalog / 下载（PR-6 commit 2 从 server.py 抽出）。
+"""Model catalog / downloads (PR-6 commit 2, extracted from server.py).
 
-路由（PP7 第一刀域 + 统一模型来源候选）：
-    GET    /api/models/catalog        列已知模型 + 各自磁盘状态 + 当前下载状态
-    GET    /api/models/path-defaults  当前 Settings 算出的 4 个模型字段绝对路径
-    POST   /api/models/download       启动后台下载，返回 status key
-    POST   /api/model-sources/{domain}   添加一条来源候选（下载型 / 本地文件）
-    DELETE /api/model-sources/{domain}   移除一条候选（不动磁盘；选中项回退默认）
+Routes (PP7 first-cut domain + unified model source candidates):
+    GET    /api/models/catalog        list known models + each one's disk status + current download status
+    GET    /api/models/path-defaults  absolute paths for the 4 model fields as computed from current Settings
+    POST   /api/models/download       start a background download, returns a status key
+    POST   /api/model-sources/{domain}   add a source candidate (download-type / local file)
+    DELETE /api/model-sources/{domain}   remove a candidate (leaves disk untouched; falls back to default if selected)
 
-本地主模型的注册/注销端点（POST/DELETE /api/models/{family}/custom）已被
-/api/model-sources/{family} 的 local 候选取代（统一来源候选，D1）。
+The local base-model register/unregister endpoints (POST/DELETE
+/api/models/{family}/custom) have been replaced by local candidates under
+/api/model-sources/{family} (unified source candidates, D1).
 """
 from __future__ import annotations
 
@@ -33,17 +34,19 @@ router = APIRouter()
 
 @router.get("/api/models/catalog")
 def get_models_catalog() -> dict[str, Any]:
-    """前端设置页 Models 区块用：列已知模型 + 各自磁盘状态 + 当前下载状态。"""
+    """Used by the frontend Settings page's Models section: lists known models + each
+    one's disk status + current download status."""
     return model_downloader.build_catalog()
 
 
 @router.get("/api/models/path-defaults")
 def get_models_path_defaults(family: str = "anima") -> dict[str, str]:
-    """当前 Settings 算出的 4 个模型字段绝对路径（按 `family` query 参数解析）。
+    """Absolute paths for the 4 model fields, computed from current Settings (resolved
+    by the `family` query parameter).
 
-    给预设页 reset 按钮和「新建预设」初始填充用——这两个场景没有 project
-    上下文，拿不到 /api/projects/{pid}/versions/{vid}/config 里的
-    project_specific_defaults，所以单独开一个端点。
+    Used by the presets page's reset button and the initial fill for "new preset" -- both
+    scenarios have no project context, so they can't get project_specific_defaults from
+    /api/projects/{pid}/versions/{vid}/config, hence this separate endpoint.
     """
     try:
         return model_downloader.default_paths_for_new_version(family=family)
@@ -57,11 +60,13 @@ def get_models_path_defaults(family: str = "anima") -> dict[str, str]:
 
 @router.post("/api/models/family-switch")
 def switch_model_family(body: FamilySwitchRequest) -> dict[str, Any]:
-    """训练配置切换模型族的预览计算（多模型 P4-3）。
+    """Preview computation for switching a training config's model family (multi-model P4-3).
 
-    纯计算不落盘：重算 4 个权重路径 + 重置族风味字段（sampler / scheduler /
-    timestep 等）+ 关闭目标族不支持的能力字段，返回切换后的完整 config 与
-    变更清单。前端拿去弹确认对话框，用户确认后走正常保存链路。
+    Pure computation, nothing is persisted: recomputes the 4 weight paths + resets
+    family-flavored fields (sampler / scheduler / timestep etc.) + disables capability
+    fields unsupported by the target family, and returns the full config after switching
+    plus a change list. The frontend uses this to pop a confirmation dialog; once the user
+    confirms it goes through the normal save path.
     """
     try:
         path_defaults = model_downloader.default_paths_for_new_version(
@@ -78,10 +83,12 @@ def switch_model_family(body: FamilySwitchRequest) -> dict[str, Any]:
 
 @router.delete("/api/models/asset")
 def delete_model_asset(model_id: str, variant: str | None = None) -> dict[str, Any]:
-    """删除一个已下载资产（下载的逆操作：用户先删除、再重新下载）。
+    """Delete a downloaded asset (the inverse of download: the user deletes it first,
+    then re-downloads if needed).
 
-    目标路径由服务端解析（不接受任意路径）；下载进行中 / 文件被占用时报错。
-    返回删除后的完整 catalog。
+    The target path is resolved server-side (arbitrary paths are not accepted); errors if
+    a download is in progress / the file is in use.
+    Returns the full catalog after deletion.
     """
     try:
         model_downloader.delete_asset(model_id, variant)
@@ -99,8 +106,8 @@ def delete_model_asset(model_id: str, variant: str | None = None) -> dict[str, A
 
 @router.post("/api/models/download")
 def start_model_download(body: ModelDownloadRequest) -> dict[str, Any]:
-    """启动后台下载，立即返回 status key；前端通过 SSE
-    (`model_download_changed`) 或轮询 catalog 看进度。"""
+    """Start a background download, return a status key immediately; the frontend
+    watches progress via SSE (`model_download_changed`) or by polling the catalog."""
     try:
         key = model_downloader.trigger(body.model_id, body.variant)
     except ValueError as exc:
@@ -113,11 +120,11 @@ def start_model_download(body: ModelDownloadRequest) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 统一模型来源候选（docs/design/model-source-unification.md §6）
+# Unified model source candidates (docs/design/model-source-unification.md §6)
 # ---------------------------------------------------------------------------
 
-# HF / MS repo id 形如 owner/name。校验从简（D3）：不做网络探测，repo 不存在
-# 等到下载时报错。
+# HF / MS repo ids look like owner/name. Validation kept minimal (D3): no network probe,
+# a nonexistent repo just errors out at download time.
 _REPO_ID_RE = re.compile(r"^[\w.\-]+/[\w.\-]+$")
 
 
@@ -128,7 +135,7 @@ def _source_domains() -> set[str]:
         set(secrets.MODEL_SOURCE_REPO_DOMAINS)
         | {"upscaler", secrets.VAE_DOMAIN}
         | set(FAMILY_ASSETS.keys())
-        # 按族文本编码器（anima_te / krea2_te）：本地 transformers 目录
+        # per-family text encoders (anima_te / krea2_te): local transformers directory
         | {secrets.te_domain(f) for f in FAMILY_ASSETS}
     )
 
@@ -168,7 +175,7 @@ def _require_dir_with(p: Path, required: tuple[str, ...]) -> None:
 
 
 def _validate_candidate(domain: str, cand: "secrets.SourceCandidate") -> None:
-    """简单校验（D3）：格式 / 存在性 / 域结构；运行时报错兜底。"""
+    """Simple validation (D3): format / existence / domain structure; errors at runtime are the fallback."""
     from ...services.models.families import FAMILY_ASSETS
     from ...services.models.paths import (
         TEXT_ENCODER_MARKER,
@@ -177,9 +184,10 @@ def _validate_candidate(domain: str, cand: "secrets.SourceCandidate") -> None:
     )
 
     if cand.kind == "download":
-        # VAE / 文本编码器暂只支持「选本地文件」：官方权重走各自的下载卡，
-        # 第三方 repo 下载需要新的 downloader 落点规则，未实现前明确报错，
-        # 不静默把候选存成永远下不动的行。
+        # VAE / text encoders currently only support "pick a local file": official
+        # weights go through their own download cards, and third-party repo downloads
+        # would need new downloader placement rules; until that's implemented we error
+        # out explicitly rather than silently saving a candidate that can never download.
         if domain == secrets.VAE_DOMAIN or secrets.te_domain_family(domain):
             raise ValidationError(
                 "This model type only supports picking a local file or folder",
@@ -192,7 +200,7 @@ def _validate_candidate(domain: str, cand: "secrets.SourceCandidate") -> None:
                 code="model_source.repo_invalid",
                 details={"repo": cand.repo}, http_status=400,
             )
-        # 单文件资产必须带 filename + 后缀白名单；目录型资产不接受 filename
+        # Single-file assets must have a filename + an allowed extension; directory-type assets don't accept filename
         if domain == "upscaler" or domain in FAMILY_ASSETS:
             exts = UPSCALER_EXTS if domain == "upscaler" else (".safetensors",)
             name = Path(cand.filename).name
@@ -229,8 +237,9 @@ def _validate_candidate(domain: str, cand: "secrets.SourceCandidate") -> None:
     elif domain == secrets.VAE_DOMAIN:
         _require_file(p, (".safetensors",))
     elif secrets.te_domain_family(domain):
-        # 文本编码器 = transformers 目录（Qwen3 / Qwen3-VL / 官方 fp8 单文件版
-        # 都带 config.json）。选到裸权重文件时这条报错会点名缺什么。
+        # A text encoder = a transformers directory (Qwen3 / Qwen3-VL / the official fp8
+        # single-file variant all ship a config.json). If a bare weights file is picked,
+        # this error names what's missing.
         _require_dir_with(p, (TEXT_ENCODER_MARKER,))
     elif domain == "cltagger":
         _require_file(p, (".onnx",))
@@ -241,7 +250,7 @@ def _validate_candidate(domain: str, cand: "secrets.SourceCandidate") -> None:
                 code="model_source.path_invalid", http_status=400,
             )
         _require_file(Path(mapping).expanduser(), (".json",))
-    else:  # 主模型族：单文件 .safetensors（同 PathPicker 注册校验）
+    else:  # base-model families: single-file .safetensors (same as PathPicker registration validation)
         _require_file(p, (".safetensors",))
 
 
@@ -261,7 +270,8 @@ def _candidate_from_request(body: ModelSourceCandidateRequest) -> "secrets.Sourc
 
 
 def _selected_value_reset(domain: str, removed: "secrets.SourceCandidate") -> dict[str, Any]:
-    """移除的候选正是当前选中 → 附带把选中值回退默认的 update partial。"""
+    """When the removed candidate is the currently selected one -> also return an update
+    partial that resets the selected value to its default."""
     from ...services.models.families import FAMILY_ASSETS
     from ...services.models.paths import DEFAULT_UPSCALER
 
@@ -270,7 +280,7 @@ def _selected_value_reset(domain: str, removed: "secrets.SourceCandidate") -> di
     if domain == "wd14" and s.wd14.model_id == removed_value:
         return {"wd14": {"model_id": secrets.DEFAULT_WD14_MODELS[0]}}
     if domain == "cltagger":
-        # download=fork repo（比 model_id）；local=双文件（比 model_path）
+        # download=fork repo (compare to model_id); local=two files (compare to model_path)
         is_current = (
             removed.kind == "download" and s.cltagger.model_id == removed.repo
         ) or (
@@ -297,12 +307,12 @@ def _selected_value_reset(domain: str, removed: "secrets.SourceCandidate") -> di
         if sel and sel in (removed_value, removed.filename):
             return {"models": {"selected_upscaler": DEFAULT_UPSCALER}}
     if domain == secrets.VAE_DOMAIN and s.models.selected_vae == removed_value:
-        # 空串 = 跟随官方落点（ModelsConfig.selected_vae 的默认语义）
+        # empty string = follow the official location (ModelsConfig.selected_vae's default semantics)
         return {"models": {"selected_vae": ""}}
     te_family = secrets.te_domain_family(domain)
     if te_family and s.models.selected_te.get(te_family) == removed_value:
-        # 官方默认 = 该族 text_encoder_presets 的首项（anima: "" = 官方目录；
-        # krea2: "bf16"）
+        # official default = the first entry of that family's text_encoder_presets
+        # (anima: "" = official directory; krea2: "bf16")
         presets = FAMILY_ASSETS[te_family].text_encoder_presets(
             model_downloader.models_root())
         return {"models": {"selected_te": {
@@ -319,16 +329,18 @@ def _selected_value_reset(domain: str, removed: "secrets.SourceCandidate") -> di
 def add_model_source(
     domain: str, body: ModelSourceCandidateRequest
 ) -> dict[str, Any]:
-    """添加一条来源候选（去重 append），返回新 catalog。
+    """Add a source candidate (dedup then append), return the new catalog.
 
-    校验从简：repo 形如 owner/name、单文件资产的后缀白名单、本地路径存在 +
-    域结构（wd14 双文件 / eval config.json 等）。不做网络探测。
+    Validation kept minimal: repo looks like owner/name, extension allowlist for
+    single-file assets, local path exists + domain structure (wd14's two files / eval's
+    config.json etc.). No network probing.
     """
     _domain_or_400(domain)
     cand = _candidate_from_request(body)
     if domain == "cltagger" and cand.kind == "download":
-        # fork repo 候选默认继承当前双文件相对路径（用户通常 fork 同版本；
-        # 当前是 local 绝对路径时回退首个内置 preset 的路径）
+        # A fork-repo candidate defaults to inheriting the current two-file relative path
+        # (users usually fork the same version; falls back to the first built-in
+        # preset's path if the current one is a local absolute path)
         from ...services.models.paths import CLTAGGER_VERSIONS
 
         cfg = secrets.load().cltagger
@@ -351,11 +363,13 @@ def add_model_source(
 def remove_model_source(
     domain: str, body: ModelSourceCandidateRequest
 ) -> dict[str, Any]:
-    """移除一条候选（只移出列表，不动磁盘文件），返回新 catalog。
+    """Remove a candidate (only removed from the list, disk files untouched), return the new catalog.
 
-    被移除的候选正是当前选中时，选中值回退该 domain 默认（wd14 首个内置 /
-    eval schema 默认 / cltagger 官方 preset / upscaler 默认 / 主模型族最新
-    官方 variant）——与「注销本地主模型回退 latest」的现状语义一致。
+    When the removed candidate is the currently selected one, the selected value falls
+    back to that domain's default (wd14's first built-in / eval schema default /
+    cltagger's official preset / upscaler default / the latest official variant for base
+    model families) -- consistent with the existing "unregistering a local base model
+    falls back to latest" semantics.
     """
     _domain_or_400(domain)
     cand = _candidate_from_request(body)

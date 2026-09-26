@@ -1,14 +1,14 @@
-"""LyCORIS 后端的 adapter build 函数（lokr / loha / lora）。
+"""Adapter build function for the LyCORIS backend (lokr / loha / lora).
 
-抽自 phases/models.py 里的 LycorisAdapter 实例化逻辑（ADR 0003 PR-C）。
+Extracted from the LycorisAdapter instantiation logic in phases/models.py (ADR 0003 PR-C).
 
-由 training/adapters/__init__.py 的 BUILDERS 字典派发：
+Dispatched by the BUILDERS dict in training/adapters/__init__.py:
     BUILDERS["lokr"] = build
     BUILDERS["loha"] = build
     BUILDERS["lora"] = build
 
-实际 adapter 类在 utils/lycoris_adapter.py，本文件只做"读 args → 调构造器"
-的轻量 wrapper。
+The actual adapter class lives in utils/lycoris_adapter.py; this file is just a
+lightweight "read args -> call constructor" wrapper.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from training.adapters.protocol import AdapterProtocol
 
 
 def build(args, *, preset: dict[str, Any]) -> AdapterProtocol:
-    """从 args 与显式 family preset 实例化 LycorisAdapter。"""
+    """Instantiate a LycorisAdapter from args and an explicit family preset."""
     from utils.lycoris_adapter import LycorisAdapter
     return LycorisAdapter(
         preset=preset,

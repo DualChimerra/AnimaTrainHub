@@ -152,8 +152,6 @@
     "subtitle": "train hub",
     "newVersion": "New version",
     "export": "Export",
-    "exportTitle": "Export the active version's train set",
-    "deleteVersionTitle": "Delete this version (move to trash)",
     "versionsLabel": "Version",
     "switchVersion": "Switch version",
     "advanceToTitle": "Advance to: {{label}}",
@@ -165,7 +163,12 @@
     "collapse": "Collapse",
     "expand": "Expand",
     "collapseLabel": "Collapse",
-    "exporting": "Packing..."
+    "exporting": "Packing...",
+    "switchProject": "Switch project",
+    "projectsHead": "Projects",
+    "allProjects": "All projects",
+    "versionsHead_one": "{{count}} version",
+    "versionsHead_other": "{{count}} versions"
   },
   "projectStepper": {
     "download": "① Download",
@@ -318,7 +321,11 @@
     "recommended": "Recommended",
     "less": "Less",
     "more": "More",
-    "was": "was: {{value}}"
+    "was": "was: {{value}}",
+    "familyDesc": {
+      "anima": "Anima Base 2B · Qwen3-0.6B encoder · Danbooru tags with natural language",
+      "krea2": "Krea 2 MMDiT · Qwen3-VL-4B encoder · natural-language captions"
+    }
   },
   "schema": {
     "fieldCount": "{{n}} items",
@@ -790,7 +797,7 @@
     "unarchived": "Restored: {{title}}",
     "editProject": "Edit project",
     "edited": "Saved \"{{title}}\"",
-    "eyebrow": "PROJECTS",
+    "eyebrow": "Projects",
     "subtitle": "One project — one LoRA training goal: a character, a style or a concept.",
     "filterAll": "All",
     "filterActive": "Active",
@@ -1039,7 +1046,7 @@
     "samplesCount": "{{n}} imgs",
     "samplesShow": "Show samples",
     "samplesHide": "Hide samples",
-    "eyebrow": "QUEUE",
+    "eyebrow": "Queue",
     "summaryNow": "In the queue now",
     "legendRunning_one": "{{count}} running",
     "legendRunning_other": "{{count}} running",
@@ -1100,7 +1107,9 @@
       "s": "{{n}} s",
       "m": "{{n}} min",
       "hm": "{{h}} h {{m}} m"
-    }
+    },
+    "stepOf": "step {{n}} / {{total}}",
+    "pausedWhen": "paused"
   },
   "queueDetail": {
     "invalidId": "Invalid task ID",
@@ -1169,7 +1178,7 @@
     "downloadFile": "Download",
     "folderOpened": "Opened {{path}}",
     "sourceLink": "Project #{{projectId}} / v#{{versionId}}",
-    "eyebrow": "TASK · {{kind}}",
+    "eyebrow": "Task · {{kind}}",
     "startedAtShort": "started {{time}}",
     "runningFor": "running {{time}}",
     "queuedAtShort": "queued since {{time}}",
@@ -1290,31 +1299,6 @@
     "wd14": "WD14",
     "clTagger": "CLTagger",
     "onnxRuntime": "ONNX Runtime",
-    "tagDictionary": {
-      "title": "Tag translation dictionary",
-      "statusLabel": "Status",
-      "loading": "Loading…",
-      "empty": "Not initialized — click 「Restore default」 below to retry",
-      "error": "Load failed",
-      "sourceDefault": "Default source",
-      "sourceUser": "User upload",
-      "sourceUnknown": "Unknown source",
-      "entryCount": "{{n}} entries",
-      "uploadLabel": "Custom dictionary",
-      "uploadHint": "CSV / TXT format: one line per `english_tag,zh1 zh2`. Replaces (not merges) the current dictionary. Max 10MB / 200k entries.",
-      "resetButton": "Restore default dictionary",
-      "resetBusy": "Downloading…",
-      "resetHint": "Re-download the ffdkj Danbooru tag Chinese translation table from GitHub (~30MB, top 200k tags by popularity, updated daily)",
-      "confirmReset": "Restore default dictionary? The current one will be overwritten.",
-      "resetOk": "Default dictionary restored",
-      "resetFail": "Reset failed",
-      "uploadOk": "Loaded {{name}}",
-      "uploadFail": "Upload failed",
-      "showToggleLabel": "Show translations on chips",
-      "showToggleHint": "Display English + Chinese on tag chips. UI-only — does not modify caption data.",
-      "autocompleteToggleLabel": "Tag autocomplete while typing",
-      "autocompleteToggleHint": "Pop up completion candidates (from this dictionary) while typing in prompt / tag inputs. Turning this off disables the popup in all inputs."
-    },
     "modelSource": "Model download source",
     "evalMetricModels": "Eval metric models",
     "evalMetrics": "Eval metrics",
@@ -1374,7 +1358,6 @@
     "gelbooru": "Gelbooru",
     "danbooru": "Danbooru",
     "language": "Language",
-    "languageZh": "中文",
     "languageEn": "English",
     "title": "Settings",
     "pageIndex": "Page index",
@@ -1890,7 +1873,9 @@
     "modelNames": {
       "animaMain": "Anima main model",
       "krea2Main": "Krea 2 main model"
-    }
+    },
+    "sounds": "Interface sounds",
+    "soundsDesc": "Soft clicks on toggles and tabs, a chime when something finishes, a low tone on errors."
   },
   "monitor": {
     "taskLabel": "Task",
@@ -1927,7 +1912,7 @@
     "deltaHint": "Net gain over the plain base model baseline",
     "deltaHintShort": "Δ against the plain base model",
     "waitingMetrics": "waiting for metrics",
-    "eyebrow": "TOOLS",
+    "eyebrow": "Tools",
     "title": "Monitor",
     "subtitle": "Checkpoint metrics against the validation set. Δ is the gain over the plain base model.",
     "pickCkptsBtn": "Pick checkpoints",
@@ -2168,7 +2153,7 @@
     "sweep": "Sweep:",
     "nCkpts": "{{count}} checkpoints",
     "versionTraining": "{{label}} (training)",
-    "eyebrow": "TOOLS",
+    "eyebrow": "Tools",
     "guidance": "Guidance",
     "randomSeed": "Random",
     "sizeNote": "multiple of 64 · {{mp}} MP",
@@ -2340,7 +2325,7 @@
     },
     "recentRunsCaption": "Recent runs",
     "noRuns": "No runs yet.",
-    "eyebrow": "PROJECT · {{slug}}",
+    "eyebrow": "Project · {{slug}}",
     "downloads_one": "{{count}} download",
     "downloads_other": "{{count}} downloads",
     "createdOn": "created {{date}}",
@@ -2415,7 +2400,13 @@
     "unitB": "B",
     "unitKB": "KB",
     "unitMB": "MB",
-    "unitGB": "GB"
+    "unitGB": "GB",
+    "verMenuOpen": "Open",
+    "verMenuActivate": "Make active",
+    "verMenuCopy": "New version from this one",
+    "verMenuExport": "Export train set…",
+    "verMenuDelete": "Delete version",
+    "versionActions": "Actions for {{label}}"
   },
   "versionStatus": {
     "preparing": "Preparing",
@@ -2473,7 +2464,8 @@
     "exportBundleDownload": "Download to local",
     "exportBundleDataExports": "Export to project directory",
     "exportSavedToDataExports": "Saved to data_exports: {{filename}} ({{path}})",
-    "exportBundleAtLeastOne": "Select at least one item to export"
+    "exportBundleAtLeastOne": "Select at least one item to export",
+    "versionName": "Version name"
   },
   "tagEdit": {
     "title": "Tags & editing",
@@ -2779,7 +2771,7 @@
       "title": "Train",
       "subtitle": "Pick preset → Edit config → Queue training"
     },
-    "eyebrowStep": "STEP {{n}} · VERSION {{label}}",
+    "eyebrowStep": "Step {{n}} · version {{label}}",
     "stepN": "STEP {{n}}"
   },
   "curate": {
@@ -3036,7 +3028,7 @@
     "colRes": "Res",
     "selectHint": "Select a preset to see its summary.",
     "colName": "Name",
-    "eyebrow": "TOOLS",
+    "eyebrow": "Tools",
     "title": "Presets",
     "subtitle": "Global config templates. A project version takes a copy — edits there never change the preset.",
     "headMenu": "More: import, export YAML",
@@ -3094,8 +3086,6 @@
     "noMatch": "No match for \"{{search}}\"",
     "loadingConfig": "Loading training config",
     "noConfigHint": "Click + New preset on the left to auto-generate one with schema defaults + project model paths and apply it, or pick an existing preset.",
-    "simpleMode": "Simple",
-    "advancedMode": "Advanced",
     "globalAutoHint": "Auto · Global settings",
     "globalAutoLockedPrefix": "Auto",
     "globalAutoLockedLink": "Global settings",
@@ -3158,14 +3148,6 @@
     "saveError": "Save failed",
     "nParams_one": "{{count}} parameter",
     "nParams_other": "{{count}} parameters",
-    "schemaGroups": "Schema groups:",
-    "fieldModeLabel": "Field set",
-    "filterLabel": "Field filter",
-    "filterAll": "All fields · {{n}}",
-    "filterChanged": "Changed only · {{n}}",
-    "filterNonDefault": "Non-default · {{n}}",
-    "filterLocked": "Locked · {{n}}",
-    "filterEmpty": "Nothing in this section matches the filter",
     "resetTab": "Reset the section to defaults",
     "resetTabConfirm_one": "Reset {{count}} field of «{{tab}}» to its default? Paths and project fields are kept.",
     "resetTabConfirm_other": "Reset {{count}} fields of «{{tab}}» to their defaults? Paths and project fields are kept.",
@@ -3239,7 +3221,8 @@
     "runStatus_failed": "failed",
     "runStatus_canceled": "cancelled",
     "runStatus_paused": "paused",
-    "runStatus_scheduled": "scheduled"
+    "runStatus_scheduled": "scheduled",
+    "resetTabShort": "Reset tab"
   },
   "reg": {
     "loadFailed": "Failed to load reg status: {{error}}",
@@ -3416,7 +3399,7 @@
     "renameFolderOk": "Rename",
     "repeatHint": "Reg folder repeat (N_data), independent of train; 1 = DreamBooth default",
     "renameFolderCancel": "Cancel",
-    "eyebrow": "STEP 4 · OPTIONAL",
+    "eyebrow": "Step 4 · optional",
     "skipStep": "Skip step",
     "moreActions": "More: delete the set",
     "next": "Next: training",
@@ -3854,7 +3837,7 @@
     }
   },
   "soup": {
-    "eyebrow": "SOUP",
+    "eyebrow": "Tools",
     "title": "Checkpoint soup",
     "subtitle": "Average several trained checkpoints into one file. Combining runs usually keeps what they agree on and cancels what is just noise from a single run — cheaper than training again.",
     "upload": "Upload file",
@@ -3980,7 +3963,7 @@
     "inCaptionsPct": "in {{pct}}% of captions"
   },
   "dataset": {
-    "eyebrow": "STEP · PROJECT DATASET",
+    "eyebrow": "Step · project dataset",
     "subtitle": "Booru scraping + your own files. Shared by every version of the project.",
     "nextCurate": "Next: curate the train set",
     "booruTitle": "Booru scraping",
@@ -4040,7 +4023,7 @@
     "logEmpty": "The log is empty"
   },
   "ppFrame": {
-    "eyebrow": "STEP 2 · OPTIONAL",
+    "eyebrow": "Step 2 · optional",
     "title": "Preprocess tools",
     "subtitle": "Upscale / crop / inpaint / duplicates — they work on the version's train set",
     "next": "Next: tags",

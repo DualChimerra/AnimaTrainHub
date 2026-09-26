@@ -88,9 +88,6 @@ export function TagSuggestList({
           }
         >
           <span>{s.tag}</span>
-          {s.zh.length > 0 && (
-            <span className="text-fg-tertiary truncate">{s.zh.join(' ')}</span>
-          )}
         </li>
       ))}
     </ul>,

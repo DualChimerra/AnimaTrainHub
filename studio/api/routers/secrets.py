@@ -1,10 +1,10 @@
-"""全局凭证 / 服务配置（PR-6 commit 2 从 server.py 抽出）。
+"""Global credentials / service configuration (extracted from server.py in PR-6 commit 2).
 
-4 routes：
-    GET /api/secrets    masked secrets snapshot（API key 等敏感字段 masked）
-    PUT /api/secrets    更新 secrets，返回新 masked snapshot
-    GET /api/secrets/wandb/presets/{id}/export   下载 wandb preset yaml（含真实 api_key）
-    POST /api/secrets/wandb/presets/import       导入 wandb preset（yaml/json 上传）
+4 routes:
+    GET /api/secrets    masked secrets snapshot (sensitive fields like API keys are masked)
+    PUT /api/secrets    update secrets, returns the new masked snapshot
+    GET /api/secrets/wandb/presets/{id}/export   download a wandb preset yaml (with the real api_key)
+    POST /api/secrets/wandb/presets/import       import a wandb preset (yaml/json upload)
 """
 from __future__ import annotations
 
@@ -32,9 +32,10 @@ def get_secrets() -> dict[str, Any]:
 @router.put("/api/secrets")
 def put_secrets(body: dict[str, Any]) -> dict[str, Any]:
     new = secrets.update(body)
-    # 用户在 Settings 里改了 generate.idle_timeout_minutes 后，立即同步给跑着的
-    # daemon —— 不然要等下次出图 dispatch 才生效。daemon 还没起的话 set 也安全
-    # （走 noop 分支，下次 dispatch 时一并应用）。
+    # When the user changes generate.idle_timeout_minutes in Settings, sync it
+    # to the running daemon immediately — otherwise it wouldn't take effect
+    # until the next generation dispatch. Safe to call even if the daemon
+    # hasn't started yet (it just no-ops and picks it up on the next dispatch).
     try:
         from ...services.inference.daemon import get_daemon
         get_daemon().sync_idle_timeout_from_secrets()
@@ -45,8 +46,9 @@ def put_secrets(body: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/api/secrets/wandb/presets/{preset_id}/export")
 def export_wandb_preset(preset_id: str) -> Response:
-    """下载单个 wandb preset 的 yaml。**包含真实 api_key**（用户显式导出动作，
-    绕过 GET /api/secrets 的 mask）——文件自行保管。"""
+    """Download a single wandb preset's yaml. **Contains the real api_key**
+    (this is an explicit user export action that bypasses the masking done by
+    GET /api/secrets) — keep the file safe."""
     preset = secrets.get_wandb_preset(preset_id)
     if preset is None:
         raise DomainError(
@@ -58,7 +60,7 @@ def export_wandb_preset(preset_id: str) -> Response:
     text = yaml.safe_dump(
         preset.model_dump(), allow_unicode=True, sort_keys=False, default_flow_style=False
     )
-    # preset.id 经 validator 归一为 [A-Za-z0-9_-]，直接进 filename 安全
+    # preset.id is normalized by the validator to [A-Za-z0-9_-], so it's safe to use directly in a filename
     return Response(
         content=text,
         media_type="application/yaml",
@@ -70,10 +72,10 @@ def export_wandb_preset(preset_id: str) -> Response:
 
 @router.post("/api/secrets/wandb/presets/import")
 async def import_wandb_preset(file: UploadFile = File(...)) -> dict[str, Any]:
-    """上传 yaml/json 导入 wandb preset；撞名自动加后缀并切换为当前选中。"""
+    """Upload a yaml/json file to import a wandb preset; a name collision gets an automatic suffix and becomes the current selection."""
     raw = await file.read()
     try:
-        data = yaml.safe_load(raw.decode("utf-8"))  # yaml 是 json 的 superset
+        data = yaml.safe_load(raw.decode("utf-8"))  # yaml is a superset of json
     except Exception as exc:
         raise DomainError(
             f"WandB preset file could not be parsed: {exc}",

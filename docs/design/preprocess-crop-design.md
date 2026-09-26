@@ -1,45 +1,57 @@
-# 预处理 · 裁剪 — 功能设计
+# Preprocess - Crop — feature design
 
-> 临时设计文档，整理**逻辑模型 + 用户场景 + 数据契约**。实现细节看后续 PR。
+> A working design document laying out the **logic model + user scenarios +
+> data contract**. See the follow-up PRs for implementation details.
 >
-> 落地后做了多轮 UI 迭代，详见 [§9 Addendum 1](#addendum-1--ui-演进2026-05-21)。
+> Several rounds of UI iteration happened after this landed; see
+> [§9 Addendum 1](#addendum-1--ui-evolution-2026-05-21).
 >
-> **2026-06-04 状态更新**：[ADR 0010](../adr/0010-preprocess-train-scope.md) 把
-> 预处理整体下沉到版本级 `versions/{label}/train/`。本文中的 `preprocess/` 一律
-> 改读作 `versions/{label}/train/{folder}/`，manifest 落在
-> `versions/{label}/train/manifest.json`（entry key 是 POSIX rel path
-> `"folder/file"`）。crop 逻辑模型（multi-crop fan-out / 命名规则 / restore 折叠
-> 到 origin）不变，只是 scope 收窄。「还原」语义改为"从 `download/{origin}`
-> 复制覆盖 `train/{folder}/{origin}` + 清 sibling"（详 ADR 0010 §Restore 语义）。
+> **2026-06-04 status update**: [ADR 0010](../adr/0010-preprocess-train-scope.md)
+> moved preprocessing down to version-level `versions/{label}/train/` as a
+> whole. Every `preprocess/` reference in this document should now be read as
+> `versions/{label}/train/{folder}/`, with the manifest living at
+> `versions/{label}/train/manifest.json` (entry keys are POSIX relative paths
+> like `"folder/file"`). The crop logic model (multi-crop fan-out / naming
+> rules / restore collapsing to origin) is unchanged — only the scope has
+> narrowed. "Restore" semantics changed to "copy from `download/{origin}`
+> over `train/{folder}/{origin}` + clear siblings" (see ADR 0010's §Restore
+> semantics for details).
 
-## 0. 目的与非目的
+## 0. Purpose and non-goals
 
-**目的**：在预处理的「放大」之后增加「裁剪」stage，允许用户对 `preprocess/` 工作集做手动 / 智能两种切图。
+**Purpose**: add a "crop" stage after preprocessing's "upscale" step, letting
+the user cut up the `preprocess/` working set either manually or via smart
+clustering.
 
-**非目的**：
-- 不引入第三类工作目录。`download/` 仍是唯一备份，`preprocess/` 是唯一工作集。
-- 不强制 stage 时序（放大 → 裁剪 → 放大 → 裁剪 都合法）。
-- 不做 partial undo，还原只回到 download。
-- 不持久化裁剪过程信息（rect 坐标、target AR、cluster id）—— 一旦写盘，过程丢。
+**Non-goals**:
+- No third working directory is introduced. `download/` remains the sole
+  backup, and `preprocess/` remains the sole working set.
+- No stage ordering is enforced (upscale → crop → upscale → crop are all
+  valid).
+- No partial undo — restore always goes back to download.
+- No persisting crop process information (rect coordinates, target AR,
+  cluster id) — once written to disk, process info is dropped.
 
 ---
 
-## 1. 数据模型
+## 1. Data model
 
-### 文件夹
+### Folders
 
-| 目录 | 角色 | 是否可变 |
+| Directory | Role | Mutable? |
 |---|---|---|
-| `download/` | 唯一原图备份 | **永不动** |
-| `preprocess/` | 当前工作集，每次 stage 直接覆盖 | 可变 |
+| `download/` | The sole backup of original images | **never touched** |
+| `preprocess/` | The current working set, overwritten in place by each stage | mutable |
 
-### 文件命名
+### File naming
 
-- 默认 1:1：`preprocess/X.png` 对应 `download/X.png`
-- multi-crop 派生：`preprocess/X_c0.png`、`preprocess/X_c1.png`，origin 都指 `download/X.png`
-- 多次裁剪：`X_c0.png` 再分多裁 → `X_c0_c0.png` / `X_c0_c1.png`（origin 仍 `X.png`）
+- Default 1:1: `preprocess/X.png` corresponds to `download/X.png`
+- Multi-crop derivatives: `preprocess/X_c0.png`, `preprocess/X_c1.png`, both
+  with origin pointing to `download/X.png`
+- Repeated cropping: cropping `X_c0.png` again into multiple pieces →
+  `X_c0_c0.png` / `X_c0_c1.png` (origin is still `X.png`)
 
-### Manifest schema（新版）
+### Manifest schema (new version)
 
 ```jsonc
 {
@@ -51,348 +63,465 @@
 }
 ```
 
-只记 `{origin, mtime, size}`。**不**记 `kind / model / scale / action / target_area / src_size / dst_size / elapsed_seconds`（这些都属于"过程信息"，写盘后丢弃）。
+Only `{origin, mtime, size}` is recorded. `kind / model / scale / action /
+target_area / src_size / dst_size / elapsed_seconds` are **not** recorded
+(these are all "process information" that gets dropped once written to
+disk).
 
-### 老 schema 兼容
+### Old-schema compatibility
 
-ADR 0004 的 `{kind, model, scale, action, target_area, src_size, dst_size, elapsed_seconds, source}` 字段已 deprecate（ADR 0010 PR-5 清掉了 reader 兼容代码）：
-- `origin` 缺失只回退到 entry key 本身，**不再** 读 `source` 字段
-- 仅 `kind == "duplicate_removed"` 作 tombstone 仍有意义；其他 `kind` 值不再分流
+ADR 0004's `{kind, model, scale, action, target_area, src_size, dst_size,
+elapsed_seconds, source}` fields are deprecated (ADR 0010 PR-5 removed the
+reader compatibility code):
+- A missing `origin` falls back to the entry key itself; the `source` field
+  is **no longer** read
+- Only `kind == "duplicate_removed"` still means anything, as a tombstone;
+  other `kind` values no longer branch anywhere
 
 ### resolve(download_name)
 
-下游（curation / thumbnail / copy_to_train）：
+Downstream (curation / thumbnail / copy_to_train):
 
-- manifest 里存在 origin = `download_name` 的 entry → 返回这些 preprocess/ 文件（可能多个）
-- 否则 → 返回 `download/{download_name}`
+- If an entry exists in the manifest with origin = `download_name` → returns
+  those preprocess/ files (possibly several)
+- Otherwise → returns `download/{download_name}`
 
-### 还原
+### Restore
 
-删 preprocess 文件 + 所有 `origin == download_name` 的 entry。下游回看 download 原图。**不**做单 stage undo。
+Deletes the preprocess files + every entry with `origin == download_name`.
+Downstream falls back to the download original. No single-stage undo is
+performed.
 
 ---
 
 ## 2. User cases
 
-| # | 场景 | 模式 | 输出 |
+| # | Scenario | Mode | Output |
 |---|---|---|---|
-| U1 | 一张全身图保头像 + 全身 | 手动 / 自由 AR / 多框 | `X_c0.png` (头像) + `X_c1.png` (全身) |
-| U2 | 训练桶统一 1:1 / 2:3 | 手动 / 锁 AR / 单框 | `X.png` (覆盖) |
-| U3 | 数据集 AR 杂乱想分桶 | 智能聚类 → 微调 | 每图 `X.png` (覆盖) |
-| U4 | 自定义比例 5:7 | 手动 / 自定义 W:H | 同 U2 |
-| U5 | 某图直通 | 不画框 | preprocess 文件保持原样 / 还原后用 download |
-| U6 | 回到原图 | 还原 | 删 preprocess entry + 文件 |
+| U1 | A full-body image, keeping both a headshot and the full body | manual / free AR / multiple boxes | `X_c0.png` (headshot) + `X_c1.png` (full body) |
+| U2 | Training buckets unified to 1:1 / 2:3 | manual / locked AR / single box | `X.png` (overwritten) |
+| U3 | Dataset ARs are all over the place, wants to bucket them | smart clustering → fine-tune | each image gets `X.png` (overwritten) |
+| U4 | Custom ratio 5:7 | manual / custom W:H | same as U2 |
+| U5 | An image passes through untouched | draw no box | preprocess file stays as-is / after restore, uses download |
+| U6 | Back to the original | restore | deletes the preprocess entry + file |
 
 ---
 
-## 3. 功能
+## 3. Features
 
-> **版本注**：v1 设计稿把"手动 / 聚类"做成 segmented tab，落地后迭代去掉
-> 了 tab —— 裁剪只有一个概念，"智能聚类"是个**可选预填工具**而非独立模式。
-> 详见 §9 Addendum 1。
+> **Version note**: the v1 design used a segmented tab for "manual /
+> clustering"; after shipping, this iterated away from tabs — cropping is a
+> single concept, and "smart clustering" is an **optional pre-fill tool**
+> rather than a separate mode. See §9 Addendum 1 for details.
 
-### 主裁剪能力
+### Core cropping capability
 
-**AR 下拉**：`自由(不锁)` / `1:1` / `4:3` / `3:2` / `16:9` / `3:4` / `2:3` / `9:16` / `4:5` / `自定义…`
+**AR dropdown**: `Free (unlocked)` / `1:1` / `4:3` / `3:2` / `16:9` / `3:4` /
+`2:3` / `9:16` / `4:5` / `Custom…`
 
-- 自由 → 拖动新建任意 AR 的框
-- 锁定 → 新框按 AR；resize handle 等比；移动不影响 AR
-- 自定义 → 弹两个数字输入 W、H
-- 一图多裁：N 个框 → N 个产物
+- Free → drag to draw a box of any AR
+- Locked → a new box follows the AR; resize handles scale proportionally;
+  moving doesn't affect AR
+- Custom → pops two numeric inputs, W and H
+- One image, multiple crops: N boxes → N outputs
 
-**画布交互**：8 handle（4 角 + 4 边） + 三分网格 + 暗色 dim 框外 + live 像素尺寸 / AR readout。
+**Canvas interaction**: 8 handles (4 corners + 4 edges) + a rule-of-thirds
+grid + dimmed area outside the box + a live pixel-size / AR readout.
 
-**右侧 rect list**：缩略 + 可编辑 label + 输出像素 + 复制 / 删除（选中时 header 出 icon）。
+**Right-side rect list**: thumbnail + editable label + output pixel size +
+copy/delete (a header icon appears while selected).
 
-**filter chips**：全部 / 待裁剪 / 已裁剪（按本 session 内 `cropsByImage` 状态过滤）。
+**Filter chips**: All / To crop / Cropped (filtered by the in-session
+`cropsByImage` state).
 
-**主操作**：`裁剪当前图` / `▶ 裁剪全部(N)`。
+**Primary actions**: `Crop current image` / `▶ Crop all (N)`.
 
-### 智能聚类（可选预填）
+### Smart clustering (optional pre-fill)
 
-OperationPanel 下方独立 section，**默认折叠**；点 `▸ 智能聚类` 展开。
+An independent section below the OperationPanel, **collapsed by default**;
+clicking `▸ Smart clustering` expands it.
 
-**参数**：`max_crop ∈ [0, 0.30]`（最大允许裁面积比）、`k_min ∈ [1, 10]`、`k_max ∈ [2, 15]`。
+**Parameters**: `max_crop ∈ [0, 0.30]` (maximum allowed cropped-area
+fraction), `k_min ∈ [1, 10]`, `k_max ∈ [2, 15]`.
 
-**算法（前端 JS）**：
+**Algorithm (frontend JS)**:
 
-1. 对 `preprocess/` 所有图算 AR = w/h
-2. 1-D k-means 在 `[k_min, k_max]` 区间，用 elbow 挑 k
-3. 每 cluster 中心 → snap 到训练桶网格（见 §7 ARB 对齐）
-4. 显示 label 取最近常用 pretty AR；rect 用训练桶 AR 算
-5. 每张成员按 target AR 居中裁剪到最大可填矩形
-6. `max_crop` 约束：裁掉面积比 > max_crop 则不加框（用户可手动处理）
+1. Compute AR = w/h for every image in `preprocess/`
+2. 1-D k-means over `[k_min, k_max]`, picking k via the elbow method
+3. Snap each cluster center → to the training bucket grid (see §7 ARB alignment)
+4. The displayed label uses the nearest common pretty AR; the rect is
+   computed from the training bucket AR
+5. Each cluster member is center-cropped to the largest rectangle that fits
+   the target AR
+6. `max_crop` constraint: if the cropped-away area fraction exceeds
+   max_crop, no box is added (the user can handle it manually)
 
-**结果**：写入 cropsByImage（每图 1 个 ✦ 标记的 cluster 来源框）。聚类后用户可任意微调 / 删 / 加（用同一个主画布）。
+**Result**: written into cropsByImage (each image gets 1 box marked with a
+✦ as coming from a cluster). After clustering, the user can freely tweak /
+delete / add boxes using the same main canvas.
 
-**主操作**：`▶ 开始聚类` — section 内独立按钮，**不是** 提交到磁盘。提交还走外层 `裁剪全部`。
+**Primary action**: `▶ Start clustering` — a button local to the section,
+**not** a submit-to-disk action. Submission still goes through the outer
+`Crop all` button.
 
 ---
 
-## 4. 后端契约
+## 4. Backend contract
 
-### 新增 endpoint（ADR 0010 后均下沉到 version scope）
+### New endpoint (all moved down to version scope after ADR 0010)
 
 ```
 POST /api/projects/:id/versions/:vid/preprocess/crop
 body: {
   crops: {
     "1_data/IMG_2741.png": [
-      { x: 0.10, y: 0.05, w: 0.55, h: 0.45, label: "头像" },
-      { x: 0.12, y: 0.42, w: 0.72, h: 0.55, label: "全身" }
+      { x: 0.10, y: 0.05, w: 0.55, h: 0.45, label: "headshot" },
+      { x: 0.12, y: 0.42, w: 0.72, h: 0.55, label: "full body" }
     ],
     "1_data/IMG_2742.png": [ { x: 0.25, y: 0.12, w: 0.50, h: 0.78, label: "" } ]
   }
 } → Job
 ```
 
-辅助 endpoint：
+Helper endpoints:
 
-- `GET /api/projects/:id/versions/:vid/preprocess/crop/workspace` —— 列出
-  `train/{folder}/{image}` 全部 + 像素尺寸 + processed 标记，前端裁剪页 filmstrip 用
-- `POST /api/projects/:id/versions/:vid/preprocess/files/reset` —— 总览 tab
-  的"撤销全部"调用，清空 train manifest（**不动** train/ 物理文件，详 ADR 0010
-  §`train_clear_all` 决策）
+- `GET /api/projects/:id/versions/:vid/preprocess/crop/workspace` — lists
+  every `train/{folder}/{image}` plus pixel dimensions and a processed
+  marker, used by the frontend crop page's filmstrip
+- `POST /api/projects/:id/versions/:vid/preprocess/files/reset` — called by
+  the overview tab's "undo all," clears the train manifest (**does not
+  touch** physical files under train/, see ADR 0010's §`train_clear_all`
+  decision)
 
-### Worker 逻辑
+### Worker logic
 
-对每个 source name：
+For each source name:
 
-1. resolve source path → preprocess/source 或 download/source
-2. PIL 打开
-3. 对每个 rect：`crop()` → 写 `preprocess/{stem}_c{n}.png`（n>1 时）或 `preprocess/{stem}.png`（n=1，覆盖）
-4. n>1 时删原 `preprocess/{stem}.png`（如果存在）
-5. manifest 加 N 条 entry，origin 指源 download 名
+1. Resolve the source path → preprocess/source or download/source
+2. Open with PIL
+3. For each rect: `crop()` → write `preprocess/{stem}_c{n}.png` (when n>1)
+   or `preprocess/{stem}.png` (when n=1, overwriting)
+4. When n>1, delete the original `preprocess/{stem}.png` (if it exists)
+5. Add N entries to the manifest, with origin pointing to the source
+   download name
 
-### SSE 事件
+### SSE events
 
-- `crop_progress`：单图完成推一次，但 worker 端**节流 ≥ 1Hz**（首末 / skip / fail 强发，其余 done 跨 ≥ 1s 才 emit）。避免 264 张数据集刷 ~500 个事件淹没事件流。
-- `job_state_changed`：状态变化
+- `crop_progress`: pushed once per completed image, but the worker side
+  **throttles to ≥ 1Hz** (the first/last item, skips, and failures are always
+  sent; other "done" events are only emitted at least 1s apart). This avoids
+  flooding the event stream — a 264-image dataset would otherwise fire
+  ~500 events.
+- `job_state_changed`: state change
 
 ---
 
-## 5. 前端结构
+## 5. Frontend structure
 
-> **版本注**：v1 设计稿是 `/preprocess/crop` 子路由 + 横向 filmstrip + stage
-> pills 内嵌 OperationPanel。落地后改成 query string `?tool=crop` + 共享工具栏
-> + 竖向 filmstrip，详见 §9 Addendum 1。
+> **Version note**: the v1 design used a `/preprocess/crop` sub-route + a
+> horizontal filmstrip + stage pills with an embedded OperationPanel. After
+> shipping, this changed to a `?tool=crop` query string + a shared toolbar +
+> a vertical filmstrip. See §9 Addendum 1 for details.
 
-### 路由
+### Routing
 
-预处理工具共用 `/projects/:pid/preprocess` 单路由 + `?tool=` query：
+All preprocessing tools share a single route,
+`/projects/:pid/preprocess`, plus a `?tool=` query:
 
-- `/preprocess` （默认）/ `?tool=upscale` → 放大工具
-- `?tool=overview` → 总览（多选 + 撤销）
-- `?tool=crop` → 裁剪工具
-- `?tool=inpaint` → 占位（未实现）
+- `/preprocess` (default) / `?tool=upscale` → the upscale tool
+- `?tool=overview` → overview (multi-select + undo)
+- `?tool=crop` → the crop tool
+- `?tool=inpaint` → a placeholder (not implemented)
 
-入口由 `PreprocessHub.tsx` 调度。query 切换不卸载父路由，工具切换更顺；侧栏 `/preprocess` 匹配也不被打断。
+Dispatched by `PreprocessHub.tsx`. Switching the query doesn't unmount the
+parent route, so tool switching is smoother, and the sidebar's `/preprocess`
+match is never interrupted.
 
-### 入口
+### Entry point
 
-页面顶部独立**工具栏**（`PreprocessToolsBar.tsx`）三个 / 四个 pill，左侧首位是「总览」，pill 即工具，点了变 `<Link to="?tool=...">`。**没有完成 ✓ 徽章** —— 工具不是 pipeline 节点。
+An independent **toolbar** at the top of the page
+(`PreprocessToolsBar.tsx`) with three or four pills; the leftmost is
+"Overview." Each pill is a tool; clicking it becomes a
+`<Link to="?tool=...">`. **There's no completion ✓ badge** — a tool isn't a
+pipeline node.
 
-### 页面布局（共享框架）
+### Page layout (shared frame)
 
 ```
 StepShell (title / subtitle)
 └─ grid 1fr / 260px
-   ├─ 左
-   │  ├─ PreprocessToolsBar  [总览][放大][裁剪][涂抹]
-   │  ├─ OperationPanel (工具专属配置)
-   │  │  ├─ AR 下拉 + 主操作按钮
-   │  │  └─ 智能聚类 section（默认折叠）
-   │  ├─ PreprocessJobStrip （job 在跑 / 有 logs 时才显示）
-   │  └─ WorkArea (裁剪)
-   │     ├─ filter chips · 当前图 meta · 清空本图
+   ├─ left
+   │  ├─ PreprocessToolsBar  [Overview][Upscale][Crop][Inpaint]
+   │  ├─ OperationPanel (tool-specific config)
+   │  │  ├─ AR dropdown + primary action button
+   │  │  └─ Smart clustering section (collapsed by default)
+   │  ├─ PreprocessJobStrip (shown only while a job is running / has logs)
+   │  └─ WorkArea (crop)
+   │     ├─ filter chips · current-image meta · clear this image
    │     └─ grid: filmstrip 220px / canvas 1fr / rect list 260px
-   └─ 右 RightRail (裁剪进度 / 预估产物 / AR 分布 / 盘占用)
+   └─ right RightRail (crop progress / estimated output / AR distribution / disk usage)
 ```
 
-WorkArea 内部三列：filmstrip 竖排（3 col 正方 cover thumbs）/ canvas 容器测量自适应 / rect list 选中时 header 出 ⎘ ✕ icon。
+Inside WorkArea, three columns: the filmstrip is arranged vertically (a
+3-col grid of square cover thumbs) / the canvas container measures and
+adapts / the rect list shows ⎘ ✕ icons in its header when a rect is
+selected.
 
-### 总览 tab（overview）
+### Overview tab
 
-独立页 `PreprocessOverview.tsx`：所有 preprocess workspace 图 grid + 单击预览 modal + ctrl/shift 多选 + `撤销选中` + `↶ 撤销全部`。撤销逻辑从放大页移到这里，所有工具都不再单独处理撤销，UX 心智模型统一。
+An independent page, `PreprocessOverview.tsx`: a grid of every image in the
+preprocess workspace + a click-to-preview modal + ctrl/shift multi-select +
+`Undo selected` + `↶ Undo all`. Undo logic moved here from the upscale page —
+no tool handles undo on its own anymore, unifying the UX mental model.
 
 ---
 
-## 6. 实施切分
+## 6. Implementation breakdown
 
-| Step | 工作量 | 说明 |
+| Step | Effort | Notes |
 |---|---|---|
-| 1 | M | 后端 endpoint + worker + manifest 读兼容 / 写新 schema |
-| 2 | M | 前端：CropPage 容器 + 路由 + OperationPanel |
-| 3 | L | 前端：FreeCropEditor 画布 + 手势 + AR-lock |
-| 4 | M | 前端：rect 列表 + filmstrip + filter chips + RightRail |
-| 5 | S | 前端：聚类 JS（k-means + elbow + max_crop 约束） |
-| 6 | S | 放大页 stage pill 改 link + i18n 补字 |
-| 7 | S | 测试（pytest crop endpoint + manifest，vitest editor + k-means） |
+| 1 | M | Backend endpoint + worker + manifest read compatibility / new write schema |
+| 2 | M | Frontend: CropPage container + routing + OperationPanel |
+| 3 | L | Frontend: FreeCropEditor canvas + gestures + AR-lock |
+| 4 | M | Frontend: rect list + filmstrip + filter chips + RightRail |
+| 5 | S | Frontend: clustering JS (k-means + elbow + max_crop constraint) |
+| 6 | S | Upscale page stage pill converted to a link + i18n additions |
+| 7 | S | Tests (pytest for the crop endpoint + manifest, vitest for the editor + k-means) |
 
 ---
 
-## 7. ARB 桶对齐（裁剪与训练桶一致）
+## 7. ARB bucket alignment (keeping crops consistent with training buckets)
 
-### 7.1 问题
+### 7.1 The problem
 
-训练时 `runtime/training/dataset.py:BucketManager` 按 (base_reso=1024, step=64,
-area_tol=0.10, max_ar=2.0) 派生 ~30 个 (w, h) 桶；每张图按 **AR 绝对距离** 落到最近桶
-并 resize 到该桶尺寸。聚类裁剪如果挑 "4:3 = 1.333" 这种 pretty AR 当 target，裁出来
-的图 trainer 会再二次 resize 到 (1152, 896) = 1.286 或 (1216, 832) = 1.461 —— 引入额外
-失真。
+During training, `runtime/training/dataset.py:BucketManager` derives ~30
+`(w, h)` buckets from `(base_reso=1024, step=64, area_tol=0.10,
+max_ar=2.0)`; each image is assigned to the nearest bucket by **absolute AR
+distance** and resized to that bucket's dimensions. If clustered cropping
+picks a pretty AR like "4:3 = 1.333" as its target, the cropped image would
+then get resized a second time by the trainer to (1152, 896) = 1.286 or
+(1216, 832) = 1.461 — introducing extra distortion.
 
-裁剪聚类的 target AR 应当**和 trainer 实际会落的桶完全一致**，trainer 拿到图就不再
-做第二次 resize。
+Cropping's clustered target AR should **exactly match the bucket the trainer
+actually lands on**, so the trainer never has to resize the image a second
+time.
 
-### 7.2 UX 原则（用户不需要知道 ARB 内部）
+### 7.2 UX principle (users don't need to know about ARB internals)
 
-底层 ARB 桶（"1024×1024"、"1216×832"、桶数量、面积带、step 这些）**永远不暴露给用户**：
+The underlying ARB buckets ("1024×1024," "1216×832," bucket count, area
+band, step) are **never exposed to the user**:
 
-- **不懂 ARB 的用户**：默认值 work，看到的标签都是 `1:1` / `4:3` / `3:2` / `16:9` 这种
-  熟悉的比例，照常用
-- **略懂的用户**：知道 4:3 是横向比例，照常用
-- **深懂的用户**：他想知道底层细节自己去看源码 `runtime/training/dataset.py`，UI 不替他展示
+- **Users unfamiliar with ARB**: the defaults just work; the labels they see
+  are all familiar ratios like `1:1` / `4:3` / `3:2` / `16:9`, used as
+  normal
+- **Users with a little knowledge**: they know 4:3 is a landscape ratio, and
+  use it as normal
+- **Power users**: if they want the underlying details, they can read the
+  source at `runtime/training/dataset.py` themselves — the UI doesn't
+  surface it for them
 
-另：手动模式支持"裁掉烂的部分"用例（自由 AR + 拖动），不强制对齐训练桶。
+Also: manual mode supports the "crop out the bad part" use case (free AR +
+drag), with no forced alignment to training buckets.
 
-### 7.3 实现
+### 7.3 Implementation
 
-**Internal**（不暴露）：
-- 前端 `studio/web/src/lib/trainBuckets.ts` 把 Python `BucketManager` 算法 1:1 移植成 TS
-- 默认参数硬编码 `base_reso=1024, min_reso=512, max_reso=2048, step=64,
-  area_tolerance=0.10, max_ar_ratio=2.0` —— 与 backend 默认 100% 一致
-- `generateBuckets()` 生成桶网格；`snapToBucket(aspect, buckets)` 按绝对 AR 距离 snap
+**Internal** (not exposed):
+- The frontend's `studio/web/src/lib/trainBuckets.ts` ports the Python
+  `BucketManager` algorithm to TS 1:1
+- Default parameters are hardcoded as `base_reso=1024, min_reso=512,
+  max_reso=2048, step=64, area_tolerance=0.10, max_ar_ratio=2.0` — 100%
+  matching the backend defaults
+- `generateBuckets()` generates the bucket grid; `snapToBucket(aspect,
+  buckets)` snaps by absolute AR distance
 
-**接入点**：
-- 聚类目标 AR：cluster 中心 → `snapToBucket()` → 训练桶 (w, h)，rect 用这个比例算
-- 聚类卡片 label 显示：取训练桶 AR 的"最近 pretty AR"作显示标签（如 `聚类 3:2`），
-  内部 rect 严格按训练桶比例
+**Integration points**:
+- Clustering target AR: cluster center → `snapToBucket()` → the training
+  bucket (w, h), with the rect computed from that ratio
+- Cluster card label display: uses the "nearest pretty AR" to the training
+  bucket AR as the display label (e.g. `cluster 3:2`), while the internal
+  rect strictly follows the training bucket's ratio
 
-**不接入**：
-- Histogram (`arBucket`)：保持现状 snap 到 11 个 pretty AR，按 aspect 排序
-- 手动模式 AR 下拉：保持现状（`1:1` / `4:3` / ... / `自定义 W:H`），UX 优先
+**Not integrated**:
+- Histogram (`arBucket`): unchanged, still snaps to 11 pretty ARs, sorted by
+  aspect
+- Manual mode's AR dropdown: unchanged (`1:1` / `4:3` / ... /
+  `Custom W:H`), UX takes priority
 
-### 7.4 防漂移
+### 7.4 Anti-drift
 
-backend `runtime/training/dataset.py:BucketManager` 和 frontend `lib/trainBuckets.ts`
-是两套独立实现的同一算法，最怕改一边忘另一边。
+Backend `runtime/training/dataset.py:BucketManager` and frontend
+`lib/trainBuckets.ts` are two independent implementations of the same
+algorithm, and the biggest risk is changing one side and forgetting the
+other.
 
-- 两边文件顶部互引注释，明示"改算法 / 默认参数 → 必须两边同 commit"
-- review 阶段把这俩文件列为联动文件
-- 后续可加跨语言同步测试（option，先不做）
+- Both files carry a comment at the top cross-referencing each other,
+  stating "changing the algorithm / default parameters → must be committed
+  on both sides together"
+- These two files are flagged as linked files during review
+- A cross-language sync test could be added later (optional, not done for now)
 
-### 7.5 base_reso 从哪取
+### 7.5 Where base_reso comes from
 
-**硬编码 1024**。理由：
-- 覆盖 SDXL / Flux / Anima 默认场景（90%+ 用户）
-- 用户在 preprocess 阶段还没必要去想训练分辨率
-- SD1.5 用户（少数）即使桶预测略偏，trainer 也会按其真实参数 re-bucket，最多多一次
-  轻微 resize，不影响训练
-- 加 UI 控件等同于暴露 ARB 概念，违反 §7.2 原则
+**Hardcoded to 1024**. Reasoning:
+- Covers the default SDXL / Flux / Anima scenario (90%+ of users)
+- At the preprocess stage, the user doesn't yet need to think about training
+  resolution
+- For the minority of SD1.5 users, even if the bucket prediction is slightly
+  off, the trainer will re-bucket using its real parameters anyway — at
+  worst one extra light resize, with no impact on training
+- Adding a UI control would be equivalent to exposing the ARB concept,
+  violating the §7.2 principle
 
-base_reso 可调当 follow-up 处理（如果出现项目级痛点）。
+Making base_reso adjustable can be a follow-up (if it turns out to be a real
+per-project pain point).
 
 ---
 
-## 8. 不做的事
+## 8. Not doing
 
-- **rect 不持久化**：写盘后过程信息丢，重画从头
-- **stage 时序约束**：无（放大 ↔ 裁剪任意顺序、任意次）
-- **partial undo**：无（只能整图还原到 download）
-- **多 manifest / 多目录**：无（仍单 manifest + 单 preprocess/）
-- **后端跑聚类**：无（前端 JS）
-- **保留旧 upscale 产物作为裁剪备份**：无（每 stage 覆盖）
-- **暴露 ARB 底层（base_reso / step / 桶数 / 桶 (w,h)）给用户**：无（见 §7.2，UX 原则）
-- **base_reso 项目级可调**：无（硬编码 1024，见 §7.5）
-- **手动模式 AR 下拉换成训练桶**：无（保 pretty AR，UX 优先）
+- **Rects aren't persisted**: process information is dropped once written to
+  disk; redrawing starts from scratch
+- **No stage-ordering constraint**: none (upscale ↔ crop in any order, any
+  number of times)
+- **No partial undo**: none (only a full restore to download is possible)
+- **No multiple manifests / directories**: none (still a single manifest +
+  a single preprocess/)
+- **No backend-side clustering**: none (it's frontend JS)
+- **No keeping old upscale output as a crop backup**: none (each stage
+  overwrites)
+- **No exposing ARB internals (base_reso / step / bucket count / bucket
+  (w,h)) to the user**: none (see §7.2, UX principle)
+- **No per-project adjustable base_reso**: none (hardcoded to 1024, see §7.5)
+- **No replacing manual mode's AR dropdown with training buckets**: none
+  (keeps pretty ARs, UX takes priority)
 
 ---
 
-## 9. Addendum 1 — UI 演进（2026-05-21）
+## 9. Addendum 1 — UI evolution (2026-05-21)
 
-设计稿落地后多轮 UI 迭代，记录主要偏离原稿的决策：
+Several rounds of UI iteration happened after the design shipped; this logs
+the main decisions that deviated from the original draft:
 
-### 9.1 去掉「手动 / 智能聚类」segmented tabs
+### 9.1 Removing the "manual / smart clustering" segmented tabs
 
-v1 把这两个做成 segmented tab 互斥切换。用户反馈"它们不是互斥关系"：聚类后生成的框可以手动改，根本就是同一个裁剪能力。
+v1 made these two mutually exclusive segmented tabs. User feedback was that
+"they aren't mutually exclusive" — boxes generated by clustering can be
+edited manually, so it's really the same cropping capability underneath.
 
-落地：
-- 删 mode tabs
-- 主裁剪能力（AR 下拉 + 画布 + 主操作）始终可见
-- "智能聚类"降级为 OperationPanel 下方独立 section，默认折叠 `▸ 智能聚类`，点开看 sliders + `开始聚类` 按钮
-- 状态保留：聚类完成后 section 顶上挂 `✓ k=N` 徽章
+What shipped:
+- Removed the mode tabs
+- The core cropping capability (AR dropdown + canvas + primary action) is
+  always visible
+- "Smart clustering" was demoted to an independent section below the
+  OperationPanel, collapsed by default as `▸ Smart clustering`; expanding it
+  shows sliders + a `Start clustering` button
+- State persists: once clustering finishes, a `✓ k=N` badge appears at the
+  top of the section
 
-### 9.2 URL 从 `/preprocess/crop` 切到 `/preprocess?tool=crop`
+### 9.2 URL changed from `/preprocess/crop` to `/preprocess?tool=crop`
 
-子路径模型有两个问题：(1) 侧栏 `/preprocess` 路径匹配被 `/crop` 后缀打断，高亮丢失；(2) 工具切换导致父路由卸载，状态全丢。
+The sub-path model had two problems: (1) the sidebar's `/preprocess` path
+match was broken by the `/crop` suffix, losing the highlight; (2) switching
+tools unmounted the parent route, losing all state.
 
-落地：
-- 单一路由 `/projects/:pid/preprocess`
-- query string `?tool=overview|upscale|crop|inpaint` 调度
-- 新建 `PreprocessHub.tsx` 调度器
-- 工具切换不卸载父路由
+What shipped:
+- A single route, `/projects/:pid/preprocess`
+- Dispatched by the query string `?tool=overview|upscale|crop|inpaint`
+- A new `PreprocessHub.tsx` dispatcher
+- Switching tools no longer unmounts the parent route
 
-### 9.3 "阶段" 改 "工具"，去掉 ✓ 完成态
+### 9.3 "Stage" renamed to "tool," removing the ✓ completed state
 
-stage pills 暗示 pipeline 时序，但放大 / 裁剪 / 涂抹都不是 stage，是任意顺序可用、可重复用的工具。
+Stage pills implied pipeline ordering, but upscale / crop / inpaint aren't
+stages at all — they're tools usable in any order, any number of times.
 
-落地：
-- 文案 "阶段" → "工具"
-- 共享组件 `PreprocessToolsBar.tsx` 放在每个工具页顶部
-- pill 没有完成徽章
+What shipped:
+- Copy changed from "stage" to "tool"
+- A shared `PreprocessToolsBar.tsx` component sits at the top of every tool
+  page
+- Pills have no completion badge
 
-### 9.4 总览 tab — 撤销统一入口
+### 9.4 Overview tab — a unified undo entry point
 
-放大页本来有"还原 N 张"按钮。但裁剪等其他工具也需要撤销，每个工具各自加是冗余。
+The upscale page originally had a "restore N images" button. But other
+tools like crop also need undo, and adding it separately to each tool would
+be redundant.
 
-落地：
-- 新建 `PreprocessOverview.tsx` 总览页
-- 工具栏左侧 `[总览]` pill
-- ImageGrid + shift/ctrl 多选 + 单图 preview modal
-- "撤销选中 N" + "↶ 撤销全部" + confirm modal
-- 放大页移除还原控件，image grid 保留
-- 后端新增 `POST /preprocess/files/reset` 路由到 `preprocess_manifest.clear_all()`
+What shipped:
+- A new `PreprocessOverview.tsx` overview page
+- A `[Overview]` pill on the left of the toolbar
+- An ImageGrid + shift/ctrl multi-select + a single-image preview modal
+- "Undo selected N" + "↶ Undo all" + a confirm modal
+- The upscale page's restore controls were removed, keeping the image grid
+- A new backend `POST /preprocess/files/reset` route added, routing to
+  `preprocess_manifest.clear_all()`
 
-### 9.5 Filmstrip 从底部横排改左侧竖排
+### 9.5 Filmstrip changed from a horizontal bottom strip to a vertical left column
 
-264 张图横排会挤成 5px 一条根本看不见。改竖排 3-col 正方 cover thumb，给画布让出更多上下空间。
+264 images laid out horizontally would squeeze down to a 5px-wide strip,
+effectively invisible. Changed to a vertical 3-column grid of square cover
+thumbnails, freeing up more vertical space for the canvas.
 
-CSS 注意：`<button>` 直接挂 `aspect-ratio: 1` 在 grid 里会塌缩（Chromium/WebKit anonymous flow-root 影响 `::before` padding-top）。包一层 div 做 padding-top trick 才稳。
+CSS note: hanging `aspect-ratio: 1` directly on a `<button>` inside a grid
+collapses (Chromium/WebKit's anonymous flow-root affects `::before`
+padding-top). Wrapping it in a div using the padding-top trick is what makes
+it stable.
 
-### 9.6 画布按容器测量自适应
+### 9.6 Canvas sizing adapts to its container
 
-固定 maxWidth/maxHeight 在不同视口要么浪费要么溢出。改 ResizeObserver 测父容器，maxWidth/maxHeight 退为兜底上限。
+A fixed maxWidth/maxHeight either wastes space or overflows depending on the
+viewport. Changed to a ResizeObserver measuring the parent container, with
+maxWidth/maxHeight falling back to just an upper bound.
 
-### 9.7 AR-lock resize 两个坑
+### 9.7 Two pitfalls with AR-lock resizing
 
-- **缩塌成全图**：超出画布时独立 clamp w/h 会破 AR（1:1 锁定的 rect 在 2:3 源图上变全图 = 2:3）。修：按锚定角缩比例，永远保 AR
-- **磁吸感**：拖出后反方向拉要先消化累计 dxN/dyN 才动。修：每帧重锚定，delta 始终是上一帧到现在的增量
+- **Collapsing to the full image**: clamping w/h independently when
+  exceeding the canvas breaks AR (a rect locked to 1:1 on a 2:3 source image
+  turns into the full image = 2:3). Fix: scale by the anchor corner
+  proportionally, always preserving AR.
+- **A sticky feel**: dragging back after overshooting requires first
+  absorbing the accumulated dxN/dyN before it moves. Fix: re-anchor every
+  frame, so delta is always the increment from the previous frame to now.
 
-### 9.8 Multi-crop 缩略图寻址
+### 9.8 Multi-crop thumbnail addressing
 
-`bucket=download` + `resolve_origin` 取 `[0]` 在 multi-crop 后多个派生共享 origin 时永远落到同一张缩略图。
+`bucket=download` + `resolve_origin` taking `[0]` always lands on the same
+thumbnail once multiple derivatives share an origin after multi-crop.
 
-落地：
-- thumb endpoint 加 `bucket=preprocess`，直接按 preprocess 文件名寻址
-- 兜底：`bucket=download` 找不到文件且 name 是 manifest entry key 时也走 preprocess/
-- 裁剪页 / 总览页 / 放大页都按"已处理走 preprocess bucket + im.name，未处理走 download" 寻址
+What shipped:
+- The thumb endpoint gained a `bucket=preprocess` option, addressing
+  directly by the preprocess filename
+- Fallback: when `bucket=download` can't find the file and the name is a
+  manifest entry key, it also falls through to preprocess/
+- The crop page / overview page / upscale page all address by "processed
+  goes through the preprocess bucket + im.name, unprocessed goes through
+  download"
 
-### 9.9 SSE 节流
+### 9.9 SSE throttling
 
-crop 速度比 upscale 快（单图 300-700ms），264 张 ~500 个事件淹没 EventSource。
+Crop is faster than upscale (300-700ms per image), so 264 images produce
+~500 events, flooding the EventSource.
 
-落地：worker 内 `emit_throttled(force=...)`：done 事件 ≥1s 间隔；首末 / skip / fail 强发。
+What shipped: `emit_throttled(force=...)` inside the worker: "done" events
+are spaced ≥1s apart; the first/last, skips, and failures are always sent.
 
-### 9.10 像素分布 + 训练桶对齐
+### 9.10 Pixel distribution + training-bucket alignment
 
-右栏统计原本只是裁剪的 AR 分布。放大页移植了像素面积 histogram（6 bin），跟 sd-scripts ARB 训练桶语义对齐（见 §7 ARB 对齐）。
+The right-panel stats used to be just the crop's AR distribution. The
+upscale page had a pixel-area histogram (6 bins) ported over, aligned with
+sd-scripts' ARB training-bucket semantics (see §7 ARB alignment).
 
-放大页 filter chips 也从 `全部 / 未处理 / 已处理` 改成 `全部 + 像素 bins`（同 sidebar histogram），UX 上「未处理 / 已处理」对放大无意义。
+The upscale page's filter chips also changed from `All / Unprocessed /
+Processed` to `All + pixel bins` (matching the sidebar histogram), since
+"unprocessed / processed" is meaningless for upscaling from a UX standpoint.
 
-### 9.11 JobStrip 不持久化日志
+### 9.11 JobStrip doesn't persist logs
 
-刷新页面后 status endpoint 还在返回历史 job + log_tail，结果空 JobStrip 蹲在页面上没意义。
+After a page refresh, the status endpoint still returns the historical job +
+log_tail, resulting in a pointless empty JobStrip sitting on the page.
 
-落地：
-- 不再从 `status.log_tail` 初始化 logs，logs 仅本 session SSE 累积
-- JobStrip 渲染条件加 `(isLive || logs.length > 0)`，无活跃 job + 无 session log 时整块隐藏
+What shipped:
+- Logs are no longer initialized from `status.log_tail`; logs only
+  accumulate from this session's SSE stream
+- JobStrip's render condition gained `(isLive || logs.length > 0)`; the
+  whole block is hidden when there's no active job and no session-local log

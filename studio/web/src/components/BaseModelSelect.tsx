@@ -2,23 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, type ModelsCatalog } from '../api/client'
 
-/** 底模下拉的一个选项：value = 官方 variant key 或本地 custom 绝对路径。 */
+/** One option in the base model dropdown: value = official variant key or a local custom absolute path. */
 export interface BaseModelOption {
   value: string
   label: string
-  /** 官方 variant 的用途声明（krea2：raw=training / turbo=inference）；
-   *  custom 权重无此元数据。页面可据此应用蒸馏推理默认参数。 */
+  /** Purpose declaration for an official variant (krea2: raw=training / turbo=inference);
+   *  custom weights carry no such metadata. Pages can use it to apply distilled inference defaults. */
   purpose?: 'training' | 'inference'
 }
 
-/** 支持底模选择的模型族。catalog section 键 = `${family}_main`。 */
+/** Model families that support base-model selection. Catalog section key = `${family}_main`. */
 export type BaseModelFamily = 'anima' | 'krea2'
 
 interface FamilyMainSection {
   variants: Array<{
     variant: string
     exists: boolean
-    /** krea2 起 variant 带用途声明（raw=training / turbo=inference）。 */
+    /** Starting with krea2, variants carry a purpose declaration (raw=training / turbo=inference). */
     purpose?: 'training' | 'inference'
   }>
   custom: Array<{ path: string; name: string; exists: boolean }>
@@ -33,12 +33,16 @@ function mainSection(
   return (section as FamilyMainSection | undefined) ?? null
 }
 
-/** 从模型 catalog 拉「已下载的指定族主模型」列表 + 设置页当前选定值。
+/** Pulls the list of "downloaded main models for the given family" from the model
+ *  catalog, plus the Settings page's currently selected value.
  *
- *  options 只含磁盘上存在的官方 variant + 注册的本地 custom（未下载的不出现，
- *  避免选了拉不到权重）；defaultValue = 设置页该族当前选中底模，作为下拉的
- *  初始 / 回退值。krea2 的 variant 带 purpose 徽标（raw=训练底模 /
- *  turbo=推理底模，两者都可选——A1 不加白名单）。 */
+ *  options only includes official variants that exist on disk plus registered
+ *  local customs (ones not downloaded are omitted, to avoid picking a variant
+ *  whose weights can't be fetched); defaultValue = the base model currently
+ *  selected on the Settings page for that family, used as the dropdown's
+ *  initial / fallback value. krea2 variants carry a purpose badge (raw=training
+ *  base model / turbo=inference base model, both are selectable -- A1 does not
+ *  add a whitelist). */
 export function useBaseModelOptions(family: BaseModelFamily = 'anima'): {
   options: BaseModelOption[]
   defaultValue: string | null
@@ -78,11 +82,15 @@ export function useBaseModelOptions(family: BaseModelFamily = 'anima'): {
   }
 }
 
-/** krea2 TE 选项状态：fp8 目录是否就绪（权重 + config 已下载，决定测试页
- *  下拉里 fp8 的可选性）+ 下载中心选中的默认 variant（下拉初值）。 */
-/** 设置页选中的 krea2 TE。`'custom'` = 选的是本地注册的编码器目录 ——
- *  出图请求此时不传 text_encoder，让服务端按 selected_te 解析（请求里只能
- *  带官方 variant key，见 api/schemas/generate.py 的 Literal）。 */
+/** krea2 TE option state: whether the fp8 directory is ready (weights + config
+ *  downloaded, which decides whether fp8 is selectable in the test page
+ *  dropdown) + the default variant selected in the download center (dropdown
+ *  initial value). */
+/** The krea2 TE currently selected on the Settings page. `'custom'` = a locally
+ *  registered encoder directory is selected -- in that case the generate
+ *  request omits text_encoder and lets the server resolve it from selected_te
+ *  (the request field can only carry an official variant key, see the Literal
+ *  in api/schemas/generate.py). */
 export type Krea2TeSelection = 'bf16' | 'fp8' | 'custom'
 
 export function useKrea2TeOptions(): {
@@ -120,11 +128,13 @@ function basename(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p
 }
 
-/** 底模下拉。受控：`value` 是「本次临时覆盖」（null = 跟随设置页默认）。
+/** Base model dropdown. Controlled: `value` is a "temporary override for this
+ *  instance" (null = follow the Settings page default).
  *
- *  `family` 决定列哪个族的主模型（默认 anima，向后兼容既有调用方）。
- *  `className` 让各页面把 select 样式对齐自己页面里的其它 input
- *  （正则集用 "select input"，测试页用 "input text-xs w-full"）。 */
+ *  `family` decides which family's main models to list (defaults to anima, for
+ *  backward compatibility with existing callers). `className` lets each page
+ *  align the select's style with its other inputs (the regularization set page
+ *  uses "select input", the test page uses "input text-xs w-full"). */
 export default function BaseModelSelect({
   value, onChange, family = 'anima', className = 'select input', style, ariaLabel,
 }: {
@@ -132,15 +142,17 @@ export default function BaseModelSelect({
   onChange: (v: string) => void
   family?: BaseModelFamily
   className?: string
-  /** 内联样式透传（正则集页用它对齐训练配置页控件视觉）。 */
+  /** Inline style pass-through (the regularization set page uses it to align
+   *  visuals with the training config page's controls). */
   style?: React.CSSProperties
   ariaLabel?: string
 }) {
   const { options, defaultValue } = useBaseModelOptions(family)
-  // 有效值：显式覆盖优先，否则跟随设置页默认。
+  // Effective value: explicit override wins, otherwise follow the Settings page default.
   const effective = value ?? defaultValue ?? ''
-  // effective 不在 options 里（例如设置页选的 variant 还没下载）时补一项，
-  // 避免 select 落到列表首项造成「显示的不是实际生效的」。
+  // When effective isn't in options (e.g. the variant selected on the Settings
+  // page hasn't been downloaded yet), add an extra entry so the select doesn't
+  // fall back to the first item and show something other than what's actually in effect.
   const missing = effective !== '' && !options.some((o) => o.value === effective)
   return (
     <select

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { playSound, useSoundEnabled } from '../../lib/sound'
 import type { TFunction } from 'i18next'
 import { Trans, useTranslation } from 'react-i18next'
 import { getStoredLangWithDefault, setStoredLang } from '../../i18n'
@@ -46,14 +47,13 @@ type Section =
   | 'training'
   | 'proxy'
 
-// Settings 现在只有「训练」一组配置（打标 / 测试 / 外观 / 系统 tab 已移除）。
-// 右侧 sticky 导航的 section index。
+// Settings now has only the "training" config group (tagging / test / appearance /
+// system tabs have been removed). The section index for the right-hand sticky nav.
 /** Languages offered in Settings. Labels stay in their own language on
  *  purpose — that is how you find yours when the UI is in one you cannot read. */
 const LANGUAGES: { code: string; label: string }[] = [
   { code: 'en', label: 'English' },
   { code: 'ru', label: 'Русский' },
-  { code: 'zh', label: '中文' },
 ]
 
 const TRAINING_SECTIONS: { id: string; labelKey: string }[] = [
@@ -69,9 +69,10 @@ const TRAINING_SECTIONS: { id: string; labelKey: string }[] = [
   { id: 'models', labelKey: 'settings.trainingModels' },
 ]
 
-// fallback 预设：仅在 GET /api/secrets 失败时充当占位，真实 prompt 由后端 builtin
-// json 文件提供。命中此 fallback 然后 PUT 回去不会破坏 builtin（后端 validator
-// 会再补全 builtin defaults）。
+// Fallback preset: only acts as a placeholder when GET /api/secrets fails; the real
+// prompt comes from the backend's builtin json file. Hitting this fallback and then
+// PUTting it back won't clobber the builtin (the backend validator backfills the
+// builtin defaults again).
 function _makeFallbackPreset(id: string, label: string, output_format: 'json' | 'text', extra: Partial<LLMPreset> = {}): LLMPreset {
   return {
     id,
@@ -264,9 +265,10 @@ function translatedCatalogText(keys: Record<string, string>, id: string, fallbac
 
 export default function SettingsPage() {
   const { t } = useTranslation()
-  // 共享数据层（SettingsDataProvider）：secrets / catalog / SSE / downloadBusy 都在根级常驻，
-  // 本组件 mount/unmount（抽屉开关）不再触发重拉。`server` 别名保留是为了让下方
-  // 大段表单代码改动最小。
+  // Shared data layer (SettingsDataProvider): secrets / catalog / SSE / downloadBusy
+  // all live at the root level, so this component mounting/unmounting (drawer
+  // open/close) no longer triggers a refetch. The `server` alias is kept so the
+  // large block of form code below needs minimal changes.
   const {
     secrets: rawServer,
     secretsError,
@@ -286,11 +288,12 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const { toast } = useToast()
   const drawer = useSettingsDrawer()
-  // 右侧 section index 用：sticky nav 的 IntersectionObserver root + 滚动平移容器
+  // For the right-hand section index: the sticky nav's IntersectionObserver root + scroll container
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
-  // 第一次拿到 secrets 时把 draft 同步过来；之后 server 变化（save 后）不再
-  // 覆盖 draft，避免抹掉用户的未保存编辑（save 里会自己 setDraft(next)）。
+  // Sync draft from secrets the first time it arrives; afterward, server changes
+  // (after save) no longer overwrite draft, to avoid wiping the user's unsaved edits
+  // (save itself calls setDraft(next)).
   const draftInitRef = useRef(false)
   useEffect(() => {
     if (server && !draftInitRef.current) {
@@ -298,7 +301,7 @@ export default function SettingsPage() {
       draftInitRef.current = true
     }
   }, [server])
-  // 数据层 fetch secrets 失败时把错误透出到本组件 error 状态，复用底部错误条。
+  // When the data layer's secrets fetch fails, surface the error into this component's error state, reusing the bottom error bar.
   useEffect(() => { if (secretsError) setError(secretsError) }, [secretsError])
 
   const dirty = useMemo(
@@ -306,8 +309,8 @@ export default function SettingsPage() {
     [server, draft]
   )
 
-  // 抽屉关闭前用这个 ref 询问"是否 dirty"；ref 每次 render 刷新，
-  // 注册的函数只挂载一次，避免 effect churn。
+  // Before closing the drawer, this ref is used to ask "is it dirty"; the ref
+  // refreshes on every render, but the registered function only mounts once, avoiding effect churn.
   const dirtyRef = useRef(false)
   dirtyRef.current = dirty
   useEffect(() => {
@@ -315,8 +318,9 @@ export default function SettingsPage() {
     return () => drawer.registerDirtyGuard(null)
   }, [drawer])
 
-  // 抽屉以 open({ section }) 打开时跳到对应 section（取代旧的 ?section= URL 参数）。
-  // sectionRequest 带 nonce，相同 section 重复 open 也会触发 effect 重跑。
+  // When the drawer opens with open({ section }), jump to that section (replaces the
+  // old ?section= URL param). sectionRequest carries a nonce, so opening the same
+  // section again still retriggers the effect.
   const drawerSectionReq = drawer.sectionRequest
   useEffect(() => {
     if (!drawerSectionReq) return
@@ -339,7 +343,7 @@ export default function SettingsPage() {
     }))
   }
 
-  /** 更新 Secrets 顶层非对象字段（如 download_source）。 */
+  /** Update a top-level, non-object field on Secrets (e.g. download_source). */
   const updateTop = <K extends keyof Secrets>(key: K, value: Secrets[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }))
   }
@@ -353,7 +357,7 @@ export default function SettingsPage() {
       const next = await api.updateSecrets(patch)
       setServer(next)
       setDraft(next)
-      // 候选 model_ids 改了之后，catalog 里的 wd14 variants 需要刷新
+      // After the candidate model_ids change, the wd14 variants in the catalog need a refresh
       void reloadCatalog()
       toast(t('settings.saved'), 'success')
     } catch (e) {
@@ -429,8 +433,9 @@ export default function SettingsPage() {
           />
         </SettingsField>
 
-        {/* 下方按当前下载源条件渲染对应凭证配置。HF/ModelScope token 都保留在
-         * secrets 里（即便切换源也不丢失），只是 UI 一次只露面一份。 */}
+        {/* Below, the matching credential config is rendered conditionally on the
+         * current download source. HF/ModelScope tokens both stay in secrets (not
+         * lost even when switching sources), only one is shown in the UI at a time. */}
         {draft.download_source === 'huggingface' ? (
           <>
             <SettingsField
@@ -539,11 +544,13 @@ export default function SettingsPage() {
 
 // ── Runtime mode (Colab / Local) ───────────────────────────────────────────
 
-/** 运行模式切换（本 fork）。首屏 `RuntimeModeGate` 问过一次后，这里是唯一的改法。
+/** Runtime mode switch (Colab / Local). After the first-screen `RuntimeModeGate`
+ *  asks once, this is the only place left to change it.
  *
- *  刻意**不**走 draft/save 那套：模式不是训练配置的一部分，它有自己的端点
- *  (`PUT /api/runtime`)，而且改完要提示"重启后绑定地址才生效" —— 混进批量
- *  Save 里这条提示就没地方挂了。 */
+ *  Deliberately **doesn't** go through the draft/save flow: the mode isn't part of
+ *  the training config, it has its own endpoint (`PUT /api/runtime`), and after
+ *  changing it we need to show "restart for the bound address to take effect" --
+ *  there'd be nowhere to hang that notice if it were folded into the batch Save. */
 function RuntimeModeSection() {
   const { t } = useTranslation()
   const runtime = useRuntimeModeOptional()
@@ -868,6 +875,7 @@ function RemoteAccessSection() {
 function AppearanceSection() {
   const { t, i18n } = useTranslation()
   const [lang, setLang] = useState(() => getStoredLangWithDefault())
+  const [soundOn, setSoundOn] = useSoundEnabled()
 
   const applyLang = (next: string) => {
     setLang(next)
@@ -892,7 +900,21 @@ function AppearanceSection() {
           ))}
         </div>
       </SettingsField>
-
+      <SettingsField label={t('settings.sounds')} desc={t('settings.soundsDesc')}>
+        <label className={`ds-switch${soundOn ? ' ds-on' : ''}`} style={{ cursor: 'pointer', alignSelf: 'flex-start' }}>
+          <input
+            type="checkbox"
+            className="sr-only"
+            checked={soundOn}
+            onChange={(e) => {
+              setSoundOn(e.target.checked)
+              if (e.target.checked) playSound('success')
+            }}
+            aria-label={t('settings.sounds')}
+          />
+          <i />
+        </label>
+      </SettingsField>
     </SettingsSection>
   )
 }
@@ -902,7 +924,7 @@ function SettingsSection({
 }: {
   id?: string
   title: string
-  headerExtras?: React.ReactNode  // 可选 slot：渲染在 h2 右侧（紧贴），给 ⓘ tooltip 之类用
+  headerExtras?: React.ReactNode  // Optional slot: rendered right next to the h2, for things like an (i) tooltip
   children: React.ReactNode
 }) {
   return (
@@ -917,11 +939,12 @@ function SettingsSection({
 }
 
 /**
- * 右侧 sticky section 目录。基于 IntersectionObserver 在 scrollContainer 视口内
- * 跟踪当前可见 section，并提供点击平滑滚动。
+ * The right-hand sticky section index. Tracks the currently visible section within
+ * scrollContainer's viewport using an IntersectionObserver, and provides smooth-scroll on click.
  *
- * rootMargin 调整为顶部 -20%、底部 -70%：让"当前可见"判定集中在视口偏上区域，
- * 滚动时高亮跟随更自然（用户视线在 viewport 上 1/3 处）。
+ * rootMargin is tuned to -20% top / -70% bottom: this concentrates the "currently
+ * visible" judgment toward the upper part of the viewport, so the highlight follows
+ * scrolling more naturally (the user's eye tends to sit around the top third of the viewport).
  */
 function SectionIndex({
   sections,
@@ -934,17 +957,17 @@ function SectionIndex({
   const [active, setActive] = useState<string>(sections[0]?.id ?? '')
 
   useEffect(() => {
-    // 切换 tab 后重置 active 到第一条
+    // Reset active to the first item after switching tabs
     setActive(sections[0]?.id ?? '')
   }, [sections])
 
   useEffect(() => {
     const root = scrollContainer.current
     if (!root || sections.length === 0) return
-    // jsdom（vitest 环境）没有 IntersectionObserver；非浏览器环境直接跳过。
+    // jsdom (vitest environment) has no IntersectionObserver; skip outright in non-browser environments.
     if (typeof IntersectionObserver === 'undefined') return
     const observers: IntersectionObserver[] = []
-    // 收集 (id, top) 用来在 onIntersect 时挑当前最靠上的可见 section
+    // Collect (id, top) to pick the topmost currently visible section on intersect
     const visible = new Set<string>()
     const obs = new IntersectionObserver(
       (entries) => {
@@ -952,7 +975,7 @@ function SectionIndex({
           if (e.isIntersecting) visible.add(e.target.id)
           else visible.delete(e.target.id)
         }
-        // 按 sections 顺序取第一个可见的作为 active
+        // Take the first visible one in sections order as active
         const next = sections.find((s) => visible.has(s.id))
         if (next) setActive(next.id)
       },
@@ -993,8 +1016,9 @@ function SectionIndex({
 function SettingsField({ label, desc, helpTooltip, children }: {
   label: string
   desc?: string
-  /** 可选 ⓘ tooltip slot，渲染在 label 旁边。中长说明（≥20 字 / 详细用法）
-   *  适合放这里，避免 inline desc 把字段名行撑得过长。一般和 desc 二选一。 */
+  /** Optional (i) tooltip slot, rendered next to the label. Medium-to-long
+   *  explanations (>=20 words / detailed usage) fit best here, to avoid an inline
+   *  desc stretching the field name row too long. Usually pick one of desc or this. */
   helpTooltip?: React.ReactNode
   children: React.ReactNode
 }) {
@@ -1072,11 +1096,12 @@ function SensitiveInput({ value, serverValue, onChange }: {
 
 // ── HFEndpointSelect ────────────────────────────────────────────────────────
 //
-// HF 模型下载 endpoint 选择器：preset + 自定义 URL 输入。
-// 0.8.2 hotfix：hf-mirror.com preset 暂时隐藏（服务端 redirect 改动后所有
-// huggingface_hub 版本均失败，详见 docs/todo/hf-mirror-recheck.md）。endpoint
-// 字段本身仍接受任意 URL，用户可通过「自定义 URL」粘贴 hf-mirror / sjtug /
-// 腾讯镜像 / 自建反代。复活后把 preset 加回来即可。
+// HF model download endpoint selector: preset + custom URL input.
+// 0.8.2 hotfix: the hf-mirror.com preset is temporarily hidden (after a server-side
+// redirect change, it fails on every huggingface_hub version, see
+// docs/todo/hf-mirror-recheck.md). The endpoint field itself still accepts any URL,
+// so users can paste hf-mirror / sjtug / a Tencent mirror / a self-hosted proxy via
+// "Custom URL". Add the preset back once it's revived.
 
 const HF_ENDPOINT_PRESETS: { value: string; label: string; hintKey: string }[] = [
   { value: '', label: 'huggingface.co', hintKey: 'settings.hfOfficialHint' },
@@ -1101,7 +1126,7 @@ function HFEndpointSelect({ value, onChange }: {
           const v = e.target.value
           if (v === '__custom__') {
             setMode('custom')
-            // 不清当前值，让用户在下方输入
+            // Don't clear the current value, let the user type below
           } else {
             setMode('preset')
             onChange(v)
@@ -1146,7 +1171,7 @@ function DownloadSourceSelect({ value, onChange }: {
   )
 }
 
-// 顶层非 object 字段（string / number / bool），直接比较后塞入 patch。
+// Top-level non-object fields (string / number / bool), compared directly and put into the patch.
 const TOP_LEVEL_SCALARS: (keyof Secrets)[] = ['download_source']
 
 function buildPatch(draft: Secrets, server: Secrets): SecretsPatch {
@@ -1172,15 +1197,16 @@ function buildPatch(draft: Secrets, server: Secrets): SecretsPatch {
 
 // ── Models Section ─────────────────────────────────────────────────────────
 
-// 本地主模型的「工作模式」= 它挂在哪个模型族下：族决定训练配置的默认值
-// （采样器 / timestep / caption 能力位，见 domain/common.py 的能力矩阵）与
-// 配套的 VAE / 文本编码器解析。domain 名与 catalog.model_sources 的键一致。
+// A local base model's "working mode" = which model family it's attached to: the
+// family determines the training config's defaults (sampler / timestep / caption
+// capability bits, see the capability matrix in domain/common.py) and which VAE /
+// text encoder it resolves against. The domain name matches the keys in catalog.model_sources.
 const FAMILY_DOMAIN_OPTIONS = [
   { value: 'anima', label: 'Anima' },
   { value: 'krea2', label: 'Krea 2' },
 ]
 
-/** 绝对路径 → 末段文件 / 目录名（toast 里显示"选中了哪个权重"）。 */
+/** Absolute path -> last path segment (file/dir name), for showing "which weights got selected" in a toast. */
 function basename(p: string): string {
   const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
   return i >= 0 ? p.slice(i + 1) : p
@@ -1208,16 +1234,18 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
   const [selectedAnima, setSelectedAnima] = useState<string>('1.0')
   const [selectedKrea2, setSelectedKrea2] = useState<string>('raw')
   const [selectedKrea2Te, setSelectedKrea2Te] = useState<string>('bf16')
-  // VAE 是族无关共享资产 → 单个选中值（''=官方落点）；Anima 的文本编码器只有
-  // 一份官方目录，所以它的选中值同样是 ''（官方）或本地目录绝对路径。
+  // VAE is a shared asset independent of family -> a single selected value (''=the
+  // official location); Anima's text encoder has only one official directory, so its
+  // selected value is likewise '' (official) or a local directory's absolute path.
   const [selectedVae, setSelectedVae] = useState<string>('')
   const [selectedAnimaTe, setSelectedAnimaTe] = useState<string>('')
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
   const [savingAutoSync, setSavingAutoSync] = useState(false)
   const [secretsLoaded, setSecretsLoaded] = useState(false)
 
-  // 一次性拉一份 secrets 取 models.root + selected（按族）+ auto_sync_paths
-  // （这几项走独立 PUT，不进 SettingsPage 的全局 dirty 流程）。catalog 由父级注入。
+  // One-time fetch of secrets to get models.root + selected (per family) +
+  // auto_sync_paths (these go through their own PUT, not the SettingsPage's global
+  // dirty flow). The catalog is injected by the parent.
   useEffect(() => {
     void api.getSecrets().then((sec) => {
       setServerRoot(sec.models?.root ?? null)
@@ -1231,8 +1259,9 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
     }).catch(() => { setSecretsLoaded(true) })
   }, [])
 
-  // secrets + catalog 都到位后，把输入框预填成「已保存值」或「实际默认绝对路径」。
-  // 用 prev !== '' 当作"已初始化 / 用户已编辑"的标志，避免覆盖用户输入。
+  // Once both secrets + catalog are in, prefill the input with the "saved value" or
+  // the "actual default absolute path". Use prev !== '' as the "already
+  // initialized / user has edited it" flag, to avoid overwriting user input.
   useEffect(() => {
     if (!secretsLoaded || !catalog) return
     setRootDraft((prev) => (prev !== '' ? prev : (serverRoot ?? catalog.models_root ?? '')))
@@ -1277,8 +1306,8 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
     }
   }
 
-  // VAE / 文本编码器的选中写回：与 pickAnima / pickKrea2Te 同形（乐观更新 +
-  // 失败回滚 = 重新拉 catalog + secrets）。
+  // Writing back the VAE / text encoder selection: same shape as pickAnima /
+  // pickKrea2Te (optimistic update + rollback on failure = refetch catalog + secrets).
   const pickVae = async (value: string) => {
     if (value === selectedVae) return
     const prev = selectedVae
@@ -1313,8 +1342,9 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
     }
   }
 
-  // 本地候选注册 / 注销 / 改模式后：catalog 与 secrets 都可能变（服务端会把
-  // 失效的选中值回退默认），两边一起重拉才不会显示成脏状态。
+  // After registering/unregistering a local candidate or changing its mode: both
+  // catalog and secrets may change (the server falls back an invalidated selection to
+  // the default), so both need refetching together, or the UI would look stale.
   const reloadSources = async () => {
     await reloadCatalog()
     try {
@@ -1325,8 +1355,8 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
       setSelectedVae(sec.models?.selected_vae ?? '')
       setSelectedAnimaTe(sec.models?.selected_te?.anima ?? '')
     } catch {
-      // 读 secrets 失败不该让刚成功的注册看起来像失败：catalog 已刷新，
-      // 下次进页面会再对齐一次。
+      // A failed secrets read shouldn't make a just-succeeded registration look like
+      // a failure: the catalog has already refreshed, and it'll reconcile again next time the page loads.
     }
   }
 

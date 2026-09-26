@@ -1,788 +1,1101 @@
-# Block swap（逐层权重换入换出）方案调研
+# Block swap (per-layer weight swap-in/swap-out) research
 
-> **本 fork 的移植范围（读本文前先看这条）**：从上游 v0.21.0 / v0.21.1 移植的是
-> **训练侧**（`runtime/training/block_swap.py` + loader 直落 pinned + 预算护栏 +
-> `TrainingConfig.blocks_to_swap`）。**推理侧（§4 / §9.6，`runtime/anima_daemon.py`
-> 的出图路径）尚未移植** —— 它依赖上游 #455「降低出图显存峰值」引入的
-> `lora_merge_precision` / `chunk_rows` / `keep_backup` 那套 merge 参数，本 fork
-> 还没有。因此 `GenerateConfig` 里没有 `blocks_to_swap`，出图仍按完整模型上卡。
-> 文中涉及推理侧的段落描述的是上游状态，作为后续移植的依据保留。
+> **This fork's port scope (read this before the rest of the doc)**: what's
+> been ported from upstream v0.21.0 / v0.21.1 is the **training side**
+> (`runtime/training/block_swap.py` + the loader landing pinned memory
+> directly + budget guardrails + `TrainingConfig.blocks_to_swap`). **The
+> inference side (§4 / §9.6, `runtime/anima_daemon.py`'s image-generation
+> path) has not been ported yet** — it depends on the
+> `lora_merge_precision` / `chunk_rows` / `keep_backup` merge parameter set
+> introduced by upstream #455 ("reduce peak VRAM during generation"), which
+> this fork doesn't have. As a result, `GenerateConfig` has no
+> `blocks_to_swap`, and generation still loads the full model onto the GPU.
+> Sections in this document about the inference side describe upstream's
+> state, kept as a reference for a future port.
 
-- 状态：**Gate-0 已跑通（§5.1 实测），方案未拍板**。原理、成本模型、硬件影响评估
-  与实测数据已固化；所有产品与实现选择留在 §7 开放问题，逐项走五步确认后才动代码。
-- 一句话结论：**已实装并真机跑通。fp8 + 全量换出（28 层）下训练步峰值 8.4GB、
-  最小需求 ≈10.1GB → 16GB 舒适、12GB 可行（§9.5c），速度代价约 4%；硬件损耗担忧
-  经 1.4TB 传输实测排除（PCIe replay 增量 0）。B12 目标达成，待小卡确认。**
-- 日期：2026-07-21
-- 上游依据：`docs/design/multi-model/00-decisions.md` D2（fp8 / block swap 搁置，
-  K2 下限 32GB bf16）；`docs/design/multi-model/04-synthesis.md` §7 Phase 0 实测
-  「32GB 可训但余量≈0」→ 将「K2 专属小规模 block swap 兜底」从备选提升为
-  **计划内可选项（默认关、撞显存开）**。本文是那一条的展开。
-- 参考实现：kohya-ss/musubi-tuner（`blocks_to_swap`，Apache-2.0）、ai-toolkit、
-  diffusion-pipe、ComfyUI `--lowvram` partial load。
+- Status: **Gate-0 has passed (real measurements in §5.1); the approach
+  hasn't been finalized.** The mechanism, cost model, hardware-impact
+  assessment, and measured data are locked in; all product and
+  implementation choices remain in §7's open questions, to be confirmed
+  one by one through the five-step process before any code is written.
+- One-line conclusion: **already implemented and verified on real
+  hardware. With fp8 + full swap-out (28 layers), the training-step peak is
+  8.4GB, minimum requirement ≈10.1GB → comfortable on 16GB, feasible on
+  12GB (§9.5c), with a speed cost of about 4%; hardware-wear concerns were
+  ruled out by a 1.4TB transfer test (zero PCIe replay increase). The B12
+  target has been achieved, pending confirmation on smaller cards.**
+- Date: 2026-07-21
+- Upstream basis: `docs/design/multi-model/00-decisions.md` D2 (fp8 / block
+  swap shelved, K2's floor set at 32GB bf16); `docs/design/multi-model/04-synthesis.md`
+  §7 Phase 0 measurement "32GB is trainable but with ≈0 headroom" → this
+  promotes "K2-specific small-scale block-swap fallback" from a candidate
+  to an **in-plan optional feature (off by default, on when VRAM runs
+  out)**. This document expands on that item.
+- Reference implementations: kohya-ss/musubi-tuner (`blocks_to_swap`,
+  Apache-2.0), ai-toolkit, diffusion-pipe, ComfyUI's `--lowvram` partial
+  load.
 
 ---
 
-## 1. 是什么
+## 1. What it is
 
-把 DiT 的一部分 transformer block **权重常驻 CPU 内存**，只在前向/反向计算轮到
-该 block 时才搬进显存，算完立即释放。换出的 block 数是唯一旋钮（musubi 生态的
-`blocks_to_swap=N`）。
+Keep part of the DiT's transformer blocks' **weights resident in CPU
+memory**, moving them into VRAM only when it's that block's turn to compute
+in the forward/backward pass, and releasing them immediately afterward. The
+number of swapped-out blocks is the only knob (the musubi ecosystem's
+`blocks_to_swap=N`).
 
-成立前提是 DiT 的结构事实：N 个同构 block 串行堆叠，**任一时刻真正参与计算的只有
-一个**。全部权重常驻显存纯粹是为了省搬运时间，不是计算的必要条件。
+The premise relies on a structural fact about DiTs: N structurally identical
+blocks stacked serially, with **only one actually participating in
+computation at any moment**. Keeping all weights resident in VRAM exists
+purely to save transfer time — it's not a requirement of the computation
+itself.
 
-本仓两族的结构（探针直接从代码读，不靠估算）：
+The structure of the two families in this repo (probed directly from code,
+not estimated):
 
-| 族 | block 数 | 关键维度 | 单 block（bf16） | 逐 block 挂点 |
+| Family | Block count | Key dimensions | Single block (bf16) | Per-block hook point |
 |---|---|---|---|---|
-| Anima | 28（大版本 36） | features 由 ckpt 定，heads 16 / 36 版 40 | 未测（§5.3-2） | [`forward.py:31`](../../runtime/training/families/anima/forward.py) 已是逐 block 循环 |
-| Krea2 | 28 | features 6144, heads 48, kvheads 12 (GQA), multiplier 4 | **828 MB**（434.2M 参数） | `modeling/krea2/krea2_modeling.py` `SingleStreamDiT`，`forward` 内已是逐 block 循环 |
+| Anima | 28 (36 for the large variant) | features set by the ckpt, heads 16 / 40 for the 36-block version | untested (§5.3-2) | [`forward.py:31`](../../runtime/training/families/anima/forward.py) is already a per-block loop |
+| Krea2 | 28 | features 6144, heads 48, kvheads 12 (GQA), multiplier 4 | **828 MB** (434.2M params) | `modeling/krea2/krea2_modeling.py`'s `SingleStreamDiT`, `forward` is already a per-block loop |
 
-Krea2 的 28 层结构与 Anima 完全同构 —— 这意味着**一套 swap 机制两族共用**，不需要
-按族扇出（正是 `02-ecosystem-survey.md` §7 批评 SimpleTuner 的那类维护债）。
+Krea2's 28-layer structure is completely isomorphic to Anima's — this means
+**a single swap mechanism can be shared by both families**, with no need to
+fan it out per family (exactly the maintenance debt criticized in
+`02-ecosystem-survey.md` §7 regarding SimpleTuner).
 
-## 2. 原理与成本模型
+## 2. Mechanism and cost model
 
-### 2.1 机制
+### 2.1 Mechanism
 
-1. 权重主副本放 CPU **pinned memory**（页锁定）。非 pinned 的可分页内存无法 DMA
-   异步传输，`non_blocking=True` 会静默退化为同步拷贝，带宽腰斩且完全暴露。
-2. 独立 CUDA stream 做预取：计算 block *i* 的同时后台搬 block *i+1*。
-3. block *i* 算完立即释放其 GPU 副本。
-4. 反向传播顺序反转（N→0），需要逆序预取。
+1. The master copy of the weights lives in CPU **pinned memory** (page-locked).
+   Non-pinned pageable memory can't do asynchronous DMA transfer;
+   `non_blocking=True` silently degrades to a synchronous copy, halving
+   bandwidth and exposing it entirely.
+2. An independent CUDA stream handles prefetching: while computing block
+   *i*, block *i+1* is moved in the background.
+3. Once block *i* finishes computing, its GPU copy is released immediately.
+4. The backward pass order is reversed (N→0), requiring reverse-order
+   prefetching.
 
-### 2.2 唯一的成败判据
+### 2.2 The single success/failure criterion
 
 ```
-可完全遮蔽  ⟺  T_transfer(block) < T_compute(block)
+fully hideable  ⟺  T_transfer(block) < T_compute(block)
 T_transfer  = bytes_per_block / effective_pcie_bandwidth
 ```
 
-暴露时间 = `max(0, T_transfer − T_compute) × swapped_block_count × passes_per_step`。
+Exposed time = `max(0, T_transfer − T_compute) × swapped_block_count × passes_per_step`.
 
-由此得到两条反直觉但重要的推论：
+This gives two counterintuitive but important corollaries:
 
-- **分辨率越高、batch 越大，block swap 越划算。** 计算时间随 token 数增长，传输时间
-  恒定（权重大小固定）。低分辨率小 batch 才是最坏工况。
-- **fp8 底模让 block swap 更容易遮蔽**，因为传输字节减半而计算时间不减半（本仓
-  `quant_fp8.py` 是逐层 dequant 后 bf16 matmul，计算量不变）。两者叠加是正协同。
+- **The higher the resolution and the larger the batch, the more worthwhile
+  block swap becomes.** Compute time grows with token count, while transfer
+  time stays constant (weight size is fixed). Low resolution + small batch
+  is the worst-case scenario.
+- **An fp8 base model makes block swap easier to hide**, since transfer
+  bytes are halved while compute time isn't halved (this repo's
+  `quant_fp8.py` does per-layer dequant followed by bf16 matmul, so compute
+  volume is unchanged). Combining the two is a positive synergy.
 
-### 2.3 LoRA 训练的额外红利
+### 2.3 The extra bonus for LoRA training
 
-底模权重**冻结** → GPU 上那份副本用完直接丢弃，**不需要 D2H 回写**，只有单向 H2D。
-全量微调则必须双向搬。所以：
+The base model's weights are **frozen** → once the GPU copy is used, it can
+just be discarded, with **no D2H write-back needed** — only a one-way H2D
+transfer. Full fine-tuning would require moving data in both directions. So:
 
-| 场景 | 每步传输方向 | 相对传输量 |
+| Scenario | Transfer direction per step | Relative transfer volume |
 |---|---|---|
-| LoRA 训练（本仓唯一场景） | 前向 H2D + 反向 H2D | 2× |
-| 全量微调 | 前向 H2D + 反向 H2D + D2H 回写 | 3×~4× |
-| 推理（每 step） | H2D | 1× × steps |
+| LoRA training (this repo's only scenario) | forward H2D + backward H2D | 2x |
+| Full fine-tuning | forward H2D + backward H2D + D2H write-back | 3x-4x |
+| Inference (per step) | H2D | 1x × steps |
 
-本仓只做 LoRA → 落在最省的一档。LoRA 参数本身极小，与优化器状态一起**常驻 GPU
-不参与 swap**。
+This repo only does LoRA → falling into the cheapest tier. LoRA parameters
+themselves are tiny, and along with optimizer state, **stay resident on the
+GPU and never participate in swap**.
 
-### 2.4 与 gradient checkpointing 的交互（实现难点）
+### 2.4 Interaction with gradient checkpointing (an implementation hurdle)
 
-开启 checkpointing 后，反向阶段要**重算前向**，那时该 block 的权重必须再次在位。
-朴素实现会让同一 block 在一个 step 内被搬 3 次（前向 1 + 重算 1 + 反向 1）。
-musubi 的做法是把重算与反向合并在同一次驻留窗口内完成。
+With checkpointing enabled, the backward pass has to **recompute the
+forward pass**, at which point that block's weights need to be in place
+again. A naive implementation would move the same block 3 times within a
+single step (forward once + recompute once + backward once). Musubi's
+approach merges the recompute and backward into the same residency window.
 
-本仓 Anima 的 [`forward_with_optional_checkpoint`](../../runtime/training/families/anima/forward.py)
-已经是逐 block 的手工展开循环，**这是天然且唯一的挂点**，无需改动架构即可插入
-预取钩子。Krea2 侧需要确认 `SingleStreamDiT.forward` 是否有同等展开面。
+This repo's Anima
+[`forward_with_optional_checkpoint`](../../runtime/training/families/anima/forward.py)
+is already a manually unrolled per-block loop, **which is a natural and the
+only hook point** — a prefetch hook can be inserted with no architecture
+changes required. On the Krea2 side, it still needs confirming whether
+`SingleStreamDiT.forward` has the same unrolled surface.
 
-### 2.5 与现有手段的正交关系
+### 2.5 Orthogonal relationship with existing measures
 
-| 手段 | 砍什么 | 代价 | 本仓现状 |
+| Measure | What it cuts | Cost | Current status in this repo |
 |---|---|---|---|
-| gradient checkpointing | 激活 | 重算 ≈ +30% 时间 | 已有，K2 v1 默认强制 |
-| fp8 量化 | 权重**字节数** | 精度 | `quant_fp8.py` 已实施（推理 + fp8_base 训练） |
-| 模型级 offload | **非活跃模型**（TE/VAE/DiT 整体） | 切换延迟 | `vram_policy` 三档已实施 |
-| **block swap** | 权重**驻留位置**（字节数不变） | PCIe 时间 | 本文对象 |
+| gradient checkpointing | activations | recompute ≈ +30% time | already present, forced on by default for K2 v1 |
+| fp8 quantization | weight **byte count** | precision | `quant_fp8.py` already implemented (inference + fp8_base training) |
+| model-level offload | **inactive models** (TE/VAE/DiT as a whole) | switching latency | the 3-tier `vram_policy` already implemented |
+| **block swap** | weight **residency location** (byte count unchanged) | PCIe time | the subject of this document |
 
-**与已有 `vram_policy` 的本质区别**：模型级 offload 解决「TE + DiT 同时装不下」，
-block swap 解决「**单个 DiT 自己就装不下**」。前者救不了 24GB 跑 20B，后者可以。
-这是它对 K2 的唯一不可替代价值。
+**Fundamental difference from the existing `vram_policy`**: model-level
+offload solves "TE + DiT don't fit at the same time," while block swap
+solves "**a single DiT alone doesn't fit**." The former can't rescue running
+a 20B model on 24GB; the latter can. This is its sole, irreplaceable value
+for K2.
 
-## 3. 硬件影响与损耗评估
+## 3. Hardware impact and wear assessment
 
-用户明确关注项。结论先行：**不存在"磨损"意义的硬件损耗；真实风险全部在系统稳定性
-与散热，且都可测量。**
+An area the user explicitly cares about. The conclusion first: **there is
+no hardware wear in the sense of "wearing out"; the real risks are all
+around system stability and thermals, and both are measurable.**
 
-### 3.1 不构成损耗的部分（可以放心）
+### 3.1 Parts that don't constitute wear (can proceed with confidence)
 
-- **PCIe 链路**：差分信号电气链路，无机械或存储介质磨损机制。持续满带宽是设计规格
-  内的常态工况（数据中心 GPU 常年如此）。PHY 满载功耗量级为个位数瓦，相对 GPU
-  整卡 300–450W 是噪声。
-- **显存（GDDR6/6X）与系统内存（DDR）**：DRAM 是电容存储，读写**不产生疲劳**。
-  NAND flash 的擦写寿命概念不适用。
-- **半导体老化的真实机制**（electromigration、NBTI/HCI）由**温度和电压**驱动，与
-  "搬运了多少字节"只有间接关系 —— 间接路径是「更多活动 → 更高功耗 → 更高温度」。
-  而 block swap 期间 GPU 若出现等待气泡，**平均功耗反而下降**。
+- **PCIe link**: a differential-signal electrical link, with no mechanical
+  or storage-media wear mechanism. Sustained full-bandwidth use is a normal
+  operating condition within spec (datacenter GPUs run like this year-round).
+  PHY power draw at full load is on the order of single-digit watts,
+  negligible against a GPU's overall 300-450W.
+- **VRAM (GDDR6/6X) and system memory (DDR)**: DRAM is capacitor-based
+  storage, and reads/writes **produce no fatigue**. NAND flash's
+  write-cycle-endurance concept doesn't apply here.
+- **The actual mechanisms of semiconductor aging** (electromigration,
+  NBTI/HCI) are driven by **temperature and voltage**, and only indirectly
+  related to "how many bytes were moved" — the indirect path is "more
+  activity → higher power draw → higher temperature." And during a block
+  swap wait bubble, the GPU's **average power draw actually drops**.
 
-### 3.2 构成真实风险的部分（必须设护栏）
+### 3.2 Parts that constitute real risk (guardrails required)
 
-**① pinned memory 不可换页 —— 与本仓已知卡死案例同源。**
+**① Pinned memory can't be paged out — the same root cause as this repo's
+known hang case.**
 
-`training/sysmem.py` 的整个存在理由是 mmap 文件缓存页撑爆 working set 导致整机
-换页卡死（见 `mmap_working_set_paging_freeze` 案例）。pinned memory 比那更硬：
+The whole reason `training/sysmem.py` exists is that mmap file-cache pages
+overflowing the working set caused the whole machine to hang while paging
+(see the `mmap_working_set_paging_freeze` case). Pinned memory is even more
+rigid than that:
 
-- `trim_working_set()` 对 pinned 页**完全无效** —— 页锁定的定义就是不可被回收。
-- `check_load_budget()` 现有的 RAM 预算把权重文件大小算作"可回收的 mmap 峰值"，
-  而 pinned 是**永久占用**，同样字节数的危害等级不同，现有护栏语义**不覆盖**。
-- Windows 对可锁定物理内存总量有系统级上限，分配失败是硬错误，必须有降级路径。
+- `trim_working_set()` is **completely ineffective** on pinned pages — the
+  definition of page-locking is precisely that it cannot be reclaimed.
+- `check_load_budget()`'s existing RAM budget counts a weight file's size
+  as a "reclaimable mmap peak," but pinned memory is a **permanent
+  allocation** — the same byte count carries a different risk level, and
+  the existing guardrail's semantics **don't cover** this.
+- Windows has a system-level cap on total lockable physical memory;
+  allocation failure is a hard error, and there must be a fallback path.
 
-这是本方案**最大的真实风险**，远大于任何硬件担忧。
+This is this approach's **biggest real risk**, far greater than any
+hardware concern.
 
-**② PCIe 链路错误（correctable error / replay）。**
+**② PCIe link errors (correctable error / replay).**
 
-满带宽持续 DMA 会暴露插槽接触、riser 线材、主板走线的边际质量问题。表现为链路
-replay 重传 → 有效带宽悄悄下降，而非报错。NVML 暴露 `PcieReplayCounter`，
-**探针必须采样其增量**作为链路健康判据。若本机链路本身跑在降级模式（x8 而非
-x16、或走 chipset 通道而非 CPU 直连），带宽会腰斩，同样必须先测出来。
+Sustained full-bandwidth DMA can expose marginal quality issues in slot
+contact, riser cables, or motherboard trace routing. This manifests as link
+replay retransmission → effective bandwidth quietly drops, without raising
+an error. NVML exposes `PcieReplayCounter`, and **the probe must sample its
+delta** as the link-health criterion. If this machine's link is already
+running in a degraded mode (x8 instead of x16, or through a chipset lane
+rather than direct CPU attachment), bandwidth would be halved — this must
+also be measured up front.
 
-**③ 内存带宽争用与散热。**
+**③ Memory bandwidth contention and thermals.**
 
-持续 DMA 占用系统内存带宽，与 dataloader / 打标进程抢。PCH 与 GPU 板边温度会
-上升，但在规格内。探针采样温度与功耗以确认无异常。
+Sustained DMA occupies system memory bandwidth, competing with the
+dataloader / tagging process. PCH and GPU board-edge temperatures will rise,
+but stay within spec. The probe samples temperature and power to confirm
+nothing abnormal.
 
-### 3.2b 启动前预检（`training/block_swap_preflight.py`）
+### 3.2b Startup preflight check (`training/block_swap_preflight.py`)
 
-①/② 那两道护栏都是**加载时**触发的：`check_load_budget` 在权重上卡那一刻预算，
-`check_pinned_budget` 在换出层要落 pinned 那一刻把关。它们能防事故，但答不了用户
-真正的问题——**这个 `blocks_to_swap` 到底该填多少**。
+Both ①/② guardrails trigger at **load time**: `check_load_budget` budgets
+at the moment weights land on the GPU, and `check_pinned_budget` gates at
+the moment a swapped-out layer is about to land in pinned memory. They
+prevent incidents, but they don't answer the user's real question — **what
+should `blocks_to_swap` actually be set to**.
 
-而 `blocks_to_swap` 默认 0，Krea 2 的 DiT 就算 fp8 也有 13GB：12GB 卡上「选中模型
-直接开跑」必然 OOM，且 OOM 发生在数据集扫描、latent 缓存、文本编码全跑完之后，
-报错只有一句 `CUDA out of memory`。
+`blocks_to_swap` defaults to 0, and Krea 2's DiT is 13GB even at fp8: on a
+12GB card, "select a model and just start" would inevitably OOM, and that
+OOM would happen only after the dataset scan, latent caching, and text
+encoding have all already run — the error message is just a bare
+`CUDA out of memory`.
 
-预检把两侧算术合并、提前到 `models.run`（bootstrap 之后的第 2 个 phase，任何权重
-加载之前），并且**给推荐值**：
+The preflight check merges both sides' arithmetic and moves it earlier, to
+`models.run` (the 2nd phase, right after bootstrap, before any weights are
+loaded), and **gives a recommended value**:
 
-- 显存侧沿用 `check_load_budget` 的算术（`文件大小 × (1-换出比例) + _VRAM_BASE_BYTES`），
-  两道护栏才不会出现「预检说行、加载时拒」；
-- 内存侧沿用 `pinned_safe_limit()` —— 与 `check_pinned_budget` 共用同一函数，
-  两处各写一份迟早漂移；
-- 推荐值取**留得下训练余量**（`_RECOMMEND_HEADROOM_BYTES`，比 `_VRAM_BASE_BYTES`
-  宽，覆盖 LoRA + 优化器状态 + 激活 + fp8 dequant 临时权重）的最小换出层数。
-  没有这样的档位时退到「至少装得下权重」的最小值，并在文案里明确标注为紧
-  —— 推荐一个照做后仍会 OOM 的数字而不作说明，比不推荐更伤。
+- The VRAM side reuses `check_load_budget`'s arithmetic
+  (`file_size × (1 - swap_fraction) + _VRAM_BASE_BYTES`), so the two
+  guardrails don't end up in a "preflight says OK, loading rejects it"
+  situation;
+- The RAM side reuses `pinned_safe_limit()` — sharing the same function with
+  `check_pinned_budget`, since writing this logic twice would drift sooner
+  or later;
+- The recommended value is the smallest swap-out count that **still leaves
+  training headroom** (`_RECOMMEND_HEADROOM_BYTES`, wider than
+  `_VRAM_BASE_BYTES`, covering LoRA + optimizer state + activations + fp8
+  dequant temporary weights). If no such tier exists, it falls back to the
+  minimum that "at least fits the weights," clearly flagged in the copy as
+  tight — recommending a number that will still OOM without saying so is
+  worse than not recommending anything.
 
-防误拒是硬要求：开关 `block_swap_preflight`（UI 在 `blocks_to_swap` 旁）可关；
-族没有 `block_swap` 能力位、未实现 `swapped_param_ratio` / `swappable_blocks`、
-权重文件读不到大小、显存查询失败、预检自身抛异常 —— 一律静默放行。内存查询失败
-时只判显存侧，绝不凭空拿「锁定内存超限」拒绝。
+Avoiding false rejections is a hard requirement: the toggle
+`block_swap_preflight` (in the UI next to `blocks_to_swap`) can turn it off;
+if the family has no `block_swap` capability bit, hasn't implemented
+`swapped_param_ratio` / `swappable_blocks`, the weight file's size can't be
+read, the VRAM query fails, or the preflight itself throws — it silently
+lets the run proceed in every case. If the memory query fails, only the
+VRAM side is checked — it never rejects the run based on a made-up "locked
+memory exceeded" verdict.
 
-### 3.3 与 WDDM 显存崖的关系（正收益）
+### 3.3 Relationship to the WDDM VRAM cliff (a positive benefit)
 
-PR #281 记录的 190s 卡死是近满载时 WDDM 换页崖。block swap 降低常驻峰值，**天然
-远离崖区**，在这条上是净正收益。
+The 190s hang recorded in PR #281 was a WDDM paging cliff near full load.
+Block swap lowers the resident peak, **naturally staying away from the
+cliff zone** — a net positive benefit here.
 
-## 4. 推理侧
+## 4. The inference side
 
-同样成立，且生态更成熟（ComfyUI `--lowvram` 的 partial load 本质就是它，粒度是
-module 而非 block）。但算式不同：
+The same logic applies here too, and the ecosystem is even more mature
+(ComfyUI's `--lowvram` partial load is essentially this, at module rather
+than block granularity). But the arithmetic differs:
 
-- **更便宜**：无激活、无优化器状态、无反向，纯单向 H2D。
-- **更贵**：扩散是 N 步循环，**每一步都要把整个模型搬一遍**。训练一步 = 2 遍；
-  推理 30 步 = 30 遍。总传输量被 step 数放大。
-- **杠杆更大**：推理显存几乎全是权重（batch=1 时激活可忽略），block swap 直接决定
-  「**能不能跑**」，而非「跑得舒不舒服」。
+- **Cheaper**: no activations, no optimizer state, no backward pass, purely
+  one-way H2D.
+- **More expensive**: diffusion is an N-step loop, and **every single step
+  requires moving the entire model**. Training's one step = 2 passes;
+  inference's 30 steps = 30 passes. Total transfer volume is amplified by
+  the step count.
+- **Higher leverage**: inference VRAM is almost entirely weights
+  (activations are negligible at batch=1), so block swap directly decides
+  "**whether it can run at all**," rather than "how comfortably it runs."
 
-对本仓的具体处境：32GB 上 K2 Generate 的 TE+DiT bf16 常驻超显存，当前靠
-`_should_offload_te` / `_should_yield_dit` 的模型级让位解决。若之后上更高分辨率或
-多 LoRA，DiT 自身驻留就是下一个瓶颈 —— 那时 DiT block swap 是同一把刀的自然延伸。
+For this repo's specific situation: on 32GB, K2 Generate's TE+DiT in bf16
+resident together exceed VRAM, currently solved by `_should_offload_te` /
+`_should_yield_dit`'s model-level yielding. If a higher resolution or
+multiple LoRAs are added later, the DiT's own residency becomes the next
+bottleneck — at that point, DiT block swap is a natural extension of the
+same tool.
 
-## 5. Gate-0 探针与实测结果
+## 5. Gate-0 probe and measured results
 
-`tools/block_swap_probe.py`。**在写任何实现代码之前必须先跑**。
+`tools/block_swap_probe.py`. **Must be run before writing any implementation
+code.**
 
-注意 Gate-0 在这里的语义**不是证伪门槛**：block swap 是「时间换显存」的确定性交易，
-不存在「不值得做」，只存在「对谁值得」（详见 §8.3）。探针的作用是**标定预期**并
-体检硬件。唯一仍具否决力的是 F 段的链路健康指标。
+Note that Gate-0's meaning here is **not a falsification threshold**: block
+swap is a deterministic trade of "time for VRAM" — there's no such thing as
+"not worth doing," only "worth it for whom" (see §8.3 for details). The
+probe's job is to **calibrate expectations** and check the hardware. The
+only thing that still carries veto power is section F's link-health metric.
 
-| 阶段 | 测什么 | 回答什么问题 |
+| Stage | What it measures | What question it answers |
 |---|---|---|
-| A 链路体检 | PCIe gen/width 实际 vs 最大、GPU/RAM 容量、replay 基线 | 本机链路是否已降级 |
-| B 带宽矩阵 | pinned/pageable × H2D/D2H × 多种 size；pin 分配耗时 | 有效带宽实测值 |
-| C 计算基准 | 真实 `SingleStreamBlock` 在真实 shape 下的前向/反向耗时 | `T_compute` |
-| D 遮蔽判据 | B/C 比值 → `blocks_to_swap` × (省显存, 加时间) 曲线 | 划不划算 |
-| E 端到端 | 真双 stream swap 循环 vs 全常驻循环的 wall clock（**前向口径**） | 预取是否真能遮蔽 |
-| F 稳定性 | 持续负载下温度/功耗/replay 增量/可用 RAM | §3.2 三条风险的实测 |
-| G 训练口径 | checkpoint + 反向逆序预取的完整一步，交错 A/B 对照 | 训练实际慢多少（B10） |
+| A link checkup | actual vs. maximum PCIe gen/width, GPU/RAM capacity, replay baseline | whether this machine's link is already degraded |
+| B bandwidth matrix | pinned/pageable × H2D/D2H × multiple sizes; pin allocation time | measured effective bandwidth |
+| C compute benchmark | forward/backward time of a real `SingleStreamBlock` at real shapes | `T_compute` |
+| D hiding criterion | the B/C ratio → the `blocks_to_swap` × (VRAM saved, time added) curve | whether it's worthwhile |
+| E end-to-end | wall-clock time for a real dual-stream swap loop vs. a fully-resident loop (**forward-only view**) | whether prefetch can actually hide the transfer |
+| F stability | temperature/power/replay delta/available RAM under sustained load | measured data for §3.2's three risks |
+| G training view | a full step with checkpoint + reverse-order backward prefetch, interleaved A/B comparison | how much slower training actually is (B10) |
 
-### 5.1 实测数据（2026-07-21，RTX 5090 32GB / PCIe 4.0 x16 / 37GB 可用 RAM）
+### 5.1 Measured data (2026-07-21, RTX 5090 32GB / PCIe 4.0 x16 / 37GB available RAM)
 
-**A 链路**：gen4 x16 满配（空闲时降 gen1 省电属正常），replay 基线 0。
+**A link**: gen4 x16 at full spec (dropping to gen1 while idle to save power
+is normal), replay baseline 0.
 
-**B 带宽**：pinned H2D **26.8 GB/s**（各 size 一致，16MB 起就跑满），pageable
-18.5–23 GB/s，**pinned 提速 1.45×**。pinned 分配 **59 ms / GB** —— 实现必须预分配
-复用，不能每步 alloc。
+**B bandwidth**: pinned H2D **26.8 GB/s** (consistent across sizes, saturated
+starting at 16MB), pageable 18.5-23 GB/s, **pinned is 1.45x faster**. Pinned
+allocation takes **59 ms/GB** — implementation must pre-allocate and reuse,
+not allocate per step.
 
-**C 规模与计算**（1024², batch 1, bf16, seq_len 4608 = text 512 + image 4096）：
+**C scale and compute** (1024², batch 1, bf16, seq_len 4608 = text 512 +
+image 4096):
 
-| 量 | 值 |
+| Quantity | Value |
 |---|---|
-| 单 block | 434.2M 参数 / **828 MB** |
-| 28 层合计 | **22.64 GB**（+ txtfusion/embed/last ≈ 25.8GB 总量，与 D2 记录吻合） |
-| 前向 | 29.1 ms |
-| 前向+反向 | 103.7 ms（反向段 ≈ 74.5 ms） |
+| single block | 434.2M params / **828 MB** |
+| 28-layer total | **22.64 GB** (+ txtfusion/embed/last ≈ 25.8GB total, matching D2's record) |
+| forward | 29.1 ms |
+| forward+backward | 103.7 ms (backward portion ≈ 74.5 ms) |
 
-**D 遮蔽判据**：`T_transfer` = 828MB ÷ 26.8GB/s = **30.2 ms**。
+**D hiding criterion**: `T_transfer` = 828MB ÷ 26.8GB/s = **30.2 ms**.
 
-| 口径 | 传输/计算比 | 判定 |
+| View | Transfer/compute ratio | Verdict |
 |---|---|---|
-| 前向（推理） | **1.04** | 临界，每 block 暴露 1.1 ms |
-| 反向段（训练） | **0.40** | 完全遮蔽 |
+| forward (inference) | **1.04** | marginal, each block exposes 1.1 ms |
+| backward portion (training) | **0.40** | fully hidden |
 
-→ 训练口径的**暴露**部分仅 1.1%。但这不是全部成本 —— 见下方 E 段测出的争用项。
+→ In the training view, the **exposed** portion is only 1.1%. But this isn't
+the whole cost — see the contention term found in section E below.
 
-**E 端到端**（前向口径 = 最坏情形，双 buffer + 独立 copy stream）：
+**E end-to-end** (forward-only view = the worst case, double buffer +
+independent copy stream):
 
-| 分辨率 | per_tensor | flat（连续 buffer） |
+| Resolution | per_tensor | flat (contiguous buffer) |
 |---|---|---|
-| 1024²（比 1.04） | +18.8% / +19.3% | +20.5% / +16.6% |
-| 1536²（比 ~0.42） | +18.5% | **+11.4%** |
+| 1024² (ratio 1.04) | +18.8% / +19.3% | +20.5% / +16.6% |
+| 1536² (ratio ~0.42) | +18.5% | **+11.4%** |
 
-三条结论：
+Three conclusions:
 
-- **§2.2 的分辨率推论验证成立** —— 比值越宽裕开销越低（1024² 约 19% → 1536² 约 11%）。
-- 存在一项**理论模型之外的额外成本**，扣掉暴露后仍剩：1024² 约 4.4 ms/block、
-  1536² 约 8.2 ms/block。**它随激活规模上升而变大，所以不是"固定开销"，而是
-  copy stream 的 DMA 写入与计算 kernel 争 HBM 带宽**（event 同步只占其中几十 μs）。
-  这是理论值（3.5%）与实测（19%）差距的真正来源。
-- flat 打平传输只在比值宽裕时（1536²）明显占优；在临界比下与逐张量拷贝无差别、
-  甚至互有胜负（噪声范围内）。**「打平成连续 buffer」不是万灵药**。
+- **§2.2's resolution corollary is validated** — the more headroom in the
+  ratio, the lower the overhead (1024² about 19% → 1536² about 11%).
+- There's **an extra cost outside the theoretical model**; after subtracting
+  the exposed portion, there's still: about 4.4 ms/block at 1024², about
+  8.2 ms/block at 1536². **It grows with activation size, so it isn't a
+  "fixed overhead" — it's the copy stream's DMA writes contending with the
+  compute kernel for HBM bandwidth** (event sync only accounts for a few
+  tens of μs of it). This is the actual source of the gap between the
+  theoretical value (3.5%) and the measured one (19%).
+- Flattening into a contiguous buffer only clearly wins when the ratio has
+  headroom (1536²); at the marginal ratio it's indistinguishable from
+  per-tensor copying, or even mixed results (within noise). **"Flattening
+  into a contiguous buffer" isn't a cure-all.**
 
-**G 训练口径端到端实测**（B10；gradient checkpointing + 反向逆序预取，底模 frozen
-= LoRA 场景。基线是同样 checkpoint 语义的全常驻）：
+**G training-view end-to-end measurement** (B10; gradient checkpointing +
+reverse-order backward prefetch, frozen base model = the LoRA scenario. The
+baseline is fully-resident with the same checkpoint semantics):
 
-| 分辨率 | 基线（抖动） | swap | 开销 | 每 block 额外 |
+| Resolution | baseline (jitter) | swap | overhead | extra per block |
 |---|---|---|---|---|
-| 1024² 第 1 次 | 920.3 ms（±0.6%） | 982.7 ms | **+6.8%** | 7.80 ms |
-| 1024² 第 2 次 | 912.8 ms（±1.0%） | 983.3 ms | **+7.7%** | 8.81 ms |
-| 1536² | 1963.0 ms（±0.3%） | 2013.9 ms | **+2.6%** | 8.48 ms |
+| 1024² 1st run | 920.3 ms (±0.6%) | 982.7 ms | **+6.8%** | 7.80 ms |
+| 1024² 2nd run | 912.8 ms (±1.0%) | 983.3 ms | **+7.7%** | 8.81 ms |
+| 1536² | 1963.0 ms (±0.3%) | 2013.9 ms | **+2.6%** | 8.48 ms |
 
-三条结论：
+Three conclusions:
 
-1. **训练口径实测 1024² 约 +7%、1536² 约 +2.6%**，优于此前 9.5% 的估算。基线自身
-   抖动仅 ±0.3–1.0%，数字可信。
-2. **每 block 额外时间是约 8 ms 的常数**（7.80 / 8.81 / 8.48），**与分辨率无关**；
-   百分比之所以在 1536² 下降，纯粹是基线计算量变大（2.25×）把它摊薄了。这修正了
-   §5.1-E 基于前向口径得出的「随激活规模上升」判断 —— 那是前向口径的表象，训练
-   口径下它是常数。也意味着**外推到全 28 层时开销比例不变**（每 block 常数）。
-3. 每个驻留窗口约 4 ms（8ms ÷ 2 个窗口），与 E 段前向口径在 1024² 测得的 4.4ms/窗口
-   互相印证。
+1. **Measured training-view overhead is about +7% at 1024² and +2.6% at
+   1536²**, better than the earlier estimate of 9.5%. The baseline's own
+   jitter is only ±0.3-1.0%, so the numbers are trustworthy.
+2. **The extra per-block time is a roughly constant 8 ms** (7.80 / 8.81 /
+   8.48), **independent of resolution**; the percentage dropping at 1536²
+   is purely because the baseline compute volume grows (2.25x), diluting it.
+   This corrects the "grows with activation size" judgment made from
+   §5.1-E's forward-only view — that was an artifact of the forward-only
+   view; in the training view, it's a constant. It also means **the overhead
+   ratio stays the same when extrapolated to the full 28 layers** (constant
+   per block).
+3. Each residency window is about 4 ms (8ms ÷ 2 windows), corroborating
+   section E's forward-only measurement of 4.4ms/window at 1024².
 
-> **方法论教训**：本段首版用「先测基线、再测 swap」的顺序测量，得到 **−2.2%** 的荒谬
-> 负开销 —— GPU 时钟状态在两条路径之间不同（先跑的那条在冷态未 boost）。改成
-> **交错 A/B**（两条路径同时驻留、逐轮交替计时）后才得到可复现的数字。任何
-> 「A 比 B 快但物理上不可能」的测量结果，先怀疑顺序效应。
+> **Methodological lesson**: the first version of this section measured
+> "baseline first, then swap" sequentially, yielding an absurd **-2.2%**
+> negative overhead — the GPU's clock state differed between the two runs
+> (the one run first was still cold, not yet boosted). Switching to
+> **interleaved A/B** (both paths kept resident simultaneously, timed in
+> alternating rounds) produced reproducible numbers. Any measurement result
+> of "A is faster than B, but that's physically impossible" should first be
+> suspected of an ordering effect.
 
-**F 硬件影响**（60s 持续负载，213 轮 × 8 block = **1704 次换入 ≈ 1.4 TB 传输**）：
+**F hardware impact** (60s of sustained load, 213 rounds × 8 blocks =
+**1704 swap-ins ≈ 1.4 TB transferred**):
 
-| 指标 | 结果 | 判定 |
+| Metric | Result | Verdict |
 |---|---|---|
-| PCIe replay 增量 | **0** | 链路零重传，§3.2 ② 通过 |
-| GPU 温度 | max 70°C / mean 64°C | 正常，无热压力 |
-| GPU 功耗 | max 497W / mean 484W | 与常规满载训练同量级，无异常尖峰 |
-| 可用内存漂移 | −99 MB | 噪声级，pinned 无泄漏 |
+| PCIe replay delta | **0** | zero link retransmissions, §3.2 ② passes |
+| GPU temperature | max 70°C / mean 64°C | normal, no thermal stress |
+| GPU power | max 497W / mean 484W | same order of magnitude as normal full-load training, no abnormal spikes |
+| Available-memory drift | −99 MB | noise-level, no pinned-memory leak |
 
-**→ §3 的硬件损耗担忧全部排除**：链路零错误、温度功耗无异常、内存无漂移。剩下的
-唯一真实风险仍是 §3.2 ① 的 pinned 内存预算（本次只 pin 6.5GB，未触及上限）。
+**→ All of §3's hardware-wear concerns are ruled out**: zero link errors, no
+abnormal temperature or power, no memory drift. The only remaining real risk
+is still §3.2 ①'s pinned-memory budget (only 6.5GB was pinned this run,
+nowhere near the cap).
 
-### 5.2 由实测数据推出的容量结论
+### 5.2 Capacity conclusions derived from the measured data
 
-K2 DiT bf16 总量 ≈ 25.8GB，其中 22.64GB 是可 swap 的 28 层 block：
+K2 DiT's total bf16 size ≈ 25.8GB, of which 22.64GB is the 28 swappable
+blocks:
 
-| blocks_to_swap | 常驻显存 | 实测训练开销（1024² / 1536²） | 意义 |
+| blocks_to_swap | resident VRAM | measured training overhead (1024² / 1536²) | significance |
 |---|---|---|---|
-| 0（现状） | 25.8 GB | 0% | 32GB 余量≈0（Phase 0 实测） |
-| 14 | 14.5 GB | ≈ 3.5% / 1.3% | 32GB 余量充裕；**24GB 可行** |
-| 28 | 3.2 GB | ≈ 7% / 2.6% | **16GB 理论可行** |
+| 0 (current) | 25.8 GB | 0% | 32GB has ≈0 headroom (Phase 0 measurement) |
+| 14 | 14.5 GB | ≈ 3.5% / 1.3% | plenty of headroom on 32GB; **24GB becomes feasible** |
+| 28 | 3.2 GB | ≈ 7% / 2.6% | **16GB theoretically feasible** |
 
-（每 block 额外时间是常数，所以开销与 `blocks_to_swap` 成正比、与总层数无关。）
+(The extra per-block time is constant, so overhead scales linearly with
+`blocks_to_swap`, independent of the total layer count.)
 
-即：block swap 把 K2 训练的显存下限从 32GB 拉到 24GB 甚至更低，而训练口径的时间
-代价在个位数百分比量级 —— 这正是 D2「未来下探 24GB 的唯一解锁是 fp8_scaled」当时
-未考虑到的第二条路，且**不付精度代价**。
+In other words: block swap pulls K2 training's VRAM floor down from 32GB to
+24GB or even lower, while the training-view time cost is in the single-digit
+percentage range — this is exactly the second path D2's "the only unlock
+for going below 24GB in the future is fp8_scaled" hadn't accounted for at
+the time, and it **costs no precision**.
 
-### 5.3 探针的已知局限
+### 5.3 Known limitations of the probe
 
-1. ~~E 段只测前向，训练口径未端到端实测~~ —— **已由 G 段补齐**（B10）。G 段测的是
-   时序而非数值正确性：buffer 权重被轮转覆盖，梯度无意义；且 LoRA 参数（常驻、不
-   参与 swap）的计算量未计入，其相对底模可忽略但非零。
-2. 只覆盖 krea2。Anima 的 Block 需要 rope/adaln_lora 一串预备张量，构造成本高而收益
-   低（24GB 已够用），未纳入。
-3. 未测 pinned 内存逼近系统上限时的行为（§3.2 ① 的真实风险面）。
-4. 与 `compile_blocks` 共存未测 —— 但按 B5 判定当前无实现，不构成阻塞。
+1. ~~Section E only measures forward pass; the training view hasn't been
+   measured end-to-end~~ — **now filled in by section G** (B10). Section G
+   measures timing, not numerical correctness: buffer weights get
+   overwritten by rotation, making the gradients meaningless; and LoRA
+   parameters' compute (resident, not participating in swap) isn't counted —
+   negligible but not zero relative to the base model.
+2. Only covers krea2. Anima's Block needs a string of pre-built tensors for
+   rope/adaln_lora, making it expensive to construct with low payoff (24GB
+   is already sufficient) — not included.
+3. Behavior when pinned memory approaches the system's limit hasn't been
+   measured (§3.2 ①'s actual risk surface).
+4. Coexistence with `compile_blocks` hasn't been measured — but per B5,
+   there's currently no implementation of it, so it's not a blocker.
 
-## 6. 实现落点（若 Gate-0 通过）
+## 6. Implementation landing point (if Gate-0 passes)
 
-按 B3，机制必须**从一开始就 family 无关**：包住一个 `nn.ModuleList`、从外部提供预取
-迭代器，不要求改模型内部代码（理由见 §7.1）。
+Per B3, the mechanism must be **family-agnostic from the start**: wrapping
+an `nn.ModuleList`, providing a prefetch iterator from outside, without
+requiring changes to the model's internal code (reasoning in §7.1).
 
-- Krea2（先行）：`modeling/krea2/krea2_modeling.py` `SingleStreamDiT.forward:513` 的
-  block 循环；`01-code-layout.md:189` 已为 `families/krea2/loader.py` 预留
-  "fp8/block-swap 兜底挂点"。**该文件对 ComfyUI 有逐字 parity 要求，改动要克制。**
-- Anima（后补）：[`forward.py:31`](../../runtime/training/families/anima/forward.py)
-  的 block 循环换一行迭代器。
-- 推理侧（B4 同期）：`runtime/anima_daemon.py` 的模型栈，与现有
-  `_should_yield_dit` / `_should_offload_te` 的模型级让位分层协作 —— block swap 管
-  单模型内部，`vram_policy` 管模型之间。
-- 护栏：`training/sysmem.py` 需要新增 **pinned 专用预算**（§3.2 ① / §8.1），不能复用
-  `check_load_budget` 的 mmap 语义（那套假设内存可回收，pinned 不可）。
-- 配置：`blocks_to_swap` 字段元数据一处定义（走 `config_rules.py` 双端强制，见
-  `config-pipeline-refactor.md`）。字段名无单位后缀问题（"blocks" 本身即单位）。
-- UI：按 B9 只给提示不给推荐数字。
+- Krea2 (first): the block loop in
+  `modeling/krea2/krea2_modeling.py` `SingleStreamDiT.forward:513`;
+  `01-code-layout.md:189` has already reserved an "fp8/block-swap fallback
+  hook" for `families/krea2/loader.py`. **This file has a byte-for-byte
+  parity requirement with ComfyUI, so changes must be minimal.**
+- Anima (later): swap out one line for an iterator in the block loop in
+  [`forward.py:31`](../../runtime/training/families/anima/forward.py).
+- Inference side (concurrent with B4): `runtime/anima_daemon.py`'s model
+  stack, layered together with the existing `_should_yield_dit` /
+  `_should_offload_te` model-level yielding — block swap manages inside a
+  single model, `vram_policy` manages between models.
+- Guardrails: `training/sysmem.py` needs a new **pinned-specific budget**
+  (§3.2 ① / §8.1), and can't reuse `check_load_budget`'s mmap semantics
+  (which assumes memory is reclaimable — pinned memory isn't).
+- Config: `blocks_to_swap` field metadata defined in one place (enforced on
+  both ends via `config_rules.py`, see `config-pipeline-refactor.md`). The
+  field name has no unit-suffix issue ("blocks" is itself the unit).
+- UI: per B9, gives hints only, no recommended numbers.
 
-## 7. 决策（2026-07-21 用户裁定第一轮）
+## 7. Decision (2026-07-21, user's first round of ruling)
 
-| # | 决策 | 备注 |
+| # | Decision | Notes |
 |---|---|---|
-| **B2** | 旋钮 = **`blocks_to_swap` 整数**，不加 `vram_policy` 档 | 与 musubi/ai-toolkit/diffusion-pipe 生态一致；用户可控优于自动推算 |
-| **B3** | **先上 K2，验证成熟后再上 Anima** | 前提是迁移代价可控，见 §7.1 判定：两族 block 循环结构完全一致，机制从一开始就按 family 无关设计，Anima 后补 = 接线 |
-| **B4** | **推理侧同期做** | §4 杠杆更大（决定「能不能跑」而非「快不快」） |
-| **B7** | **fp8 + block swap 同一刀** | 目标明确 = K2 fp8 训练门槛下探 **12–16GB**；§2.2 已论证正协同（fp8 减半传输字节而计算量不减，比值更宽裕） |
-| **B9** | 上限**只给提示、不给精确推荐数字** | 用户裁定：不同显卡的显存、PCIe 代数、DRAM 速率差异过大，精确数字会误导 |
-| **B5** | `compile_blocks` 冲突 —— **当前不存在，不设计** | 查证：主线只有能力位（`FAMILY_CAPABILITIES` / `KNOWN_CAPABILITIES` 的词表占坑），**无配置字段、无 `torch.compile` 代码**；实现在未合的 `pr257-review` 分支。若 #257 先合再回来处理 |
+| **B2** | The knob = **an integer `blocks_to_swap`**, no `vram_policy` tier | consistent with the musubi/ai-toolkit/diffusion-pipe ecosystem; user control beats automatic estimation |
+| **B3** | **Ship K2 first, validate maturity, then add Anima** | conditional on migration cost being manageable, per §7.1's determination: both families' block-loop structures are fully identical, the mechanism is designed family-agnostic from the start, so Anima later = just wiring |
+| **B4** | **The inference side is done at the same time** | §4's leverage is higher (it decides "can it run at all" rather than "how fast") |
+| **B7** | **fp8 + block swap, one and the same effort** | the clear goal = pulling K2's fp8 training floor down to **12-16GB**; §2.2 already established the positive synergy (fp8 halves transfer bytes without halving compute, giving a wider ratio) |
+| **B9** | The upper limit **gives hints only, no precise recommended number** | user's ruling: VRAM, PCIe generation, and DRAM speed differ too much across GPUs, and a precise number would mislead |
+| **B5** | The `compile_blocks` conflict — **doesn't currently exist, not designed for** | verified: the main line only has a capability bit (a placeholder entry in `FAMILY_CAPABILITIES` / `KNOWN_CAPABILITIES`'s vocabulary), **no config field, no `torch.compile` code**; the implementation lives on the unmerged `pr257-review` branch. Revisit if #257 merges first |
 
-### 7.1 B3 的迁移代价判定（支撑「先 K2 后 Anima」）
+### 7.1 B3's migration-cost determination (supporting "K2 first, then Anima")
 
-两族的 block 循环结构**完全同构**：
+The two families' block-loop structures are **fully isomorphic**:
 
 ```
 Anima  runtime/training/families/anima/forward.py:31   for block in model.blocks:  x = block(x, ...)
 Krea2  modeling/krea2/krea2_modeling.py:513            for block in self.blocks:   h = block(h, ...)
 ```
 
-只要机制抽成 family 无关的「包住一个 `nn.ModuleList` + 提供预取迭代器」组件（而非
-写死 krea2 类型），Anima 后补 = 在它的循环里换一行迭代器，几十行 + 测试。
+As long as the mechanism is abstracted into a family-agnostic component
+("wrap an `nn.ModuleList` + provide a prefetch iterator," rather than
+hardcoding the krea2 type), adding Anima later = swapping in one line for an
+iterator in its loop — a few dozen lines plus tests.
 
-**唯一不对称、需要在设计时就处理好的点**：两族的**结构定义都在 `modeling/<family>/`**
-（按层切架构，`01-code-layout.md` §2.1：`modeling` 结构定义 → `runtime/training/families`
-行为适配 → `studio/services/models/families` 资产清单，依赖单向），但**逐 block 循环
-的位置不同**：
+**The one asymmetry that needs to be handled at design time**: both
+families' structural definitions live in `modeling/<family>/` (layered by
+architecture, per `01-code-layout.md` §2.1: `modeling` = structural
+definition → `runtime/training/families` = behavior adaptation →
+`studio/services/models/families` = asset manifest, a one-way dependency),
+but **the per-block loop itself lives in different places**:
 
-| 族 | block 循环在哪 | 为什么 |
+| Family | Where the block loop lives | Why |
 |---|---|---|
-| Krea2 | `modeling/krea2/krea2_modeling.py:513`，**结构定义层内部**，`use_checkpoint` 是模型自带参数 | 该文件是我们按 ComfyUI 命名自己写的，可以直接内建开关 |
-| Anima | `runtime/training/families/anima/forward.py:31`，**行为适配层**，手工展开模型内部 API 重写了一遍前向 | `modeling/anima/cosmos_predict2_modeling.py` 是移植的外部 Cosmos 主干（2068 行），其 `forward` 不提供 checkpoint 开关，且要保持与上游可比对，所以在外面展开而非改它 |
+| Krea2 | `modeling/krea2/krea2_modeling.py:513`, **inside the structural-definition layer**; `use_checkpoint` is a parameter native to the model | this file was written by us following ComfyUI's naming, so the switch can be built in directly |
+| Anima | `runtime/training/families/anima/forward.py:31`, **the behavior-adaptation layer**, a hand-unrolled rewrite of the model's internal API forward pass | `modeling/anima/cosmos_predict2_modeling.py` is a ported external Cosmos backbone (2068 lines) whose `forward` provides no checkpoint switch, and needs to stay comparable with upstream — so it's unrolled outside rather than modified in place |
 
-因此组件必须能从**外部**包住一个 `nn.ModuleList` 而不要求改模型内部代码 —— 这样
-Krea2 侧不必动 parity 敏感的 `modeling/` 文件，Anima 侧也不必复制一份逻辑（后者
-就是 `02-ecosystem-survey.md` §7 批评 SimpleTuner 的按族扇出）。
+So the component must be able to wrap an `nn.ModuleList` **from outside**
+without requiring changes to the model's internal code — this way, the
+Krea2 side never has to touch the parity-sensitive `modeling/` files, and
+the Anima side never has to duplicate the logic (the latter being exactly
+the per-family fan-out that `02-ecosystem-survey.md` §7 criticized
+SimpleTuner for).
 
-## 8. 第二轮裁定与剩余问题
+## 8. Second-round ruling and remaining questions
 
-| # | 决策 | 备注 |
+| # | Decision | Notes |
 |---|---|---|
-| **B6** | pinned 分配失败 = **报错，不静默降级** | 用户裁定：既然失败时机可确定（§8.1：只发生在启动时的分配那一刻），就该明确报错。落 DomainError + 可操作文案，与 `check_load_budget` 两条护栏同款 |
-| **B8** | HBM 争用项**不压** | 见 §8.2 三条理由；靠 B7 的 fp8 减半传输量顺路解决 |
-| **B10** | **下一步 = 先补训练口径端到端实测** | 用户裁定。**已完成** —— 探针 G 段，实测 1024² +7% / 1536² +2.6%（§5.1 G） |
-| **B1'** | **Gate-0 门槛不设否决语义** | 见 §8.3 —— 这不是「值不值得做」的赌，是「用时间换能不能跑」的确定性交易 |
+| **B6** | Pinned allocation failure = **raise an error, don't silently degrade** | user's ruling: since the failure timing is deterministic (§8.1: it can only happen at the startup-time allocation), it should raise an explicit error. Lands as a DomainError + actionable copy, matching `check_load_budget`'s two existing guardrails |
+| **B8** | The HBM contention term **isn't squeezed further** | see §8.2's three reasons; solved incidentally by B7's fp8 halving the transfer volume |
+| **B10** | **Next step = measure the training-view end-to-end first** | user's ruling. **Done** — the probe's section G, measured +7% at 1024² / +2.6% at 1536² (§5.1 G) |
+| **B1'** | **Gate-0's threshold carries no veto semantics** | see §8.3 — this isn't a bet on "is it worth doing," it's a deterministic trade of "time for whether it can run at all" |
 
-### 8.3 门槛数字到底决定什么（B1' 的由来）
+### 8.3 What the threshold number actually decides (where B1' comes from)
 
-用户提问：「这个门槛数字决定了是为了什么，如果超出了这个时间就不做吗？」—— 这个
-问题暴露了 Gate-0 语义被套错了模板。
+User's question: "What is this threshold number actually deciding — if it
+goes over that time, do we just not do it?" — this question exposed that
+Gate-0's semantics had been mapped onto the wrong template.
 
-LPL 那次的 Gate-0 是**证伪门槛**：新算法效果不明，不达标就没有存在价值，该 park。
-block swap 不是这种东西 —— 它是**确定性交易**：拿走一段时间，换回一段显存，两边
-都是可测量的已知量。对不同用户，这笔交易的价值天差地别：
+The LPL project's Gate-0 was a **falsification threshold**: a new
+algorithm's effectiveness was unknown, and if it didn't meet the bar, it had
+no reason to exist and should be parked. Block swap isn't that kind of
+thing — it's a **deterministic trade**: take away some time, get back some
+VRAM, both sides being measurable known quantities. For different users,
+this trade's value is wildly different:
 
-| 用户显存 | 不开 | 开（慢 ~10%） | 门槛的意义 |
+| User's VRAM | off | on (~10% slower) | what the threshold means |
 |---|---|---|---|
-| 32GB+ | 正常训练 | 纯亏 | 默认**关** |
-| 24GB | **完全跑不了** | 能跑 | 慢 30% 也必须开 |
-| 12–16GB（B7 目标） | **完全跑不了** | 能跑 | 同上 |
+| 32GB+ | trains fine | pure loss | default **off** |
+| 24GB | **can't run at all** | can run | must be on even at 30% slower |
+| 12-16GB (the B7 target) | **can't run at all** | can run | same as above |
 
-**对跑不了的用户，任何百分比都优于「跑不了」。** 所以超出门槛不该导致「不做」。
+**For a user who can't run at all, any percentage is better than "can't
+run."** So exceeding the threshold shouldn't mean "don't do it."
 
-门槛数字真正该决定的只有两件事，都不涉及否决：
+What the threshold number should actually decide is only two things, and
+neither involves a veto:
 
-1. **默认值与自动建议**：训练开销若稳定 < 15%，显存不足时可以主动建议开启；> 30%
-   则只在用户显式开启时生效，不主动推荐。
-2. **UI 提示的措辞强度**（B9 只给提示不给数字的前提下）：低于门槛说「会略微变慢」，
-   高于门槛说「会明显变慢」。
+1. **The default value and auto-suggestions**: if training overhead stably
+   stays < 15%, it can be actively suggested when VRAM is insufficient;
+   if > 30%, it only takes effect when the user explicitly turns it on,
+   never actively recommended.
+2. **The strength of the UI's wording** (given B9's "hints only, no
+   numbers"): below the threshold, say "will slow down slightly"; above it,
+   say "will slow down noticeably."
 
-因此 §5 里「不达门槛则方案直接否决」的表述已作废，改为标定预期用。**唯一仍具否决
-力的是 F 段的硬件健康指标**（replay 持续增长 = 链路有问题，那是真该停）。
+So §5's earlier wording, "the approach is directly rejected if it doesn't
+meet the threshold," has been voided, and is now used only for calibrating
+expectations. **The only thing that still carries veto power is section F's
+hardware-health metrics** (sustained replay growth = a link problem, which
+genuinely warrants stopping).
 
-### 8.1 pinned 分配失败的时机与恢复（回答 B6 的前置问题）
+### 8.1 Timing and recovery for pinned allocation failure (answering B6's prerequisite question)
 
-- **失败发生在分配那一刻，不会在运行中途随机出现** —— `cudaHostAlloc` 要么拿到页锁定
-  内存要么立即返回 `cudaErrorMemoryAllocation`（PyTorch 抛 `RuntimeError`）。一旦分配
-  成功，这块内存就锁定归本进程所有，运行期不会被回收、不会"用着用着没了"。
-- **但同一份配置这次成功下次失败是可能的**，因为成败取决于分配时刻的系统可用物理
-  内存（另一个训练/打标进程、浏览器都会影响）。这与本仓 `check_load_budget` 面对的
-  是同一类不确定性。
-- **由此得出实现纪律**：**启动时一次性预分配全部 pinned buffer**，不要按需分配。
-  这样失败只可能发生在训练启动阶段 —— 可预测、可 fail-fast、可给出明确错误。代价是
-  启动多花约 `59ms × GB`（§5.1 B），22.6GB 约 1.3 秒，可接受。
-- **自动恢复**：技术上可行（退回 pageable 慢 1.45×，或减少 `blocks_to_swap` 重试）。
-  但静默降级会让用户拿到一个「莫名其妙慢了一半」的训练 —— 与
-  `feedback_no_silent_magic_protection` 的纪律冲突。倾向：**DomainError 明确失败 +
-  错误文案给出可操作建议**（关掉其他占内存的应用 / 调小 `blocks_to_swap`），与
-  `check_load_budget` 现有的两条护栏文案同款。待用户拍板。
+- **The failure happens at the moment of allocation, not randomly mid-run**
+  — `cudaHostAlloc` either gets page-locked memory or immediately returns
+  `cudaErrorMemoryAllocation` (PyTorch raises a `RuntimeError`). Once
+  allocation succeeds, that memory is locked and owned by this process for
+  good — it won't be reclaimed mid-run, and won't "disappear while in use."
+- **But the same config can succeed this time and fail next time**, because
+  success depends on the system's available physical memory at the moment
+  of allocation (another training/tagging process, or even the browser, can
+  affect it). This is the same kind of uncertainty `check_load_budget`
+  already deals with.
+- **This leads to an implementation discipline**: **pre-allocate all pinned
+  buffers up front at startup**, don't allocate on demand. This way,
+  failure can only happen during the training-startup phase — predictable,
+  fail-fast, and able to give a clear error. The cost is startup taking
+  roughly `59ms × GB` longer (§5.1 B); at 22.6GB that's about 1.3 seconds,
+  acceptable.
+- **Automatic recovery**: technically possible (fall back to pageable, 1.45x
+  slower, or reduce `blocks_to_swap` and retry). But silently degrading
+  would leave the user with a training run that's "mysteriously about half
+  as fast" for no apparent reason — conflicting with the
+  `feedback_no_silent_magic_protection` discipline. Leaning toward: **an
+  explicit DomainError failure + error copy with actionable suggestions**
+  (close other memory-hungry applications / reduce `blocks_to_swap`),
+  matching `check_load_budget`'s existing two guardrails' copy. Pending the
+  user's final call.
 
-### 8.2 HBM 争用项要不要继续压（回答 B8）
+### 8.2 Whether to keep squeezing the HBM contention term (answering B8)
 
-**相对影响**（1024²，全 28 层 swap）：单步 2.90s → 3.18s。一次 2000 步的训练从约
-97 分钟变成约 106 分钟，**多 9 分钟**，换来 22.6GB 显存和「24GB 卡能训 K2」。
+**Relative impact** (1024², full 28-layer swap): per-step time goes from
+2.90s → 3.18s. A 2000-step training run goes from about 97 minutes to about
+106 minutes, **9 minutes more**, in exchange for 22.6GB of VRAM and "a 24GB
+card can train K2."
 
-**建议不压**，三条理由：
+**Recommendation: don't squeeze further**, for three reasons:
 
-1. 争用的物理来源是 DMA 写入与计算 kernel 抢 HBM 带宽，**不是可以靠调度消除的开销**。
-   加 buffer（3+ 轮转）解决的是抖动不是争用，而且每个 buffer 多占 828MB —— 直接抵消
-   收益。copy stream 优先级影响 SM 调度，对 DMA 引擎无效。两条最便宜的招大概率无效。
-2. 唯一真正有效的方向是**减少传输字节**，而那正是 B7 已经决定要做的 fp8 —— 传输量
-   减半，争用同比例下降。**顺路解决，不需要单开一条优化线**。
-3. 维护代价不对称：分片传输重叠会把 swap 从「一次 `copy_`」变成一个状态机，还要处理
-   与 checkpoint 重算的交互。复杂度是跃升式的，而收益上限只有几个百分点。
+1. The physical source of the contention is DMA writes competing with the
+   compute kernel for HBM bandwidth — **it's not overhead that scheduling
+   can eliminate**. Adding buffers (3+ rotation) addresses jitter, not
+   contention, and each buffer costs an extra 828MB — directly eating into
+   the benefit. Copy-stream priority affects SM scheduling, but has no
+   effect on the DMA engine. The two cheapest tricks are both likely
+   ineffective.
+2. The only genuinely effective direction is **reducing transfer bytes**,
+   and that's exactly what B7 has already decided to do with fp8 — halving
+   the transfer volume drops contention proportionally. **Solved
+   incidentally, no need to open a separate optimization track.**
+3. Asymmetric maintenance cost: overlapping chunked transfers would turn
+   swap from "a single `copy_`" into a state machine, and would also need
+   to handle interaction with checkpoint recomputation. The complexity jump
+   is a step-change, while the payoff ceiling is only a few percentage
+   points.
 
-### 8.4 第三轮裁定（进入实现）
+### 8.4 Third-round ruling (moving into implementation)
 
-| # | 决策 | 备注 |
+| # | Decision | Notes |
 |---|---|---|
-| **B11** | **默认值 = 0（关闭）**，暂不做自动建议 | 用户裁定：等真实实现并训过 LoRA、有实际体验后再定默认策略。门槛数字同步搁置（B1' 已去除其否决语义，现在连"定默认值"这个用途也推后） |
-| **B12** | 项目目标 = **fp8 + swap 在 16GB / 12GB 消费级卡上稳定跑 K2 LoRA 训练** | 用户明确的最大期望。这是验收标准，不是"能跑就行" —— 强调**稳定** |
+| **B11** | **Default value = 0 (off)**, no auto-suggestion for now | user's ruling: decide the default policy after the real implementation has actually trained a LoRA and there's real-world experience. The threshold number is likewise deferred (B1' already removed its veto semantics, and now even "setting the default" is deferred too) |
+| **B12** | Project goal = **fp8 + swap running K2 LoRA training stably on 16GB / 12GB consumer cards** | the user's explicit maximum expectation. This is the acceptance criterion, not just "it runs" — emphasizing **stability** |
 
-## 9. 实现设计
+## 9. Implementation design
 
-### 9.1 必须原地换 `param.data`，不能用 buffer 轮转（探针与实现的关键差异）
+### 9.1 Must swap `param.data` in place, can't use buffer rotation (the key difference between the probe and the implementation)
 
-探针 E/G 段用「2 个预留 block 实例作为 buffer 轮转」测时序。**真实实现不能这么做**：
+Probe sections E/G used "2 reserved block instances as a rotating buffer" to
+measure timing. **The real implementation can't do this**:
 
-LyCORIS `apply_to()`（[`utils/lycoris_adapter.py:157`](../../utils/lycoris_adapter.py)）创建的
-LoRA 模块**持有原 block 内 Linear 的引用**并包住它的 forward（bypass 模式下是
-`org_forward(x) + lora_up(lora_down(x))`）。若前向走的是 buffer 实例，就**完全绕过了
-LoRA** —— 训练会静默地什么都没学到。
+LyCORIS's `apply_to()` ([`utils/lycoris_adapter.py:157`](../../utils/lycoris_adapter.py))
+creates LoRA modules that **hold a reference to the original block's Linear
+layers** and wrap its forward (in bypass mode, it's
+`org_forward(x) + lora_up(lora_down(x))`). If the forward pass runs against
+a buffer instance instead, it would **completely bypass LoRA** — training
+would silently learn nothing.
 
-因此实现取**原地换**：module 对象始终不变，只切换每个 parameter 的 `.data` 指向。
+So the implementation takes an **in-place swap** approach: the module
+object itself never changes; only each parameter's `.data` pointer is
+switched.
 
-| | buffer 轮转（探针用） | 原地换 `param.data`（实现用） |
+| | buffer rotation (used by the probe) | in-place `param.data` swap (used by the implementation) |
 |---|---|---|
-| LoRA 兼容 | **破坏**（前向绕过 LoRA 模块） | 兼容（module 身份不变） |
-| fp8 `weight_scale` | **错配**（非持久 buffer 绑在 module 上，不随权重轮转） | **自动正确**（module 不变，scale 一直配对） |
-| 时序特征 | 与实现等价（传输量、同步模式相同） | —— |
+| LoRA compatibility | **broken** (forward bypasses the LoRA module) | compatible (module identity unchanged) |
+| fp8 `weight_scale` | **mismatched** (a non-persistent buffer bound to the module, doesn't rotate with the weights) | **automatically correct** (module never changes, scale stays paired) |
+| timing characteristics | equivalent to the implementation (same transfer volume, same sync pattern) | — |
 
-探针测出的性能数字仍然有效（时序等价），但**代码形态不可照搬**。
+The performance numbers measured by the probe remain valid (timing is
+equivalent), but **the code shape can't be copied as-is**.
 
-顺带记一条：fp8 的 `weight_scale` 由 `patch_fp8_linears` 注册为**非持久 buffer**
-（不进 `state_dict`）。任何基于 `state_dict()` 做搬运的设计都会漏掉它 —— 原地换
-天然避开这个坑，但若将来有人改回 state_dict 路线，这是第一个会踩的雷。
+Worth noting in passing: fp8's `weight_scale` is registered by
+`patch_fp8_linears` as a **non-persistent buffer** (not part of
+`state_dict`). Any design that moves things around based on `state_dict()`
+would miss it — the in-place swap naturally avoids this pitfall, but if
+anyone ever switches back to a state_dict-based approach, this is the first
+thing they'd trip on.
 
-### 9.2 分刀
+### 9.2 Cut breakdown
 
-1. ✅ **刀 1（core）**：`runtime/training/block_swap.py` 的 `PinnedBlockSwap` + 单测。
-2. ✅ **刀 2（K2 接线）**：能力位 + `blocks_to_swap` 字段（默认 0）+ pinned 预算护栏
-   + loader/family/phases 接线。
-3. 🔄 **刀 3（fp8 叠加 + 12/16GB 验收）**：B7/B12。代码侧完成（fp8 组合已端到端
-   验证、预算折扣、可观测性），**真机验收待用户的 16GB/12GB 卡**。
-4. ✅ **刀 4（推理侧接线）**：B4 欠账已清偿，见 §9.6。
+1. ✅ **Cut 1 (core)**: `PinnedBlockSwap` in `runtime/training/block_swap.py`
+   + unit tests.
+2. ✅ **Cut 2 (K2 wiring)**: capability bit + `blocks_to_swap` field
+   (default 0) + pinned-budget guardrail + loader/family/phases wiring.
+3. 🔄 **Cut 3 (fp8 stacking + 12/16GB acceptance)**: B7/B12. The code side is
+   done (fp8 combination validated end-to-end, budget discount, observability),
+   **real-hardware acceptance pending the user's 16GB/12GB card**.
+4. ✅ **Cut 4 (inference-side wiring)**: the B4 debt has been repaid, see §9.6.
 
-Anima 接线按 B3 留到 K2 验证成熟之后。
+Anima wiring is deferred until after K2 has been validated as mature, per B3.
 
-### 9.5 显存预算必须折扣换出部分（刀 3 修的真问题）
+### 9.5 The VRAM budget must discount the swapped-out portion (the real bug cut 3 fixed)
 
-`check_load_budget` 按权重文件全尺寸预算显存。开 swap 后 DiT 不全上卡，**16GB 卡设
-`blocks_to_swap=28` 会被这个护栏按「完整模型 25.8GB 装不下」误拒**，而实际常驻只有
-3.2GB —— B12 的目标会被自家护栏挡死。
+`check_load_budget` budgets VRAM using the weight file's full size. With
+swap on, the DiT doesn't fully load onto the GPU, and **a 16GB card setting
+`blocks_to_swap=28` would be falsely rejected by this guardrail as "the
+full 25.8GB model doesn't fit,"** while the actual resident amount is only
+3.2GB — B12's goal would be blocked by its own guardrail.
 
-已加 `vram_discount_bytes`：**只折扣显存侧**，RAM 侧照算（换出层仍占内存，且是锁定
-的，由 `check_pinned_budget` 单独把关）。折扣量由 family 报告
-（`Krea2Family.estimate_swapped_bytes` → meta 模型数参数，不读盘不占显存）：
-14 层 → 11.32GB、28 层 → 22.64GB，与 §5.1 探针实测吻合。
+`vram_discount_bytes` has been added: it **only discounts the VRAM side**,
+the RAM side is computed as before (swapped-out layers still occupy memory,
+and it's locked memory, separately gated by `check_pinned_budget`). The
+discount amount is reported by the family
+(`Krea2Family.estimate_swapped_bytes` → the meta model's parameter count,
+no disk reads, no VRAM used): 14 layers → 11.32GB, 28 layers → 22.64GB,
+matching §5.1's probe measurements.
 
-### 9.5b 首次真机运行（2026-07-21，5090 32GB，fp8 底模 + `blocks_to_swap=14`）
+### 9.5b First real-hardware run (2026-07-21, 5090 32GB, fp8 base model + `blocks_to_swap=14`)
 
-| 时点 | torch alloc | reserved | 全卡 |
+| Point in time | torch alloc | reserved | whole card |
 |---|---|---|---|
-| DiT 加载后 | 6.82 GB | 6.92 GB | 8.62 GB |
-| swap 挂载后（LoRA 已注入） | 7.85 GB | 7.96 GB | 9.67 GB |
-| 采样**前**（= 训练步跑完的状态） | 8.9 GB | **16.0–16.4 GB** | **19.4–19.9 GB** |
-| 采样**后**（`empty_cache` 之后） | 8.9 GB | 9.2 GB | 12.7–12.8 GB |
+| after DiT load | 6.82 GB | 6.92 GB | 8.62 GB |
+| after swap attaches (LoRA already injected) | 7.85 GB | 7.96 GB | 9.67 GB |
+| **before** sampling (= state after the training step finishes) | 8.9 GB | **16.0-16.4 GB** | **19.4-19.9 GB** |
+| **after** sampling (after `empty_cache`) | 8.9 GB | 9.2 GB | 12.7-12.8 GB |
 
-读数要点：
+Reading notes:
 
-1. **峰值来自训练步，不是采样。** 「采样前」那次读数在 `empty_cache` 之前，反映的是
-   训练步累积的 allocator 状态；采样本身很便宜（TE 已释放、DiT 已换出，采样期
-   12.8GB）。此前基于前向口径的直觉判断（以为采样是尖峰）与实测相反。
-2. **决定「这张卡够不够」的是 `alloc` 不是 `reserved`。** alloc 全程稳在 8.9GB，
-   reserved 涨到 16.4GB —— 差的 7.5GB 是多 bucket 形状造成的 allocator 保留段。
-   32GB 卡上 allocator 乐得多留；小卡上它会回收复用，不会因此 OOM。
-   **真实需求 ≈ alloc 8.9GB + CUDA context ≈ 10.4GB** → 16GB 有余量，12GB 需
-   `blocks_to_swap` 推到更高。
-3. 数字自洽：`pinned 5.66GB` 是 fp8 实际值（bf16 的一半）；挂载后 alloc +1.03GB
-   = LoRA 264 模块 + 2 个 GPU 槽（fp8 单块 0.4GB）。
-4. **这次运行抓出 §9.5 折扣的方向性 bug**（按 dtype 字节折扣在 fp8 下把护栏折扣
-   穿），已改为按参数比例。
+1. **The peak comes from the training step, not sampling.** The "before
+   sampling" reading was taken before `empty_cache`, reflecting the
+   allocator state accumulated by the training step; sampling itself is
+   cheap (TE has already been released, DiT is already swapped out,
+   sampling uses 12.8GB). This contradicts the earlier intuition based on
+   the forward-only view (which assumed sampling was the spike).
+2. **What decides "is this card enough" is `alloc`, not `reserved`.**
+   `alloc` holds steady at 8.9GB throughout, while `reserved` climbs to
+   16.4GB — the 7.5GB gap is allocator-reserved segments from multiple
+   bucket shapes. On a 32GB card, the allocator happily holds onto extra
+   memory; on a smaller card it would reclaim and reuse it, not OOM because
+   of this. **The real requirement ≈ alloc 8.9GB + CUDA context ≈ 10.4GB**
+   → 16GB has headroom, 12GB needs `blocks_to_swap` pushed higher.
+3. The numbers are self-consistent: `pinned 5.66GB` is the real fp8 value
+   (half of bf16); after attaching, alloc +1.03GB = 264 LoRA modules + 2 GPU
+   slots (0.4GB per fp8 block).
+4. **This run caught a directional bug in §9.5's discount** (discounting by
+   dtype byte count broke through the guardrail's discount under fp8),
+   which has been changed to discount by parameter ratio instead.
 
-### 9.5c 全量换出实测（同机，fp8 底模 + `blocks_to_swap=28`）—— B12 达成
+### 9.5c Full swap-out measurement (same machine, fp8 base model + `blocks_to_swap=28`) — B12 achieved
 
-| 读数点 | 14 层 | **28 层** |
+| Reading point | 14 layers | **28 layers** |
 |---|---|---|
-| DiT 加载后 alloc | 6.82 GB | **1.16 GB** |
-| 训练开始前 alloc | 7.85 GB | **2.19 GB** |
-| 稳态 alloc | 8.9 GB | **2.8 GB** |
-| **训练步峰值** | — | **8.4 GB** |
-| **采样期峰值** | — | **7.1 GB** |
-| 全卡（采样前） | 19.9 GB | **13.4 GB** |
+| alloc after DiT load | 6.82 GB | **1.16 GB** |
+| alloc before training starts | 7.85 GB | **2.19 GB** |
+| alloc at steady state | 8.9 GB | **2.8 GB** |
+| **training step peak** | — | **8.4 GB** |
+| **sampling-period peak** | — | **7.1 GB** |
+| whole card (before sampling) | 19.9 GB | **13.4 GB** |
 | pinned | 5.66 GB | **11.32 GB** |
 
-**容量判决**（本机 CUDA context ≈ 1.7GB，由静态点 `全卡 3.98 − reserved 2.27` 得出）：
+**Capacity verdict** (this machine's CUDA context ≈ 1.7GB, derived from the
+static point "whole card 3.98 − reserved 2.27"):
 
-> 最小需求 ≈ 训练步峰值 8.4GB + context 1.7GB ≈ **10.1 GB**
-> → **16GB 舒适（余 5.9GB）、12GB 可行（余 1.9GB）**
+> Minimum requirement ≈ training step peak 8.4GB + context 1.7GB ≈
+> **10.1 GB**
+> → **comfortable on 16GB (5.9GB to spare), feasible on 12GB (1.9GB to spare)**
 
-B12 目标在 32GB 上的外推已达成，待小卡实测确认。
+The B12 target, extrapolated from the 32GB run, has been achieved, pending
+confirmation on smaller cards.
 
-两条附带结论：
+Two side conclusions:
 
-1. **训练步是瓶颈，不是采样** —— 这次有峰值数据（8.4GB vs 7.1GB），不再是从
-   reserved 快照推断。§9.5b 已推翻「采样是尖峰」的直觉，本轮用峰值坐实。
-2. **速度代价几乎看不见**：同一采样任务 14 层 52–53s、28 层 53–55s，**换出层数
-   翻倍只慢约 4%**，优于探针的训练口径 +7%（且探针是 bf16，fp8 传输量减半）。
+1. **The training step is the bottleneck, not sampling** — this run has
+   actual peak data (8.4GB vs. 7.1GB), no longer inferred from a reserved
+   snapshot. §9.5b already overturned the "sampling is the spike" intuition,
+   and this round confirms it with actual peaks.
+2. **The speed cost is nearly invisible**: for the same sampling task, 14
+   layers took 52-53s, 28 layers took 53-55s — **doubling the swap-out
+   layer count only slowed things by about 4%**, better than the probe's
+   training-view +7% (and the probe used bf16, whose transfer volume is
+   double fp8's).
 
-注意 `reserved`(10.2GB) 高于峰值 `alloc`(8.4GB)：32GB 卡上 allocator 乐得多留，
-小卡上会主动回收 —— 小卡实测值应更贴近 8.4GB 而非 13.4GB。
+Note that `reserved` (10.2GB) is higher than the peak `alloc` (8.4GB): on a
+32GB card, the allocator happily holds onto extra memory, while a smaller
+card would actively reclaim it — a smaller card's measured value should be
+closer to 8.4GB than to 13.4GB.
 
-#### 9.5c-1 真机整卡读数（出图，2026-07-21 补记）
+#### 9.5c-1 Real-hardware whole-card reading (image generation, added 2026-07-21)
 
-同机同配置（fp8 + `blocks_to_swap=28`、1024²）出图期间用**任务管理器**看整卡占用：
-**8.9–9.3 GB**，其中约 **3 GB** 是同时开着的其他应用 —— 归本程序的约 **6 GB**。
+Same machine, same config (fp8 + `blocks_to_swap=28`, 1024²), using the
+**Task Manager** to check whole-card usage during generation: **8.9-9.3
+GB**, of which about **3 GB** belongs to other applications open at the same
+time — about **6 GB** belongs to this program.
 
-与上表的 torch 口径有出入，两边都留着，别混用：
+This differs from the torch-based readings in the table above; both are
+kept, don't mix them up:
 
-| 口径 | 采样期数值 | 说明 |
+| View | value during sampling | notes |
 |---|---|---|
-| `max_memory_allocated`（上表） | 7.1 GB + context 1.7 GB ≈ **8.8 GB** | 不漏瞬时尖峰，偏保守 |
-| 任务管理器整卡（本节） | **≈ 6 GB**（扣除他程序 baseline） | 采样式读数，可能漏掉毫秒级尖峰 |
+| `max_memory_allocated` (table above) | 7.1 GB + context 1.7 GB ≈ **8.8 GB** | doesn't miss transient spikes, on the conservative side |
+| Task Manager whole-card (this section) | **≈ 6 GB** (after subtracting other apps' baseline) | a sampled reading, might miss millisecond-scale spikes |
 
-差值 ≈ 2.8GB 尚未定位（候选：任务管理器采样漏峰、`reserved` 与整卡计入方式、
-baseline 应用与本进程的显存复用）。**对外口径取整卡读数**（用户看到的就是这个），
-公告与 README 写「出图 8GB 卡可跑」；真要卡在 8GB 边界的场景，以 torch 峰值为准
-更安全。**小卡实测仍是欠账**（同 §9.5c 结尾），拿到 8/12GB 卡的实测再收敛这一条。
+The ≈2.8GB gap hasn't been pinned down yet (candidates: Task Manager's
+sampling missing a peak, how `reserved` is counted against the whole card,
+memory reuse between the baseline apps and this process). **The public-facing
+number uses the whole-card reading** (that's what the user actually sees) —
+the announcement and README say "generation can run on an 8GB card"; for
+scenarios genuinely at the 8GB boundary, the torch peak is the safer number
+to rely on. **Testing on smaller cards is still owed** (same as noted at the
+end of §9.5c), and will be settled once real 8/12GB cards are tested.
 
-### 9.6 推理侧接线（刀 4，已完成）
+### 9.6 Inference-side wiring (cut 4, done)
 
-B4 裁定「推理侧同期做」、§6 也写了落点，但 §9.2 分刀时只切了训练侧三刀，推理侧漏了。
-组件是 family 无关的、`attach()` 也通用，`load_dit` 已带 `blocks_to_swap` 参数
-（`purpose="generate"` 走同一 loader），所以接线成本不高。**但推理侧的 LoRA 语义与
-训练侧不同，这是接线前必须处理的**：
+B4 ruled that "the inference side is done at the same time," and §6 already
+noted a landing point, but §9.2's cut breakdown only split the training side
+into three cuts, missing the inference side. The component is
+family-agnostic, `attach()` is generic too, and `load_dit` already carries a
+`blocks_to_swap` parameter (`purpose="generate"` goes through the same
+loader), so the wiring cost is low. **But the inference side's LoRA
+semantics differ from the training side, and this must be handled before
+wiring**:
 
-| 底模 | 推理侧 LoRA 方式 | 与 swap 的关系 |
+| Base model | Inference-side LoRA approach | Relationship with swap |
 |---|---|---|
-| bf16 | lycoris hook（adapter），不改权重 | 与训练侧同构，直接可用 |
-| fp8 | **merge 进权重**（ComfyUI 语义：dequant → 加 delta → stochastic rounding 回写） | merge 会写 `module.weight`，而换出层此刻是 CPU pinned 张量 |
+| bf16 | a lycoris hook (adapter), doesn't modify weights | isomorphic to the training side, usable directly |
+| fp8 | **merged into the weights** (ComfyUI semantics: dequant → add delta → stochastic rounding write-back) | merging writes to `module.weight`, but the swapped-out layer is at this moment a CPU pinned tensor |
 
-fp8 那条只要**顺序对**就正确：loader 落 CPU pinned → `apply_loras` merge 写进主副本
-→ 构造 `PinnedBlockSwap` 就地接管 → 后续换入的即 merged 权重。前提是 fp8 在 CPU 上
-可算 —— 已验证：`pin_memory` / H2D 逐位一致 / `to(bf16)` dequant / `fp32→fp8` 回写
-全部可用。
+The fp8 path is correct as long as the **order is right**: the loader lands
+into CPU pinned memory → `apply_loras` merges and writes into the master
+copy → constructing `PinnedBlockSwap` takes over in place → subsequent
+swap-ins are then of the merged weights. This requires fp8 to be computable
+on CPU — already verified: `pin_memory` / bit-exact H2D / `to(bf16)` dequant
+/ `fp32→fp8` write-back all work.
 
-另需注意：推理每个 step 都要搬一遍全模型（§4），30 步 = 30 遍，swap 对象随 daemon
-的模型缓存常驻、跨 step 复用，不每步重建。
+Also worth noting: inference has to move the entire model on every single
+step (§4), so 30 steps = 30 passes; the swap object stays resident with the
+daemon's model cache across steps and is reused, not rebuilt every step.
 
-**实施结论**：daemon 是按「整个模型常驻 GPU」写的，有三个训练侧没有的敌对交互，
-都已处理：
+**Implementation conclusion**: the daemon was written assuming "the entire
+model stays resident on the GPU," which creates three adversarial
+interactions the training side doesn't have, all of which have been
+handled:
 
-| 交互 | 后果 | 处理 |
+| Interaction | Consequence | Handling |
 |---|---|---|
-| `_move_runtime_to_device` 的一刀切 `module.to(device)` | 连 CPU pinned 主副本一起搬上卡 → swap 白做，且瞬时占用 = 完整模型（小卡 OOM） | `move_module_excluding` 跳过被管理张量。实测两种时序（刚加载 / 跑过前向）均零显存消耗 |
-| fp8 LoRA merge 写 `module.weight` | 跑过前向后 `.data` 指向会被下一层覆盖的 GPU 槽位 → merge **静默丢失** | `apply_loras` 开头 `restore_masters()`，delta 落主副本 |
-| `unload` 未释放 pinned | 页锁定内存不会被除 GC 外任何机制回收 → 常驻泄漏 11GB+ | `unload` 里 `detach()` + 置空 |
+| `_move_runtime_to_device`'s blanket `module.to(device)` | moves even the CPU pinned master copy onto the GPU → swap is wasted, and the instantaneous usage = the full model (OOM on smaller cards) | `move_module_excluding` skips managed tensors. Measured: both timings (right after load / after running a forward pass) result in zero extra VRAM usage |
+| fp8 LoRA merge writing to `module.weight` | after a forward pass has run, `.data` points at a GPU slot that gets overwritten by the next layer → the merge is **silently lost** | `apply_loras` starts with `restore_masters()`, so the delta lands on the master copy |
+| `unload` not releasing pinned memory | page-locked memory can't be reclaimed by anything except GC → a persistent leak of 11GB+ | `unload` now does `detach()` + clears references |
 
-`blocks_to_swap` 进 `ModelCache` 身份比较（换出哪些层是 loader 期决定的，改了必须
-重载 DiT）；显存预算走与训练侧同款的比例折扣。
+`blocks_to_swap` is included in `ModelCache`'s identity comparison (which
+layers get swapped out is decided at loader time, so changing it requires
+reloading the DiT); the VRAM budget uses the same proportional discount as
+the training side.
 
-实现踩坑：**张量身份判定必须用 `data_ptr()` 不能用 `id()`** —— `param.data` 每次访问
-返回新的 Python 包装对象，按 `id` 比对会全部漏判（测试直接抓到）。
+Implementation gotcha: **tensor-identity comparisons must use `data_ptr()`,
+not `id()`** — every access to `param.data` returns a new Python wrapper
+object, so comparing by `id` would miss every match (caught directly by
+tests).
 
-另记一条易踩语义：**换出层的权重只在自己的 forward 窗口内有效**。一次 pass 结束后
-它的 `.data` 指向的槽位早被后面的层覆盖（rel 0 与 rel 2 共用槽 0）。窗口外要读或改
-权重必须先 `restore_masters()`。已写进模块 docstring + 专门一条测试。
+Another easily-missed semantic worth noting: **a swapped-out layer's weights
+are only valid within its own forward window**. Once a pass finishes, the
+slot its `.data` pointed at has already been overwritten by a later layer
+(rel 0 and rel 2 share slot 0). Reading or modifying weights outside that
+window requires calling `restore_masters()` first. This is now documented
+in the module's docstring + a dedicated test.
 
-### 9.3 接线方式：forward hook（刀 2 实施结论，优于原计划）
+### 9.3 Wiring approach: forward hooks (cut 2's implementation conclusion, better than originally planned)
 
-原计划是「在 family 的 forward 循环里插预取钩子」。实际实施取**给每个换出 block
-注册 forward pre/post hook**（`PinnedBlockSwap.attach()`），更好：
+The original plan was "insert a prefetch hook inside the family's forward
+loop." What actually got implemented instead is **registering a forward
+pre/post hook on each swapped-out block**
+(`PinnedBlockSwap.attach()`), which is better:
 
-- **完全不改 `modeling/krea2/`** —— 那里对 ComfyUI 有逐字 parity 要求（§7.1）。
-- ~~**反向自动成立**：checkpoint 重算会触发 forward hook，逆序换入自动成立~~
-  —— **这条是错的，已于 §9.10 更正**。反向必须自己挂钩子取回权重。
-- Anima 接线因此也只是「构造 + attach」，连它的手工展开循环都不必改。
+- **Doesn't touch `modeling/krea2/` at all** — that has a byte-for-byte
+  parity requirement with ComfyUI (§7.1).
+- ~~**Backward automatically works**: checkpoint recompute triggers the
+  forward hook, so reverse-order swap-in automatically works~~ — **this
+  claim is wrong, corrected in §9.10**. Backward requires its own hooks to
+  retrieve the weights.
+- Wiring Anima is therefore also just "construct + attach," without even
+  needing to touch its hand-unrolled loop.
 
-### 9.4 实施中实测抓出的三个坑（都已有回归测试）
+### 9.4 Three pitfalls caught during implementation testing (all have regression tests now)
 
-1. **`_rebind` 不能遍历 `named_parameters()`**：构造之后新增的参数（LoRA 在 block
-   内建子模块的情形）会让 `buf[name]` 直接 KeyError。只能重绑构造时登记过的名字。
-2. **可训练参数不能被换出**：LoRA 参数是优化器的目标，被搬走会破坏训练；且相对底模
-   极小、没有换出价值。组件按 `requires_grad` 跳过，只管理冻结的基权重。
-3. **fp8 `weight_scale` 的 device**：`patch_fp8_linears` 原本让 scale 跟随
-   `module.weight.device`，而换出层的权重在 patch 时正在 CPU → scale 落 CPU，前向时
-   权重已被搬到 GPU，`weight * scale` device 不匹配（`scale.to()` 只改 dtype 不改
-   device）。已加 `device` 参数，scale 恒放计算设备（per-layer 标量，开销可忽略）。
+1. **`_rebind` can't iterate `named_parameters()`**: parameters added after
+   construction (the case where LoRA builds a submodule inside the block)
+   would make `buf[name]` raise a bare KeyError. It can only rebind names
+   registered at construction time.
+2. **Trainable parameters must not be swapped out**: LoRA parameters are the
+   optimizer's target, and moving them away would break training; also
+   they're tiny relative to the base model, with no value in swapping them
+   out. The component skips anything with `requires_grad`, managing only
+   the frozen base weights.
+3. **fp8 `weight_scale`'s device**: `patch_fp8_linears` originally made the
+   scale follow `module.weight.device`, but a swapped-out layer's weights
+   were on CPU at patch time → the scale ended up on CPU, while at forward
+   time the weights have already been moved to GPU, causing a device
+   mismatch in `weight * scale` (`scale.to()` only changes dtype, not
+   device). A `device` parameter has been added, keeping the scale always on
+   the compute device (a per-layer scalar, negligible overhead).
 
-另一条已在设计中避开、但值得记：**loader 必须直接把末尾 N 层载到 CPU pinned**，而
-不是「全量上卡再搬下来」—— 后者峰值仍等于完整模型，B12 的 12/16GB 目标不成立。
+One more thing already avoided in the design, but worth noting: **the loader
+must load the last N layers directly into CPU pinned memory**, rather than
+"loading everything onto the GPU first and then moving it down" — the
+latter's peak would still equal the full model's size, and B12's 12/16GB
+target wouldn't hold.
 
-### 9.7 pinned 内存的归还（真泄漏，已修）
+### 9.7 Returning pinned memory (a real leak, now fixed)
 
-**丢引用不等于还内存。** pinned 走 PyTorch 独立的 host caching allocator，释放张量
-只是还给那个缓存池：
+**Dropping a reference doesn't mean the memory is returned.** Pinned memory
+goes through PyTorch's independent host caching allocator, and releasing a
+tensor just returns it to that cache pool:
 
-| 操作 | 系统可用内存 |
+| Operation | System available memory |
 |---|---|
 | pin 6GB | −8.18 GB |
-| `del` + `gc.collect()` | **归还 0.00 GB** |
-| `torch._C._host_emptyCache()` | 归还 8.02 GB |
+| `del` + `gc.collect()` | **returns 0.00 GB** |
+| `torch._C._host_emptyCache()` | returns 8.02 GB |
 
-刀 4 首版在 `unload()` 里只做了 `detach()` + 置 None，注释还写着「pinned 主副本随之
-释放」—— **那句话是错的，一字节没还**。block swap 主副本可达 11GB+，等于卸载后仍
-长期占着内存，而且页锁定内存连换页都不行，其他程序完全用不到。
+Cut 4's first version only did `detach()` + set to None inside `unload()`,
+with a comment that even claimed "the pinned master copy is released along
+with it" — **that comment is wrong; not a single byte was returned.** Block
+swap's master copy can be 11GB+, meaning that after unloading, that memory
+is still held long-term, and since page-locked memory can't even be paged
+out, other programs can't use it at all.
 
-这与同一函数里的 `_cuda_clearCublasWorkspaces` 是**同一类问题的 host 侧版本**：
-都是 C++/分配器层的常驻，Python GC 看不见。
+This is **the host-side version of the same class of problem** as
+`_cuda_clearCublasWorkspaces` in the same function: both are residency at
+the C++/allocator layer, invisible to Python's GC.
 
-**清理时机：跟随卸载，不是每次出图后。** `blocks_to_swap > 0` 时 pinned 里装的
-**就是模型权重本身**，不是临时缓冲：
+**Cleanup timing: tied to unloading, not after every generation.** When
+`blocks_to_swap > 0`, what's inside pinned memory **is the model weights
+themselves**, not a temporary buffer:
 
-- **出图之间（模型还在）**：绝不能清 —— 清掉等于卸载模型，下次出图要重新读盘 +
-  重新 pin（`59ms/GB`，11.32GB ≈ 0.7s，外加磁盘读）。
-- **卸载时（idle 超时 / 手动「清理显存」）**：必须连同显存一起还。两条路径都走
-  `CACHE.unload()`，已在那里统一处理。
+- **Between generations (the model is still loaded)**: must never be
+  cleared — clearing it would be equivalent to unloading the model, and the
+  next generation would have to re-read from disk + re-pin (`59ms/GB`,
+  11.32GB ≈ 0.7s, plus the disk read).
+- **On unload (idle timeout / manual "clear VRAM")**: must be returned along
+  with VRAM. Both paths go through `CACHE.unload()`, where this is now
+  handled uniformly.
 
-即**和显存一起清，不单独清**。现有的「闲置自动清理 / 手动清理」语义天然正确，只是
-此前少还了 host 侧那一半。只在用过 block swap 时才清（`had_block_swap` 门控）——
-只归还自己分配的，不动别处（如 dataloader）的 pinned 缓存。
+That is: **cleared together with VRAM, never cleared separately.** The
+existing "auto-clear on idle / manual clear" semantics were already
+naturally correct — they just previously failed to return the host-side
+half. Only cleared when block swap was actually used (gated by
+`had_block_swap`) — only returning what it allocated itself, without
+touching pinned caches elsewhere (e.g. the dataloader's).
 
-训练侧不需要同等处理：训练是独立子进程，跑完退出由操作系统回收。
+The training side doesn't need equivalent handling: training is an
+independent child process, and the OS reclaims memory once it exits.
 
-### 9.8 三个「训练侧内存」问题的答案
+### 9.8 Answers to three "training-side memory" questions
 
-**Q：训练的内存有释放吗？** 此前**没有** —— 训练是独立子进程，靠退出让 OS 回收。
-但退出前有一段尾巴：`finalize` 里 wandb 上传最终 LoRA（可能几十秒到几分钟），而
-此时 `eval_training_finished` 已经发出、supervisor 已排训练后评估 job，评估进程要
-加载模型却撞上本进程还占着 11GB+ 页锁定内存（连换页都不行）。在内存紧张的机器上
-（正是 block swap 要服务的那批）这会直接把评估拖垮。已在 `finalize` 主动释放。
+**Q: Is training's memory released?** Previously **no** — training is an
+independent child process, relying on OS reclamation at exit. But there's a
+tail before exit: `finalize` uploads the final LoRA to wandb (which can take
+tens of seconds to minutes), and by that point `eval_training_finished` has
+already fired, the supervisor has already queued the post-training
+evaluation job, and the evaluation process needs to load a model while this
+process is still holding onto 11GB+ of page-locked memory (which can't even
+be paged out). On a memory-constrained machine (exactly the kind block swap
+is meant to serve), this would tank the evaluation. `finalize` now
+proactively releases it.
 
-**Q：训练时的 sample 走 swap 吗？** **走。** `sample_image(ctx.model, ...)` 拿的就是
-挂了钩子的同一个 model，前向照常触发换入。实测佐证：28 层换出时采样期峰值仅
-7.1GB —— 若采样不走 swap，完整 fp8 DiT（≈12.9GB）必须常驻，峰值不可能低于它。
+**Q: Does training's sampling go through swap?** **Yes.**
+`sample_image(ctx.model, ...)` takes the exact same model with hooks
+attached, and the forward pass triggers swap-ins as usual. Corroborated by
+measurement: with 28 layers swapped out, the sampling-period peak is only
+7.1GB — if sampling didn't go through swap, the complete fp8 DiT
+(≈12.9GB) would need to stay resident, and the peak couldn't be lower than
+that.
 
-**Q：训练时的 sample swap 有释放吗？** 采样与训练**共用同一个 swap 对象**，没有额外
-的东西要释放，而且训练还要继续、也**不能**释放。`sample_runner` 前后的
-`empty_cache()` 只回收设备侧缓存，swap 的 GPU 槽是活引用不受影响 —— 这是正确的。
+**Q: Is training's sampling swap released?** Sampling and training **share
+the same swap object**, so there's nothing extra to release, and training
+still needs to continue, so it **can't** be released anyway. The
+`empty_cache()` calls before/after `sample_runner` only reclaim device-side
+caches — swap's GPU slots are live references and are unaffected — which is
+the correct behavior.
 
-### 9.9 `close()` 与 `release()` 是两回事（命名陷阱）
+### 9.9 `close()` and `release()` are two different things (a naming trap)
 
-组件有两个语义完全不同的方法，实施时撞过车（新方法覆盖了旧方法，17 个测试同时红）：
+The component has two methods with completely different semantics, and
+implementation hit a collision here (a new method overwrote an old one, and
+17 tests went red at once):
 
-| 方法 | 语义 | 何时调 |
+| Method | Semantics | When to call it |
 |---|---|---|
-| `release(absolute_index)` | 某层算完，它的 GPU 槽位可被后续层覆盖 | 每层前向后（post-hook 内） |
-| `close()` | 彻底放手：摘钩子 + 参数指向空张量 + 丢弃主副本与槽 | 训练收尾 / 模型卸载，**之后模型不可用** |
+| `release(absolute_index)` | a layer has finished computing, its GPU slot can be overwritten by a later layer | after every layer's forward pass (inside the post-hook) |
+| `close()` | letting go entirely: removes hooks + points parameters at empty tensors + discards the master copy and slots | at the end of training / on model unload; **the model is unusable afterward** |
 
-`close()` 而非「丢掉 model 引用」的理由：pinned 主副本被 `param.data` 引用，而持有
-block 的不止 `ctx.model` —— LyCORIS injector 持 `org_module`、optimizer 持参数、
-hook 闭包也可能持有。真机实测只丢 swap 对象归还 **0 字节**，丢 model 之后才归还。
-与其到处找持有者，不如让组件自己把参数指走。`close()` 之后仍需
-`release_pinned_host_cache()` 才真正还给操作系统（§9.7 的另一层）。
+The reason for `close()` rather than "just dropping the model reference":
+the pinned master copy is referenced by `param.data`, and more than just
+`ctx.model` holds a block — the LyCORIS injector holds `org_module`, the
+optimizer holds the parameters, and hook closures might also hold
+references. Real-hardware testing confirmed that dropping just the swap
+object returns **0 bytes**; only dropping the model afterward returns
+anything. Rather than hunting down every holder, it's simpler to have the
+component redirect the parameters itself. After `close()`,
+`release_pinned_host_cache()` is still needed to actually return the memory
+to the OS (§9.7's other layer).
 
-### 9.10 反向必须单独挂钩子（推翻 §9.3 的错误论断）
+### 9.10 Backward needs its own separate hooks (overturning §9.3's wrong claim)
 
-**症状**：用户开 block swap + PPSF 训练，Prodigy 的 `d` 估计大幅跳升、学习率失控、
-训练失败。
+**Symptom**: a user enabled block swap + PPSF training, and Prodigy's `d`
+estimate jumped wildly, the learning rate ran out of control, and training
+failed.
 
-**根因**：`attach()` 起初只挂前向 pre/post 钩子，基于一个错误论断——「开 gradient
-checkpointing 后反向会重算前向，forward hook 随之触发，逆序换入自动成立」。实测两处
-都不成立：
+**Root cause**: `attach()` originally only hooked forward pre/post, based on
+a wrong claim — "with gradient checkpointing on, backward recomputes the
+forward pass, which triggers the forward hook, so reverse-order swap-in
+automatically works." Neither part of this held up under testing:
 
-1. **重算不触发 forward_hook**：实测 checkpoint 下 pre-hook 触发 2N 次，而 post-hook
-   只有 N 次（重算只走 pre）。
-2. **更关键**：重算之后本 block 的**反向**仍要读权重，而前向 post 已经放开了槽位 ——
-   下一次换入直接覆盖正在被反向读的权重。
+1. **Recompute doesn't trigger forward_hook**: measured that under
+   checkpoint, the pre-hook fires 2N times while the post-hook only fires N
+   times (recompute only goes through pre).
+2. **More critically**: after recompute, this block's **backward pass**
+   still needs to read the weights, but the forward post-hook has already
+   released the slot — the next swap-in directly overwrites the weights
+   that backward is in the middle of reading.
 
-后果是**静默的**：不报错、不 NaN，梯度只是数值不对。定量（RTX 5090，真实 6144-dim
-block）：
+The consequence was **silent**: no error, no NaN, just numerically wrong
+gradients. Quantitatively (RTX 5090, a real 6144-dim block):
 
-| | 噪声底 | swap 偏差 | 倍数 |
+| | noise floor | swap deviation | multiple |
 |---|---|---|---|
-| 修复前 · checkpoint | 4.4e-3 | **1.31** | **298×** |
-| 修复前 · 无 checkpoint | 2.2e-3 | 1.48 | 675× |
-| 修复后 · checkpoint | 4.4e-3 | 4.7e-3 | 1× |
-| 修复后 · 无 checkpoint | 3.5e-3 | 4.7e-3 | 1.4× |
+| before fix · checkpoint | 4.4e-3 | **1.31** | **298x** |
+| before fix · no checkpoint | 2.2e-3 | 1.48 | 675x |
+| after fix · checkpoint | 4.4e-3 | 4.7e-3 | 1x |
+| after fix · no checkpoint | 3.5e-3 | 4.7e-3 | 1.4x |
 
-**PPSF 是报警器不是肇事者**：固定 lr 的 AdamW 会带着被污染的梯度闷头训完、产出一个
-质量下降但看不出异常的 LoRA；Prodigy 系靠梯度一致性估计 `d`，梯度一乱 `d` 立刻炸。
-**用 AdamW + block swap 训过的 LoRA 都应视为受影响。**
+**PPSF is the alarm, not the culprit**: AdamW with a fixed lr would just
+train through with poisoned gradients, producing a LoRA with degraded
+quality but no obvious sign of trouble; Prodigy-family optimizers rely on
+gradient-consistency estimation to compute `d`, so a messed-up gradient
+makes `d` blow up immediately. **Any LoRA trained with AdamW + block swap
+should be considered affected too.**
 
-**修法**：四个钩子缺一不可 —— 前向 pre 取回 / post 放开、**反向 pre 再取回 / post
-放开**。开 checkpoint 时反向 pre 通常命中紧邻重算刚放好的权重，零额外传输；不开
-checkpoint 时它是唯一的换回时机。
+**Fix**: all four hooks are required — forward pre retrieves / post
+releases, and **backward pre retrieves again / post releases**. When
+checkpoint is on, backward pre usually lands on weights just placed there by
+the recompute, with zero extra transfer; when checkpoint is off, it's the
+only opportunity to swap the weights back in.
 
-### 9.11 这个 bug 为什么能溜过全部既有测试
+### 9.11 Why this bug slipped past every existing test
 
-`test_block_swap.py` 里那条 checkpoint 反向测试**在 bug 存在时照样全绿**。原因：
+The checkpoint-backward test in `test_block_swap.py` **stayed fully green
+even while the bug existed**. The reasons:
 
-- 小张量（16–32 dim）、`_Tiny` block **没有 attention**，计算快到竞态窗口不显形；
-- 它用 `assert_close` 逐位比 —— 而真实尺寸下 SDPA 反向在 CUDA/bf16 上**本就非确定**
-  （同权重跑两遍梯度差约 5e-3），逐位比在真实尺寸上根本没法用。
+- Small tensors (16-32 dim), and the `_Tiny` block **has no attention**, so
+  computation is too fast for the race window to manifest;
+- It compared bit-for-bit with `assert_close` — while at real sizes, SDPA's
+  backward pass on CUDA/bf16 **is inherently non-deterministic** (running
+  the same weights twice gives gradients that differ by about 5e-3), making
+  bit-for-bit comparison unusable at real sizes in the first place.
 
-教训两条，已固化进 `tests/test_block_swap_grad_fidelity.py`：
+Two lessons, now baked into `tests/test_block_swap_grad_fidelity.py`:
 
-1. **验证并发/竞态必须用真实尺寸**。小 case 的绿灯是假信心。
-2. **非确定性环境里要先测噪声底再做判据**。第一次排查时我直接拿「梯度不逐位相等」
-   当证据，其实无 swap 跑两遍也不相等 —— 缺对照组的测量会同时制造假阳性（当时）
-   和假阴性（原单测）。判据应是「与对照组自身重复性同量级」。
-### 9.12 pinned 实际锁定 = 权重 × 1.47（5080 / 32GB 内存真机撞死，已修）
+1. **Verifying concurrency/races must use real sizes.** A green light on a
+   small case is false confidence.
+2. **In a non-deterministic environment, measure the noise floor before
+   building a criterion.** During the first investigation, "gradients
+   aren't bit-for-bit equal" was taken directly as evidence, when in fact
+   even running without swap twice wouldn't be equal either — a measurement
+   without a control group produces both false positives (that time) and
+   false negatives (the original unit test) at once. The criterion should
+   be "matches the control group's own repeatability, same order of
+   magnitude."
+### 9.12 Actual pinned lock = weights × 1.47 (a 5080 / 32GB RAM machine crashed for real, now fixed)
 
-**现象**：16GB 卡 + 32GB 内存的机器开 `blocks_to_swap=28`，`load_krea2_model` 在
-`tensor.pin_memory()` 处抛 `CUDA error: out of memory` —— 此时 DiT 一层都还没上卡，
-这不是显存 OOM，是 `cudaHostAlloc`（主机页锁定内存）失败。
+**Symptom**: a machine with a 16GB card + 32GB RAM, with `blocks_to_swap=28`
+enabled, hit a `CUDA error: out of memory` in `load_krea2_model` at
+`tensor.pin_memory()` — at this point not a single DiT layer had loaded onto
+the GPU yet, so this isn't a VRAM OOM, it's a `cudaHostAlloc` (host
+page-locked memory) failure.
 
-**两个叠加因素**：
+**Two compounding factors**:
 
-1. **Windows WDDM 对 `cudaHostAlloc` 有硬上限 ≈ 物理内存的 50%**，由 Windows 管理、
-   驱动改不了，与分配块大小无关（NVIDIA 论坛多贴确认）。`check_pinned_budget` 只按
-   可用内存比例算，没建模这条线。
-2. **PyTorch host caching allocator 把每次 pinned 分配向上取整到 2 的幂**
-   （`CachingHostAllocator.h` `PowerOf2Ceil`），而 loader 逐张量 `pin_memory()`。
-   krea2 的尺寸恰恰都很吃亏：
+1. **Windows WDDM has a hard cap on `cudaHostAlloc` of ≈50% of physical
+   memory**, managed by Windows and not adjustable by the driver,
+   independent of allocation block size (confirmed across multiple NVIDIA
+   forum posts). `check_pinned_budget` only computes based on the available
+   memory ratio, and hasn't modeled this line.
+2. **PyTorch's host caching allocator rounds every pinned allocation up to a
+   power of 2** (`CachingHostAllocator.h`'s `PowerOf2Ceil`), while the
+   loader calls `pin_memory()` tensor by tensor. Krea2's sizes happen to be
+   particularly unfavorable for this:
 
-   | 张量 | 实际 | 锁定 |
+   | Tensor | actual | locked |
    |---|---|---|
    | 16384×6144 fp8 | 96 MB | 128 MB |
    | 6144×6144 fp8 | 36 MB | 64 MB |
    | 1536×6144 fp8 | 9 MB | 16 MB |
 
-   | blocks_to_swap | 日志/护栏计的 pinned | **真实锁定** |
+   | blocks_to_swap | pinned counted by log/guardrail | **actual lock** |
    |---|---|---|
    | 14 | 5.66 GB | 8.31 GB |
    | 18 | 7.28 GB | 10.69 GB |
    | 28 | 11.32 GB | **16.63 GB** |
 
-   §9.5c 的 `pinned 11.32 GB` 是 `numel × element_size` 累加值，不是 allocator 真占用；
-   那台 5090 内存大（可用 37.5GB）所以 16.6GB 塞得下没暴露。32GB 机器 50% 线 = 16GB，
-   28 层 16.63GB 必炸 —— 而护栏按 11.32GB 放行。anima 2B 张量尺寸正好是 2 的幂
-   （1.02×），anima 36 层版 1.29×。
+   §9.5c's `pinned 11.32 GB` is the `numel × element_size` sum, not the
+   allocator's real usage; that 5090 machine had a lot of RAM (37.5GB
+   available), so 16.6GB fit without exposing the problem. On a 32GB
+   machine, the 50% line = 16GB, and 28 layers' 16.63GB would definitely
+   blow past it — while the guardrail, computing from 11.32GB, would let it
+   through. Anima's 2B-parameter tensor sizes happen to already be powers of
+   2 (1.02x), and the 36-layer Anima variant is 1.29x.
 
-**修法（`PinnedPacker`，`training/block_swap.py`）**：不逐张量 pin，按**精确总量**
-的二进制分解一次性预分配若干块（8G+2G+1G+256M+64M，每块恰为 2 的幂 → allocator
-零取整），每个张量 best-fit 装进某块、256B 对齐、返回块上的 view。多族多配置模拟
-（krea2 fp8/bf16 × 14/18/28、anima 2048/5120 × 8/14/全）实际锁定 = 权重 × 1.00–1.03；
-装不进的张量走溢出路径（`pow2_ceil(nbytes)` 单独一块 = 旧行为，永远不更差）。两条
-pin 路径都接了：krea2 loader 直落（计划字节由 `_swapped_pinned_bytes` 镜像加载规则
-——fp8 原样、其余按计算 dtype——从 header 精确算出）、`PinnedBlockSwap._build` 的
-非预 pinned 路径（anima 放置 / GPU 常驻）。view 语义对既有机制透明：`is_pinned()`
-成立、`param.data = view` 照旧、H2D 照常、`release_pinned_host_cache` 仍按 §9.7 归还。
+**Fix (`PinnedPacker`, `training/block_swap.py`)**: instead of pinning
+tensor by tensor, pre-allocate a handful of blocks in one shot using a
+binary decomposition of the **exact total size** (8G+2G+1G+256M+64M, each
+block exactly a power of 2 → zero rounding by the allocator), best-fitting
+each tensor into one of the blocks, 256B-aligned, returning a view onto that
+block. Simulated across multiple families/configs (krea2 fp8/bf16 ×
+14/18/28, anima 2048/5120 × 8/14/full), the actual lock = weights ×
+1.00-1.03; tensors that don't fit fall back to the overflow path
+(`pow2_ceil(nbytes)` in its own block = the old behavior, never worse than
+before). Both pinning paths were wired up: the krea2 loader landing
+directly (the planned byte count is computed exactly from the header by
+`_swapped_pinned_bytes`, mirroring the loading rule — fp8 as-is, everything
+else by compute dtype), and `PinnedBlockSwap._build`'s non-pre-pinned path
+(Anima placement / GPU-resident). The view semantics are transparent to the
+existing mechanism: `is_pinned()` holds true, `param.data = view` works as
+before, H2D works as usual, and `release_pinned_host_cache` still returns
+memory per §9.7.
 
-顺带把 `cudaHostAlloc` 失败翻译成可行动的文案（`PinnedAllocationError`：说明是页
-锁定内存不是显存、要锁多少、Windows 上限在哪、调小 `blocks_to_swap`）。
+Along the way, `cudaHostAlloc` failures were translated into actionable copy
+(`PinnedAllocationError`: explains it's page-locked memory, not VRAM, how
+much needs to be locked, where the Windows cap is, and to reduce
+`blocks_to_swap`).
 
-**没改的**：护栏仍按 `numel × element_size` 口径且不建模 50% 线、`_build` 的
-`pinned x GB` 日志仍是 numel 口径 —— 修好打包后两者与真实锁定只差 ≤3%，误差方向
-可接受；loader 新增一行「权重 X GB 打包进 N 块，实际锁定 Y GB」的日志供真机核对。
+**Not changed**: the guardrail still computes in `numel × element_size`
+terms and doesn't model the 50% line; the `pinned x GB` log inside `_build`
+is still the numel-based figure — after fixing the packing, both are within
+≤3% of the actual lock, an acceptable margin of error; the loader adds one
+new log line, "weights X GB packed into N blocks, actually locked Y GB," for
+verification on real hardware.

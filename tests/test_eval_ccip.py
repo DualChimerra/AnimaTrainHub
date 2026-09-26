@@ -1,4 +1,5 @@
-"""CCIP-I eval metric runner（anime 角色身份；ONNX 数值靠真实模型，这里测生命周期）。"""
+"""CCIP-I eval metric runner (anime character identity; ONNX numerics rely on the
+real model, here we only test the lifecycle)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -87,7 +88,7 @@ def test_run_ccip_job_with_injected_scorer(isolated) -> None:
         scorer=lambda _r, _v, _m, _p: {"ccip_i": 0.75, "ccip_i_count": 4},
         model_name="ccip-x",
     )
-    assert result["metrics"]["clip_t"] == 0.5  # 保留其它指标
+    assert result["metrics"]["clip_t"] == 0.5  # other metrics are preserved
     assert result["metrics"]["ccip_i"] == 0.75
     assert result["metric_states"]["ccip_i"]["status"] == "done"
     assert result["metric_states"]["ccip_i"]["count"] == 4
@@ -114,7 +115,7 @@ def test_ccip_preprocess_shape_and_norm() -> None:
         arr = eval_ccip._ccip_preprocess(p)
         assert arr.shape == (3, 384, 384)
         assert arr.dtype == np.float32
-        # 红通道归一后 = (1-mean)/std，绿/蓝 = (0-mean)/std —— 通道值各自常数
+        # after normalization the red channel = (1-mean)/std, green/blue = (0-mean)/std -- each channel is a constant
         assert np.allclose(arr[0], (1.0 - 0.48145466) / 0.26862954, atol=1e-4)
         assert np.allclose(arr[1], (0.0 - 0.4578275) / 0.26130258, atol=1e-4)
     finally:

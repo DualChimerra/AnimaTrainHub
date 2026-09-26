@@ -1,8 +1,8 @@
-"""runtime/training 子包：anima_train 训练代码的模块化拆分（ADR 0003）。
+"""runtime/training subpackage: modular split of the anima_train training code (ADR 0003).
 
-PR-A：把原 runtime/anima_train.py 的 53 个 def/class 按职责分到本子包。
-PR-B：引入 TrainingContext + phase 拆分 main()。
-PR-C：引入 4 个 plugin 子包（adapters / optimizers / schedulers / inference_samplers）。
+PR-A: split the original runtime/anima_train.py's 53 defs/classes into this subpackage by responsibility.
+PR-B: introduce TrainingContext + split main() into phases.
+PR-C: introduce 4 plugin subpackages (adapters / optimizers / schedulers / inference_samplers).
 
-详细设计见 docs/adr/0003-anima-train-refactor.md。
+See docs/adr/0003-anima-train-refactor.md for the detailed design.
 """

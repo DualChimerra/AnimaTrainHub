@@ -634,7 +634,9 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
   const [items, setItems] = useState<TaskSample[] | null>(null)
   const [zoom, setZoom] = useState<number | null>(null)
   const load = useCallback(() => {
-    api.listTaskSamples(taskId).then((r) => setItems(r.items)).catch(() => setItems([]))
+    api.listTaskSamples(taskId)
+      .then((r) => setItems([...r.items].sort((x, y) => (x.epoch ?? -1) - (y.epoch ?? -1) || (x.step ?? -1) - (y.step ?? -1))))
+      .catch(() => setItems([]))
   }, [taskId])
   useEffect(() => { load() }, [load])
   // New samples land every few epochs while training runs.

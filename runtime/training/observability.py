@@ -1,10 +1,11 @@
-"""训练观测层：Loss 曲线 ASCII 渲染 + Weights & Biases 可选监控。
+"""Training observability layer: ASCII loss-curve rendering + optional
+Weights & Biases monitoring.
 
-抽自原 runtime/anima_train.py L183-369（ADR 0003 PR-A）。
+Extracted from the original runtime/anima_train.py L183-369 (ADR 0003 PR-A).
 
-公开：
-- render_loss_curve / render_curve_panel — ASCII loss 曲线 + Rich Panel 包装
-- WandBMonitor / init_wandb_monitor — 可选 W&B 集成；env 变量驱动启停
+Public:
+- render_loss_curve / render_curve_panel -- ASCII loss curve + Rich Panel wrapper
+- WandBMonitor / init_wandb_monitor -- optional W&B integration; enabled/disabled via env vars
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def render_loss_curve(losses, width=60, height=10):
-    """渲染 ASCII Loss 曲线。"""
+    """Render an ASCII loss curve."""
     if not losses:
         return ""
     if width < 5:
@@ -52,7 +53,7 @@ def render_loss_curve(losses, width=60, height=10):
 
 
 def render_curve_panel(losses, width=60, height=10):
-    """渲染 Rich Panel 包装的 Loss 曲线。"""
+    """Render the loss curve wrapped in a Rich Panel."""
     try:
         from rich.panel import Panel
         from rich.text import Text
@@ -102,10 +103,10 @@ class WandBMonitor:
         try:
             self._run.log(data, step=step)
         except Exception as exc:
-            logger.warning(f"W&B log 失败: {exc}")
+            logger.warning(f"W&B log failed: {exc}")
 
     def _should_log_step(self, key: str, step: Optional[int]) -> bool:
-        # baseline / epoch 边界一律放行；step 模式按 sample_every_n_steps 节流。
+        # baseline / epoch boundaries always pass through; step mode is throttled by sample_every_n_steps.
         if self.sample_every_n_steps <= 0:
             return True
         if not key.startswith("samples/step"):
@@ -113,11 +114,12 @@ class WandBMonitor:
         if step is None or step <= 0:
             return True
         if step == self._last_logged_step:
-            return True  # 同步重复调用允许
+            return True  # allow duplicate calls for the same step
         return step % self.sample_every_n_steps == 0
 
     def _prepare_image(self, image_path: Path, caption: str):
-        # 原图常 2K+，wandb 面板浏览 512px 已足够；JPEG 流量比 PNG 小一个数量级。
+        # Source images are often 2K+; 512px is plenty for browsing the wandb
+        # panel, and JPEG traffic is an order of magnitude smaller than PNG.
         try:
             from PIL import Image
         except Exception:
@@ -133,7 +135,7 @@ class WandBMonitor:
                     img = img.resize(new_size, Image.LANCZOS)
                 return self._wandb.Image(img, caption=caption)
         except Exception as exc:
-            logger.warning(f"W&B 图片缩放失败，改传原图: {exc}")
+            logger.warning(f"W&B image resize failed, sending the original image instead: {exc}")
             return self._wandb.Image(str(image_path), caption=caption)
 
     def log_image(self, key: str, image_path: Path, *, caption: str, step: Optional[int] = None) -> None:
@@ -145,7 +147,7 @@ class WandBMonitor:
             self._run.log({key: [self._prepare_image(image_path, caption)]}, step=step)
             self._last_logged_step = step
         except Exception as exc:
-            logger.warning(f"W&B 图片记录失败: {exc}")
+            logger.warning(f"W&B image logging failed: {exc}")
 
     def _delete_previous_artifact_versions(self, artifact_name: str, artifact_type: str, keep_artifact) -> None:
         keep_version = getattr(keep_artifact, "version", None)
@@ -159,13 +161,13 @@ class WandBMonitor:
                 try:
                     artifact.delete(delete_aliases=True)
                     deleted += 1
-                    logger.info(f"W&B artifact 旧版本已删除: {artifact_name}:{artifact.version}")
+                    logger.info(f"W&B artifact old version deleted: {artifact_name}:{artifact.version}")
                 except Exception as exc:
-                    logger.warning(f"W&B 删除旧 artifact 版本失败 ({artifact_name}:{getattr(artifact, 'version', '?')}): {exc}")
+                    logger.warning(f"Failed to delete old W&B artifact version ({artifact_name}:{getattr(artifact, 'version', '?')}): {exc}")
             if deleted:
-                logger.info(f"W&B artifact 已清理旧版本: {artifact_name} ({deleted} 个)")
+                logger.info(f"W&B artifact old versions cleaned up: {artifact_name} ({deleted} total)")
         except Exception as exc:
-            logger.warning(f"W&B artifact 历史版本清理失败 ({artifact_name}): {exc}")
+            logger.warning(f"Failed to clean up old W&B artifact versions ({artifact_name}): {exc}")
 
     def _upload_artifact(self, file_path: Path, artifact_name: str, artifact_type: str, policy: str) -> None:
         if not self.enabled:
@@ -174,7 +176,7 @@ class WandBMonitor:
             artifact = self._wandb.Artifact(artifact_name, type=artifact_type)
             artifact.add_file(str(file_path), name=file_path.name)
             size_mb = file_path.stat().st_size / 1024 / 1024
-            logger.info(f"W&B artifact 开始上传: {artifact_name} ({file_path.name}, {size_mb:.1f} MB)")
+            logger.info(f"W&B artifact upload starting: {artifact_name} ({file_path.name}, {size_mb:.1f} MB)")
             logged_artifact = self._run.log_artifact(artifact)
             start_time = time.monotonic()
             done = threading.Event()
@@ -182,7 +184,7 @@ class WandBMonitor:
             def report_waiting() -> None:
                 while not done.wait(10):
                     elapsed = time.monotonic() - start_time
-                    logger.info(f"W&B artifact 仍在上传: {artifact_name} ({elapsed:.0f}s, {size_mb:.1f} MB)")
+                    logger.info(f"W&B artifact still uploading: {artifact_name} ({elapsed:.0f}s, {size_mb:.1f} MB)")
 
             progress_thread = threading.Thread(target=report_waiting, daemon=True)
             progress_thread.start()
@@ -192,19 +194,19 @@ class WandBMonitor:
                 done.set()
                 progress_thread.join(timeout=1)
             elapsed = time.monotonic() - start_time
-            logger.info(f"W&B artifact 已上传: {artifact_name} ({file_path.name}, {size_mb:.1f} MB, {elapsed:.1f}s)")
+            logger.info(f"W&B artifact uploaded: {artifact_name} ({file_path.name}, {size_mb:.1f} MB, {elapsed:.1f}s)")
             if policy == "last":
                 self._delete_previous_artifact_versions(artifact_name, artifact_type, logged_artifact)
                 prev = self._last_artifact.get(artifact_name)
                 if prev is not None and getattr(prev, "version", None) != getattr(logged_artifact, "version", None):
                     try:
                         prev.delete(delete_aliases=True)
-                        logger.info(f"W&B artifact 旧版本已删除: {artifact_name}:{prev.version}")
+                        logger.info(f"W&B artifact old version deleted: {artifact_name}:{prev.version}")
                     except Exception as exc:
-                        logger.warning(f"W&B 删除旧 artifact 失败: {exc}")
+                        logger.warning(f"Failed to delete old W&B artifact: {exc}")
                 self._last_artifact[artifact_name] = logged_artifact
         except Exception as exc:
-            logger.warning(f"W&B artifact 上传失败 ({artifact_name}): {exc}")
+            logger.warning(f"W&B artifact upload failed ({artifact_name}): {exc}")
 
     def upload_model(self, file_path: Path) -> None:
         if not self._upload_model_enabled or not self.enabled:
@@ -230,14 +232,15 @@ class WandBMonitor:
         try:
             self._run.finish()
         except Exception as exc:
-            logger.warning(f"W&B finish 失败: {exc}")
+            logger.warning(f"W&B finish failed: {exc}")
 
 
 def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> WandBMonitor:
-    # ---- 全部配置来自环境变量（全局 Settings 经 supervisor 注入 WANDB_*）。----
-    # 0.18 起 per-config wandb_* 覆盖块已从 TrainingConfig 移除：wandb 属于账号/
-    # 工作流级配置，api_key 等 secrets 不落 yaml、不进 args（args 会被整体作为
-    # run config 上传到 wandb 服务端）。
+    # ---- All config comes from env vars (global Settings injects WANDB_* via the supervisor). ----
+    # As of 0.18 the per-config wandb_* override block was removed from
+    # TrainingConfig: wandb is account/workflow-level config, and secrets like
+    # api_key must never land in yaml or args (args gets uploaded wholesale as
+    # the run config to the wandb server).
     enabled = str(os.environ.get("WANDB_ENABLED", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
@@ -251,12 +254,13 @@ def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> W
         import wandb
     except ImportError as exc:
         raise RuntimeError(
-            "已在 Settings 启用 WandB，但当前环境没有安装 wandb。"
-            "请先在训练环境安装：pip install wandb，或在 Settings 关闭 WandB。"
+            "WandB is enabled in Settings, but wandb is not installed in this "
+            "environment. Install it in the training environment first: "
+            "pip install wandb, or disable WandB in Settings."
         ) from exc
 
-    # api_key / base_url 由 supervisor 直接放进 WANDB_API_KEY / WANDB_BASE_URL，
-    # wandb.init() 自己识别，这里无需经手。
+    # api_key / base_url are placed directly into WANDB_API_KEY / WANDB_BASE_URL
+    # by the supervisor; wandb.init() picks them up on its own, no handling needed here.
     project = os.environ.get("WANDB_PROJECT") or "AnimaLoraStudio"
     entity = os.environ.get("WANDB_ENTITY") or None
     run_name = os.environ.get("WANDB_RUN_NAME") or str(args.output_name)
@@ -275,7 +279,7 @@ def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> W
     except ValueError:
         sample_every_n_steps = 0
 
-    # artifact 上传
+    # artifact upload
     def _env_bool(key: str, default: str = "0") -> bool:
         return str(os.environ.get(key, default)).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -305,7 +309,7 @@ def init_wandb_monitor(args, output_dir: Path, config_path: Optional[Path]) -> W
         config=cfg,
         dir=str(wandb_dir),
     )
-    logger.info(f"W&B 监控已启用: project={project}, run={run_name}, mode={mode}")
+    logger.info(f"W&B monitoring enabled: project={project}, run={run_name}, mode={mode}")
     return WandBMonitor(
         wandb,
         run,

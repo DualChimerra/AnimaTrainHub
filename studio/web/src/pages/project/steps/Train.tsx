@@ -32,7 +32,6 @@ import { useMonitorProgress } from '../../../lib/useMonitorProgress'
 import type { SaveStatus } from '../../../lib/SettingsData'
 import { useToast } from '../../../components/Toast'
 import { useSettingsDrawer } from '../../../lib/SettingsDrawer'
-import { useAdvancedMode } from '../../../lib/useAdvancedMode'
 import {
   PRESET_NAME_RE,
   defaultsFromSchema,
@@ -94,7 +93,6 @@ export default function TrainPage() {
   // 0.17 P-B — 定时训练弹层（延迟 N 小时 / 指定绝对时间两种入口，D7）。
   const [scheduleOpen, setScheduleOpen] = useState(false)
   const [scheduleTime, setScheduleTime] = useState('')
-  const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
   const pickerAnchorRef = useRef<HTMLButtonElement | null>(null)
   const pickerPopRef = useRef<HTMLDivElement | null>(null)
 
@@ -121,7 +119,6 @@ export default function TrainPage() {
   const [baseline, setBaseline] = useState<ConfigData | null>(null)
   const [changes, setChanges] = useState<ChangeEntry[]>([])
   const [tab, setTab] = useLocalStorageState<TrainTabId>('train.formTab', 'model')
-  const [fieldFilter, setFieldFilter] = useState<FieldFilterMode>('all')
 
   /** Fold an edit into the session change log: one row per field, keeping its
    *  first "from"; a field edited back to where it started drops out. */
@@ -592,7 +589,7 @@ export default function TrainPage() {
   /** Fields of a group as the form would show them right now. */
   const groupFields = (key: string): string[] =>
     Object.entries(props)
-      .filter(([, p]) => !p.hidden && (!p.advanced || advancedMode) && (p.group ?? 'misc') === key
+      .filter(([, p]) => !p.hidden && (p.group ?? 'misc') === key
         && (!config || evalShowWhen(p.show_when, config)))
       .map(([n]) => n)
   const tabGroups = (id: TrainTabId): string[] => {
@@ -606,10 +603,6 @@ export default function TrainPage() {
     TRAIN_TABS.find((x) => (x.groups as readonly string[]).includes(groupKey))?.id ?? 'system'
   const tabFieldNames = (id: TrainTabId) => tabGroups(id).flatMap(groupFields)
   const currentFields = tabFieldNames(tab)
-  const filterFn = fieldFilter === 'changed' ? isChanged
-    : fieldFilter === 'nondefault' ? isNonDefault
-      : fieldFilter === 'locked' ? isLocked
-        : undefined
   const totalFields = TRAIN_TABS.reduce((s, x) => s + tabFieldNames(x.id).length, 0)
 
   const resetTab = async () => {
@@ -636,7 +629,6 @@ export default function TrainPage() {
 
   const openGroup = (key: string) => {
     setTab(tabOf(key))
-    setFieldFilter('all')
     requestAnimationFrame(() => {
       document.getElementById(`schema-group-${key}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
     })
@@ -860,30 +852,10 @@ export default function TrainPage() {
                       {t(`train.tab_${x.id}`)}<span className="ds-badge ds-mute">{tabFieldNames(x.id).length}</span>
                     </button>
                   ))}
-                </div>
-                <div className="ds-pane-head" style={{ flexWrap: 'wrap' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div className="ds-card-title">{t(`train.tab_${tab}`)}</div>
-                    <div className="ds-card-sub">
-                      {t('train.schemaGroups')}{' '}
-                      {tabGroups(tab).filter((g) => groupFields(g).length > 0).map((g, i) => (
-                        <span key={g}>{i > 0 && ' · '}<span className="ds-mono">{g}</span></span>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div className="ds-seg" role="group" aria-label={t('train.fieldModeLabel')}>
-                      <button type="button" className={`ds-seg-item${!advancedMode ? ' ds-is-active' : ''}`} onClick={() => { if (advancedMode) toggleAdvancedMode() }} aria-pressed={!advancedMode}>{t('train.simpleMode')}</button>
-                      <button type="button" className={`ds-seg-item${advancedMode ? ' ds-is-active' : ''}`} onClick={() => { if (!advancedMode) toggleAdvancedMode() }} aria-pressed={advancedMode}>{t('train.advancedMode')}</button>
-                    </div>
-                    <select className="ds-inp" style={{ width: 190 }} value={fieldFilter} onChange={(e) => setFieldFilter(e.target.value as FieldFilterMode)} aria-label={t('train.filterLabel')}>
-                      <option value="all">{t('train.filterAll', { n: currentFields.length })}</option>
-                      <option value="changed">{t('train.filterChanged', { n: currentFields.filter(isChanged).length })}</option>
-                      <option value="nondefault">{t('train.filterNonDefault', { n: currentFields.filter(isNonDefault).length })}</option>
-                      <option value="locked">{t('train.filterLocked', { n: currentFields.filter(isLocked).length })}</option>
-                    </select>
-                    <button type="button" className="ds-iconbtn" onClick={() => void resetTab()} aria-label={t('train.resetTab')} title={t('train.resetTab')}>{TrainIcon.reset}</button>
-                  </div>
+                  <span style={{ flex: 1 }} />
+                  <button type="button" className="ds-ctl ds-sm" style={{ alignSelf: 'center' }} onClick={() => void resetTab()} title={t('train.resetTab')}>
+                    {TrainIcon.reset}{t('train.resetTabShort')}
+                  </button>
                 </div>
                 {/* Trigger word: under DOP (gated row) when DOP is on and its field is
                     shown; otherwise at the top of the data tab, next to captions. */}
@@ -896,11 +868,8 @@ export default function TrainPage() {
                   disabledHints={disabledHints}
                   autoHints={autoHints}
                   fieldSuffixes={makeResetSuffixes(config, applyEdit)}
-                  advancedMode={advancedMode}
                   groupKeys={tabGroups(tab)}
-                  fieldFilter={filterFn}
                   baseline={baseline}
-                  emptyHint={t('train.filterEmpty')}
                   afterField={triggerUnderDop ? { dop_enabled: triggerRow } : undefined}
                 />
                 {familySwitchTarget && (
@@ -965,7 +934,6 @@ export default function TrainPage() {
 // ---------------------------------------------------------------------------
 
 type TrainTabId = 'model' | 'data' | 'optim' | 'system'
-type FieldFilterMode = 'all' | 'changed' | 'nondefault' | 'locked'
 
 /** Which schema groups each tab of the form shows. */
 /** How the network type reads in the page subtitle (the mockup writes "LoKr r32"). */

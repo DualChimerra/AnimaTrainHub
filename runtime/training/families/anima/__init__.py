@@ -1,19 +1,23 @@
-"""Anima 族的声明式常量（PR-1 只有 ANIMA_SPEC；行为适配器随 PR-2b 落地）。"""
+"""Declarative constants for the Anima family (PR-1 only has ANIMA_SPEC; the behavior adapter lands with PR-2b)."""
 
 from __future__ import annotations
 
-# 能力矩阵 / 族默认 / 采样白名单单源在 studio/domain/common.py（config 管线
-# 刀 1 / R3）：studio 不 import runtime（server sys.path 无 runtime/），反向
-# runtime → studio 是既有依赖方向（bootstrap 已 import studio.schema），
-# common.py 是零依赖纯数据叶子模块，server / 裸 CLI / tests 三场景都可达。
+# The capability matrix / family defaults / sampling whitelist have a single
+# source in studio/domain/common.py (config pipeline knife 1 / R3): studio
+# does not import runtime (the server's sys.path has no runtime/), while the
+# reverse runtime -> studio direction is the existing dependency direction
+# (bootstrap already imports studio.schema); common.py is a zero-dependency
+# pure-data leaf module reachable from all three scenarios: server, bare CLI,
+# and tests.
 from studio.domain.common import (
     FAMILY_CAPABILITIES,
     FAMILY_CONFIG_DEFAULTS,
     FAMILY_SAMPLING,
 )
 
-# 相对导入：studio server 经 `runtime.training.dataset` 间接 import 本模块，
-# 那边 sys.path 没有 runtime/，`training.*` 绝对导入会 ModuleNotFoundError。
+# Relative import: the studio server imports this module indirectly via
+# `runtime.training.dataset`, and over there sys.path has no runtime/, so an
+# absolute `training.*` import would raise ModuleNotFoundError.
 from ..latent_spaces import WAN21_F8C16
 from ..spec import (
     ConstantShift,
@@ -28,17 +32,17 @@ ANIMA_SPEC = ModelSpec(
     family_id="anima",
     display_name="Anima",
     objective="rectified_flow",
-    # Qwen-Image VAE = Wan2.1 latent 空间；与 Krea 2 引用同一实例 →
-    # latent 缓存跨族共享（D6）是结构事实。
+    # Qwen-Image VAE = the Wan2.1 latent space; shares the same instance as
+    # Krea 2 -> latent cache sharing across families (D6) is a structural fact.
     latent=WAN21_F8C16,
     text=TextSpec(
-        # 每步在线编码（Qwen3-0.6B 末层 + T5 IDs 进 LLMAdapter），无文本缓存
+        # Online encoding per step (Qwen3-0.6B final layer + T5 IDs into LLMAdapter), no text cache
         strategy="online",
         max_seq_len=512,
         fingerprint="anima-qwen3-0.6b-t5xxl",
     ),
     sampling=SamplingDefaults(
-        # 白名单对应 sampling.py Comfy KSampler parity 现状；首项 = 族默认
+        # Whitelist matches sampling.py's current Comfy KSampler parity; first item = family default
         samplers=FAMILY_SAMPLING["anima"]["samplers"],
         schedulers=FAMILY_SAMPLING["anima"]["schedulers"],
         default_sampler=FAMILY_SAMPLING["anima"]["samplers"][0],
@@ -47,7 +51,7 @@ ANIMA_SPEC = ModelSpec(
         default_cfg=4.0,
         shift_policy=ConstantShift(shift=3.0),
     ),
-    # D5：Anima = 全量能力减 text_cache
+    # D5: Anima = full capability set minus text_cache
     capabilities=FAMILY_CAPABILITIES["anima"],
     lora=LoraOutputSpec(prefix="lora_unet", preset_name="anima_full"),
     config_defaults=FAMILY_CONFIG_DEFAULTS["anima"],

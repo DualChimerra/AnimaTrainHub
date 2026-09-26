@@ -1,13 +1,13 @@
-"""Projects + Versions CRUD + phase 推进 + ckpts（PR-6.5 commit 1 从 server.py 抽出）。
+"""Projects + Versions CRUD + phase advancement + ckpts (PR-6.5 commit 1, extracted from server.py).
 
-18 routes：
-    GET    /api/projects                                       list（含 active version enrich；含已归档行）
-    POST   /api/projects                                       create（可选 initial version）
-    GET    /api/projects/{pid}                                 get（含 versions 列表）
+18 routes:
+    GET    /api/projects                                       list (enriched with active version; includes archived rows)
+    POST   /api/projects                                       create (optional initial version)
+    GET    /api/projects/{pid}                                 get (includes versions list)
     PATCH  /api/projects/{pid}                                 update
     DELETE /api/projects/{pid}                                 delete
-    POST   /api/projects/{pid}/archive                         归档（软隐藏，可逆）
-    POST   /api/projects/{pid}/unarchive                       取消归档
+    POST   /api/projects/{pid}/archive                         archive (soft-hide, reversible)
+    POST   /api/projects/{pid}/unarchive                       unarchive
     GET    /api/projects/{pid}/versions                        list versions
     POST   /api/projects/{pid}/versions                        create version
     GET    /api/projects/{pid}/versions/{vid}                  get version
@@ -16,9 +16,9 @@
     POST   /api/projects/{pid}/versions/{vid}/activate         activate
     POST   /api/projects/{pid}/versions/{vid}/advance-phase    ADR-0007 §11.5-A
     POST   /api/projects/{pid}/versions/{vid}/skip-phase       ADR-0007 §11.5-B
-    GET    /api/projects/{pid}/versions/{vid}/lora_ckpts       LoRA picker 第二层（XY ckpt 轴）
-    GET    /api/projects/{pid}/state_ckpts                     resume_state picker（按 version 分组）
-    GET    /api/projects/{pid}/lora_ckpts                      resume_lora picker（按 version 分组）
+    GET    /api/projects/{pid}/versions/{vid}/lora_ckpts       LoRA picker second tier (XY ckpt axis)
+    GET    /api/projects/{pid}/state_ckpts                     resume_state picker (grouped by version)
+    GET    /api/projects/{pid}/lora_ckpts                      resume_lora picker (grouped by version)
 """
 from __future__ import annotations
 
@@ -47,11 +47,13 @@ router = APIRouter()
 
 @router.get("/api/projects")
 def list_projects_endpoint() -> dict[str, Any]:
-    """ADR-0007 §11.8-E：enrich active version label + status，卡片右上角 badge 用。
+    """ADR-0007 §11.8-E: enrich with active version label + status, for the card's
+    top-right badge.
 
-    v12 起额外带 archived_at（归档行不在这里过滤 —— 项目量小，归档/活跃的
-    切分交给前端，省一次切视图的往返）+ active_version_phase（preparing 时
-    badge 显示当前 phase，如"准备中 · 打标"）。
+    Since v12 also carries archived_at (archived rows aren't filtered here -- project
+    counts are small, so splitting archived/active is left to the frontend, saving a
+    round trip when switching views) + active_version_phase (while preparing, the badge
+    shows the current phase, e.g. "preparing - tagging").
     """
     with db.connection_for() as conn:
         rows = projects.list_projects(conn)

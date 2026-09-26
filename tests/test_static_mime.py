@@ -1,6 +1,6 @@
 """issue #228 regression: studio.api.static must force .js / .css / .svg etc.
 to canonical MIME types so Windows registry pollution (e.g. .js → text/plain
-set by IIS / 杀软 / 旧装机) can't break ES module loading and white-screen the SPA.
+set by IIS / antivirus software / old machine images) can't break ES module loading and white-screen the SPA.
 """
 from __future__ import annotations
 

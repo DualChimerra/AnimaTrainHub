@@ -1,6 +1,5 @@
 import i18n from 'i18next'
 import { initReactI18next } from 'react-i18next'
-import zh from './locales/zh.json'
 import en from './locales/en.json'
 import ru from './locales/ru.json'
 
@@ -10,8 +9,13 @@ export function getStoredLang(): string | null {
   try { return localStorage.getItem(STORAGE_KEY) } catch { return null }
 }
 
+/** Languages the app ships. A stored value outside this list (a language
+ *  that was removed) falls back to English. */
+export const SUPPORTED_LANGS = ['en', 'ru'] as const
+
 export function getStoredLangWithDefault(): string {
-  return getStoredLang() ?? 'en'
+  const stored = getStoredLang()
+  return stored && (SUPPORTED_LANGS as readonly string[]).includes(stored) ? stored : 'en'
 }
 
 export function setStoredLang(lang: string) {
@@ -28,7 +32,7 @@ export const i18nReady = i18n
   .init({
     // ru is intentionally partial: i18next falls back to `en` per key, so an
     // untranslated screen shows English rather than a raw key.
-    resources: { zh: { translation: zh }, en: { translation: en }, ru: { translation: ru } },
+    resources: { en: { translation: en }, ru: { translation: ru } },
     lng: getStoredLangWithDefault(),
     fallbackLng: 'en',
     interpolation: { escapeValue: false },

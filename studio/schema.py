@@ -1,9 +1,13 @@
-"""Re-export shim — 真实定义在 studio.domain.*（PR-2 拆分自原 976 行单文件）。
+"""Re-export shim -- the real definitions live in studio.domain.* (split out
+in PR-2 from the original 976-line single file).
 
-历史上本模块汇聚所有 pydantic schema（TrainingConfig 等）。0.11.0 重构后：
-  - 训练 / 生成 / 正则 / LoRA / XY 矩阵各类拆到 `studio.domain.*` 子模块
-  - 本文件保留作为兼容垫片，所有 `from studio.schema import X` 仍可工作
-  - 新代码请直接 `from studio.domain import X`
+This module used to hold every pydantic schema (TrainingConfig, etc). After
+the 0.11.0 restructure:
+  - training / generate / reg / LoRA / XY matrix classes moved to
+    `studio.domain.*` submodules
+  - this file stays as a compat shim, so `from studio.schema import X` still
+    works
+  - new code should use `from studio.domain import X` directly
 """
 from .domain import (
     GROUP_ORDER,

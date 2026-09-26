@@ -1,14 +1,19 @@
-// FamilySwitchDialog —— 模型族切换的确认对话框（多模型 P4-3）。
+// FamilySwitchDialog -- confirmation dialog for switching model family (multi-model P4-3).
 //
-// 翻 model_family 不是普通字段编辑：路径按目标族重算、族风味字段重置、
-// 目标族不支持的能力字段关闭。本组件在打开时调后端预览计算
-// （/api/models/family-switch，纯计算不落盘），把变更分「模型路径 /
-// 参数调整」两区结构化展示，确认才把切换后的完整 config 交回调用方
-// （走各页正常保存链路）。
+// Flipping model_family isn't a plain field edit: paths get recomputed for the
+// target family, family-flavor fields get reset, and capability fields the
+// target family doesn't support get turned off. This component calls the
+// backend preview computation on open (/api/models/family-switch, pure
+// computation, nothing written to disk), shows the changes structured into two
+// sections ("model paths / parameter adjustments"), and only on confirm does
+// it hand the fully recomputed config back to the caller (which then goes
+// through that page's normal save flow).
 //
-// 不用通用 Dialog.confirm 的文本槽：变更清单是结构化数据（长路径 +
-// 新旧对照），塞纯文本里换行混乱不可读 —— 按 Dialog.tsx 自己的约定，
-// 复杂内容走声明式 JSX modal（NewVersionDialog 同款范式）。
+// Doesn't use the generic Dialog.confirm text slot: the change list is
+// structured data (long paths + old/new comparisons) that becomes an
+// unreadable jumble of line breaks stuffed into plain text -- per Dialog.tsx's
+// own convention, complex content goes through a declarative JSX modal (same
+// pattern as NewVersionDialog).
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -19,17 +24,17 @@ import {
 import { fieldLabel, schemaEnumLabel } from '../lib/schema'
 
 interface Props {
-  /** 目标族 id（用户在下拉里选的新值）。 */
+  /** Target family id (the new value the user picked in the dropdown). */
   target: string
-  /** 当前 config（切换前，model_family 仍是旧值）。 */
+  /** Current config (before the switch, model_family is still the old value). */
   config: ConfigData
-  /** 用户确认：应用后端重算的完整 config。 */
+  /** User confirmed: apply the fully recomputed config from the backend. */
   onApply: (switched: ConfigData) => void
-  /** 用户取消 / 预览失败：调用方保持旧值不动。 */
+  /** User canceled / preview failed: caller keeps the old value unchanged. */
   onCancel: () => void
 }
 
-/** 4 个权重路径字段 —— 展示用等宽字体 + 上下对照布局。 */
+/** The 4 weight path fields -- shown with monospace font + a stacked before/after layout. */
 const PATH_FIELDS = new Set([
   'transformer_path', 'vae_path', 'text_encoder_path', 't5_tokenizer_path',
 ])
@@ -46,7 +51,7 @@ function useSwitchPreview(target: string, config: ConfigData) {
       .then((r) => { if (alive) setPreview(r) })
       .catch((e) => { if (alive) setError(String(e)) })
     return () => { alive = false }
-    // config 引用在对话框生命周期内不变（打开时快照）
+    // The config reference doesn't change over the dialog's lifetime (snapshotted on open)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target])
   return { preview, error }

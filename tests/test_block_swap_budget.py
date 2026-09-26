@@ -1,12 +1,14 @@
-"""block swap 的预算护栏（docs/design/block-swap.md §3.2 ① / 刀 3）。
+"""Budget guardrails for block swap (docs/design/block-swap.md §3.2 ① / knife 3).
 
-两条独立的预算，语义不同、不能互相复用：
-- ``check_load_budget`` 的显存侧：换出层**永不上卡**，必须折扣，否则小显存卡
-  开满 swap 会被按「完整模型装不下」误拒。
-- ``check_pinned_budget``：换出层锁定在内存里、``trim_working_set`` 对它无效，
-  按可用物理内存的安全比例把关。
+Two independent budgets with different semantics that cannot substitute for each other:
+- ``check_load_budget``'s VRAM side: swapped-out layers **never go on the GPU**, so they
+  must be discounted -- otherwise a small-VRAM card with swap fully enabled would be
+  wrongly rejected as if "the full model doesn't fit."
+- ``check_pinned_budget``: swapped-out layers are locked in RAM, where
+  ``trim_working_set`` has no effect on them; gated by a safe fraction of available
+  physical memory.
 
-不需要 CUDA（纯预算算术 + 猴补查询函数）。
+Doesn't need CUDA (pure budget arithmetic + monkeypatched query functions).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ _GIB = 1024 ** 3
 
 @pytest.fixture
 def fake_env(monkeypatch):
-    """把 RAM / VRAM 查询与文件大小都换成可控值。"""
+    """Replace the RAM / VRAM queries and file size with controllable values."""
 
     def _apply(*, ram_gb: float, vram_gb: float, file_gb: float):
         monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: int(ram_gb * _GIB))
@@ -41,58 +43,59 @@ def fake_env(monkeypatch):
 
 
 def test_vram_discount_lets_small_card_pass(fake_env):
-    """16GB 卡 + 25.8GB bf16 模型 + 换出 94.8% → 应放行（这正是 B12 的场景）。
+    """16GB card + 25.8GB bf16 model + 94.8% swapped out -> should pass (this is exactly B12's scenario).
 
-    不折扣的话按完整模型算需 25.8+3=28.8GB，会被误拒。
+    Without the discount, the full-model calculation needs 25.8+3=28.8GB and would be wrongly rejected.
     """
     fake_env(ram_gb=64, vram_gb=15.0, file_gb=25.8)
 
-    # 不折扣：拒绝
+    # no discount: rejected
     with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
-        sysmem.check_load_budget(True, weight_paths=["x"], stage="测试")
+        sysmem.check_load_budget(True, weight_paths=["x"], stage="test")
 
-    # 折扣掉换出的 94.8%（28 层全换）：常驻 1.3GB + 基底 3GB < 15GB，放行
+    # discount the 94.8% swapped out (all 28 layers swapped): resident 1.3GB + base 3GB < 15GB, passes
     sysmem.check_load_budget(
-        True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.9482,
+        True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
     )
 
 
 def test_vram_discount_is_ratio_so_fp8_is_not_over_discounted(fake_env):
-    """**回归**：折扣必须按比例，不能按计算 dtype 的字节数。
+    """**Regression**: the discount must be proportional, not based on the compute dtype's byte count.
 
-    fp8 checkpoint 文件只有 bf16 的一半（13GB）。若折扣按 bf16 估的字节数
-    （22.64GB）去减，vram_need 会被压到 0 —— 护栏对 fp8 完全失效。
-    按比例则 fp8 常驻 = 13 × (1-0.948) = 0.7GB，与实际相符。
+    An fp8 checkpoint file is only half the size of bf16 (13GB). If the discount
+    subtracted the bf16-estimated byte count (22.64GB), vram_need would be pushed to 0 --
+    the guardrail would be completely ineffective for fp8. Proportionally, fp8 resident
+    = 13 x (1-0.948) = 0.7GB, matching reality.
     """
-    fake_env(ram_gb=64, vram_gb=3.0, file_gb=13.0)  # fp8 文件 13GB，卡只剩 3.0GB
+    fake_env(ram_gb=64, vram_gb=3.0, file_gb=13.0)  # fp8 file is 13GB, the card only has 3.0GB left
 
-    # 比例折扣：需 0.7+3=3.7GB > 3.0GB 可用 → 正确拒绝
+    # proportional discount: needs 0.7+3=3.7GB > 3.0GB available -> correctly rejected
     with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.9482,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
         )
-    # 比例被 clamp 到 [0,1]，不会因传入异常值把护栏折扣穿
+    # the ratio is clamped to [0,1], so a bogus input value can't blow the guardrail's discount through
     with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=-5.0,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=-5.0,
         )
 
 
 def test_vram_discount_still_rejects_when_genuinely_short(fake_env):
-    """折扣不是免死金牌：常驻部分仍装不下时照样拒。"""
+    """The discount isn't a free pass: it still rejects when the resident part alone doesn't fit."""
     fake_env(ram_gb=64, vram_gb=4.0, file_gb=25.8)
     with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.5,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=0.5,
         )
 
 
 def test_vram_discount_does_not_relax_ram_side(fake_env):
-    """折扣只作用于显存侧 —— 换出层仍要占内存，RAM 预算照算。"""
+    """The discount only applies to the VRAM side -- swapped-out layers still occupy RAM, so the RAM budget is computed as usual."""
     fake_env(ram_gb=8, vram_gb=80, file_gb=25.8)
     with pytest.raises(RuntimeError, match="系统可用内存不足"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.9482,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
         )
 
 

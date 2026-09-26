@@ -23,6 +23,7 @@ import {
   type VersionPhase,
 } from '../../api/client'
 import KebabMenu, { type KebabItem } from '../../components/ds/KebabMenu'
+import Popover, { MenuItems, useContextMenu, type MenuItem } from '../../components/ds/Popover'
 import PageHead from '../../components/ds/PageHead'
 import { useDialog } from '../../components/Dialog'
 import { useToast } from '../../components/Toast'
@@ -99,6 +100,11 @@ const Icon = {
   image: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5" /><path d="m3 15 4.5-4.5 4 4L15 11l6 5.5" /></svg>,
   tag: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M20.6 13.4 12 22l-9-9V3h9l8.6 8.6a2 2 0 0 1 0 2.8Z" /></svg>,
   branch: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M8.5 6h4a3 3 0 0 1 3 3v.5M8.5 18h4a3 3 0 0 0 3-3v-.5" /></svg>,
+  plus: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>,
+  open: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13m-5-6 6 6-6 6" /></svg>,
+  copy: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="8" width="12" height="12" rx="2.5" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>,
+  download: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" /></svg>,
+  trash: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-9 0 1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" /></svg>,
   hex: (s: number) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={s > 13 ? 1.7 : 1.8} strokeLinecap="round" strokeLinejoin="round"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /></svg>,
 }
 
@@ -305,7 +311,6 @@ export default function ProjectOverview() {
         tools={
           <>
             <button type="button" className="ds-ctl" onClick={() => setEditing(true)}>{t('overview.editProject')}</button>
-            <button type="button" className="ds-ctl" onClick={() => ctx?.onCreateVersion()}>{t('overview.newVersion')}</button>
             {primary && <Link className="ds-btn-primary" to={primary.to}>{primary.label}{Icon.arrow}</Link>}
           </>
         }
@@ -365,6 +370,10 @@ export default function ProjectOverview() {
               project={project}
               selectedVid={vid}
               tasks={tasks}
+              onCreate={(forkFrom) => ctx?.onCreateVersion(forkFrom)}
+              onActivate={(v) => ctx?.onSelectVersion(v.id)}
+              onDelete={(v) => ctx?.onDeleteVersion(v.id)}
+              onExport={ctx?.onExportTrain}
               onOpen={(v) => {
                 const isActive = v.id === project.active_version_id
                 if (!isActive && v.status === 'completed' && v.output_lora_path) {
@@ -867,15 +876,22 @@ function FilesTable({ version, rows, outputs, taskId, onRender }: {
 
 // ── right column ─────────────────────────────────────────────────────────
 
-function VersionsCard({ project, selectedVid, tasks, onOpen }: {
+function VersionsCard({ project, selectedVid, tasks, onOpen, onCreate, onActivate, onDelete, onExport }: {
   project: ProjectDetail
   selectedVid: number | null
   tasks: Task[]
   onOpen: (v: Version) => void
+  /** New version; with an id, prefilled as a copy of that version. */
+  onCreate: (forkFrom?: number) => void
+  onActivate: (v: Version) => void
+  onDelete: (v: Version) => void
+  /** Exports the active version's train set. */
+  onExport?: () => void
 }) {
   const { t } = useTranslation()
   const active = project.versions.find((v) => v.id === project.active_version_id) ?? null
   const versions = [...project.versions].sort((a, b) => b.created_at - a.created_at)
+  const menu = useContextMenu<Version>()
 
   const badgeOf = (v: Version) => {
     const last = tasks.find((tk) => tk.version_id === v.id && isTrainTask(tk))
@@ -896,6 +912,25 @@ function VersionsCard({ project, selectedVid, tasks, onOpen }: {
     return t('overview.activateAndOpen')
   }
 
+  const itemsFor = (v: Version): MenuItem[] => {
+    const isActive = v.id === project.active_version_id
+    const items: MenuItem[] = [
+      { label: t('overview.verMenuOpen'), icon: Icon.open, onSelect: () => onOpen(v) },
+    ]
+    if (!isActive) items.push({ label: t('overview.verMenuActivate'), icon: Icon.check, onSelect: () => onActivate(v) })
+    items.push({ label: t('overview.verMenuCopy'), icon: Icon.copy, onSelect: () => onCreate(v.id) })
+    if (isActive && onExport) items.push({ label: t('overview.verMenuExport'), icon: Icon.download, onSelect: onExport })
+    items.push({
+      label: t('overview.verMenuDelete'),
+      icon: Icon.trash,
+      tone: 'err',
+      divider: true,
+      disabled: project.versions.length <= 1,
+      onSelect: () => onDelete(v),
+    })
+    return items
+  }
+
   return (
     <div className="ds-card">
       <div className="ds-card-head ds-pad">
@@ -906,8 +941,19 @@ function VersionsCard({ project, selectedVid, tasks, onOpen }: {
             {active && <>{' · '}{t('overview.activeLabel')} {active.label}</>}
           </div>
         </div>
+        <div className="ds-card-tools">
+          <button
+            type="button"
+            className="ds-iconbtn"
+            onClick={() => onCreate()}
+            title={t('overview.newVersion')}
+            aria-label={t('overview.newVersion')}
+          >
+            {Icon.plus}
+          </button>
+        </div>
       </div>
-      <div style={{ maxHeight: 360, overflowY: 'auto' }}>
+      <div style={{ maxHeight: 360, overflowY: 'auto', borderTop: '1px solid var(--line)' }}>
         {versions.length === 0 && <div className="ds-card-body ds-muted" style={{ fontSize: 12.5 }}>{t('overview.noVersion')}</div>}
         {versions.map((v) => {
           const s = v.stats
@@ -918,23 +964,34 @@ function VersionsCard({ project, selectedVid, tasks, onOpen }: {
             if (s.has_output) meta.push(t('overview.verCkpt'))
           }
           return (
-            <button
+            <div
               key={v.id}
-              type="button"
-              className={`ds-verrow${v.id === selectedVid ? ' ds-is-active' : ''}`}
-              style={{ width: '100%', textAlign: 'left' }}
+              role="button"
+              tabIndex={0}
+              className={`ds-verrow${v.id === selectedVid ? ' ds-is-active' : ''}${menu.menu?.payload.id === v.id ? ' ds-is-menu' : ''}`}
               title={titleOf(v)}
               onClick={() => onOpen(v)}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(v) } }}
+              onContextMenu={(e) => menu.open(e, v)}
             >
               <span style={{ minWidth: 0 }}>
                 <span className="ds-verrow-name"><span className="ds-nm">{v.label}</span>{badgeOf(v)}</span>
                 {meta.length > 0 && <span className="ds-cell-key" style={{ display: 'block', marginTop: 4 }}>{meta.join(' · ')}</span>}
               </span>
-              <span className="ds-rowgo" aria-hidden="true">{Icon.rowgo}</span>
-            </button>
+              <span className="ds-verrow-tools">
+                <KebabMenu label={t('overview.versionActions', { label: v.label })} items={itemsFor(v).map((it) => ({ ...it, label: String(it.label) }))} />
+                <span className="ds-rowgo" aria-hidden="true">{Icon.rowgo}</span>
+              </span>
+            </div>
           )
         })}
       </div>
+      {menu.menu && (
+        <Popover anchor={menu.menu.at} minWidth={210} onClose={menu.close} ariaLabel={t('overview.versionActions', { label: menu.menu.payload.label })}>
+          <div className="ds-menu-head">{menu.menu.payload.label}</div>
+          <MenuItems items={itemsFor(menu.menu.payload)} onClose={menu.close} />
+        </Popover>
+      )}
     </div>
   )
 }

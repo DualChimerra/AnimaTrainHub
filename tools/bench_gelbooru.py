@@ -1,11 +1,11 @@
-"""三步定位 gelbooru 下载速度瓶颈：网络 / 上游限速 / Studio 代码。
+"""Three-step localization of the gelbooru download speed bottleneck: network / upstream rate limit / Studio code.
 
-跑法（在仓库根目录）：
+How to run (from the repo root):
     venv/bin/python scripts/bench_gelbooru.py
     # Windows: venv\\Scripts\\python.exe scripts\\bench_gelbooru.py
 
-凭证自动从 studio_data/secrets.json 读；找不到时从环境变量 GELBOORU_USER_ID /
-GELBOORU_API_KEY 读。日志同时打到 stdout 和 bench_gelbooru.log。
+Credentials are read automatically from studio_data/secrets.json; if not found, falls back to the
+GELBOORU_USER_ID / GELBOORU_API_KEY environment variables. Logs go to both stdout and bench_gelbooru.log.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 LOG_PATH = REPO_ROOT / "bench_gelbooru.log"
-SAMPLE_SIZE = 20  # 拉多少张图做 serial / parallel 对比
+SAMPLE_SIZE = 20  # how many images to pull for the serial / parallel comparison
 TAGS = "1girl"
 
 logging.basicConfig(
@@ -57,24 +57,24 @@ def load_credentials() -> tuple[str, str]:
             g = data.get("gelbooru") or {}
             uid, key = g.get("user_id", ""), g.get("api_key", "")
             if uid and key:
-                log.info("凭证从 studio_data/secrets.json 读取")
+                log.info("Credentials read from studio_data/secrets.json")
                 return uid, key
         except Exception as exc:  # noqa: BLE001
-            log.warning("secrets.json 读失败：%s", exc)
+            log.warning("Failed to read secrets.json: %s", exc)
     uid = os.environ.get("GELBOORU_USER_ID", "")
     key = os.environ.get("GELBOORU_API_KEY", "")
     if uid and key:
-        log.info("凭证从环境变量读取")
+        log.info("Credentials read from environment variables")
         return uid, key
     log.error(
-        "找不到 gelbooru 凭证。请确认 studio_data/secrets.json 已配 user_id/api_key，"
-        "或导出 GELBOORU_USER_ID / GELBOORU_API_KEY 环境变量。"
+        "Gelbooru credentials not found. Make sure studio_data/secrets.json has "
+        "user_id/api_key configured, or export the GELBOORU_USER_ID / GELBOORU_API_KEY environment variables."
     )
     sys.exit(1)
 
 
 def fetch_post_urls(user_id: str, api_key: str, limit: int) -> list[str]:
-    log.info("拉 %d 张 post 元数据 ...", limit)
+    log.info("Fetching metadata for %d posts ...", limit)
     r = requests.get(
         "https://gelbooru.com/index.php",
         params={
@@ -88,15 +88,15 @@ def fetch_post_urls(user_id: str, api_key: str, limit: int) -> list[str]:
     r.raise_for_status()
     posts = r.json().get("post") or []
     urls = [p["file_url"] for p in posts if p.get("file_url")]
-    log.info("拿到 %d 个 file_url", len(urls))
+    log.info("Got %d file_urls", len(urls))
     if not urls:
-        log.error("一个 URL 都没拿到，凭证或 tag 有问题，终止")
+        log.error("Got zero URLs, credentials or tag are likely wrong, aborting")
         sys.exit(1)
     return urls
 
 
 def ping_host(host: str, port: int = 443, attempts: int = 5) -> None:
-    """TCP connect RTT —— 不靠 ICMP（云机房常 block ping），看 TCP 握手时间。"""
+    """TCP connect RTT -- doesn't rely on ICMP (cloud datacenters often block ping), measures TCP handshake time instead."""
     samples: list[float] = []
     for _ in range(attempts):
         t0 = time.perf_counter()
@@ -104,22 +104,22 @@ def ping_host(host: str, port: int = 443, attempts: int = 5) -> None:
             with socket.create_connection((host, port), timeout=10):
                 samples.append((time.perf_counter() - t0) * 1000)
         except OSError as exc:
-            log.warning("  TCP connect %s 失败：%s", host, exc)
+            log.warning("  TCP connect %s failed: %s", host, exc)
     if samples:
         log.info(
-            "  TCP RTT %s:%d → min=%.0fms median=%.0fms max=%.0fms (n=%d)",
+            "  TCP RTT %s:%d -> min=%.0fms median=%.0fms max=%.0fms (n=%d)",
             host, port, min(samples), statistics.median(samples), max(samples), len(samples),
         )
 
 
 # ---------------------------------------------------------------------------
-# ① 单图原始网络（无 Session、无并发，最接近 curl）
+# (1) Single-image raw network (no Session, no concurrency, closest to curl)
 # ---------------------------------------------------------------------------
 
 
 def step1_raw_network(urls: list[str]) -> None:
     log.info("=" * 70)
-    log.info("① 单图原始网络速度（每图新建连接，不复用 session）")
+    log.info("(1) Single-image raw network speed (new connection per image, no session reuse)")
     log.info("=" * 70)
 
     api_host = "gelbooru.com"
@@ -130,7 +130,7 @@ def step1_raw_network(urls: list[str]) -> None:
     if cdn_host and cdn_host != api_host:
         ping_host(cdn_host)
 
-    # 测前 3 张图，看 speed = bytes / total_time
+    # Test the first 3 images, measure speed = bytes / total_time
     speeds: list[float] = []
     for i, u in enumerate(urls[:3]):
         t0 = time.perf_counter()
@@ -139,28 +139,28 @@ def step1_raw_network(urls: list[str]) -> None:
             resp.raise_for_status()
             content = resp.content
         except Exception as exc:  # noqa: BLE001
-            log.warning("  图 %d 失败：%s", i + 1, exc)
+            log.warning("  Image %d failed: %s", i + 1, exc)
             continue
         elapsed = time.perf_counter() - t0
         size = len(content)
         speed = size / elapsed if elapsed > 0 else 0
         speeds.append(speed)
         log.info(
-            "  图 %d  size=%.2fMB  time=%.2fs  speed=%.2f MB/s  (%s)",
+            "  Image %d  size=%.2fMB  time=%.2fs  speed=%.2f MB/s  (%s)",
             i + 1, size / 1e6, elapsed, speed / 1e6, urlparse(u).hostname,
         )
     if speeds:
-        log.info("  平均单图速度 %.2f MB/s", statistics.mean(speeds) / 1e6)
+        log.info("  Average per-image speed %.2f MB/s", statistics.mean(speeds) / 1e6)
 
 
 # ---------------------------------------------------------------------------
-# ② 串行 vs 并发（裸 requests，绕开 Studio）
+# (2) Serial vs parallel (bare requests, bypassing Studio)
 # ---------------------------------------------------------------------------
 
 
 def step2_serial_vs_parallel(urls: list[str]) -> tuple[float, float]:
     log.info("=" * 70)
-    log.info("② 裸 requests 串行 vs 并发对比 (n=%d)", len(urls))
+    log.info("(2) Bare requests serial vs parallel comparison (n=%d)", len(urls))
     log.info("=" * 70)
 
     sess1 = requests.Session()
@@ -174,7 +174,7 @@ def step2_serial_vs_parallel(urls: list[str]) -> tuple[float, float]:
             total += len(r.content)
         except Exception as exc:  # noqa: BLE001
             fail += 1
-            log.warning("  serial 失败：%s", exc)
+            log.warning("  serial failed: %s", exc)
     serial_t = time.perf_counter() - t0
     sess1.close()
     log.info(
@@ -201,7 +201,7 @@ def step2_serial_vs_parallel(urls: list[str]) -> tuple[float, float]:
                 total += f.result()
             except Exception as exc:  # noqa: BLE001
                 fail += 1
-                log.warning("  parallel 失败：%s", exc)
+                log.warning("  parallel failed: %s", exc)
     para_t = time.perf_counter() - t0
     sess2.close()
     log.info(
@@ -216,18 +216,18 @@ def step2_serial_vs_parallel(urls: list[str]) -> tuple[float, float]:
 
 
 # ---------------------------------------------------------------------------
-# ③ Studio 实际代码（PP9 BooruClient）
+# (3) Studio's actual code (PP9 BooruClient)
 # ---------------------------------------------------------------------------
 
 
 def step3_studio_client(urls: list[str]) -> None:
     log.info("=" * 70)
-    log.info("③ Studio BooruClient (PP9 真实代码路径)")
+    log.info("(3) Studio BooruClient (PP9 real code path)")
     log.info("=" * 70)
     try:
         from studio.services.booru.pool import BooruClient, BooruPoolConfig
     except Exception as exc:  # noqa: BLE001
-        log.error("import studio.services.booru_pool 失败：%s", exc)
+        log.error("import studio.services.booru_pool failed: %s", exc)
         return
 
     cfg = BooruPoolConfig(parallel_workers=4, api_rate_per_sec=2.0, cdn_rate_per_sec=5.0)
@@ -265,7 +265,7 @@ def step3_studio_client(urls: list[str]) -> None:
         )
         for _, _, exc in results[:3]:
             if exc is not None:
-                log.warning("  示例错误：%s", exc)
+                log.warning("  Example error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +274,7 @@ def step3_studio_client(urls: list[str]) -> None:
 
 
 def main() -> None:
-    log.info("bench_gelbooru.py — 日志写入 %s", LOG_PATH)
+    log.info("bench_gelbooru.py -- writing log to %s", LOG_PATH)
     log.info("Python: %s", sys.version.split()[0])
     log.info("requests: %s", requests.__version__)
 
@@ -286,7 +286,7 @@ def main() -> None:
     step3_studio_client(urls)
 
     log.info("=" * 70)
-    log.info("完成。把 %s 整份贴回来即可。", LOG_PATH.name)
+    log.info("Done. Paste back the whole %s file.", LOG_PATH.name)
 
 
 if __name__ == "__main__":

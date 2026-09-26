@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { TranslatedTag } from './tagDisplay/TranslatedTag'
 import { TagSuggestList } from './tagSuggest/TagSuggestList'
 import { useTagSuggest } from './tagSuggest/useTagSuggest'
 
@@ -136,7 +135,7 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
               key={`${tag}-${i}`}
               className="inline-flex items-center px-2 py-0.5 rounded-full bg-overlay border border-subtle text-xs font-mono text-fg-primary"
             >
-              <TranslatedTag tag={tag} />
+              {tag}
             </span>
           ))}
     </div>

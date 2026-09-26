@@ -87,8 +87,8 @@ class LLMAdapterAttention(nn.Module):
             cos, sin = position_embeddings_context
             key_states = apply_rotary_pos_emb(key_states, cos, sin)
 
-        # flash_attn 不支持任意 mask；只在 mask=None（cross-attention 默认情形）时尝试。
-        # 状态判断 + warn-once 由 try_flash_attn 统一处理。
+        # flash_attn doesn't support an arbitrary mask; only try it when mask=None (the default cross-attention case).
+        # State checks + warn-once are handled centrally by try_flash_attn.
         if mask is None:
             out, used = try_flash_attn(
                 query_states.transpose(1, 2),
@@ -238,9 +238,9 @@ class Anima(MiniTrainDIT):
         Args:
             text_embeds: Qwen3 embeddings (B, seq_len, 1024)
             text_ids: T5 token IDs (B, seq_len)
-            t5xxl_weights: 每 token 权重 (B, seq_len) 或 (B, seq_len, 1)；
-                对应 `(tag:1.3)` 类语法。漏传 → 权重失效（与 ComfyUI 原生
-                `comfy/ldm/anima/model.py:198-206` 对齐）。
+            t5xxl_weights: per-token weights (B, seq_len) or (B, seq_len, 1);
+                corresponds to `(tag:1.3)`-style syntax. If omitted, weighting has no
+                effect (matches ComfyUI's native `comfy/ldm/anima/model.py:198-206`).
 
         Returns:
             Processed embeddings for cross-attention

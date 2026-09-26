@@ -1,11 +1,13 @@
-"""Version 数据模型 + 物理目录 + fork 训练树 + activate。
+"""Version data model + physical directories + fork training tree + activate.
 
-Version 是 Pipeline 的「实验单元」：每个 version 独立维护 train/ reg/
-output/。label 由用户起（baseline /
-high-lr 这种语义名），同 project 内唯一，且不可改（路径锚点）。
+A Version is a Pipeline "experiment unit": each version independently
+maintains its own train/ reg/ output/. The label is user-chosen (semantic
+names like baseline / high-lr), unique within a project, and immutable (it's
+a path anchor).
 
-删除：直接 rmtree version 目录 + DELETE db 行。不可恢复。
-若被删的是 active version，自动 reassign 到「最新创建的剩余 version」。
+Deletion: rmtree the version directory + DELETE the db row. Unrecoverable.
+If the deleted version was active, it's automatically reassigned to "the
+most recently created remaining version".
 """
 from __future__ import annotations
 
@@ -20,12 +22,13 @@ from typing import Any, Optional
 from . import projects
 from ...services.dataset.scan import IMAGE_EXTS
 
-# ADR-0007 §11.3-B：versions 状态机用 status + phase 两个正交字段。
-# 老 stage 已在 PR-5 移除（PR-5 commit 2 删 VALID_STAGES / advance_stage）。
+# ADR-0007 section 11.3-B: the versions state machine uses two orthogonal
+# fields, status and phase. The old single `stage` field was removed in PR-5
+# (PR-5 commit 2 dropped VALID_STAGES / advance_stage).
 
 
 class VersionStatus:
-    """版本运行态状态机（5 enum，ADR-0007 §11.3-B）。"""
+    """Version runtime state machine (5 enum values, ADR-0007 section 11.3-B)."""
 
     PREPARING = "preparing"
     TRAINING = "training"
@@ -39,16 +42,19 @@ class VersionStatus:
 
 
 class VersionPhase:
-    """版本准备 cursor，仅 status=preparing 时有业务语义（ADR-0007 §11.3-B / §11.5-A）。
+    """Version preparation cursor; only meaningful while status=preparing (ADR-0007 sections 11.3-B / 11.5-A).
 
-    顺序：curating → preprocessing → editing → regularizing → ready。
-    preprocessing / regularizing 可跳过（SKIPPABLE），其余必经。
+    Order: curating -> preprocessing -> editing -> regularizing -> ready.
+    preprocessing / regularizing can be skipped (SKIPPABLE); the rest are mandatory.
 
-    ADR 0010 加 preprocessing phase（curating 之后）：用户筛选完图后对 train
-    集做 upscale / crop / 去重等精细处理；可跳过 = 接受训练时默认放大算法。
+    ADR 0010 added the preprocessing phase (after curating): the user does
+    fine-grained processing (upscale / crop / dedup) on the train set after
+    picking images; skippable = accept the default upscale algorithm at
+    training time.
 
-    自动打标步骤（旧 tagging phase）已移除；caption 通过上传自带 .txt、
-    手动填写（editing）或裸训练提供。旧 tagging 数据由 migration 迁到 editing。
+    The old auto-tagging step (the old tagging phase) has been removed;
+    captions now come from uploaded .txt files, manual entry (editing), or
+    training without captions. Old tagging data was migrated to editing.
     """
 
     CURATING = "curating"
@@ -65,17 +71,17 @@ class VersionPhase:
 
 
 def get_status(v: dict[str, Any]) -> str:
-    """读 version.status；None / 缺字段 fallback → preparing。"""
+    """Read version.status; None / missing field falls back to preparing."""
     return str(v.get("status") or VersionStatus.PREPARING)
 
 
 def get_phase(v: dict[str, Any]) -> str:
-    """读 version.phase；None / 缺字段 fallback → curating。"""
+    """Read version.phase; None / missing field falls back to curating."""
     return str(v.get("phase") or VersionPhase.CURATING)
 
 
 # ---------------------------------------------------------------------------
-# ADR-0007 §11.3-C / §6.9: version.status 派生 + 一致性校验
+# ADR-0007 sections 11.3-C / 6.9: version.status derivation + consistency check
 # ---------------------------------------------------------------------------
 
 
@@ -89,16 +95,18 @@ _TASK_TO_VERSION_STATUS: dict[str, str] = {
 def derive_status_from_tasks(
     conn: sqlite3.Connection, version_id: int
 ) -> str:
-    """按 ADR §11.3-C 派生 version.status：
+    """Derive version.status per ADR section 11.3-C:
 
-    - 有 active task（pending / running / paused / scheduled）→ training
-    - 无 active 看最近终态 task → completed / failed / canceled
-    - 从未有 task → preparing
+    - has an active task (pending / running / paused / scheduled) -> training
+    - no active task, look at the most recent terminal task -> completed / failed / canceled
+    - never had a task -> preparing
 
-    0.17 P-B：scheduled（计划任务，还没到点）与 pending 同等对待 —— 版本已被
-    该任务占用（enqueue 端点会 409），状态必须体现出来。
-    R-5：台账合并后 tasks 表也装数据作业（tag/download/eval…），派生只看
-    GPU 任务类型 —— 否则一个 pending 打标作业会把 version 顶成「训练中」。
+    0.17 P-B: scheduled (a scheduled task not yet due) is treated the same as
+    pending - the version is already claimed by that task (the enqueue
+    endpoint would 409), and the status must reflect that.
+    R-5: after the ledger merge, the tasks table also holds data jobs
+    (tag/download/eval...), so the derivation only looks at GPU task types -
+    otherwise a pending tagging job would bump the version to "training".
     """
     row = conn.execute(
         "SELECT 1 FROM tasks "
@@ -126,16 +134,19 @@ def derive_status_from_tasks(
 def reconcile_version_status(
     conn: sqlite3.Connection, version_id: int
 ) -> tuple[Optional[dict[str, Any]], bool]:
-    """读 version + 校正 status 不一致；返回 (version, was_corrected)。
+    """Read a version + correct any status mismatch; returns (version, was_corrected).
 
-    ADR §6.9 安全网：双写过渡期 supervisor 偶尔漏写时，此函数能让
-    任意 read 路径自愈。
-    - 计算 derive_status_from_tasks
-    - 与存储值不一致 → log warning + UPDATE + 返回 corrected version + True
-    - 一致 → 直接返回 (version, False)
-    - version 不存在 → (None, False)
+    Safety net for ADR section 6.9: during the dual-write transition period,
+    when the supervisor occasionally misses a write, this function lets any
+    read path self-heal.
+    - computes derive_status_from_tasks
+    - mismatch against the stored value -> logs a warning + UPDATE + returns
+      the corrected version + True
+    - match -> returns (version, False) directly
+    - version doesn't exist -> (None, False)
 
-    本函数不发 SSE（保持纯 db 操作），调用方根据 was_corrected 决定要不要 publish。
+    This function doesn't emit SSE (kept as a pure db operation); callers
+    decide whether to publish based on was_corrected.
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -150,20 +161,21 @@ def reconcile_version_status(
         return v, False
 
     logger.warning(
-        "version %d status mismatch: stored=%r derived=%r → correcting",
+        "version %d status mismatch: stored=%r derived=%r -> correcting",
         version_id, stored, derived,
     )
     update_version(conn, version_id, status=derived)
     return get_version(conn, version_id), True
 
-# label 必须是路径安全的：字母 / 数字 / 下划线 / 连字符 / 点。
-# 纯点 label（"." / ".."）会让 version_dir 解析到 versions/ 之外
-# （".." == project 根，delete_version 时 rmtree 整个项目），必须拒绝。
+# The label must be path-safe: letters / digits / underscore / hyphen / dot.
+# An all-dots label ("." / "..") would make version_dir resolve outside
+# versions/ (".." == the project root, so delete_version would rmtree the
+# whole project) - this must be rejected.
 _VALID_LABEL = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]+$")
 
 
 def is_valid_label(label: str) -> bool:
-    """version label 校验，给外部输入源（如 bundle manifest）复用。"""
+    """Version label validation, reusable by external input sources (e.g. a bundle manifest)."""
     return bool(_VALID_LABEL.fullmatch(label))
 
 
@@ -171,9 +183,9 @@ from studio.domain.errors import DomainError
 
 
 class VersionError(DomainError):
-    """Version 业务错误。
+    """Version business error.
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    PR-2 C3 added the DomainError base - the handler auto-translates it into the dual-write envelope.
     """
     default_code = "version.error"
 
@@ -188,31 +200,34 @@ def version_dir(project_id: int, slug: str, label: str) -> Path:
 
 
 def _natural_key(s: str) -> list[Any]:
-    """自然序 key：字符串里的数字段当 int 比较，让 a_5 < a_60。
+    """Natural-sort key: numeric runs in the string compare as ints, so a_5 < a_60.
 
     re.split(r'(\\d+)', 'a_60') -> ['a_', '60', '']
-    转换为 ['a_', 60, '']，与同样转换后的 'a_5' -> ['a_', 5, ''] 按位比较。
+    converted to ['a_', 60, ''], compared element-wise against the same
+    conversion of 'a_5' -> ['a_', 5, ''].
     """
     parts = re.split(r"(\d+)", s)
     return [int(p) if p.isdigit() else p.lower() for p in parts]
 
 
 def list_lora_ckpts(vdir: Path) -> list[dict[str, Any]]:
-    """扫 versions/{label}/output/*.safetensors，列所有 LoRA ckpt 文件。
+    """Scan versions/{label}/output/*.safetensors, listing every LoRA checkpoint file.
 
-    anima_train 输出命名约定（runtime/anima_train.py:2434, 2464）：
-      - {output_name}_step{N}.safetensors    （按 step 保存）
-      - {output_name}_epoch{N}.safetensors   （按 epoch 保存）
-      - {output_name}_final.safetensors      （训练完毕）
+    anima_train output naming convention (runtime/anima_train.py:2434, 2464):
+      - {output_name}_step{N}.safetensors    (saved by step)
+      - {output_name}_epoch{N}.safetensors   (saved by epoch)
+      - {output_name}_final.safetensors      (training finished)
 
-    返回每个 ckpt 的 {kind, value, label, path, mtime}：
+    Returns {kind, value, label, path, mtime} for each checkpoint:
       - kind: 'step' | 'epoch' | 'final' | 'other'
-      - value: int（step/epoch 数；final/other → 0）
-      - label: 显示用，"step 2476" / "epoch 5" / "final" / 文件名
-      - path: 绝对路径字符串
-      - mtime: 修改时间戳（前端按时间倒序展示）
-    排序：final 在前 → step 数字降序 → epoch 数字降序 → 其他按 label 自然序升序
-    （让 a_5 < a_60，避免 lex 序把 a_60 排到 a_9 前面或 mtime 序乱掉用户预期）。
+      - value: int (step/epoch number; 0 for final/other)
+      - label: for display, "step 2476" / "epoch 5" / "final" / the filename
+      - path: absolute path string
+      - mtime: modification timestamp (frontend shows newest first)
+    Sort order: final first -> step number descending -> epoch number
+    descending -> everything else by natural-sort label ascending (so a_5 <
+    a_60, avoiding lexical order putting a_60 before a_9, or mtime order
+    scrambling the user's expectation).
     """
     output_dir = vdir / "output"
     if not output_dir.exists():
@@ -221,11 +236,11 @@ def list_lora_ckpts(vdir: Path) -> list[dict[str, Any]]:
     for f in output_dir.glob("*.safetensors"):
         if not f.is_file():
             continue
-        name = f.stem  # 去掉 .safetensors
+        name = f.stem  # strip .safetensors
         kind = "other"
         value = 0
         label = name
-        # 匹配 *_step{N}
+        # match *_step{N}
         m = re.search(r"_step(\d+)$", name)
         if m:
             kind = "step"
@@ -249,14 +264,14 @@ def list_lora_ckpts(vdir: Path) -> list[dict[str, Any]]:
             "path": str(f), "mtime": mtime,
         })
 
-    # 排序：final 顶部；step/epoch 按 value 降序；other 按 label 自然序升序
+    # sort: final on top; step/epoch by value descending; other by natural-sort label ascending
     kind_order = {"final": 0, "step": 1, "epoch": 2, "other": 3}
 
     def _sort_key(x: dict[str, Any]) -> tuple[Any, ...]:
         ko = kind_order.get(x["kind"], 9)
         if x["kind"] in ("step", "epoch"):
             return (ko, -x["value"], [], -x["mtime"])
-        # final / other：value 都是 0，按 label 自然序升序（other 主要受益）
+        # final / other: value is always 0, sort by natural-sort label ascending (mainly benefits "other")
         return (ko, 0, _natural_key(x["label"]), -x["mtime"])
 
     items.sort(key=_sort_key)
@@ -267,28 +282,30 @@ _STATE_FILE_RE = re.compile(r"training_state_(step|epoch)(\d+)\.pt$")
 
 
 def list_state_ckpts(vdir: Path) -> list[dict[str, Any]]:
-    """扫 version output/ 下所有断点续训 state 文件。
+    """Scan a version's output/ for every resume-training state file.
 
-    扫描两个位置（ADR 0006 PR-1 路径迁移）：
-      - 旧路径：``output/training_state_step{N}.pt``（pre-PR-1 残留）
-      - 新路径：``output/state/task_<TID>/training_state_step{N}.pt``（PR-1+）
+    Scans two locations (ADR 0006 PR-1 path migration):
+      - old path: ``output/training_state_step{N}.pt`` (pre-PR-1 leftovers)
+      - new path: ``output/state/task_<TID>/training_state_step{N}.pt`` (PR-1+)
 
-    两种粒度都看（PR-1 顺手修扫描漏 epoch 的旧 bug）：
-      - step  →  ``training_state_step{N}.pt``    label "step N"
-      - epoch →  ``training_state_epoch{N}.pt``   label "epoch N"
+    Both granularities are checked (PR-1 also fixed a bug where the old scan missed epoch files):
+      - step  ->  ``training_state_step{N}.pt``    label "step N"
+      - epoch ->  ``training_state_epoch{N}.pt``   label "epoch N"
 
-    pause 文件（PR-2+ 的 ``pause_step_<N>.pt``）**不在此列**——picker 不应
-    暴露 pause 中间态。命名前缀天然过滤。
+    Pause files (PR-2+'s ``pause_step_<N>.pt``) are **excluded** - the picker
+    shouldn't expose a mid-pause state. The naming prefix filters them out naturally.
 
-    返回 [{step, label, path, mtime}]，step 降序，epoch 单独按 step（int 部分）
-    降序排在 step 项前后；UI 按 mtime/step 自己排即可。
+    Returns [{step, label, path, mtime}], step entries descending; epoch
+    entries are sorted separately by their own step-like int, interleaved
+    around the step entries - the UI can re-sort by mtime/step as it likes.
     """
     output_dir = vdir / "output"
     if not output_dir.exists():
         return []
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    # 同一相对路径不要进两次（理论上不会撞，但 glob 重叠 + symlink 兜底）。
+    # avoid the same relative path appearing twice (shouldn't collide in
+    # theory, but glob overlap + symlinks as a safety net)
     candidates: list[Path] = []
     candidates.extend(output_dir.glob("training_state_*.pt"))
     state_root = output_dir / "state"
@@ -315,10 +332,10 @@ def list_state_ckpts(vdir: Path) -> list[dict[str, Any]]:
             "label": f"{kind} {n}",
             "path": str(f),
             "mtime": mtime,
-            "_kind": kind,  # 内部排序用，返回前剥掉
+            "_kind": kind,  # for internal sorting, stripped before returning
             "_n": n,
         })
-    # 先 step 段（按 step 降序），后 epoch 段（按 epoch 降序）。
+    # step entries first (descending by step), then epoch entries (descending by epoch).
     items.sort(key=lambda x: (0 if x["_kind"] == "step" else 1, -x["_n"]))
     for it in items:
         it.pop("_kind", None)
@@ -329,10 +346,11 @@ def list_state_ckpts(vdir: Path) -> list[dict[str, Any]]:
 def list_project_state_ckpts(
     conn: sqlite3.Connection, project: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """列项目所有 versions 的 state.pt，按 version 分组（Train 页 resume_state picker 用）。
+    """List every version's state.pt files across a project, grouped by version (used by the Train page's resume_state picker).
 
-    返回 [{version_id, label, items: [{step, label, path, mtime}, ...]}]，按 version
-    `created_at` 升序，items 按 step 降序。空 version（没产出 .pt）保留分组但 items 为空。
+    Returns [{version_id, label, items: [{step, label, path, mtime}, ...]}],
+    versions ordered by `created_at` ascending, items by step descending. A
+    version with no output .pt files keeps its group with an empty items list.
     """
     pid = int(project["id"])
     slug = str(project["slug"])
@@ -350,10 +368,11 @@ def list_project_state_ckpts(
 def list_project_lora_ckpts(
     conn: sqlite3.Connection, project: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """列项目所有 versions 的 LoRA ckpt（.safetensors），按 version 分组（resume_lora picker 用）。
+    """List every version's LoRA checkpoints (.safetensors) across a project, grouped by version (used by the resume_lora picker).
 
-    返回 [{version_id, label, items: [{kind, value, label, path, mtime}, ...]}]，
-    按 version `created_at` 升序；items 按 list_lora_ckpts 内置排序（final → step desc → epoch desc → other）。
+    Returns [{version_id, label, items: [{kind, value, label, path, mtime}, ...]}],
+    versions ordered by `created_at` ascending; items sorted by list_lora_ckpts's
+    own ordering (final -> step desc -> epoch desc -> other).
     """
     pid = int(project["id"])
     slug = str(project["slug"])
@@ -376,14 +395,17 @@ def _write_version_json(v: dict[str, Any], pdir_label_path: Path) -> None:
     )
 
 
-# 默认训练子文件夹：Kohya 风格 N_label，repeat=1。
-# 之所以默认建一个：用户进 Curation 页就能直接复制图，不需要先「+ 新建文件夹」。
+# Default training subfolder: Kohya-style N_label, repeat=1.
+# Created by default so users landing on the Curation page can immediately
+# copy images in, without first having to "+ create a new folder".
 DEFAULT_TRAIN_FOLDER = "1_data"
 
 
 def _ensure_version_tree(vdir: Path) -> None:
-    # samples/ 不再建：采样图是 task 档案（studio_data/tasks/<id>/samples/），
-    # version 树里只有老 task 的历史数据，读兼容由 samples.py 多候选解析负责
+    # samples/ is no longer created here: sample images are now task-scoped
+    # archives (studio_data/tasks/<id>/samples/); anything under the version
+    # tree is just historical data from old tasks, and read compatibility is
+    # handled by samples.py's multi-candidate resolution.
     for sub in ("train", "reg", "output"):
         (vdir / sub).mkdir(parents=True, exist_ok=True)
     (vdir / "train" / DEFAULT_TRAIN_FOLDER).mkdir(parents=True, exist_ok=True)
@@ -437,16 +459,18 @@ def create_version(
     fork_from_version_id: Optional[int] = None,
     note: Optional[str] = None,
 ) -> dict[str, Any]:
-    """label 校验：仅 [A-Za-z0-9_.-]+；同 project 内唯一。
+    """Label validation: only [A-Za-z0-9_.-]+; unique within the project.
 
-    fork_from_version_id 给了 → 全量复制源 version 的用户产物：
-        train/、reg/、config.yaml、.unlocked.json（PP10.4）
-    输出类（output/、samples/、monitor_state.json）一律不复制。
-    复制 config.yaml 后立即重写一次，把 data_dir / reg_data_dir / output_dir /
-    output_name 强制刷成新 version 的路径。
+    When fork_from_version_id is given, fully copies the source version's
+    user-generated artifacts:
+        train/, reg/, config.yaml, .unlocked.json (PP10.4)
+    Output artifacts (output/, samples/, monitor_state.json) are never copied.
+    After copying config.yaml, it's immediately rewritten once to force
+    data_dir / reg_data_dir / output_dir / output_name to the new version's paths.
 
-    ADR-0007 PR-5: fork 不再继承 stage / status / phase；新 version 始终从
-    preparing / curating 默认值开始。用户 fork 后从筛选 phase 接着干。
+    ADR-0007 PR-5: forking no longer inherits stage / status / phase; a new
+    version always starts from the preparing / curating defaults. After
+    forking, the user continues from the curation phase.
     """
     p = projects.get_project(conn, project_id)
     if not p:
@@ -461,7 +485,7 @@ def create_version(
             code="version.label_invalid", details={"name": label},
             http_status=400,
         )
-    # 唯一性
+    # uniqueness
     if conn.execute(
         "SELECT 1 FROM versions WHERE project_id = ? AND label = ?",
         (project_id, label),
@@ -498,37 +522,39 @@ def create_version(
     if fork_from_version_id is not None:
         src = _must_get(conn, fork_from_version_id)
         src_vdir = version_dir(project_id, p["slug"], src["label"])
-        # train / reg：递归复制目录（存在才复制）
+        # train / reg: recursively copy the directory (only if it exists)
         for sub in ("train", "reg"):
             src_sub = src_vdir / sub
             if src_sub.exists():
                 _copytree(src_sub, vdir / sub)
-        # config.yaml + .unlocked.json：单文件复制
+        # config.yaml + .unlocked.json: single-file copy
         for fname in ("config.yaml", ".unlocked.json"):
             src_file = src_vdir / fname
             if src_file.exists():
                 shutil.copy2(src_file, vdir / fname)
-        # config.yaml 复制过来后，data_dir / reg_data_dir / output_dir /
-        # output_name 还指向源 version；用 force_project_overrides=True 重写
-        # 一次刷成新 version 的路径。reg_data_dir 由 project_specific_overrides
-        # 自动检测新 version 的 reg/meta.json 是否存在 → 跟随复制结果。
+        # After copying config.yaml over, data_dir / reg_data_dir /
+        # output_dir / output_name still point at the source version;
+        # rewrite once with force_project_overrides=True to fix them to the
+        # new version's paths. reg_data_dir is auto-detected by
+        # project_specific_overrides based on whether the new version's
+        # reg/meta.json exists - it follows what actually got copied.
         v_for_rewrite = _must_get(conn, vid)
         new_cfg_path = vdir / "config.yaml"
         if new_cfg_path.exists():
-            from .. import version_config as _vc  # 延迟避免循环
+            from .. import version_config as _vc  # deferred import to avoid a cycle
             try:
                 cfg = _vc.read_version_config(p, v_for_rewrite)
                 _vc.write_version_config(
                     p, v_for_rewrite, cfg, force_project_overrides=True
                 )
             except _vc.VersionConfigError:
-                # 源 config 损坏不阻断新建；用户去 Train 页换预设
+                # a corrupt source config shouldn't block creating the new version; the user can switch presets on the Train page
                 pass
 
     v = _must_get(conn, vid)
     _write_version_json(v, vdir)
 
-    # 项目里第一个 version → 自动设为 active
+    # first version in a project -> auto-set as active
     if p.get("active_version_id") is None:
         projects.update_project(conn, project_id, active_version_id=vid)
 
@@ -536,10 +562,11 @@ def create_version(
 
 
 def _copytree(src: Path, dst: Path) -> None:
-    """递归复制目录（含子文件夹与同名 metadata 文件）。
+    """Recursively copy a directory (including subfolders and same-named metadata files).
 
-    Win 上硬链接受限较多，统一走 copy（PP1 说明这点）。
-    PP10.1 起从 _copytree_train 通用化 — train / reg 都用这个。
+    Hardlinks are more restricted on Windows, so this always does a plain
+    copy (see PP1's notes on this). Generalized from _copytree_train since
+    PP10.1 - train / reg both use this now.
     """
     dst.mkdir(parents=True, exist_ok=True)
     for sub in src.iterdir():
@@ -579,7 +606,7 @@ def update_version(
 
 
 def delete_version(conn: sqlite3.Connection, version_id: int) -> None:
-    """rmtree version 目录 + DELETE db 行；若是 active 自动 reassign。不可恢复。"""
+    """rmtree the version directory + DELETE the db row; reassigns active automatically if needed. Unrecoverable."""
     v = _must_get(conn, version_id)
     p = projects.get_project(conn, v["project_id"])
     if p:
@@ -588,7 +615,7 @@ def delete_version(conn: sqlite3.Connection, version_id: int) -> None:
             shutil.rmtree(src, ignore_errors=True)
 
         if p.get("active_version_id") == version_id:
-            # 选剩下里 created_at 最新的；都没了就清空
+            # pick whichever remaining version has the newest created_at; clear if none left
             row = conn.execute(
                 "SELECT id FROM versions WHERE project_id = ? AND id != ? "
                 "ORDER BY created_at DESC LIMIT 1",
@@ -606,7 +633,7 @@ def delete_version(conn: sqlite3.Connection, version_id: int) -> None:
 def activate_version(
     conn: sqlite3.Connection, version_id: int
 ) -> dict[str, Any]:
-    """把当前 version 设为项目的 active_version。返回更新后的 version。"""
+    """Set the given version as the project's active_version. Returns the updated version."""
     v = _must_get(conn, version_id)
     projects.update_project(conn, v["project_id"], active_version_id=version_id)
     return v
@@ -618,10 +645,10 @@ def activate_version(
 
 
 def _scan_caption_dataset(root: Path) -> tuple[list[dict[str, Any]], int, int]:
-    """扫 root/<folder>/ 的图片数与已打标数（.txt / .json sidecar）。
+    """Scan root/<folder>/ for image count and captioned count (.txt / .json sidecar).
 
-    train/ 与 validation/ 同构（validation 镜像 train 的子文件夹布局），共用一套扫描。
-    返回 (folders, total, tagged)。
+    train/ and validation/ share the same layout (validation mirrors train's
+    subfolder structure), so they share this scan. Returns (folders, total, tagged).
     """
     folders: list[dict[str, Any]] = []
     total = 0
@@ -642,7 +669,7 @@ def _scan_caption_dataset(root: Path) -> tuple[list[dict[str, Any]], int, int]:
 
 
 def stats_for_version(p: dict[str, Any], v: dict[str, Any]) -> dict[str, Any]:
-    """train / validation 图片与已打标计数 / reg 计数 / output 是否存在。"""
+    """train / validation image and tagged counts / reg count / whether output exists."""
     vdir = version_dir(p["id"], p["slug"], v["label"])
     train_folders, train_total, tagged_total = _scan_caption_dataset(vdir / "train")
     _, val_total, val_tagged = _scan_caption_dataset(vdir / "validation")
@@ -650,7 +677,7 @@ def stats_for_version(p: dict[str, Any], v: dict[str, Any]) -> dict[str, Any]:
     reg_total = 0
     reg_meta_exists = False
     if reg_dir.exists():
-        # reg/{train-subfolder-mirror}/{post_id}.png — 递归扫（与源脚本一致）
+        # reg/{train-subfolder-mirror}/{post_id}.png - scanned recursively (matches the source script)
         for f in reg_dir.rglob("*"):
             if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
                 reg_total += 1
@@ -675,17 +702,19 @@ def compute_bucket_histogram(
     aspect_ratio_limit: float = 2.0,
     prefer_json: bool = True,
 ) -> list[dict[str, Any]]:
-    """按**真正的** BucketManager 算训练集 ARB 桶分布（与实际训练逐桶一致）。
+    """Compute the training set's ARB bucket distribution using the **real** BucketManager (matches actual training bucket-for-bucket).
 
-    扫描规则镜像 trainer 的 ``ImageDataset._scan`` / ``_make_sample``，避免预览与实际
-    训练数量不符：
-    - 根目录散图按 repeat=1 + config 分辨率列表计入；
-    - 子文件夹**递归**（``rglob``）扫，按文件夹名 px 覆盖 / repeat 解析；
-    - **只计有 caption 的图**（无 ``.json``/``.txt``/``.caption`` 的会被 trainer 丢弃）。
+    Scan rules mirror the trainer's ``ImageDataset._scan`` / ``_make_sample``,
+    to avoid the preview disagreeing with the actual training count:
+    - loose images at the root count with repeat=1 + the config's resolution list;
+    - subfolders are scanned **recursively** (``rglob``), with px override / repeat parsed from the folder name;
+    - **only images with a caption count** (trainer drops anything without a ``.json``/``.txt``/``.caption``).
 
-    每张图按其分辨率 fan-out 落桶，count = 有效样本数（含 repeat × 分辨率档数）。
-    复用 runtime 的 ``BucketManager`` + ``_parse_folder_meta``，不引入桶算法第三份拷贝。
-    返回 ``[{reso, buckets: [{w, h, count}]}]``，按分辨率升序、桶按 count 降序。
+    Each image fans out into a bucket per resolution; count = the number of
+    effective samples (repeat times the number of resolution tiers). Reuses
+    the runtime's ``BucketManager`` + ``_parse_folder_meta`` instead of
+    introducing a third copy of the bucketing algorithm. Returns ``[{reso,
+    buckets: [{w, h, count}]}]``, resolutions ascending, buckets by count descending.
     """
     from runtime.training.dataset import BucketManager, ImageDataset
     from PIL import Image
@@ -700,7 +729,7 @@ def compute_bucket_histogram(
         return mgrs[reso]
 
     def has_caption(img_path: Path) -> bool:
-        # 镜像 _make_sample：prefer_json 且 .json 存在 → json；否则要 .txt 或 .caption。
+        # mirrors _make_sample: prefer_json and .json exists -> json; otherwise needs .txt or .caption.
         if prefer_json and img_path.with_suffix(".json").exists():
             return True
         return img_path.with_suffix(".txt").exists() or img_path.with_suffix(".caption").exists()
@@ -721,11 +750,11 @@ def compute_bucket_histogram(
             bmap[(bw, bh)] = bmap.get((bw, bh), 0) + repeat
 
     if train_dir.exists():
-        # 根目录散图：repeat=1，无 px 前缀 → 用 config 分辨率列表
+        # loose images at the root: repeat=1, no px prefix -> use the config's resolution list
         for p in sorted(train_dir.iterdir()):
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
                 add_image(p, 1, base_resos)
-        # 子文件夹：递归扫 + px 覆盖 / repeat 解析
+        # subfolders: recursive scan + px override / repeat parsing
         for sub in sorted(train_dir.iterdir()):
             if not sub.is_dir():
                 continue
@@ -746,11 +775,12 @@ def compute_bucket_histogram(
 
 
 class _NavitTokenStub:
-    """给 ``NavitPackBatchSampler`` 喂 token 数列表的最小 dataset 壳。
+    """Minimal dataset shell that hands ``NavitPackBatchSampler`` a list of token counts.
 
-    ``dataset_token_counts`` 通过 ``token_count_for_index`` 属性发现 token 数，
-    因此打包（含 shuffle/strategy/drop_last）走的是**真打包器同一条代码路径**，
-    不是第二份算法拷贝。
+    ``dataset_token_counts`` discovers token counts through the
+    ``token_count_for_index`` attribute, so packing (including
+    shuffle/strategy/drop_last) goes through the exact same code path as the
+    **real packer**, not a second copy of the algorithm.
     """
 
     def __init__(self, counts: list[int]) -> None:
@@ -775,29 +805,39 @@ def compute_navit_pack_estimate(
     over_budget: str = "downscale",
     seed: int = 42,
 ) -> dict[str, Any]:
-    """NaViT 打包模式的 epoch 包数预估（= 优化器 steps/epoch 的分子）。
+    """Estimate the number of packs per epoch for NaViT packing mode (= the numerator of optimizer steps/epoch).
 
-    扫描规则与 ``compute_bucket_histogram`` 同源（镜像 ``ImageDataset._scan``：
-    根目录散图 → 子文件夹 sorted+rglob、只计有 caption 的图、repeat 展开），逐图
-    token 数与打包全部复用 runtime 真实现：
+    Scan rules share the same source as ``compute_bucket_histogram``
+    (mirroring ``ImageDataset._scan``: loose root images, then subfolders
+    sorted+rglob, only images with a caption count, repeat expansion); the
+    per-image token count and packing both reuse the runtime's real
+    implementation:
 
-    - ``native_resolution=True``：``plan_native_fit_image``（floor-16 + 超预算
-      downscale），多分辨率 fan-out 收拢为单档（镜像 ``ImageDataset.__init__``）；
-    - 否则按 ARB 桶尺寸推 token（``(w//16)*(h//16)``，与
-      ``dataset_token_counts`` 从 latent 形状推导的口径一致）；
-    - 打包经真 ``NavitPackBatchSampler``（同 shuffle(seed)+strategy+drop_last），
-      epoch-0 包数与训练日志的 ``dataset_len``/steps 逐位一致；后续 epoch 因
-      reshuffle 有 ±几步波动，故对外语义仍是「预估」。
+    - ``native_resolution=True``: ``plan_native_fit_image`` (floor-16 +
+      over-budget downscale), multi-resolution fan-out collapses to a single
+      tier (mirrors ``ImageDataset.__init__``);
+    - otherwise, token count is derived from the ARB bucket size
+      (``(w//16)*(h//16)``, matching the convention
+      ``dataset_token_counts`` derives from the latent shape);
+    - packing goes through the real ``NavitPackBatchSampler`` (same
+      shuffle(seed)+strategy+drop_last), so the epoch-0 pack count matches
+      the training log's ``dataset_len``/steps exactly; later epochs drift by
+      a few steps due to reshuffling, so this is still described externally
+      as an "estimate".
 
-    ``data_dirs`` 传 ``[train_dir]`` 或 ``[train_dir, reg_dir]``（reg 参与同一
-    打包池，与 ``MergedDataset`` 的 main+reg 拼接顺序一致）。
+    ``data_dirs`` is passed as ``[train_dir]`` or ``[train_dir, reg_dir]``
+    (reg participates in the same packing pool, matching ``MergedDataset``'s
+    main+reg concatenation order).
 
-    已知偏差：模型 RoPE 单边 token 上限（训练时从 pos_embedder 读）此处拿不到，
-    按不设限处理——只影响单边 > 上限×16 px 的极端巨图（预算上限仍然生效）。
+    Known bias: the model's per-side RoPE token cap (read from the
+    pos_embedder at training time) isn't available here, so it's treated as
+    unbounded - this only affects extreme oversized images whose single side
+    exceeds cap x16 px (the budget cap still applies).
 
-    返回 ``{packs_per_epoch, samples, avg_images_per_pack, token_min, token_max,
-    token_budget, strategy, native, downscaled, sizes}``；``sizes`` 仅 native 下
-    非空（原生尺寸直方图 ``[{w,h,count}]``，count 含 repeat，按 count 降序）。
+    Returns ``{packs_per_epoch, samples, avg_images_per_pack, token_min,
+    token_max, token_budget, strategy, native, downscaled, sizes}``;
+    ``sizes`` is only non-empty under native (a histogram of native sizes
+    ``[{w,h,count}]``, count includes repeat, sorted by count descending).
     """
     from runtime.training.dataset import (
         ImageDataset,
@@ -808,7 +848,7 @@ def compute_navit_pack_estimate(
 
     base_resos = [int(r) for r in resolutions]
     if native_resolution and len(base_resos) > 1:
-        # 镜像 ImageDataset.__init__：native 下 fan-out 无意义，收拢为单档
+        # mirrors ImageDataset.__init__: fan-out is meaningless under native, collapse to a single tier
         base_resos = base_resos[:1]
     mgrs: dict[int, Any] = {}
 
@@ -843,8 +883,9 @@ def compute_navit_pack_estimate(
                     over_budget=over_budget,
                 )
             except ValueError:
-                # over_budget="fail" 的超限图：训练会 fail-fast；预估侧跳过并
-                # 不计入（比抛 500 砸掉整个分布面板好）
+                # an over-budget image with over_budget="fail": training would
+                # fail-fast; the estimate skips it and doesn't count it
+                # (better than a 500 taking down the whole distribution panel)
                 return
             token_counts.extend([plan.token_count] * repeat)
             key = (plan.width, plan.height)
@@ -852,11 +893,11 @@ def compute_navit_pack_estimate(
             if plan.was_downscaled:
                 downscaled += repeat
         else:
-            # 镜像 _scan 展开顺序：reso fan-out 外层、repeat 内层
+            # mirrors _scan's expansion order: reso fan-out outer, repeat inner
             for target_reso in resos:
                 bw, bh = mgr_for(target_reso).get_bucket(w, h)
-                # 与 dataset_token_counts 的 latent 形状推导同口径：
-                # (px/8 latent) // patch_spatial(2) → px // 16
+                # same convention as dataset_token_counts's latent-shape derivation:
+                # (px/8 latent) // patch_spatial(2) -> px // 16
                 token_counts.extend([(bw // 16) * (bh // 16)] * repeat)
 
     for data_dir in data_dirs:

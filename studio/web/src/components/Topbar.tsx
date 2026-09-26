@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { playSound } from '../lib/sound'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useProjectCtx } from '../context/ProjectContext'
@@ -166,7 +167,13 @@ export default function Topbar({
 
   useEventStream(
     (evt: StudioEvent) => {
-      if (evt.type === 'task_state_changed') void refreshQueue()
+      if (evt.type === 'task_state_changed') {
+        void refreshQueue()
+        // Background work finishing is worth an audible cue (the Topbar is
+        // mounted on every page, so this fires exactly once per event).
+        if (evt.status === 'done') playSound('notify')
+        else if (evt.status === 'failed') playSound('error')
+      }
     },
     { onOpen: () => void refreshQueue() },
   )

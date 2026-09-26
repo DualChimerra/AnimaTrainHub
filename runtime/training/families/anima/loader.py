@@ -1,8 +1,9 @@
-"""Anima 族加载器（多模型 PR-2b，自 training/models.py 函数级迁入）。
+"""Anima family loader (multi-model PR-2b, moved function-by-function from training/models.py).
 
-load_anima_model / load_text_encoders 是族知识（checkpoint 形状推断两档、
-llm_adapter 缺失兜底、Qwen+T5 双 encoder）；VAEWrapper / load_vae 为跨族
-共享资产留在 training.vae（D6）。
+load_anima_model / load_text_encoders are family knowledge (two-tier
+checkpoint shape inference, llm_adapter missing-weight fallback, Qwen+T5 dual
+encoder); VAEWrapper / load_vae stay in training.vae as a cross-family shared
+asset (D6).
 """
 
 from __future__ import annotations
@@ -19,18 +20,21 @@ from training.model_loading import (
 
 logger = logging.getLogger(__name__)
 
-#: checkpoint 键里的 block 归属（键可能带 model./module. 等前缀，
-#: _load_weights_best_effort 加载时才剥——这里按子串匹配，前缀无关）
+#: Block ownership within checkpoint keys (keys may carry a model./module.
+#: prefix etc., which _load_weights_best_effort only strips at load time --
+#: this matches by substring, so the prefix doesn't matter)
 _BLOCK_KEY_RE = re.compile(r"(?:^|\.)blocks\.(\d+)\.")
 
 
 @lru_cache(maxsize=8)
 def _header_param_counts(checkpoint_path: str) -> tuple[tuple[int, ...], int]:
-    """(每个 block 的参数量, 全模型参数量)，从 safetensors header 数（不读 payload）。
+    """(per-block parameter count, full-model parameter count), counted from the safetensors header (payload not read).
 
-    带缓存：block swap 预检要为 0..N 每个候选值各问一次比例，不缓存就会把同一个
-    header 读 N+1 遍（krea2 侧的 ``_swapped_param_counts`` 同款处理）。key 是路径
-    字符串，返回两个不可变值，缓存本身零内存风险。
+    Cached: the block-swap preflight needs to ask for the ratio of each
+    candidate value from 0..N, and without caching that would re-read the
+    same header N+1 times (same treatment as krea2's
+    ``_swapped_param_counts``). The key is the path string; the two returned
+    values are immutable, so the cache itself has zero memory risk.
     """
     from safetensors import safe_open
 
@@ -53,10 +57,12 @@ def _header_param_counts(checkpoint_path: str) -> tuple[tuple[int, ...], int]:
 
 
 def block_count_from_header(checkpoint_path) -> int:
-    """checkpoint 里的 DiT 主干层数（2B=28 / 14B=36）。读不出来返回 0。
+    """Number of DiT backbone layers in the checkpoint (2B=28 / 14B=36). Returns 0 if it can't be read.
 
-    Anima 的层数由 checkpoint 决定，不像 krea2 有固定 config —— 预检要搜推荐值
-    就得先知道上界，而它只能从权重文件本身问。
+    Anima's layer count is determined by the checkpoint, unlike krea2 which
+    has a fixed config -- to search for a recommended value the preflight
+    needs to know the upper bound first, and that can only be asked of the
+    weight file itself.
     """
     try:
         per_block, _total = _header_param_counts(str(checkpoint_path))
@@ -66,11 +72,14 @@ def block_count_from_header(checkpoint_path) -> int:
 
 
 def swapped_param_ratio_from_header(checkpoint_path, blocks_to_swap: int) -> float:
-    """换出层占全模型参数的比例，从 safetensors header 数 numel（不读 payload）。
+    """Fraction of total model parameters held by the swapped-out layers, counted as numel from the safetensors header (payload not read).
 
-    krea2 用固定 config 数 meta 模型参数；Anima 的层数由 checkpoint 决定
-    （2B=28 层 / 14B=36 层），header 才是版本真相，且数参数天然 dtype 无关
-    （显存折扣必须按比例乘文件实际大小，见 krea2 loader 同名函数的说明）。
+    krea2 counts meta-model parameters from a fixed config; Anima's layer
+    count is determined by the checkpoint (2B=28 layers / 14B=36 layers), so
+    the header is the source of truth for the version, and counting
+    parameters this way is naturally dtype-independent (the VRAM discount
+    must scale by the file's actual size ratio -- see the note on the
+    same-named function in the krea2 loader).
     """
     if blocks_to_swap <= 0:
         return 0.0
@@ -84,15 +93,19 @@ def swapped_param_ratio_from_header(checkpoint_path, blocks_to_swap: int) -> flo
 
 
 def place_model_for_block_swap(model, device, dtype, blocks_to_swap: int) -> int:
-    """换出层不上卡的模型放置：CPU 内 cast 到 dtype，只把非换出部分搬上 GPU。
+    """Placement for a model with swapped-out layers that don't go on the GPU: cast to dtype on CPU, only move the non-swapped part to GPU.
 
-    §9.4 纪律（docs/design/block-swap.md）：**不能全量上卡再搬下来**——那样
-    GPU 瞬时峰值仍等于完整模型，小卡目标不成立。换出层留在 CPU（dtype 已
-    cast），pinned 化由 ``PinnedBlockSwap._build`` 就地接管（已在 CPU 的张量
-    只 pin、不重复拷贝）。
+    S9.4 discipline (docs/design/block-swap.md): **must not move the whole
+    model to the GPU and then back down** -- that would still hit the same
+    peak GPU usage as the full model, defeating the small-card target. The
+    swapped-out layers stay on CPU (dtype already cast); pinning is taken
+    over in place by ``PinnedBlockSwap._build`` (tensors already on CPU are
+    only pinned, not copied again).
 
-    返回实际换出层数（clamp 到总层数——blocks_to_swap 是全局设置，用户可能
-    按 36 层版调的值喂给 28 层版，超界按全量换出处理）。
+    Returns the actual number of swapped layers (clamped to the total layer
+    count -- blocks_to_swap is a global setting, and a user might feed a
+    value tuned for the 36-layer version into the 28-layer version; anything
+    over the limit is treated as swapping out everything).
     """
     import torch
 
@@ -103,7 +116,7 @@ def place_model_for_block_swap(model, device, dtype, blocks_to_swap: int) -> int
     first = total - num_swap
     swapped_prefixes = tuple(f"blocks.{i}." for i in range(first, total))
 
-    # pinned 预算护栏先行（B6：fail-fast，此刻尚无任何 GPU / pinned 分配）
+    # pinned-memory budget guard runs first (B6: fail-fast, no GPU / pinned allocation has happened yet)
     elem = torch.empty(0, dtype=dtype).element_size()
     need = sum(
         p.numel() for n, p in model.named_parameters()
@@ -111,7 +124,7 @@ def place_model_for_block_swap(model, device, dtype, blocks_to_swap: int) -> int
     ) * elem
     check_pinned_budget(need, blocks=num_swap)
 
-    model.to(dtype=dtype)  # CPU 内 cast（fp32 构建 → 目标 dtype）
+    model.to(dtype=dtype)  # cast on CPU (built as fp32 -> target dtype)
     target = torch.device(device)
     for name, param in model.named_parameters():
         if not name.startswith(swapped_prefixes):
@@ -119,12 +132,13 @@ def place_model_for_block_swap(model, device, dtype, blocks_to_swap: int) -> int
     for name, buf in model.named_buffers():
         if not name.startswith(swapped_prefixes):
             buf.data = buf.data.to(target)
-    # 公开标记：采样期 VAE decode 的整模型 offload 必须跳过本模型（一刀切
-    # .to() 恢复时会把 CPU 主副本搬上卡，swap 白做且瞬时占用=完整模型），
-    # families/anima/sampling.py 按它分流
+    # public marker: whole-model offload during VAE decode at sampling time
+    # must skip this model (a blanket .to() would move the CPU-resident
+    # copy back onto the GPU on restore, wasting the swap and hitting peak
+    # usage = full model); families/anima/sampling.py branches on this
     model.blocks_to_swap = num_swap
     logger.info(
-        "block swap 放置：末尾 %d/%d 层留在内存（%.2f GB），其余上卡",
+        "Block swap placement: the last %d/%d layers stay in host memory (%.2f GB), the rest go to the GPU",
         num_swap, total, need / 1024 ** 3,
     )
     return num_swap
@@ -132,22 +146,26 @@ def place_model_for_block_swap(model, device, dtype, blocks_to_swap: int) -> int
 
 def load_anima_model(transformer_path, device, dtype, repo_root, *,
                      flash_attn: bool = True, blocks_to_swap: int = 0):
-    """加载 Anima transformer 模型。
+    """Load the Anima transformer model.
 
-    `flash_attn=False` 显式禁用 flash_attn fast path（attention_backend=xformers/none
-    时由 caller 传入），让 caller 完全决定 attention 实现 —— PR #17 那版默认
-    fn(True) 强制开 flash_attn 不让用户关，与 cfg.attention_backend 解耦不彻底。
+    `flash_attn=False` explicitly disables the flash_attn fast path (passed
+    in by the caller when attention_backend=xformers/none), letting the
+    caller fully decide the attention implementation -- the PR #17 version's
+    default fn(True) forced flash_attn on with no way for the user to turn
+    it off, which didn't fully decouple from cfg.attention_backend.
     """
     from safetensors import safe_open
 
-    # repo_root 参数保留但已不使用（sister 契约签名「可加不可减不可改」）：模型
-    # 代码随仓库发布，走正常 import —— 单一模块身份，exec-load 已退役（多模型
-    # PR-2a），attention backend 开关不再需要跨模块别名广播。
+    # repo_root is kept but no longer used (the sister-contract signature is
+    # "may add, may not remove or change"): model code ships with the repo
+    # and goes through a normal import -- single module identity, exec-load
+    # has been retired (multi-model PR-2a), and the attention-backend switch
+    # no longer needs cross-module alias broadcasting.
     from modeling.anima import anima_modeling, cosmos_predict2_modeling
 
     Anima = anima_modeling.Anima
 
-    # attention backend 全局开关：set_attention_backend() 一次性清掉未选中的 fast path
+    # global attention-backend switch: set_attention_backend() clears the unselected fast path in one shot
     flash_enabled = False
     for module in (cosmos_predict2_modeling, anima_modeling):
         set_backend = getattr(module, "set_attention_backend", None)
@@ -157,7 +175,7 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *,
                 flash_enabled = (effective == "flash_attn") or flash_enabled
                 continue
             except Exception as exc:  # noqa: BLE001
-                logger.warning("attention backend 设置失败，继续走 SDPA fallback: %s", exc)
+                logger.warning("Failed to set attention backend, falling back to SDPA: %s", exc)
                 continue
         fn = getattr(module, "set_flash_attn_enabled", None)
         if fn is None:
@@ -165,14 +183,14 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *,
         try:
             flash_enabled = bool(fn(flash_attn)) or flash_enabled
         except Exception as exc:  # noqa: BLE001
-            logger.warning("flash_attn 启用失败，继续走 SDPA fallback: %s", exc)
+            logger.warning("Failed to enable flash_attn, falling back to SDPA: %s", exc)
     if flash_enabled:
-        logger.info("flash_attn 启用（训练 + sample 走 fast path）")
+        logger.info("flash_attn enabled (training + sampling use the fast path)")
     else:
-        logger.info("flash_attn 关闭（attention_backend=%s 或包未安装）",
+        logger.info("flash_attn disabled (attention_backend=%s or package not installed)",
                     "flash_attn" if flash_attn else "non-flash")
 
-    # 从 checkpoint 推断配置
+    # infer config from the checkpoint
     with safe_open(transformer_path, framework="pt", device="cpu") as f:
         for k in f.keys():
             if k.endswith("x_embedder.proj.1.weight"):
@@ -187,12 +205,13 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *,
     elif model_channels == 5120:
         num_blocks, num_heads = 36, 40
     else:
-        raise RuntimeError(f"未知的 model_channels={model_channels}")
-    # 层数以 checkpoint 为准：同为 2048 宽也有 28 层（2B）和 40 层（2.9B）两种。
-    # 写死 28 会让 strict=False 的加载静默丢掉多出来的层。
+        raise RuntimeError(f"Unknown model_channels={model_channels}")
+    # The layer count is taken from the checkpoint: a width of 2048 can be
+    # either 28 layers (2B) or 40 layers (2.9B). Hard-coding 28 would make a
+    # strict=False load silently drop the extra layers.
     header_blocks = block_count_from_header(transformer_path)
     if header_blocks and header_blocks != num_blocks:
-        logger.info("Anima DiT 层数按 checkpoint 取 %d（默认 %d）", header_blocks, num_blocks)
+        logger.info("Anima DiT layer count taken from checkpoint: %d (default %d)", header_blocks, num_blocks)
         num_blocks = header_blocks
 
     config = dict(
@@ -213,22 +232,23 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *,
 
     model = Anima(**config)
 
-    # 加载权重
+    # load the weights
     sd = _load_safetensors_state_dict(Path(transformer_path))
-    # RoPE 表（seq = arange(最大长度) 等）由 config 推出；有的导出把它们按别的
-    # 最大长度存进了权重（2.9B: seq 256 vs 模型 512），交给模型自己重建。
+    # The RoPE tables (seq = arange(max length) etc.) are derived from
+    # config; some exports saved them into the weights under a different max
+    # length (2.9B: seq 256 vs. model 512), so let the model rebuild them itself.
     sd = {
         k: v for k, v in sd.items()
         if not ("pos_embedder." in k and k.rsplit(".", 1)[-1] in ("seq", "dim_spatial_range", "dim_temporal_range"))
     }
     info = _load_weights_best_effort(model, sd, label="Transformer")
 
-    # 如果 checkpoint 中完全没有 llm_adapter 权重，随机初始化会把 cross-attn 条件搞乱，直接禁用更安全
+    # If the checkpoint has no llm_adapter weights at all, a random init would scramble the cross-attn conditioning, so disabling it is safer
     has_llm_adapter = any("llm_adapter" in k for k in sd.keys())
     if not has_llm_adapter and hasattr(model, "llm_adapter"):
         try:
             model.llm_adapter = None
-            logger.warning("检测到 checkpoint 不包含 llm_adapter 权重：已禁用 llm_adapter（回退为直接使用 Qwen embeddings）")
+            logger.warning("Checkpoint has no llm_adapter weights: llm_adapter disabled (falling back to using Qwen embeddings directly)")
         except Exception:
             pass
     if blocks_to_swap > 0:
@@ -237,7 +257,7 @@ def load_anima_model(transformer_path, device, dtype, repo_root, *,
         model = model.to(device=device, dtype=dtype)
     model.requires_grad_(False)
 
-    logger.info(f"Anima 模型加载完成: {model_channels}ch, {num_blocks} blocks")
+    logger.info(f"Anima model loaded: {model_channels}ch, {num_blocks} blocks")
     return model
 
 
@@ -250,7 +270,7 @@ def load_text_encoders(
     comfy_qwen: bool = False,
     t5_fast: bool = False,
 ):
-    """加载文本编码器（Qwen + T5）。"""
+    """Load the text encoders (Qwen + T5)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer, T5Tokenizer, T5TokenizerFast
 
     # Qwen
@@ -270,18 +290,19 @@ def load_text_encoders(
         t5_tokenizer = t5_cls.from_pretrained(t5_tokenizer_path)
     else:
         logger.warning(
-            "T5 tokenizer 本地目录缺失（t5_tokenizer_path=%s），"
-            "开始从 Hugging Face 下载 google/t5-v1_1-xxl",
-            t5_tokenizer_path or "未配置",
+            "T5 tokenizer local directory missing (t5_tokenizer_path=%s), "
+            "downloading google/t5-v1_1-xxl from Hugging Face",
+            t5_tokenizer_path or "not configured",
         )
         try:
             t5_tokenizer = t5_cls.from_pretrained("google/t5-v1_1-xxl")
         except Exception as e:
             raise RuntimeError(
-                f"T5 tokenizer 下载失败（google/t5-v1_1-xxl）：{type(e).__name__}: {e}\n"
-                f"请检查网络后重试；或在 Studio 设置页下载 t5_tokenizer 模型，"
-                f"并确认 t5_tokenizer_path（当前值：{t5_tokenizer_path or '未配置'}）指向该目录。"
+                f"Failed to download the T5 tokenizer (google/t5-v1_1-xxl): {type(e).__name__}: {e}\n"
+                f"Please check your network connection and retry; or download the t5_tokenizer model "
+                f"from the Studio settings page, and make sure t5_tokenizer_path "
+                f"(current value: {t5_tokenizer_path or 'not configured'}) points to that directory."
             ) from e
 
-    logger.info("文本编码器加载完成")
+    logger.info("Text encoders loaded")
     return qwen_model, qwen_tokenizer, t5_tokenizer

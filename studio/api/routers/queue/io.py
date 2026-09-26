@@ -1,11 +1,13 @@
-"""Queue task snapshot（PR-6 commit 6 从 server.py 抽出）。
+"""Queue task snapshot (extracted from server.py in PR-6 commit 6).
 
-1 route：
-    GET /api/queue/{task_id}/snapshot/config    ADR-0007 §11.7 task 入队 freeze 的 config
+1 route:
+    GET /api/queue/{task_id}/snapshot/config    ADR-0007 §11.7: the config frozen when the task was enqueued
 
-历史：本文件曾有 /api/queue/export + /api/queue/import（预设池时代的队列 JSON
-分享）。R-5 删除——现代任务 config 是 version 私有，导出恒空、导入恒跳过，
-UI 按钮已先行下线（PR #359 反馈轮）；项目级分享由项目 bundle 导入导出覆盖。
+History: this file used to have /api/queue/export + /api/queue/import (queue JSON
+sharing from the preset-pool era). Removed in R-5 — modern task configs are
+private to a version, so export was always empty and import always a no-op;
+the UI button was already removed beforehand (PR #359 feedback round).
+Project-level sharing is now covered by project bundle import/export.
 """
 from __future__ import annotations
 
@@ -22,10 +24,11 @@ router = APIRouter()
 
 @router.get("/api/queue/{task_id}/snapshot/config")
 def get_task_snapshot_config(task_id: int) -> dict[str, Any]:
-    """ADR-0007 §11.7：返回 task 入队时冻结的 config。
+    """ADR-0007 §11.7: return the config frozen when the task was enqueued.
 
-    返回 ``{"yaml": str, "config": dict}``。task 不存在 / 无 snapshot → 404。
-    UI [关联配置] tab 用此 + 触发 "套用此配置" 路由跳转到 ⑦ 训练 phase + prefill。
+    Returns ``{"yaml": str, "config": dict}``. Task doesn't exist / no
+    snapshot → 404. Used by the UI's [Linked Config] tab, plus the "apply
+    this config" action that routes to the training phase (7) and prefills it.
     """
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)

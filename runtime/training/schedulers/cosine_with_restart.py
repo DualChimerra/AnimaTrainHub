@@ -1,4 +1,4 @@
-"""CosineAnnealingWarmRestarts scheduler build wrapper（ADR 0003 PR-C）。"""
+"""CosineAnnealingWarmRestarts scheduler build wrapper (ADR 0003 PR-C)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 def build(args, optimizer, total_steps: Optional[int]):
-    """实例化 CosineAnnealingWarmRestarts。total_steps 未传也不阻断，
-    跟原 main() 老逻辑等价。"""
+    """Build a CosineAnnealingWarmRestarts. Not passing total_steps doesn't
+    block it, matching the old main() logic."""
     import torch
 
     t0 = int(getattr(args, "lr_scheduler_t0", 500) or 500)
@@ -20,5 +20,5 @@ def build(args, optimizer, total_steps: Optional[int]):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=t0, T_mult=t_mult, eta_min=eta_min,
     )
-    logger.info(f"学习率调度: cosine_with_restart (T_0={t0}, T_mult={t_mult}, eta_min={eta_min})")
+    logger.info(f"LR schedule: cosine_with_restart (T_0={t0}, T_mult={t_mult}, eta_min={eta_min})")
     return scheduler

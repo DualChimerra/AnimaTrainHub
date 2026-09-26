@@ -66,8 +66,9 @@ function FieldShell({
       <div className="ds-field-txt">
         <div className="ds-field-name">
           {changedFrom && <span className="ds-changed-dot" aria-hidden="true" />}
-          <FieldLabel label={label} tip={helpNode} />
-          <span className="ds-key">{name}</span>
+          {/* The config key is for reference, not for reading: it sits in the
+              hover tip under the explanation instead of crowding the row. */}
+          <FieldLabel label={label} tip={<>{helpNode}<span className="ds-tip-key">{name}</span></>} />
           {hintNode}
         </div>
       </div>
@@ -78,6 +79,12 @@ function FieldShell({
       {below}
     </div>
   )
+}
+
+/** Select fields rendered as option cards; value = i18n prefix of the
+ *  one-line description under each option. */
+const CARD_FIELDS: Record<string, string> = {
+  model_family: 'field.familyDesc',
 }
 
 const LockIcon = (
@@ -158,6 +165,42 @@ export default function Field({
           <option value="true">{t('field.yes')}</option>
           <option value="false">{t('field.no')}</option>
         </select>
+      </FieldShell>
+    )
+  }
+
+  // select shown as option cards (few choices that change a lot) ----------
+  const cards = kind === 'select' ? CARD_FIELDS[name] : undefined
+  if (cards) {
+    const opts = (enumOptions ?? prop.enum ?? []).map(String)
+    const cur = String(value ?? '')
+    return (
+      <FieldShell {...shell} stack>
+        <div className="ds-optcards ds-compact" role="radiogroup" aria-label={label} style={{ gridTemplateColumns: `repeat(${Math.min(opts.length, 3)}, minmax(0, 1fr))` }}>
+          {opts.map((opt) => {
+            const on = opt === cur
+            const optDisabled = disabled || (disabledEnumOptions?.includes(opt) && !on)
+            return (
+              <button
+                key={opt}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                disabled={optDisabled}
+                title={optDisabled && !disabled ? disabledOptionHint : undefined}
+                className={`ds-optcard${on ? ' ds-is-on' : ''}`}
+                style={optDisabled ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
+                onClick={() => { if (!on) onChange(opt) }}
+              >
+                <span className={`ds-radio${on ? ' ds-on' : ''}`} aria-hidden="true" />
+                <span className="ds-optcard-txt">
+                  <span className="ds-optcard-name">{schemaEnumLabel(name, opt, t)}</span>
+                  <span className="ds-optcard-desc">{t(`${cards}.${opt}`, { defaultValue: '' })}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
       </FieldShell>
     )
   }
@@ -681,7 +724,7 @@ function PathStringField({
             disabled={disabled}
             aria-label={label}
             title={text || undefined}
-            className="ds-inp ds-mono"
+            className="ds-inp ds-code"
             style={{ flex: 1 }}
           />
           <button

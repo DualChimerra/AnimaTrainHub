@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { api, type CaptionSnapshot } from '../api/client'
 import { useDialog } from './Dialog'
 import { useToast } from './Toast'
+import Popover from './ds/Popover'
 
 interface Props {
   pid: number
@@ -42,6 +43,7 @@ export default function SaveBar({
   const [busyId, setBusyId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const pointsBtnRef = useRef<HTMLButtonElement | null>(null)
   const dirty = dirtyCount > 0
 
   const refresh = useCallback(async () => {
@@ -49,15 +51,8 @@ export default function SaveBar({
     catch (e) { toast(String(e), 'error') }
   }, [pid, vid, toast])
 
-  useEffect(() => { if (open) void refresh() }, [open, refresh])
-
-  useEffect(() => {
-    const close = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
-  }, [])
+  // Load on mount (the button shows how many points exist) and on every open.
+  useEffect(() => { void refresh() }, [open, refresh])
 
   const save = async () => {
     setSaving(true)
@@ -90,36 +85,35 @@ export default function SaveBar({
   }
 
   return (
-    <div
-      ref={ref}
-      className="ds-logbar"
-      style={{ position: 'relative', ...(dirty ? { background: 'var(--green-soft)', borderTopColor: 'var(--green-line)', color: 'var(--green-text)' } : null) }}
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-        <path d="M12 4v8" /><path d="M6.3 7.3a8 8 0 1 0 11.4 0" />
-      </svg>
-      <span style={{ fontWeight: dirty ? 500 : undefined }}>
-        {dirty ? t('saveBar.unsaved', { count: dirtyCount }) : t('saveBar.allSaved')}
+    <div ref={ref} className={`ds-savebar${dirty ? ' ds-is-dirty' : ''}`}>
+      <span className="ds-savebar-status">
+        <span className={`ds-dot ${dirty ? 'ds-dot-run' : 'ds-dot-ok'}`} />
+        <span style={{ fontWeight: dirty ? 600 : 500 }}>
+          {dirty ? t('saveBar.unsaved', { count: dirtyCount }) : t('saveBar.allSaved')}
+        </span>
       </span>
-      <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+      <span className="ds-savebar-act">
         <button
+          ref={pointsBtnRef}
           type="button"
-          className="ds-ctl ds-ghost"
-          style={{ height: 26, color: 'inherit' }}
+          className={`ds-ctl${open ? ' ds-is-open' : ''}`}
           onClick={() => setOpen(!open)}
           aria-expanded={open}
+          aria-haspopup="dialog"
         >
-          {t('saveBar.restorePoints')} {open ? '↓' : '↑'}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" /></svg>
+          {t('saveBar.restorePoints')}
+          {items.length > 0 && <span className="ds-badge ds-mute" style={{ height: 17, padding: '0 6px', fontSize: 10.5 }}>{items.length}</span>}
         </button>
         {dirty && (
-          <button type="button" className="ds-ctl ds-ghost" style={{ height: 26, color: 'inherit' }} onClick={() => void discard()} disabled={saving}>
+          <button type="button" className="ds-ctl" onClick={() => void discard()} disabled={saving}>
             {t('saveBar.discard')}
           </button>
         )}
         <button
           type="button"
           className="ds-btn-primary"
-          style={{ height: 26 }}
+          style={{ minWidth: 120 }}
           onClick={() => void save()}
           disabled={saving || !dirty}
           title={t('saveBar.tooltip')}
@@ -128,37 +122,32 @@ export default function SaveBar({
         </button>
       </span>
 
-      {open && (
-        <div
-          role="dialog"
-          aria-label="snapshot-list"
-          className="ds-card"
-          style={{ position: 'absolute', right: 20, bottom: 'calc(100% + 6px)', width: 340, maxHeight: 320, overflowY: 'auto', zIndex: 30, color: 'var(--ink)' }}
-        >
-          <div className="ds-cap" style={{ padding: '12px 14px 6px' }}>{t('saveBar.restorePoints')}</div>
+      {open && pointsBtnRef.current && (
+        <Popover anchor={pointsBtnRef.current} align="end" minWidth={340} maxHeight={360} role="dialog" ariaLabel={t('saveBar.restorePoints')} onClose={() => setOpen(false)}>
+          <div className="ds-menu-head">{t('saveBar.restorePoints')}</div>
           {items.length === 0 ? (
-            <p className="ds-muted" style={{ padding: '4px 14px 14px', margin: 0, fontSize: 12 }}>
+            <p className="ds-muted" style={{ padding: '2px 10px 10px', margin: 0, fontSize: 12 }}>
               {t('saveBar.noRestorePoints')}
             </p>
           ) : (
-            <ul style={{ listStyle: 'none', padding: '0 0 6px', margin: 0 }}>
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
               {items.map((s) => (
-                <li key={s.id} style={{ padding: '8px 14px', display: 'flex', alignItems: 'center', gap: 8, borderTop: '1px solid var(--line)', fontSize: 12 }}>
+                <li key={s.id} className="ds-savepoint">
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="ds-mono" style={{ fontSize: 11.5 }}>{fmtTime(s.created_at)}</div>
+                    <div style={{ fontSize: 12.5, fontWeight: 500 }}>{fmtTime(s.created_at)}</div>
                     <div className="ds-kpi-meta">{t('saveBar.restoreEntry', { n: s.file_count, size: fmtSize(s.size) })}</div>
                   </div>
-                  <button type="button" className="ds-ctl" style={{ height: 26 }} onClick={() => void restore(s.id)} disabled={busyId === s.id}>
+                  <button type="button" className="ds-ctl ds-sm" onClick={() => void restore(s.id)} disabled={busyId === s.id}>
                     {t('common.restore')}
                   </button>
-                  <button type="button" className="ds-kebab" onClick={() => void del(s.id)} disabled={busyId === s.id} aria-label={t('common.delete')}>
+                  <button type="button" className="ds-kebab" onClick={() => void del(s.id)} disabled={busyId === s.id} aria-label={t('common.delete')} title={t('common.delete')}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
                   </button>
                 </li>
               ))}
             </ul>
           )}
-        </div>
+        </Popover>
       )}
     </div>
   )

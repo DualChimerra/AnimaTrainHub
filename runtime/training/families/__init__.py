@@ -1,15 +1,19 @@
-"""模型族 registry —— 第 8 套 plugin registry，首个架构级（多模型支持 Phase 1）。
+"""Model family registry -- the 8th plugin registry, the first at the architecture
+level (multi-model support Phase 1).
 
-PR-1 只承载 ModelSpec（声明式常量单一来源 + latent 缓存指纹协议）；
-ModelFamily 行为接口与 get_family() 派发随 PR-2b 落地，派发经 anima_train
-公共命名空间收口全部 6 个调用面（docs/design/multi-model/04-synthesis.md D8'/§5）。
+PR-1 only carries ModelSpec (single source of declarative constants + latent
+cache fingerprint protocol); the ModelFamily behavior interface and
+get_family() dispatch land with PR-2b, with dispatch funneling all 6 call
+sites through the anima_train public namespace (docs/design/multi-model/04-synthesis.md D8'/S5).
 """
 
 from __future__ import annotations
 
-# families 子树用相对导入：studio server 以 `runtime.training.*` 命名复用本子树
-# （bucket 分布预览经 dataset.py），那边 sys.path 只有仓库根，`training.*` 绝对
-# 导入会 ModuleNotFoundError（tests/test_bucket_histogram.py 有回归导入测试）。
+# The families subtree uses relative imports: the studio server reuses this
+# subtree under the `runtime.training.*` namespace (bucket distribution
+# preview via dataset.py); over there sys.path only has the repo root, so an
+# absolute `training.*` import would raise ModuleNotFoundError
+# (tests/test_bucket_histogram.py has a regression import test for this).
 from .spec import (  # noqa: F401  (re-export)
     ConstantShift,
     KNOWN_CAPABILITIES,
@@ -30,7 +34,7 @@ SPECS: dict[str, ModelSpec] = {}
 def _register(spec: ModelSpec) -> None:
     validate_spec(spec)
     if spec.family_id in SPECS:
-        raise ValueError(f"模型族重复注册: {spec.family_id}")
+        raise ValueError(f"Model family registered twice: {spec.family_id}")
     SPECS[spec.family_id] = spec
 
 
@@ -42,8 +46,8 @@ _FAMILIES: dict[str, object] = {}
 
 
 def get_family(family_id: str):
-    """按族 id 取 ModelFamily 实例（惰性构造）。未知 id → ValueError。"""
-    get_spec(family_id)  # 未知 id 在此报错并列出已注册项
+    """Get the ModelFamily instance for a family id (lazily constructed). Unknown id -> ValueError."""
+    get_spec(family_id)  # Raises here for an unknown id and lists what's registered
     fam = _FAMILIES.get(family_id)
     if fam is None:
         if family_id == "anima":
@@ -54,15 +58,15 @@ def get_family(family_id: str):
             from .krea2 import Krea2Family
 
             fam = Krea2Family()
-        else:  # pragma: no cover - registry 与 SPECS 同步维护
-            raise ValueError(f"模型族 '{family_id}' 缺少 ModelFamily 实现")
+        else:  # pragma: no cover - registry is kept in sync with SPECS
+            raise ValueError(f"Model family '{family_id}' has no ModelFamily implementation")
         _FAMILIES[family_id] = fam
     return fam
 
 
 def resolve_family(args):
-    """从 args/cfg 解析 model_family（缺省 anima，D7 零迁移）。支持
-    argparse.Namespace 与 dict 两种载体（旁路调用方的 cfg 是 dict）。"""
+    """Resolve model_family from args/cfg (defaults to anima, D7 zero migration).
+    Supports both argparse.Namespace and dict carriers (bypass callers' cfg is a dict)."""
     if isinstance(args, dict):
         fid = args.get("model_family") or "anima"
     else:
@@ -71,10 +75,10 @@ def resolve_family(args):
 
 
 def get_spec(family_id: str) -> ModelSpec:
-    """按族 id 取 ModelSpec。未知 id → ValueError 并列出已注册项。"""
+    """Get the ModelSpec for a family id. Unknown id -> ValueError listing what's registered."""
     try:
         return SPECS[str(family_id)]
     except KeyError:
         raise ValueError(
-            f"未知模型族 '{family_id}'，已注册: {sorted(SPECS)}"
+            f"Unknown model family '{family_id}', registered: {sorted(SPECS)}"
         ) from None

@@ -1,4 +1,4 @@
-"""进程树终止的跨平台、无机器状态单元测试。"""
+"""Cross-platform, machine-state-free unit tests for process tree termination."""
 
 from __future__ import annotations
 

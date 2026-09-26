@@ -1,8 +1,9 @@
-"""`anima-studio` / `python -m studio.server` uvicorn 启动入口（PR-5 从 server.py 抽出）。
+"""`anima-studio` / `python -m studio.server` uvicorn entry point (extracted from server.py in PR-5).
 
-uvicorn 启动字符串仍指 `studio.server:app` —— 老 server.py 内 130 个
-route decorator 在 import 时全部注册到 `api.app.app`，server.py 顶部
-`from .api.app import app` re-export 同一对象。
+The uvicorn startup string still points at `studio.server:app` — all 130
+route decorators in the legacy server.py register onto `api.app.app` at
+import time, and `from .api.app import app` at the top of server.py
+re-exports that same object.
 """
 from __future__ import annotations
 
@@ -11,11 +12,14 @@ def main() -> None:
     import argparse
     import uvicorn
 
-    # 第三方缓存收进 `<仓库>/.cache/`（本 fork）。cli.py 起 server 时已在自己
-    # 的 import 期设过、子进程继承；这里覆盖的是**直接** `python -m
-    # studio.server` 的入口 —— 训练子进程由本进程 spawn，缓存变量必须在这一层
-    # 就位，否则底模下载和 HF 缓存还是会落到系统盘。重复调用是幂等的
-    # （已有值不覆盖）。
+    # Third-party caches are collected into `<repo>/.cache/` (this fork).
+    # When cli.py starts the server, it has already set this during its own
+    # import phase, inherited by the subprocess; what's overridden here is
+    # the **direct** `python -m studio.server` entry point — training
+    # subprocesses are spawned by this process, so the cache env vars must be
+    # in place at this layer, otherwise base-model downloads and the HF cache
+    # would still land on the system drive. Repeated calls are idempotent
+    # (existing values are not overwritten).
     from ..infrastructure import local_cache
     from ..infrastructure.paths import REPO_ROOT
 
@@ -34,7 +38,7 @@ def main() -> None:
     import os
     os.environ["ALS_STUDIO_PORT"] = str(args.port)
 
-    # ADR 0012：SPA 入口在根路径 /（不再用 /studio 子路径）。
+    # ADR 0012: the SPA entry point is at the root path / (no longer under the /studio subpath).
     print(f"[AnimaTrainHub] http://{args.host}:{args.port}/")
     uvicorn.run(
         "studio.server:app",
@@ -42,11 +46,14 @@ def main() -> None:
         port=args.port,
         reload=args.reload,
         log_level="info",
-        # 浏览器开着时 /api/events 的 SSE 长连接不会主动断，graceful shutdown
-        # 默认无限等 →「Waiting for connections to close」卡死；且 py3.12+ 的
-        # Server.wait_closed() 等全部活跃连接，二次 Ctrl+C 的 force_exit 也
-        # 解不开（transport 不被强关）。给 graceful 一个上限：超时后 uvicorn
-        # cancel 剩余连接 task → 连接关闭 → lifespan 正常收尾（supervisor /
-        # daemon 优雅停）。
+        # While a browser is open, the /api/events SSE long connection never
+        # closes on its own, so graceful shutdown's default indefinite wait
+        # gets stuck on "Waiting for connections to close"; also, py3.12+'s
+        # Server.wait_closed() waits for every active connection, and even a
+        # second Ctrl+C's force_exit can't break out of it (the transport
+        # isn't force-closed). Give graceful shutdown a cap: after the
+        # timeout, uvicorn cancels the remaining connection tasks -> the
+        # connection closes -> lifespan finishes normally (supervisor /
+        # daemon stop gracefully).
         timeout_graceful_shutdown=3,
     )

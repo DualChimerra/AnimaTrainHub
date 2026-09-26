@@ -1,15 +1,15 @@
-"""SOAP optimizer build wrapper（ADR 0003 PR-C）。
+"""SOAP optimizer build wrapper (ADR 0003 PR-C).
 
-SOAP = Adam in the Shampoo eigenbasis（Vyas et al., 2024, arxiv 2409.11321）。
-普通（非 schedule-free）变体：可配 lr_scheduler，无 train()/eval() 切换。
-schedule-free 变体见 soap_sf.py。
+SOAP = Adam in the Shampoo eigenbasis (Vyas et al., 2024, arxiv 2409.11321).
+This is the plain (non-schedule-free) variant: configurable lr_scheduler, no
+train()/eval() switching. See soap_sf.py for the schedule-free variant.
 """
 
 from __future__ import annotations
 
 
 def build(args, params, lr: float, weight_decay: float):
-    """实例化 SOAP，读 soap_* 参数。"""
+    """Build a SOAP instance; reads the soap_* args."""
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(

@@ -1,32 +1,44 @@
-"""本地上传：单图 / zip 压缩包（自动解压拍平）/ 同名 .txt caption，落盘到 download/。
+"""Local upload: single image / zip archive (auto-extracted and flattened) / same-named .txt caption, saved to download/.
 
-用户通过浏览器 file picker / 拖拽上传文件 → server 端解析 → 写入项目的
-`download/` 目录，与 booru 下载共享同一份「全量备份」。
+The user uploads files via the browser's file picker / drag-and-drop -> the
+server parses them -> writes into the project's `download/` directory,
+sharing the same "full backup" as booru downloads.
 
-约束：
-- 接受 IMAGE_EXTS 里所有格式的单图（png / jpg / jpeg / webp / bmp / gif）；
-  zip 包内同样按这套白名单提取。
-- zip 内的子目录结构会被拍平（取 basename）。
-- zip 损坏时整包跳过并报告，不影响其它文件。
+Constraints:
+- Accepts single images in any format from IMAGE_EXTS (png / jpg / jpeg /
+  webp / bmp / gif); the same whitelist is used to extract files from zip
+  archives.
+- Subdirectory structure inside a zip gets flattened (basename only).
+- A corrupt zip is skipped as a whole and reported, without affecting other
+  files.
 
-caption 配对（kohya_ss / sd-scripts 风格）：
-- 与图片同 stem 的 `.txt` 视为该图的 caption / tags（`1.png` ↔ `1.txt`）；
-- 一次上传里（zip 内、或同批多文件拖拽）出现的 `.txt` 会按 stem 配到对应图，
-  随图一起落盘到 download/。后续 curation 会把同名 .txt 一并带进 train/，
-  于是 tagging 阶段直接看到这些 caption（caption 覆盖率即时满足）；
-- 没有对应图片的孤立 `.txt` 被跳过并报告；
-- convert_to_png 把图重命名 / 加后缀时（见下），caption 跟随**落盘后的实际
-  stem**，所以 `1.jpg` → `1.png` 的 caption 落 `1.png` 同 stem 的 `1.txt`，后缀化
-  的 `1_1.png` 不会与 `1.png` 抢同一个 caption。
+Caption pairing (kohya_ss / sd-scripts style):
+- A `.txt` sharing the image's stem is treated as that image's caption /
+  tags (`1.png` <-> `1.txt`);
+- A `.txt` appearing in a single upload (inside a zip, or dragged in the same
+  batch of multiple files) is paired to the matching image by stem, and
+  saved alongside it into download/. Later, curation carries the same-named
+  .txt into train/ too, so the tagging stage sees these captions right away
+  (caption coverage is satisfied immediately);
+- An orphan `.txt` with no matching image is skipped and reported;
+- When convert_to_png renames the image / adds a suffix (see below), the
+  caption follows the **actual stem after saving**, so the caption for
+  `1.jpg` -> `1.png` lands on `1.txt` sharing `1.png`'s stem, and a
+  suffixed `1_1.png` won't fight `1.png` for the same caption.
 
-`convert_to_png` 模式（与 booru 下载共用的 `gelbooru.convert_to_png` 设置）：
-- 所有图片经 PIL 解码后统一重编码为 .png，文件名 stem 不变后缀改 .png；
-- 同 stem 冲突（含 `1.jpg` + `1.png` 同上传一次的场景）改加 `_1`/`_2` 后缀
-  落盘，避免 caption `1.txt` 被两张不同图共用；
-- `remove_alpha_channel=True` 时按白底压平 alpha，与 booru 下载一致；
-- PIL 解码失败按 skipped 上报「图片损坏」。
+`convert_to_png` mode (shares the `gelbooru.convert_to_png` setting with
+booru downloads):
+- All images are decoded via PIL and uniformly re-encoded to .png, keeping
+  the filename stem but changing the suffix to .png;
+- A same-stem conflict (including the case of `1.jpg` + `1.png` both
+  uploaded at once) gets a `_1`/`_2` suffix on save instead, so the
+  `1.txt` caption isn't shared between two different images;
+- `remove_alpha_channel=True` flattens alpha onto a white background,
+  matching booru downloads;
+- A PIL decode failure is reported as skipped with reason "corrupt image".
 
-`convert_to_png=False`（默认）保持历史行为：原扩展名拷贝、目标已存在则跳过。
+`convert_to_png=False` (default) keeps the historical behavior: copied with
+the original extension, skipped if the target already exists.
 """
 from __future__ import annotations
 
@@ -42,19 +54,20 @@ from PIL import Image
 from ..booru.api import flatten_alpha, has_alpha
 from .scan import IMAGE_EXTS
 
-# PP10 起复用全链路白名单：上传 / 下载 / curation / 训练共用一份。
+# Since PP10, reuses the same whitelist across the whole pipeline: upload / download / curation / training all share it.
 ALLOWED_IMAGE_EXTS = IMAGE_EXTS
 ZIP_EXT = ".zip"
-# kohya_ss / sd-scripts 风格 caption：与图同 stem 的 .txt。curation 的 _META_EXTS
-# 也是 (.txt, .json)，所以落到 download/ 的 .txt 会随图带进 train/。
+# kohya_ss / sd-scripts style caption: a .txt sharing the image's stem.
+# curation's _META_EXTS is also (.txt, .json), so a .txt landing in
+# download/ gets carried into train/ along with its image.
 CAPTION_EXT = ".txt"
 
 
 @dataclass
 class UploadResult:
-    """单次上传调用的汇总结果。
+    """Summary result of a single upload call.
 
-    ``added`` 含落盘的图片名，也含成功配对的 caption（`*.txt`）名。
+    ``added`` includes both saved image names and successfully paired caption (`*.txt`) names.
     """
 
     added: list[str] = field(default_factory=list)
@@ -70,15 +83,15 @@ class UploadResult:
 
 @dataclass
 class _Entry:
-    """解包后的叶子文件（图片或 caption），统一全量读入内存再处理。"""
+    """A leaf file after unpacking (image or caption); read fully into memory before processing."""
 
-    report: str  # 给用户看的名字（zip 内 entry 带 `pack.zip:` 前缀）
-    base: str    # 落盘 basename
+    report: str  # user-facing name (a zip entry is prefixed with `pack.zip:`)
+    base: str    # basename to save under
     data: bytes
 
 
 def _safe_basename(name: str) -> str:
-    """剥掉 zip 内嵌套子目录 / Windows 反斜杠，只留 basename。"""
+    """Strip nested subdirectories inside a zip / Windows backslashes, keeping only the basename."""
     return name.replace("\\", "/").rsplit("/", 1)[-1]
 
 
@@ -91,16 +104,21 @@ def _is_caption_ext(name: str) -> bool:
 
 
 class _SeekableStream:
-    """给缺失 seekable/readable/writable 的流补上这三个 IOBase 谓词方法，其余透传。
+    """Patches in the three IOBase predicate methods a stream may be missing (seekable/readable/writable); everything else passes through.
 
-    Python < 3.11 的 `SpooledTemporaryFile`（FastAPI `UploadFile.file` 的实际
-    类型）只显式转发 read/seek/tell 给底层 `_file`，却漏了这三个谓词方法（3.11
-    才让它继承 io.IOBase 补全）。`zipfile.ZipFile` 构造与 `infolist()` 只用
-    seek/read，都正常；但 `zf.open()` 经 `_SharedFile` 取 `fileobj.seekable`
-    → AttributeError —— 表现为「打开 zip」成功、开始读内层图片时才炸。
+    On Python < 3.11, `SpooledTemporaryFile` (the actual type behind FastAPI's
+    `UploadFile.file`) only explicitly forwards read/seek/tell to the
+    underlying `_file`, missing these three predicate methods (only fixed in
+    3.11 when it started inheriting io.IOBase). `zipfile.ZipFile`'s
+    constructor and `infolist()` only use seek/read, so those work fine; but
+    `zf.open()` goes through `_SharedFile` to read `fileobj.seekable`, which
+    raises AttributeError - so "opening the zip" succeeds, and it only blows
+    up once it starts reading an inner image.
 
-    底层 `_file`（spool 内的 BytesIO 或已 rollover 的真临时文件）本身支持 seek，
-    所以零拷贝包一层即可，保住上层流式上传「不把整包读进内存」的初衷。
+    The underlying `_file` (a BytesIO while still spooled, or a real temp
+    file after rollover) already supports seek, so a zero-copy wrapper is
+    enough, preserving the point of streaming uploads (never reading the
+    whole archive into memory).
     """
 
     def __init__(self, stream: BinaryIO) -> None:
@@ -115,31 +133,33 @@ class _SeekableStream:
     def writable(self) -> bool:
         return False
 
-    def __getattr__(self, name: str):  # seek/read/tell/close 等透传给底层流
+    def __getattr__(self, name: str):  # seek/read/tell/close etc. pass through to the underlying stream
         return getattr(self._stream, name)
 
 
 def _ensure_seekable(stream: BinaryIO) -> BinaryIO:
-    """zipfile 需要 `fileobj.seekable()`；老 SpooledTemporaryFile 没有 → 包一层。
+    """zipfile needs `fileobj.seekable()`; older SpooledTemporaryFile doesn't have it -> wrap it.
 
-    真文件 / BytesIO / 3.11+ 的 SpooledTemporaryFile 已实现则原样返回，不包。
+    A real file / BytesIO / a 3.11+ SpooledTemporaryFile that already implements it is returned as-is, unwrapped.
     """
     probe = getattr(stream, "seekable", None)
     if callable(probe):
         try:
             probe()
             return stream
-        except Exception:  # noqa: BLE001 — 任何异常都按"谓词不可用"降级包一层
+        except Exception:  # noqa: BLE001 - any exception is treated as "predicate unusable" and wrapped
             pass
     return _SeekableStream(stream)
 
 
 def _unique_target(dest_dir: Path, name: str) -> Path:
-    """目标已存在时加 `_1` / `_2` ... 后缀直到不冲突。
+    """When the target already exists, append `_1` / `_2` ... until there's no conflict.
 
-    用于 convert_to_png 模式：用户的本意是「这张图也进来」，文件名冲突时
-    用后缀保住第二张，而不是丢弃。caption 文件按落盘后的实际 stem 配对，
-    所以后缀化的 `1_1.png` 会拿到独立的 `1_1.txt`，不再与 `1.png` 共用。
+    Used in convert_to_png mode: the user's intent is "this image should come
+    in too", so a filename collision keeps the second image under a
+    suffixed name instead of dropping it. Captions are paired by the actual
+    on-disk stem, so a suffixed `1_1.png` gets its own independent
+    `1_1.txt`, no longer sharing one with `1.png`.
     """
     target = dest_dir / name
     if not target.exists():
@@ -164,12 +184,12 @@ def _write_image_entry(
     report_name: str,
     result: UploadResult,
 ) -> Optional[Path]:
-    """落盘单张图。返回落盘后的实际路径；跳过 / 损坏返回 ``None``。"""
+    """Save a single image. Returns the actual saved path; ``None`` if skipped / corrupt."""
     if not convert_to_png:
         target = dest_dir / src_name
         if target.exists():
             result.skipped.append(
-                {"name": report_name, "reason": "已存在，跳过"}
+                {"name": report_name, "reason": "already exists, skipped"}
             )
             return None
         with target.open("wb") as fh:
@@ -181,9 +201,9 @@ def _write_image_entry(
     try:
         img = Image.open(BytesIO(raw))
         img.load()
-    except Exception as exc:  # noqa: BLE001 — PIL 抛多种类型，整体当损坏
+    except Exception as exc:  # noqa: BLE001 - PIL raises various types, treat them all as corrupt
         result.skipped.append(
-            {"name": report_name, "reason": f"图片损坏: {exc}"}
+            {"name": report_name, "reason": f"corrupt image: {exc}"}
         )
         return None
     target = _unique_target(dest_dir, Path(src_name).stem + ".png")
@@ -202,15 +222,15 @@ def _write_image_entry(
 def _expand_input(
     src_name: str, src_stream: BinaryIO
 ) -> tuple[list[_Entry], list[dict[str, str]]]:
-    """把单个上传项展开成叶子 entry（图片 / caption）+ 顶层跳过项。
+    """Expand a single uploaded item into leaf entries (images / captions) + top-level skipped items.
 
-    - 单图 / 单 .txt → 一个 entry
-    - zip → 解压所有图片 + .txt（拍平、内层 entry 同样进 entry 列表）
-    - 其他 / 没扩展名 / 损坏 zip → 不产 entry，记 skipped
+    - a single image / single .txt -> one entry
+    - a zip -> unpack all images + .txt (flattened; inner entries also go into the entry list)
+    - anything else / no extension / corrupt zip -> no entries produced, recorded as skipped
     """
     base = _safe_basename(src_name or "")
     if not base:
-        return [], [{"name": src_name, "reason": "文件名为空"}]
+        return [], [{"name": src_name, "reason": "empty filename"}]
 
     suffix = Path(base).suffix.lower()
 
@@ -233,13 +253,13 @@ def _expand_input(
                     if inner_suffix in ALLOWED_IMAGE_EXTS or inner_suffix == CAPTION_EXT:
                         entries.append(_Entry(label, inner_base, zf.read(info)))
                     else:
-                        skipped.append({"name": label, "reason": "格式不支持"})
+                        skipped.append({"name": label, "reason": "unsupported format"})
         except zipfile.BadZipFile:
-            skipped.append({"name": base, "reason": "zip 损坏"})
+            skipped.append({"name": base, "reason": "corrupt zip"})
         return entries, skipped
 
     allowed = ", ".join(sorted(ALLOWED_IMAGE_EXTS)) + ", .txt, .zip"
-    return [], [{"name": base, "reason": f"格式不支持（仅 {allowed}）"}]
+    return [], [{"name": base, "reason": f"unsupported format (only {allowed})"}]
 
 
 def _accept_entries(
@@ -249,11 +269,13 @@ def _accept_entries(
     convert_to_png: bool,
     remove_alpha_channel: bool,
 ) -> UploadResult:
-    """落盘一批已展开的 entry，并按 stem 把 caption 配到图片。
+    """Save a batch of already-expanded entries, pairing captions to images by stem.
 
-    配对规则：caption 按 **图片落盘后的实际 stem** 命名（`X.png` → `X.txt`）。
-    同 stem 多张图时，caption 给第一张成功落盘的图（FIFO），后缀化的副本不抢；
-    没有对应图片的孤立 caption 跳过并报告。
+    Pairing rule: a caption is named after the **actual saved stem of its
+    image** (`X.png` -> `X.txt`). When several images share a stem, the
+    caption goes to the first one saved successfully (FIFO); a suffixed
+    duplicate doesn't claim it. An orphan caption with no matching image is
+    skipped and reported.
     """
     result = UploadResult()
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -262,7 +284,7 @@ def _accept_entries(
     images = [e for e in items if _is_image_ext(e.base)]
     captions = [e for e in items if _is_caption_ext(e.base)]
 
-    # caption 按上传名 stem 入队，供同 stem 的图片按 FIFO 领取。
+    # queue captions by their uploaded stem, to be claimed FIFO by images sharing that stem.
     cap_by_stem: dict[str, list[_Entry]] = {}
     for cap in captions:
         cap_by_stem.setdefault(Path(cap.base).stem, []).append(cap)
@@ -284,11 +306,11 @@ def _accept_entries(
             cap_path.write_bytes(cap.data)
             result.added.append(cap_path.name)
 
-    # 没配上图的 caption（孤立 .txt / stem 对不上）→ 跳过并报告。
+    # captions with no matching image (orphan .txt / stem doesn't match) -> skipped and reported.
     for queue in cap_by_stem.values():
         for cap in queue:
             result.skipped.append(
-                {"name": cap.report, "reason": "无对应图片，已忽略 caption"}
+                {"name": cap.report, "reason": "no matching image, caption ignored"}
             )
 
     return result

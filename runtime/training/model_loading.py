@@ -1,15 +1,18 @@
-"""模型加载基础设施：前缀推断、safetensors 读取、路径解析、xformers / 梯度检查点。
+"""Model-loading infrastructure: prefix inference, safetensors reading, path
+resolution, xformers / gradient checkpointing.
 
-抽自原 runtime/anima_train.py L370-612（ADR 0003 PR-A）。这里都是相对底层的 utils；
-更上层的 load_vae 在 training.vae；load_anima_model / load_text_encoders 在 families/anima/loader。
+Extracted from the original runtime/anima_train.py L370-612 (ADR 0003 PR-A).
+These are relatively low-level utils; the higher-level load_vae lives in
+training.vae, and load_anima_model / load_text_encoders live in
+families/anima/loader.
 
-公开（被 sister script 用）：
+Public (used by the sister script):
 - find_diffusion_pipe_root / resolve_path_best_effort / enable_xformers
-- forward_with_optional_checkpoint（被 train loop 调）
+- forward_with_optional_checkpoint (called by the train loop)
 
-内部：
-- _strip_prefixes / _pick_best_prefix_remap — checkpoint key 前缀自动推断
-- _load_safetensors_state_dict / _load_weights_best_effort — 容错加载
+Internal:
+- _strip_prefixes / _pick_best_prefix_remap -- automatic checkpoint key prefix inference
+- _load_safetensors_state_dict / _load_weights_best_effort -- fault-tolerant loading
 """
 
 from __future__ import annotations
@@ -26,20 +29,15 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 梯度检查点
-# ============================================================================
-
-
-# ============================================================================
-# xformers 支持
+# xformers support
 # ============================================================================
 
 def enable_xformers(model):
-    """为模型启用 xformers memory efficient attention。"""
+    """Enable xformers memory-efficient attention on the model."""
     try:
         from xformers.ops import memory_efficient_attention  # noqa: F401
     except ImportError:
-        logger.warning("xformers 未安装，跳过启用")
+        logger.warning("xformers is not installed, skipping enable")
         return False
 
     enabled_count = 0
@@ -49,8 +47,9 @@ def enable_xformers(model):
         for cls in type(model).__mro__
         if getattr(cls, "__module__", None)
     }
-    # exec-load 退役后模块身份唯一（多模型 PR-2a）：MRO 即可覆盖真实模块名
-    # （modeling.anima.cosmos_predict2_modeling / anima_modeling），无需别名广播。
+    # Since exec-load retirement, module identity is unique (multi-model PR-2a):
+    # walking the MRO covers the real module names
+    # (modeling.anima.cosmos_predict2_modeling / anima_modeling), no alias broadcast needed.
     for module_name in sorted(module_names):
         module = sys.modules.get(module_name)
         fn = getattr(module, "set_xformers_enabled", None) if module is not None else None
@@ -60,10 +59,10 @@ def enable_xformers(model):
             if fn(True):
                 module_switches += 1
         except Exception as exc:  # noqa: BLE001
-            logger.warning("xformers 模组开关启用失败 (%s): %s", module_name, exc)
+            logger.warning("Failed to enable xformers module switch (%s): %s", module_name, exc)
 
     for name, module in model.named_modules():
-        # 查找 attention 模块并替换
+        # Find attention modules and swap them in
         if hasattr(module, "set_use_memory_efficient_attention_xformers"):
             module.set_use_memory_efficient_attention_xformers(True)
             enabled_count += 1
@@ -73,45 +72,49 @@ def enable_xformers(model):
 
     if module_switches > 0 or enabled_count > 0:
         logger.info(
-            "xformers 已启用: module_switches=%d, module_hooks=%d",
+            "xformers enabled: module_switches=%d, module_hooks=%d",
             module_switches,
             enabled_count,
         )
         return True
 
-    logger.warning("xformers 已安装，但当前模型没有可启用的 xformers attention hook")
+    logger.warning("xformers is installed, but the current model has no xformers attention hook to enable")
     return False
 
 
 # ============================================================================
-# 模型代码 / 路径定位
+# Model code / path resolution
 # ============================================================================
 
 def find_diffusion_pipe_root():
-    """[deprecated shim] 返回 Anima 模型代码目录（`modeling/anima/`）。
+    """[deprecated shim] Returns the Anima model code directory (`modeling/anima/`).
 
-    模型代码随仓库发布并走正常 import（exec-load 与外部 diffusion-pipe checkout
-    兼容已退役，多模型 PR-2a）。函数名与返回语义保留 —— 它是 sister 契约 7 名
-    之一（docs/AGENTS.md §3.2「可加不可减不可改签名」），下游把返回值作为
-    `load_anima_model(..., repo_root=)` 透传，该参数现被忽略。
+    Model code now ships with the repo and goes through a normal import
+    (exec-load and external diffusion-pipe checkout compatibility have been
+    retired, multi-model PR-2a). The function name and return semantics are
+    kept -- it's one of the 7 sister-script contract functions
+    (docs/AGENTS.md Sec 3.2 "can add, cannot remove, cannot change signature");
+    downstream still passes the return value through as
+    `load_anima_model(..., repo_root=)`, but that parameter is now ignored.
 
-    `DIFFUSION_PIPE_ROOT` 环境变量已不支持：检测到设置时打一次 warning，
-    下个 release 删除此检测。
+    The `DIFFUSION_PIPE_ROOT` env var is no longer supported: a warning is
+    logged once if it's set, and this check will be removed next release.
     """
     if os.environ.get("DIFFUSION_PIPE_ROOT"):
         logger.warning(
-            "DIFFUSION_PIPE_ROOT 已不支持（模型代码随仓库发布，走正常 import），忽略该变量"
+            "DIFFUSION_PIPE_ROOT is no longer supported (model code ships with "
+            "the repo and uses a normal import); ignoring this variable"
         )
     repo_root = Path(__file__).resolve().parent.parent.parent
     return repo_root / "modeling" / "anima"
 
 
 # ============================================================================
-# checkpoint key 前缀推断 + 容错加载
+# Checkpoint key prefix inference + fault-tolerant loading
 # ============================================================================
 
 def _strip_prefixes(key: str, prefixes: list[str]) -> str:
-    """反复剥离前缀（支持 module.model. 这种复合前缀）。"""
+    """Repeatedly strip prefixes (supports compound prefixes like module.model.)."""
     if not prefixes:
         return key
     changed = True
@@ -126,8 +129,9 @@ def _strip_prefixes(key: str, prefixes: list[str]) -> str:
 
 def _pick_best_prefix_remap(sd_keys: list[str], model_keys: set[str]) -> tuple[list[str], int]:
     """
-    从常见前缀组合里选择"命中最多 model_keys"的 remap 方案。
-    返回 (prefixes, matched_count)。
+    Pick the remap scheme, from a set of common prefix combinations, that
+    matches the most model_keys.
+    Returns (prefixes, matched_count).
     """
     candidates: list[tuple[str, list[str]]] = [
         ("none", []),
@@ -170,7 +174,7 @@ def _load_safetensors_state_dict(path: Path) -> dict:
 
 
 def ensure_models_namespace(repo_root):
-    """确保 models 命名空间可用。"""
+    """Make sure the models namespace is importable."""
     repo_root = Path(repo_root)
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
@@ -180,8 +184,10 @@ def ensure_models_namespace(repo_root):
 
 def resolve_path_best_effort(path_str: str, bases: list[Path]) -> str:
     """
-    将相对路径按多个 base 尝试解析到一个真实存在的路径。
-    主要用于：无论从 repo 根目录还是 AnimaLoraToolkit 目录启动，都能找到 models/* 文件。
+    Try to resolve a relative path against several bases until it hits a path
+    that actually exists.
+    Mainly used so that models/* files can be found regardless of whether the
+    process starts from the repo root or from the AnimaLoraToolkit directory.
     """
     if not path_str:
         return path_str
@@ -190,11 +196,11 @@ def resolve_path_best_effort(path_str: str, bases: list[Path]) -> str:
     if p.is_absolute():
         return str(p)
 
-    # 先按原样（相对 cwd）试一下
+    # First try it as-is (relative to cwd)
     if p.exists():
         return str(p)
 
-    # 逐 base 拼接尝试
+    # Try joining each base in turn
     for b in bases:
         if not b:
             continue
@@ -205,7 +211,8 @@ def resolve_path_best_effort(path_str: str, bases: list[Path]) -> str:
         if cand.exists():
             return str(cand)
 
-    # 常见：配置写了 AnimaLoraToolkit/xxx，但启动目录已经在 AnimaLoraToolkit 下
+    # Common case: the config wrote AnimaLoraToolkit/xxx, but the process
+    # already started from inside AnimaLoraToolkit
     parts = p.parts
     if parts and parts[0].lower() in ("animaloratoolkit", "anima_trainer", "anima-trainer"):
         p2 = Path(*parts[1:])
@@ -223,10 +230,11 @@ def resolve_path_best_effort(path_str: str, bases: list[Path]) -> str:
 
 def _load_weights_best_effort(model: torch.nn.Module, sd: dict, label: str) -> dict:
     """
-    更健壮的权重加载：
-    - 自动尝试剥离常见前缀（model./module./...）
-    - 打印匹配率、missing/unexpected
-    - 关键模块未加载时直接报错（避免"采样全噪点"还继续训练）
+    More robust weight loading:
+    - automatically tries stripping common prefixes (model./module./...)
+    - logs match rate, missing/unexpected keys
+    - raises immediately if a critical module failed to load (avoids
+      continuing to train while sampling produces pure noise)
     """
     model_keys = set(model.state_dict().keys())
     sd_keys = list(sd.keys())
@@ -244,19 +252,20 @@ def _load_weights_best_effort(model: torch.nn.Module, sd: dict, label: str) -> d
     remap_name = "+".join(prefixes) if prefixes else "none"
 
     logger.info(
-        f"{label} 权重加载: remap={remap_name}, 匹配 {matched_after}/{len(model_keys)} ({coverage:.1%}), "
+        f"{label} weight load: remap={remap_name}, matched {matched_after}/{len(model_keys)} ({coverage:.1%}), "
         f"missing={len(missing)}, unexpected={len(unexpected)}"
     )
 
-    # 关键层缺失会直接导致输出接近 0，采样就是纯噪点
+    # Missing critical layers drives output to near-zero, so sampling would be pure noise
     critical_prefixes = ("x_embedder.", "blocks.", "final_layer.")
     critical_missing = [k for k in missing if k.startswith(critical_prefixes)]
     if coverage < 0.60 or len(critical_missing) > 0:
         preview_missing = ", ".join(critical_missing[:8])
         raise RuntimeError(
-            f"{label} 权重看起来没有正确加载（remap={remap_name}, coverage={coverage:.1%}）。"
-            f"关键参数缺失: {preview_missing or 'N/A'}。\n"
-            f"这通常表示你选错了 .safetensors（不是完整 transformer/vae 权重），或 checkpoint key 前缀不匹配。"
+            f"{label} weights don't look like they loaded correctly (remap={remap_name}, coverage={coverage:.1%}). "
+            f"Missing critical params: {preview_missing or 'N/A'}.\n"
+            f"This usually means you picked the wrong .safetensors (not the full transformer/vae weights), "
+            f"or the checkpoint key prefix doesn't match."
         )
     return {
         "remap": remap_name,
@@ -266,5 +275,6 @@ def _load_weights_best_effort(model: torch.nn.Module, sd: dict, label: str) -> d
     }
 
 
-# 兼容 re-export（sister/loop 现有 import 面；多模型 PR-2b 移居 families/anima/forward.py）
+# Compatibility re-export (kept for the sister script/loop's existing import
+# surface; moved to families/anima/forward.py in multi-model PR-2b)
 from training.families.anima.forward import forward_with_optional_checkpoint  # noqa: E402,F401

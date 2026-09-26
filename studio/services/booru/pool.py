@@ -1,18 +1,25 @@
-"""PP9 — Booru API 统一池子：Session keepalive + 双 token bucket + 并发拉图 + 429 退避。
+"""PP9 — Unified Booru API pool: Session keepalive + dual token bucket + concurrent image fetching + 429 backoff.
 
-为什么要池子：
-- `downloader.py` 现状是完全同步串行 + 每图强制 0.5s sleep，云上比家庭宽带慢 5-10x
-- API 限速主要落在 `gelbooru.com`，CDN 拉图域名 (`img*.gelbooru.com`) 限频要松得多
-- 多个 task（download + reg_build）同时跑时各自不知道对方进度，容易撞速率墙
+Why a pool is needed:
+- `downloader.py` as it stands is fully synchronous/serial with a forced
+  0.5s sleep per image — 5-10x slower in the cloud than on home broadband
+- Rate limiting mostly falls on `gelbooru.com`; the CDN image domains
+  (`img*.gelbooru.com`) allow a much looser rate
+- When multiple tasks (download + reg_build) run at the same time, they
+  don't know about each other's progress, making it easy to hit rate walls
 
-设计：
-- 双 token bucket：API host 2 req/s + CDN host 5 req/s（按 URL netloc 区分）
-- ThreadPoolExecutor 默认 4 worker（与 CDN 桶匹配）
-- 收到 429/503 → sticky backoff 60s + 速率减半，永久到 client 销毁（保守）
-- `requests.Session` 复用 TCP/TLS（HTTP keepalive 单这一项就快 2x）
+Design:
+- Dual token bucket: API host 2 req/s + CDN host 5 req/s (distinguished by
+  the URL's netloc)
+- ThreadPoolExecutor with 4 workers by default (matches the CDN bucket)
+- On 429/503 -> sticky backoff of 60s + rate halved, permanent until the
+  client is destroyed (conservative)
+- `requests.Session` reuses TCP/TLS (HTTP keepalive alone is ~2x faster)
 
-公开接口与 `booru_api.py` 平行：`search_posts` / `download_image` / `parallel_download`。
-原始 `booru_api.search_posts(...)` 仍可单独调用（测试 / 旧代码兼容），池子只是上层薄壳。
+Public interface parallels `booru_api.py`: `search_posts` / `download_image` /
+`parallel_download`. The raw `booru_api.search_posts(...)` can still be called
+directly (for tests / legacy-code compatibility) — the pool is just a thin
+wrapper on top.
 """
 from __future__ import annotations
 
@@ -36,18 +43,18 @@ T = TypeVar("T")
 
 
 # ---------------------------------------------------------------------------
-# host 分类
+# host classification
 # ---------------------------------------------------------------------------
 
 
-# CDN 主机匹配（gelbooru / danbooru 都把图托管在子域）：
+# CDN host matching (both gelbooru / danbooru host images on subdomains):
 # gelbooru: img3.gelbooru.com / video-cdn3.gelbooru.com / ...
 # danbooru: cdn.donmai.us / sample.donmai.us / ...
 _CDN_HOST_HINTS = ("cdn", "img", "video-cdn", "raikou", "sample")
 
 
 def is_cdn_host(url: str) -> bool:
-    """按 netloc 判定是否是 CDN（图床）；其它按 API host 计。"""
+    """Determine by netloc whether this is a CDN (image host); everything else counts as an API host."""
     try:
         host = (urlparse(url).hostname or "").lower()
     except Exception:  # noqa: BLE001
@@ -61,9 +68,9 @@ def is_cdn_host(url: str) -> bool:
 
 
 class TokenBucket:
-    """简单时间窗 token bucket：每秒最多 `rate` 个 token，跨线程安全。
+    """A simple time-windowed token bucket: at most `rate` tokens per second, thread-safe.
 
-    `acquire()` 阻塞直到拿到 token；不实现 burst（连续请求自然等齐）。
+    `acquire()` blocks until a token is available; no burst support (consecutive requests naturally get spaced out evenly).
     """
 
     def __init__(self, rate_per_sec: float) -> None:
@@ -84,12 +91,12 @@ class TokenBucket:
             self._interval = 1.0 / rate_per_sec
 
     def acquire(self) -> None:
-        """阻塞到下一个 token 可用。"""
+        """Block until the next token is available."""
         with self._lock:
             now = time.monotonic()
             wait = self._next_time - now
             if wait > 0:
-                # 持锁 sleep —— 简单粗暴，rate 不大时 contention 可接受
+                # Sleep while holding the lock — crude but simple; contention is acceptable when rate is small
                 time.sleep(wait)
                 now = time.monotonic()
             self._next_time = max(now, self._next_time) + self._interval
@@ -106,19 +113,19 @@ class BooruPoolConfig:
     api_rate_per_sec: float = 2.0
     cdn_rate_per_sec: float = 5.0
     backoff_on_429: float = 60.0
-    # 503 = 服务端瞬时不可用，纯瞬时问题，不应像 429 那样长时间 sticky + 减速
+    # 503 = server temporarily unavailable, purely a transient issue; should not sticky + slow down for as long as 429 does
     backoff_on_503: float = 15.0
 
 
 class BooruClient:
-    """Session + ThreadPoolExecutor + 双 token bucket + 429 sticky 退避。
+    """Session + ThreadPoolExecutor + dual token bucket + 429 sticky backoff.
 
-    使用模式：
+    Usage pattern:
         with BooruClient() as client:
             posts = client.search_posts("gelbooru", "1girl", api_key=..., user_id=...)
             results = client.parallel_download(items, lambda item: client.download_image(...))
 
-    线程安全；同实例可被 downloader / reg_builder 同时调用。
+    Thread-safe; the same instance can be called concurrently by downloader / reg_builder.
     """
 
     def __init__(
@@ -130,7 +137,8 @@ class BooruClient:
         self.cfg = cfg or BooruPoolConfig()
         self._session = session or requests.Session()
         patch_requests_session(self._session)
-        # 外部传入的 session 不一定是 requests.Session（测试里有最小 FakeSession 只实现 .get）
+        # An externally passed-in session isn't necessarily a requests.Session
+        # (tests use a minimal FakeSession that only implements .get)
         logger.info("BooruClient session proxies: %s", getattr(self._session, "proxies", {}))
         self._owns_session = session is None
         self._api_bucket = TokenBucket(self.cfg.api_rate_per_sec)
@@ -139,7 +147,7 @@ class BooruClient:
             max_workers=max(1, self.cfg.parallel_workers),
             thread_name_prefix="booru-pool",
         )
-        # sticky 退避状态 —— API / CDN 独立，避免 CDN 503 风暴锁住 API host
+        # Sticky backoff state — API / CDN are independent, to avoid a CDN 503 storm locking up the API host too
         self._lock = threading.Lock()
         self._backoff_until: dict[str, float] = {"api": 0.0, "cdn": 0.0}
         self._rate_halved = False
@@ -163,13 +171,14 @@ class BooruClient:
     def __exit__(self, *_exc: Any) -> None:
         self.close()
 
-    # -------------------- sticky 退避状态 --------------------
+    # -------------------- sticky backoff state --------------------
 
     def _wait_if_backoff(self, kind: str) -> None:
-        """若该 host class 处在 backoff window 内，阻塞到 window 结束。
+        """If this host class is within a backoff window, block until the window ends.
 
-        不 log —— 进入 backoff 时 `_trigger_backoff` 已经 log 过一次；
-        每个 worker 各自在这里 log 会刷屏（N worker → N 行相同 backoff 提示）。
+        No logging here — `_trigger_backoff` already logged once when entering
+        backoff; having every worker log here too would spam the console
+        (N workers -> N identical backoff lines).
         """
         with self._lock:
             until = self._backoff_until[kind]
@@ -178,18 +187,21 @@ class BooruClient:
             time.sleep(wait)
 
     def _trigger_backoff(self, status_code: int, kind: str) -> None:
-        """收到 429/503 → 该 host class 进 sticky backoff。
+        """On receiving 429/503 -> this host class enters sticky backoff.
 
-        - 429（服务端明确「太快了」）：长退避 + 永久减半速率（一次）
-        - 503（服务端瞬时不可用）：短退避，不动速率 —— 服务端宕机不是我们的问题
-        - 一个 backoff window 内连续触发只 log 一次（避免 burst 503 时刷 N 行）
+        - 429 (server explicitly says "too fast"): long backoff + rate
+          permanently halved (once)
+        - 503 (server temporarily unavailable): short backoff, rate untouched
+          — server downtime isn't our problem
+        - Repeated triggers within one backoff window only log once (avoids
+          spamming N lines during a burst of 503s)
         """
         is_429 = status_code == 429
         backoff = self.cfg.backoff_on_429 if is_429 else self.cfg.backoff_on_503
         log_new_window = False
         do_halve = False
         with self._lock:
-            # 仅在当前不在 backoff window 内时视为「新 window」→ log 一次
+            # Only treat this as a "new window" -> log once if we're not currently inside a backoff window
             if self._backoff_until[kind] <= time.monotonic():
                 log_new_window = True
             self._backoff_until[kind] = time.monotonic() + backoff
@@ -201,27 +213,27 @@ class BooruClient:
 
         if log_new_window:
             logger.warning(
-                "[booru_pool] %s 收到 %d，sticky backoff %.0fs",
+                "[booru_pool] %s received %d, sticky backoff %.0fs",
                 kind, status_code, backoff,
             )
         if do_halve:
             self._api_bucket.set_rate(self.cfg.api_rate_per_sec)
             self._cdn_bucket.set_rate(self.cfg.cdn_rate_per_sec)
             logger.warning(
-                "[booru_pool] 429 触发速率永久减半（API %.2f / CDN %.2f req/s）",
+                "[booru_pool] 429 triggered a permanent rate halving (API %.2f / CDN %.2f req/s)",
                 self.cfg.api_rate_per_sec,
                 self.cfg.cdn_rate_per_sec,
             )
 
     def _check_response(self, resp: requests.Response, kind: str) -> None:
-        """429/503 触发 sticky 退避；其他 4xx/5xx 不动池子（让上层抛错）。"""
+        """429/503 triggers sticky backoff; other 4xx/5xx leave the pool untouched (let the caller raise)."""
         if resp.status_code in (429, 503):
             self._trigger_backoff(resp.status_code, kind)
 
-    # -------------------- 公开 API --------------------
+    # -------------------- public API --------------------
 
     def search_posts(self, api_source: str, tags_query: str, **kw: Any) -> list[dict[str, Any]]:
-        """走 API bucket。kw 透传给 booru_api.search_posts。"""
+        """Goes through the API bucket. kw is passed through to booru_api.search_posts."""
         self._wait_if_backoff("api")
         self._api_bucket.acquire()
         kw.setdefault("session", self._session)
@@ -233,7 +245,7 @@ class BooruClient:
             raise
 
     def download_image(self, url: str, save_path: Path, **kw: Any) -> Path:
-        """走 CDN bucket。kw 透传给 booru_api.download_image。"""
+        """Goes through the CDN bucket. kw is passed through to booru_api.download_image."""
         self._wait_if_backoff("cdn")
         self._cdn_bucket.acquire()
         kw.setdefault("session", self._session)
@@ -251,16 +263,18 @@ class BooruClient:
         *,
         cancel_event: Optional[threading.Event] = None,
     ) -> list[tuple[T, Any, Optional[Exception]]]:
-        """并发跑 fn(item) 跨 items；保持原顺序返回 [(item, result, exc)]。
+        """Run fn(item) concurrently across items; returns [(item, result, exc)] in the original order.
 
-        异常不冒泡（每个 item 独立报错），由调用方按需处理。
-        cancel_event 在 submit 前 + result 后双检；触发后取消未跑的 future。
+        Exceptions don't propagate (each item reports its own error);
+        handled by the caller as needed.
+        cancel_event is checked twice — before submit and after result;
+        once triggered, un-run futures are canceled.
         """
         if not items:
             return []
         results: list[tuple[T, Any, Optional[Exception]]] = []
         futures = []
-        # submit 前批量检 cancel
+        # Batch-check cancel before submitting
         for it in items:
             if cancel_event is not None and cancel_event.is_set():
                 break

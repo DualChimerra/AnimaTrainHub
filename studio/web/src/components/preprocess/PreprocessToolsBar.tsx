@@ -84,6 +84,10 @@ export default function PreprocessToolsBar({ current, projectId, versionId }: Pr
     { tool: 'dedupe', icon: Icon.dedupe, label: t('preprocess.tools.dedupe'), cell: t('ppFrame.sumDedupe', { n: s.removed }), fill: pct(s.removed), tone: 'warn' },
   ]
 
+  // The editing tools (crop, inpaint) need every pixel of height for the
+  // canvas; the tabs of the tool card already switch tools there.
+  if (current === 'crop' || current === 'inpaint') return null
+
   return (
     <div className="ds-pp-cards" style={{ padding: '0 24px 12px' }}>
       {cards.map((c) => {

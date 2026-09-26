@@ -1,55 +1,50 @@
-# 公告 post 编写指南
+# Release Post Authoring Guide
 
-本目录的 markdown 会被后端解析、在 app 内「公告栏」（右上角铃铛）展示。
-整体设计见 [`docs/todo/announcement-center.md`](../todo/announcement-center.md)。
+Each markdown file in this directory is one post. Posts tagged `release` are the
+source of truth for [`CHANGELOG.md`](../../CHANGELOG.md): `tools/bump_version.py`
+renders the changelog from them (see ADR 0013). Never edit `CHANGELOG.md` by hand.
 
-**本文管「文件格式 / frontmatter / tag / 工具」；「写什么 / 怎么写」（各类公告的内容与文风）见
-[`CONTENT-GUIDE.md`](CONTENT-GUIDE.md)。**
+**This document covers file format / frontmatter / tooling. For what to write and
+how, see [`CONTENT-GUIDE.md`](CONTENT-GUIDE.md).**
 
-## 一篇 = 两个文件（双语）
+## One post = one file
 
-- `<id>.md` —— 中文（必有）
-- `<id>.en.md` —— 英文（可选；缺失时该篇英文 fallback 用中文）
-- `<id>` = 文件名去掉 `.md` / `.en.md`，也是前端「已读」状态的 key
-  —— **改名会被当成新公告、让用户重新看到**。
-- 命名建议 `YYYY-MM-DD-slug`，如 `2026-06-28-url-root`。
+- `<id>.md`, written in English.
+- Recommended naming: `YYYY-MM-DD-slug`; release posts must be named
+  `YYYY-MM-DD-v<version>.md` (the validator warns otherwise).
 
-## frontmatter 字段
+## Frontmatter fields
 
 ```yaml
 ---
-date: 2026-06-28         # 必填，ISO 日期；列表排序 + 显示
-tag: migration           # 必填，见下方枚举
-title: 访问地址改为根路径   # 必填，该语言标题（.en.md 里写英文）
-pin: true                # 可选，默认 false；置顶（重要迁移常用）
-version: "0.16.0"        # 可选，关联版本号
+date: 2026-06-28         # required, ISO date; used for ordering + display
+tag: release             # required: release | notice | migration
+title: v0.16.0 release   # required
+pin: true                # optional, default false
+version: "0.16.0"        # required for release posts
 ---
-正文（markdown）
+Body (markdown)
 ```
 
-> 正文按完整 markdown 渲染（`ReactMarkdown` + GFM，0.16.0 起）：标题 / 列表 / 链接 / 代码块都可用，
-> 写法约定见 [`CONTENT-GUIDE.md`](CONTENT-GUIDE.md)。
+## Tags
 
-## tag 枚举（白名单）
-
-| tag | 含义 | 何时用 |
+| tag | meaning | when to use |
 |---|---|---|
-| `release` | 更新日志 | 一个版本的发布说明（Phase 2 起从 release_notes 迁入，一版一篇） |
-| `notice` | 公告 | 一般通知 / 提示 |
-| `migration` | 迁移 | 行为变化、需要用户注意或操作（如入口地址变更） |
+| `release` | update log | release notes for a version, one post per version |
+| `notice` | announcement | general notice / heads-up |
+| `migration` | migration | a behavior change that needs the user's attention or action |
 
-不在白名单的 tag 会被后端**直接跳过**（不显示）。运行时权威是
-`studio/services/announcements.py` 的 `VALID_TAGS`，本表与它保持一致。
+Only `release` posts end up in the changelog.
 
-## 加一个新 tag 要同步这 5 处
+## Tooling
 
-1. `studio/services/announcements.py` → `VALID_TAGS`
-2. `studio/web/src/api/client.ts` → `AnnouncementPost['tag']` 联合类型
-3. `studio/web/src/components/AnnouncementCenter.tsx` → `TAG_ORDER` + `tagChipClass`（配色）
-4. `studio/web/src/i18n/locales/zh.json` + `en.json` → `announcements.tags.<new>`
-5. 本文件上面的 tag 表
+```bash
+python tools/bump_version.py validate          # check release post frontmatter
+python tools/bump_version.py render-changelog  # rewrite CHANGELOG.md
+python tools/bump_version.py bump              # sync version files + rewrite CHANGELOG.md
+```
 
-## 模板
+## Templates
 
-直接抄现成的：`2026-06-28-welcome.md` / `.en.md`（`notice`）或
-`2026-06-28-url-root.md` / `.en.md`（`migration`，置顶）。
+Copy an existing post, e.g. `2026-07-19-v0.20.2.md` (`release`) or
+`2026-06-28-url-root.md` (`migration`, pinned).

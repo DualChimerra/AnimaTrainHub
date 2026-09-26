@@ -1,98 +1,98 @@
-# 0010 — preprocess scope 从项目级 download 下沉到 version 级 train
+# 0010 — Move preprocess scope from project-level download down to version-level train
 
-**状态**：Accepted（PR-1/2/3/4/5 全部 merge；2026-06-04 收尾）
-**日期**：2026-06-03
-**决策者**：@WalkingMeatAxolotl
-**Supersedes**：[ADR 0004 — 预处理状态用单 manifest 替代「双 bucket + per-image sidecar」](0004-preprocess-manifest.md)（含 Addendum 1）
+**Status**: Accepted (PR-1/2/3/4/5 all merged; wrapped up 2026-06-04)
+**Date**: 2026-06-03
+**Decision makers**: @WalkingMeatAxolotl
+**Supersedes**: [ADR 0004 — Replace "dual bucket + per-image sidecar" preprocessing state with a single manifest](0004-preprocess-manifest.md) (including Addendum 1)
 
-## 背景
+## Background
 
-ADR 0004 把预处理状态固化为 **项目级单 manifest + 双 bucket resolver + 隐式 original**，工作流是：
+ADR 0004 fixed preprocessing state as **a single project-level manifest + dual-bucket resolver + implicit original**, with a workflow of:
 
 ```
-download/  ──(对全集预处理)──>  preprocess/  ──(curate 选入)──>  versions/{label}/train/
-   ↑ 项目级                    ↑ 项目级                          ↑ version 级
+download/  ──(preprocess the whole set)──>  preprocess/  ──(curate selects)──>  versions/{label}/train/
+   ↑ project-level                    ↑ project-level                          ↑ version-level
 ```
 
-跨版本「预处理结果复用」由项目级 `preprocess/` 目录直接承担——这是 ADR 0004 §74-83 选项目级 scope 的核心论据。
+"Reusing preprocessing results across versions" was handled directly by the project-level `preprocess/` directory — this was the core argument for choosing project-level scope in ADR 0004 §74-83.
 
-beta 用户使用后揭示了**四个真实痛点**：
+Use by beta users revealed **four real pain points**:
 
-1. **前置时间浪费**：booru scrape 进来几百-几千张图，最终只用很小一部分；用户对全集每张图都要操作（放大要等 / 裁剪要逐张跳过），其中大部分图不会进 train
-2. **统计指标无意义**：分辨率分布 / 宽高比分布基于 `download/` 全集，不是最终 train 集——对训练决策没有指导价值
-3. **智能聚类失效**：聚类目标是统一 ARB 桶，但聚类在 download 全集做完后下游 curate 还要再筛，**桶又乱了**
-4. **scope 错位**：用户心智上"我想训练的图"是 train 集合；preprocess 在 download 全集上做，跟心智不对齐
+1. **Wasted upfront time**: a booru scrape brings in hundreds-to-thousands of images, of which only a small fraction ends up used; the user has to act on every image in the whole set (waiting for upscales, skipping through crops one by one), even though most of them will never enter train
+2. **Meaningless statistics**: resolution distribution / aspect-ratio distribution are computed over the entire `download/` set, not the final train set — they don't inform training decisions
+3. **Smart clustering breaks down**: the goal of clustering is unified ARB buckets, but clustering happens over the entire download set, and downstream curation filters it further, **scrambling the buckets again**
+4. **Scope mismatch**: in the user's mental model, "the images I want to train on" is the train set; preprocessing operating on the full download set doesn't match that model
 
-ADR 0004 项目级 scope 的两条事实假设也已变化：
+The two factual assumptions behind ADR 0004's project-level scope have also changed:
 
-- **ADR 0007** 落地后 `create_version(fork_from_version_id=...)` (`studio/services/projects/versions.py:407-498`) 通过 `_copytree("train")` 实现**整树 fork**。train/ 含已 upscale 产物在 fork 时自然跟随到子 version——**不需要项目级缓存**就能实现跨版本复用
-- 用户调研：**新 version 绝大多数从上一个 version 复制 + 微调**，"v2 完全重做 preprocess"这种最坏情况几乎不发生
+- After **ADR 0007** landed, `create_version(fork_from_version_id=...)` (`studio/services/projects/versions.py:407-498`) implements a **whole-tree fork** via `_copytree("train")`. train/, including already-upscaled outputs, naturally carries over to the child version on fork — **no project-level cache is needed** to get cross-version reuse
+- User research: **the vast majority of new versions are copies of the previous version with minor tweaks**; the worst case of "completely redo preprocessing in v2" almost never happens
 
-ADR 0004 的优化目标（跨版本复用）在新事实下由 ADR 0007 fork 机制承接，scope 错位反而成了主要成本。
+The optimization ADR 0004 targeted (cross-version reuse) is now covered by ADR 0007's fork mechanism under these new facts, and the scope mismatch has instead become the dominant cost.
 
-## 候选方案
+## Candidate approaches
 
-### A — 维持 ADR 0004 现状
+### A — Keep ADR 0004's current state
 
-- 优点：0 工时
-- 缺点：四个痛点不解决；统计 / 聚类基于错误集合是**正确性 bug**而不是 UX 缺陷
-- **否决**
+- Pros: 0 effort
+- Cons: none of the four pain points are addressed; statistics / clustering built on the wrong set is a **correctness bug**, not just a UX shortcoming
+- **Rejected**
 
-### B — UI filter 折中（Preprocess 页加"只看 train"过滤）
+### B — Compromise with a UI filter (add a "show train only" filter to the Preprocess page)
 
-保留项目级磁盘结构，只在 UI 加 filter 让用户视图聚焦到 train 集合。成本 ~2.5d，不动任何 ADR。
+Keep the project-level disk layout, and just add a UI filter so the user's view focuses on the train set. Cost ~2.5 days, doesn't touch any ADR.
 
-逐条 check 痛点解决度：
+Checking each pain point against this fix:
 
-| 痛点 | filter 解了吗 |
+| Pain point | Does the filter solve it? |
 |---|---|
-| 前置时间浪费（对不会用的图也操作） | **否**——filter 是事后过滤，时间已花掉 |
-| 统计指标基于 download 全集无意义 | **否**——统计源不变 |
-| 聚类失效（统一 ARB 桶又被下游筛乱） | **否**——聚类源不变 |
-| booru 素材只用很小一部分 | 部分（视觉上隐藏，不影响数据流） |
+| Wasted upfront time (acting on images that won't be used) | **No** — the filter is applied after the fact, the time is already spent |
+| Statistics meaningless because based on the full download set | **No** — the statistics source is unchanged |
+| Broken clustering (unified ARB buckets scrambled again downstream) | **No** — the clustering source is unchanged |
+| Only a small fraction of booru material is used | Partially (hidden visually, doesn't change the data flow) |
 
-**0/4 真解**。filter 解的是"视觉干扰"——这是症状不是根因。**否决**。
+**0/4 real fixes**. The filter addresses "visual clutter" — a symptom, not the root cause. **Rejected**.
 
-### C — preprocess scope 下沉到 version 级 train/（**采纳**）
+### C — Move preprocess scope down to the version-level train/ (**adopted**)
 
-新工作流：
+New workflow:
 
 ```
-download/  ──(curate 选入)──>  versions/{label}/train/  ──(对 train 处理)──>  tag / train
-   ↑ 项目级 source-of-truth     ↑ version 级（预处理 + 训练同位）
+download/  ──(curate selects)──>  versions/{label}/train/  ──(process train)──>  tag / train
+   ↑ project-level source-of-truth     ↑ version-level (preprocessing and training co-located)
 ```
 
-预处理在 curate **之后**，只对最终训练集生效。跨版本复用通过 fork 整树复制承接。
+Preprocessing happens **after** curation, applying only to the final training set. Cross-version reuse is covered by fork's whole-tree copy.
 
-详 §决策。
+Details in §Decision.
 
-## 决策
+## Decision
 
-选**方案 C**。
+**Approach C** was chosen.
 
-### 磁盘结构
+### Disk layout
 
 ```
 projects/{id}-{slug}/
-  download/                       # 项目级，仍是 source-of-truth（不变）
+  download/                       # project-level, still the source-of-truth (unchanged)
     X.jpg, Y.jpg, ...
-  preprocess/                     # 老目录，保留不动（fallback 重建源；不主动删）
-    manifest.json                 # 老 v0/v1 schema，只读
-    *.png                         # 老产物，只读
+  preprocess/                     # old directory, kept as-is (fallback rebuild source; not actively deleted)
+    manifest.json                 # old v0/v1 schema, read-only
+    *.png                         # old outputs, read-only
   versions/{label}/
     train/
-      manifest.json               # 新增 per-version（v2 schema）
-      X.png + X.txt               # 训练 bytes + caption（caption 不进 manifest）
-      Y_c0.png + Y_c0.txt         # multi-crop 派生
+      manifest.json               # new, per-version (v2 schema)
+      X.png + X.txt               # training bytes + caption (caption is not part of the manifest)
+      Y_c0.png + Y_c0.txt         # multi-crop derivatives
       Y_c1.png + Y_c1.txt
     reg/ samples/ output/ config.yaml
 ```
 
-**关键不变量**：项目级 `preprocess/` 目录**永远不主动删**（详 §不变量）。
+**Key invariant**: the project-level `preprocess/` directory is **never actively deleted** (see §Invariants).
 
 ### Manifest schema v2
 
-`versions/{label}/train/manifest.json`：
+`versions/{label}/train/manifest.json`:
 
 ```json
 {
@@ -105,261 +105,261 @@ projects/{id}-{slug}/
 }
 ```
 
-**字段语义**：
+**Field semantics**:
 
-- `version` (int): schema 版本，当前固定 `2`
-- `images` (map): key = train 内**POSIX 相对路径** `"{N_label}/{image}"`（LoRA
-  repeat folder 结构：`train/1_data/X.png` → entry key `"1_data/X.png"`），
-  value = entry
-- `entry.origin` (string): `download/` 下对应原图的**平铺文件名**（download/
-  无 sub-folder 结构），用于 restore 反查
-- `entry.mtime` / `entry.size` (number): 产物文件元数据，可检测外部修改
+- `version` (int): schema version, currently fixed at `2`
+- `images` (map): key = the **POSIX-style relative path** within train, `"{N_label}/{image}"`
+  (LoRA's repeat-folder structure: `train/1_data/X.png` → entry key `"1_data/X.png"`),
+  value = the entry
+- `entry.origin` (string): the **flat filename** of the corresponding source image under `download/`
+  (download/ has no sub-folder structure), used for reverse lookup during restore
+- `entry.mtime` / `entry.size` (number): metadata of the output file, used to detect external modification
 
-**为什么 rel path 而不是平铺**：LoRA 训练 dataset config 把 `train/{N_label}/`
-当 repeat folder（N = 重复次数）；同一张图可在多个 folder 出现（罕见但合法）。
-平铺 entry key 无法表达跨 folder 唯一性 + 同名歧义。POSIX 形式 `/` 跨平台一致。
+**Why a relative path instead of a flat name**: LoRA's training dataset config treats `train/{N_label}/`
+as a repeat folder (N = repeat count); the same image can appear in multiple folders (rare but legal).
+A flat entry key can't express uniqueness across folders or resolve same-name collisions. The POSIX form with `/` is consistent across platforms.
 
-`train/` 根目录直接放的图**被忽略**（LoRA 训练只读 sub-folder 内）；validator
-`_validate_rel_name` 强制 `folder/image` 两段格式，防 path traversal。
+Images placed directly at the `train/` root are **ignored** (LoRA training only reads inside sub-folders); the validator
+`_validate_rel_name` enforces the two-segment `folder/image` format, preventing path traversal.
 
-**状态字段**（2026-06-04 fixup）：
+**Status field** (2026-06-04 fixup):
 
-- `processed: true`：worker upscale / crop 完成后写。前端用这个字段画"已处理"
-  徽章。entry 缺该字段（curate 复制原图 / 老 entry）→ 视为未处理。
-- 老 entry（PR-2/3 跑过 upscale 的旧 manifest）`processed` 缺失 → 视为未处理；
-  用户重新跑 preprocess 即升级到新字段。
+- `processed: true`: written once a worker completes upscale / crop. The frontend uses this field to render the
+  "processed" badge. An entry missing this field (curation copied the original image / an old entry) is treated as unprocessed.
+- Old entries (from manifests written before the fixup, after an upscale pass) missing `processed`
+  are treated as unprocessed; rerunning preprocess upgrades them to the new field.
 
-**为什么显式存 `processed`**（修改原"从字段差异推断"原则）：
+**Why `processed` is stored explicitly** (a revision of the original "infer from field differences" principle):
 
-原设计想用"rel 末段 != origin 扩展名"推断处理过，但 fixup 后 **upscale
-不改扩展名**（保留 src 扩展名 in-place 覆盖；详 §worker 行为），扩展名差异
-不再是可靠信号。其他备选（size diff vs download / mtime 差异）也都不可靠
-或开销大。显式 bool 字段是最简单准确的选择。仅此一个状态字段，仍符合"manifest
-最小"精神——不存 model/scale/action 等过程信息，只存"是否处理过"这一个 user
-能在 UI 上看见的语义。
+The original design planned to infer "processed" from "final path segment's extension differs from origin's,"
+but after the fixup, **upscale doesn't change the extension** (it overwrites in place, preserving the source extension; see §worker behavior),
+so an extension mismatch is no longer a reliable signal. Other alternatives (size diff vs. download, mtime diff)
+are also unreliable or expensive. An explicit bool field is the simplest, most accurate choice. It remains the only status field,
+still in keeping with the "minimal manifest" spirit — it doesn't store model/scale/action or other process information,
+only "has this been processed" — the one piece of semantics a user actually sees in the UI.
 
-**不存的字段**（明确否定项，跟 ADR 0004 Addendum 1 一致）：
+**Fields not stored** (explicitly rejected, consistent with ADR 0004 Addendum 1):
 
-- `kind`（老字段：`processed` / `cropped` / `masked`，跟 `processed:bool` 重叠）
-- `source`（老字段名，由 `origin` 取代）
-- `model / scale / action / target_area / src_size / dst_size / elapsed_seconds`（过程信息，写盘后应丢）
-- `state`（多状态枚举）—— `processed:bool` 二态就够；多状态由 UI 从 `processed`
-  + `duplicate_removed` + `orphan` 组合推断
-- `caption_mtime / tags / caption`（caption 是 tagging stage owner，独立 lifecycle）
-- `kind: duplicate_removed`（人工去重审核状态——本 ADR 下沉去重 scope 到 train 集，每个 version 独立审核，状态不跨 version 共享，详 §去重 scope）
+- `kind` (old field: `processed` / `cropped` / `masked`, overlaps with `processed:bool`)
+- `source` (old field name, replaced by `origin`)
+- `model / scale / action / target_area / src_size / dst_size / elapsed_seconds` (process information, should be discarded once written)
+- `state` (a multi-value enum) — `processed:bool` as a two-state field is enough; multi-state is derived by the UI by combining `processed`
+  + `duplicate_removed` + `orphan`
+- `caption_mtime / tags / caption` (caption belongs to the tagging stage, its own independent lifecycle)
+- `kind: duplicate_removed` (manual dedup review state — this ADR moves dedup scope down to the train set, reviewed independently per version, with state not shared across versions; see §dedup scope)
 
-### worker 行为：扩展名保留（2026-06-04 fixup）
+### Worker behavior: extension preserved (2026-06-04 fixup)
 
-worker upscale / crop **不改文件名也不改扩展名**——`X.jpg` 上调后仍是
-`X.jpg`，`X.png` 上调后仍是 `X.png`。原因：
+Worker upscale / crop **doesn't change the filename or extension** — `X.jpg` stays
+`X.jpg` after upscaling, `X.png` stays `X.png`. Reasons:
 
-- 改扩展名（`X.jpg → X.png`）破坏 LoRA dataset config 对扩展名的 glob 匹配
-- 改 stem 破坏 caption 对应关系（caption 按 stem 找：`X.txt`）
+- Changing the extension (`X.jpg → X.png`) would break the LoRA dataset config's extension-based glob matching
+- Changing the stem would break the caption correspondence (captions are matched by stem: `X.txt`)
 
-upscaler 按 src 扩展名 save：
+The upscaler saves according to the source extension:
 
 - `.jpg` / `.jpeg` → JPEG quality=95
 - `.webp` → WebP quality=95 method=6
-- 其他（PNG / BMP / GIF 等） → PNG 无压缩
+- everything else (PNG / BMP / GIF etc.) → uncompressed PNG
 
-In-place 覆盖走 tmp + atomic rename 防训练框架读到半文件。JPEG 二次编码有
-微量质量损失——接受这个 trade-off 换 caption / dataset config 兼容性。
+In-place overwrite goes through a tmp file + atomic rename to prevent the training framework from reading a half-written file. JPEG re-encoding does introduce a small quality loss —
+this trade-off is accepted in exchange for caption / dataset-config compatibility.
 
-### Fallback 重建机制：`ensure_train_manifest`
+### Fallback rebuild mechanism: `ensure_train_manifest`
 
-老项目里 train/ 已经有 preprocess 产物（curate 阶段已复制），唯一丢失的是 train ↔ download 的 origin 关系。`ensure_train_manifest(project_dir, version_label)` 在所有 manifest read/write 入口防御性调用，幂等。
+Old projects already have preprocessing outputs sitting in train/ (copied during curation); the only thing missing is the train ↔ download origin relationship. `ensure_train_manifest(project_dir, version_label)` is called defensively at every manifest read/write entry point, and is idempotent.
 
-**重建规则**（按优先级）：
+**Rebuild rules** (in priority order):
 
-1. 目标 `versions/{label}/train/manifest.json` 已存在 → 直接返回（O(1) stat，热路径 0 开销）
-2. 不存在 + 老 `projects/{id}/preprocess/manifest.json` 存在 → 递归扫
-   `train/` 一级 sub-folder 收集图片相对路径集合（仅图像后缀；根目录直接放
-   的图忽略）；按文件名（rel path 末段）匹配老平铺 entry name → 重建 v2
-   schema，entry key 用 rel path
-3. 老 manifest 不存在 / 损坏（非 dict / 非法 JSON） → 写空 v2 manifest（`{"version": 2, "images": {}}`）
-4. 老 entry 标 `kind: duplicate_removed` → **跳过**（人工去重审核状态不跨模型迁移，新模型下用户在 train scope 重新去重）
-5. 跨 sub-folder 同名图（罕见但合法，如 `1_data/X.png` + `5_extra/X.png`） →
-   各自独立 entry，都继承同一老 origin
+1. The target `versions/{label}/train/manifest.json` already exists → return immediately (an O(1) stat, zero overhead on the hot path)
+2. Doesn't exist + the old `projects/{id}/preprocess/manifest.json` exists → recursively scan
+   `train/`'s first-level sub-folders to collect the set of relative image paths (image extensions only; images placed
+   directly at the root are ignored); match by filename (the last segment of the relative path) against old flat entry names → rebuild the v2
+   schema, using the relative path as the entry key
+3. The old manifest doesn't exist / is corrupted (not a dict / invalid JSON) → write an empty v2 manifest (`{"version": 2, "images": {}}`)
+4. An old entry marked `kind: duplicate_removed` → **skipped** (manual dedup review state doesn't migrate across models; users redo dedup within train scope under the new model)
+5. Same-named images across different sub-folders (rare but legal, e.g. `1_data/X.png` + `5_extra/X.png`) →
+   each gets its own independent entry, both inheriting the same old origin
 
-并发：`threading.Lock` 串行 + 原子 `tmp+rename` 落盘 + 双检查防竞态。
+Concurrency: serialized via `threading.Lock` + atomic `tmp+rename` writes + double-check to prevent races.
 
-**为什么 fallback 而不是显式迁移脚本**：用户 train/ 物理 bytes 已经是 preprocess 复制过来的产物，**删 project 级 `preprocess/` 不影响 train/ 内容**。唯一损失是 origin 反查，30 行代码 lazy 重建即可。比显式脚本 + UI 弹窗省 1 人日 + 零用户感知 + 零失败回滚成本（重建失败下次调用会重试）。
+**Why a fallback instead of an explicit migration script**: the physical bytes in the user's train/ are already outputs copied over during preprocessing — **deleting the project-level `preprocess/` doesn't affect train/'s contents**. The only thing lost is the origin lookup, and a 30-line lazy rebuild is enough. This saves ~1 person-day and zero perceived user impact compared to an explicit script + UI dialog, with zero failure-rollback cost (a failed rebuild just retries on the next call).
 
-### Resolver 命运
+### Fate of the resolver
 
-ADR 0004 的 `resolve(name) → Path` resolver 是为消除"双 bucket fallback（download/ vs preprocess/）"而设计的中心抽象。**新模型下 train/ 是 self-contained**——thumbnail / curation / tagging / training materialize 全部直接读 `train/{name}`，没有歧义。
+ADR 0004's `resolve(name) → Path` resolver was the central abstraction designed to eliminate the "dual-bucket fallback (download/ vs preprocess/)". **Under the new model, train/ is self-contained** — thumbnail / curation / tagging / training materialization all read directly from `train/{name}`, with no ambiguity.
 
-| 函数 | 命运 |
+| Function | Fate |
 |---|---|
-| `resolve(project_dir, name)` | **删**（双 bucket 概念消失） |
-| `resolve_origin(project_dir, download_name)` | **删**（反向 resolve 无业务调用方） |
-| `list_pending()` | **删**（"未处理 / 已处理"二元概念消失） |
-| `ensure_manifest()` + `_scan_legacy_sidecars()` | **删**（不再迁老 sidecar；老 manifest 由 `ensure_train_manifest` 一次性读） |
-| `entry_origin()` | **保留**（fallback 读老 entry / restore 反查都要用） |
-| `add_processed / restore / mark_duplicate_removed / clear_all / replace_with_crops` | **保留并加 `version_label` 参数** |
+| `resolve(project_dir, name)` | **removed** (the dual-bucket concept is gone) |
+| `resolve_origin(project_dir, download_name)` | **removed** (no caller needed reverse resolve) |
+| `list_pending()` | **removed** (the binary "unprocessed / processed" concept is gone) |
+| `ensure_manifest()` + `_scan_legacy_sidecars()` | **removed** (no longer migrates old sidecars; the old manifest is read once by `ensure_train_manifest`) |
+| `entry_origin()` | **kept** (needed for fallback reading of old entries / reverse lookup during restore) |
+| `add_processed / restore / mark_duplicate_removed / clear_all / replace_with_crops` | **kept, with a `version_label` parameter added** |
 
-### Restore 语义
+### Restore semantics
 
-`restore(project_dir, version_label, name)`：
+`restore(project_dir, version_label, name)`:
 
-1. `ensure_train_manifest` 前置调用
-2. 查 `manifest.images[name].origin`
-3. 从 `download/{origin}` 复制覆盖 `train/{name}`
-4. 更新 manifest entry 的 mtime/size
+1. Calls `ensure_train_manifest` first
+2. Looks up `manifest.images[name].origin`
+3. Copies `download/{origin}` over `train/{name}`
+4. Updates the manifest entry's mtime/size
 
-**`download/{origin}` 缺失时**：明确失败 + UI 显式提示。具体图列出 + 提供三选项：
+**When `download/{origin}` is missing**: an explicit failure + a UI prompt. The specific image is listed with three options:
 
-- **拖入替换** — 文件选择器选本地图覆盖 `download/{origin}`，重试 restore
-- **保留处理后版本** — 忽略失败，train/{name} 不变
-- **从 train/ 移除** — 删 train/{name} + 删 manifest entry（破坏性，二次确认）
+- **Drag in a replacement** — pick a local file via a picker to overwrite `download/{origin}`, then retry restore
+- **Keep the processed version** — ignore the failure, leave train/{name} unchanged
+- **Remove from train/** — delete train/{name} + delete the manifest entry (destructive, requires confirmation)
 
-承袭 ADR 0004 §215-219 "外部删 download/ 不主动 reconcile"原则：**没有隐藏备份字节**（不做 per-version `.backup/`，违反 "download 唯一备份" 不变量）。复原失败是有意的接受现状，UI 显式失败优于静默假复原。
+Carries forward ADR 0004 §215-219's "no active reconciliation when download/ is deleted externally" principle: **no hidden backup bytes** (no per-version `.backup/`, which would violate the "download is the sole backup" invariant). Restore failure is an intentional accepted trade-off — an explicit UI failure beats a silent false restore.
 
-### 跨版本复用：fork 整树复制
+### Cross-version reuse: fork's whole-tree copy
 
-通过 ADR 0007 现有 fork 机制承接：
+Handled through ADR 0007's existing fork mechanism:
 
-- `create_version(fork_from_version_id=...)` 调用 `_copytree("train")` 递归复制 train 子树
-- `train/manifest.json` **自动随复制带过去**（递归复制目标，0 代码改动）
-- fork 后调用一次 `ensure_train_manifest(new_label)` 兜底（万一源 manifest 损坏可重建）
-- v2 起手 train/ 跟 v1 完全一致 → preprocess phase 自动跳过（产物全继承）
+- `create_version(fork_from_version_id=...)` calls `_copytree("train")`, recursively copying the train subtree
+- `train/manifest.json` **comes along automatically with the copy** (it's within the recursive copy target, zero code changes)
+- After forking, `ensure_train_manifest(new_label)` is called once as a safety net (in case the source manifest was corrupted and needs rebuilding)
+- v2 starts out with train/ identical to v1 → the preprocessing phase auto-skips (all outputs inherited)
 
-代价：fork 时复制几 GB train/（含 upscale 产物）。**用户接受**——"v3 通常只改训练参数不改 train" 是最常见 case，磁盘代价摊销低；想完全重做 preprocess 的少数场景用户显式触发"重做 stage"按钮。
+Cost: forking copies several GB of train/ (including upscale outputs). **Accepted by the user** — "v3 usually only changes training parameters, not train" is the most common case, so the disk cost amortizes well; for the rare case of a full preprocessing redo, users explicitly trigger a "redo stage" button.
 
-### Phase 状态机改动（ADR 0007 amendment 配套）
+### Phase state machine change (companion to the ADR 0007 amendment)
 
-`VersionPhase.ORDER` 加 `preprocessing`：
+`VersionPhase.ORDER` gains `preprocessing`:
 
 ```python
-# 改前（ADR 0007 §132）：
-ORDER = (curating, tagging, editing, regularizing, ready)         # 5 个
+# Before (ADR 0007 §132):
+ORDER = (curating, tagging, editing, regularizing, ready)         # 5 phases
 SKIPPABLE = {regularizing}
 
-# 改后：
-ORDER = (curating, preprocessing, tagging, editing, regularizing, ready)   # 6 个
+# After:
+ORDER = (curating, preprocessing, tagging, editing, regularizing, ready)   # 6 phases
 SKIPPABLE = {preprocessing, regularizing}
 ```
 
-`check_preprocessing(conn, version_id)` 跟 `check_regularizing` 同 pattern：
+`check_preprocessing(conn, version_id)` follows the same pattern as `check_regularizing`:
 
-- 校验 = 无 preprocess job 处于 pending / running
-- 不强校验"是否处理过任何图"——可跳过，跟 `regularizing` 一致心智
-- UI 文案在 phase 名后加"（可选）"，跟 `regularizing` 现有 `nav.reg = "正则集（可选）"` 完全同 pattern
+- Validation = no preprocess job pending / running
+- Doesn't hard-require "has any image been processed" — skippable, matching the `regularizing` mental model
+- The UI adds "(optional)" after the phase name, exactly the same pattern as `regularizing`'s existing `nav.reg = "Regularization set (optional)"`
 
-### Migration 两层机制
+### Two-layer migration mechanism
 
-**Layer 1 — `_v11_preprocessing_phase` DB migration**（隐式 add-only，跟 `_v8_version_status_phase.py` 同 pattern）：
+**Layer 1 — `_v11_preprocessing_phase` DB migration** (implicit add-only, same pattern as `_v8_version_status_phase.py`):
 
-跟 lifecycle PR-5 (`_v9 destructive`) 之后跑。回填规则：
+Runs after lifecycle PR-5 (`_v9 destructive`). Backfill rules:
 
-| 现存 phase | train/ 状态 | 新 phase |
+| Existing phase | train/ state | New phase |
 |---|---|---|
-| `curating` | 空 | `curating`（保持） |
-| `curating` | 非空 | **`preprocessing`** |
-| 其他（tagging / editing / regularizing / ready） | 任意 | 保持不变 |
+| `curating` | empty | `curating` (unchanged) |
+| `curating` | non-empty | **`preprocessing`** |
+| Others (tagging / editing / regularizing / ready) | any | unchanged |
 
-依据：用户原话"preprocessing 的图片已经复制到现有 train"——train/ 非空意味着 curating 已实质完成。零用户感知。
+Rationale: per the user, "preprocessing's images have already been copied into the existing train" — a non-empty train/ means curating has effectively already been completed. Zero perceived impact for users.
 
-**Layer 2 — `ensure_train_manifest` 隐式 fallback**（见 §Fallback 重建机制）：
+**Layer 2 — the `ensure_train_manifest` implicit fallback** (see §Fallback rebuild mechanism):
 
-DB migration 处理 phase 字段，fallback 处理 manifest 文件。两层解耦。
+The DB migration handles the phase field; the fallback handles the manifest file. The two layers are decoupled.
 
-### 去重 / blur / 聚类 scope
+### Dedup / blur / clustering scope
 
-全部跟随下沉到 **train 集合**：
+All moved down to the **train set** as well:
 
-- `studio/services/preprocess/duplicates.py:_resolve_download_sources` → `_resolve_train_sources(version_label)`，scope 改 `versions/{label}/train/`
-- **不拆模块**（R1/R2 设计阶段曾考虑"去重上提到 ingestion 阶段"作为前置硬条件，最终否决）——下沉到 train 后去重就是为了清理 train 集本身，跟"项目级清理素材池"是不同心智，拆模块反而增加复杂度
-- 人工去重审核状态在新模型下**每个 version 独立**（fork 时跟随 train manifest 复制，不跨 version 共享）
+- `studio/services/preprocess/duplicates.py:_resolve_download_sources` → `_resolve_train_sources(version_label)`, scope changed to `versions/{label}/train/`
+- **No module split** (during the R1/R2 design phase, "moving dedup up to the ingestion stage" was considered as a hard prerequisite, and ultimately rejected) — once moved down to train, dedup exists to clean up the train set itself, which is a different mental model from "cleaning the project-level material pool"; splitting the module would only add complexity
+- Manual dedup review state is now **independent per version** under the new model (carried along with the train manifest on fork, not shared across versions)
 
-### 不动的部分
+### What's left unchanged
 
-- `download/` 仍是项目级 source-of-truth；curate 阶段从 download 复制进 train 的语义不变
-- `services/preprocess/` 模块（worker / upscale / crop / blur / dedup 核心逻辑）保留——本 ADR 改的是**状态存储位置**，不是计算职责
-- ADR 0007 §70 "数据集归属 = 项目级"决议**不撕**——train 集合 source-of-truth 仍是项目级 download 池，本 ADR 只把**预处理产物**与 train 同位
+- `download/` remains the project-level source-of-truth; the semantics of copying from download into train during curation are unchanged
+- The `services/preprocess/` module (worker / upscale / crop / blur / dedup core logic) is kept — this ADR changes **where state is stored**, not the computation's responsibilities
+- ADR 0007 §70's decision that "dataset ownership = project-level" is **not overturned** — the train set's source-of-truth is still the project-level download pool; this ADR only co-locates **preprocessing outputs** with train
 
-## 不变量（未来修改时必读）
+## Invariants (must-read before future modifications)
 
-以下约束是本 ADR 数据模型的硬约束。后续相关方向重构时**必须保留**或显式撕掉并写新 ADR：
+The following constraints are hard constraints of this ADR's data model. Future refactors in related areas **must preserve them** or explicitly overturn them and write a new ADR:
 
-1. **`download/` 是唯一持久原图备份**——除非用户外部删，否则永远存在；不发明任何 `.backup/` / 影子目录复制 download bytes
-2. **老 `projects/{id}/preprocess/` 目录永远不主动删**——作 fallback 重建源 + 老数据备份；用户自决何时清理；只有 next next minor release 才考虑加用户引导清理
-3. **Manifest 只存"现状反查关系"，不存"过程信息"**——schema 三字段 `{origin, mtime, size}` 之外都属于过程信息（kind / model / scale / action / state / ops 链 / rect / target_area / 等等）。写盘后过程信息应丢
-4. **状态字段最小化**——`processed: bool` 是唯一允许的状态 bool（2026-06-04
-   fixup 加，详 §Manifest schema v2）；增加其他状态字段必须先论证差异推断
-   或现有字段不够
-5. **train/ 是 self-contained**——所有下游消费者（thumbnail / curation / tagging / training materialize）直接读 `train/{name}`，**不**走双 bucket fallback。manifest 用于反查 origin（restore / 派生关系），不用于"指路径"
-6. **caption 跟 manifest 解耦**——caption (`.txt`) 是 tagging stage owner，不进 manifest；preprocess 改图不动 caption
-7. **跨版本复用走 fork 整树复制**，不走项目级缓存——这是 ADR 0007 现有机制承接，不重复发明
-8. **复原失败显式可见**——`download/{origin}` 缺失时 restore **必须明确失败**给用户三选项，**禁止**静默成功 / 假复原
-9. **DB migration 跟 manifest fallback 解耦**——`_v11` 改 phase 字段，`ensure_train_manifest` 重建 manifest 文件；两套机制独立、各自幂等
-10. **进程内 `threading.Lock` 即可**——服务端单进程，没跨进程写者。未来真出现跨进程写（独立 preprocess daemon），升级到 `portalocker.Lock`，逻辑外壳不变
+1. **`download/` is the sole persistent backup of the original images** — it exists forever unless the user deletes it externally; never invent a `.backup/` or shadow directory duplicating download bytes
+2. **The old `projects/{id}/preprocess/` directory is never actively deleted** — it serves as the fallback rebuild source + a backup of old data; the user decides when to clean it up; only consider adding a guided user cleanup in a later minor release
+3. **The manifest only stores "current-state reverse lookup relationships," never "process information"** — anything outside the schema's three fields `{origin, mtime, size}` counts as process information (kind / model / scale / action / state / op chains / rect / target_area / etc.). Process information should be discarded once written
+4. **Status fields are kept minimal** — `processed: bool` is the only allowed status bool (added by the 2026-06-04
+   fixup, see §Manifest schema v2); adding another status field first requires demonstrating that field-difference inference
+   or the existing fields are insufficient
+5. **train/ is self-contained** — every downstream consumer (thumbnail / curation / tagging / training materialization) reads directly from `train/{name}`; **none** go through a dual-bucket fallback. The manifest is used for reverse origin lookup (restore / derivation relationships), not for "path resolution"
+6. **caption is decoupled from the manifest** — captions (`.txt`) belong to the tagging stage, and are not part of the manifest; preprocessing edits to images don't touch captions
+7. **Cross-version reuse goes through fork's whole-tree copy**, not a project-level cache — this is handled by ADR 0007's existing mechanism, not reinvented here
+8. **Restore failure must be explicitly visible** — when `download/{origin}` is missing, restore **must fail explicitly** and give the user three options; **silently succeeding / faking a restore is forbidden**
+9. **DB migration is decoupled from manifest fallback** — `_v11` changes the phase field, `ensure_train_manifest` rebuilds the manifest file; the two mechanisms are independent and each idempotent
+10. **An in-process `threading.Lock` is sufficient** — the server is single-process, with no cross-process writer. If cross-process writes emerge in the future (e.g. an independent preprocessing daemon), upgrade to `portalocker.Lock` without changing the outer logic
 
-## 理由
+## Rationale
 
-**为什么 ADR 0004 项目级 scope 被推翻**：
+**Why ADR 0004's project-level scope was overturned**:
 
-不是决策当时论证错了，是两个**事实假设**变了：
+It's not that the original reasoning was wrong at the time — two **factual assumptions** changed:
 
-1. ADR 0007 落地的 fork 机制让"跨版本复用"无需项目级缓存就能实现——ADR 0004 §74-83 的核心论据由 fork 承接
-2. 用户实际工作流是「v2 从 v1 复制 + 微调」远多于「v2 重做」——重做 upscale 几十分钟这种最坏 case 几乎不发生
+1. The fork mechanism landed by ADR 0007 achieves "cross-version reuse" without needing a project-level cache — the core argument of ADR 0004 §74-83 is now covered by fork
+2. The actual user workflow is "v2 copied from v1 with tweaks" far more often than "v2 redone from scratch" — the worst case of redoing an upscale pass that takes tens of minutes almost never happens
 
-ADR 0004 §227 "跨版本复用"论据在新事实下**不构成项目级 scope 的支撑**，反而 scope 错位（preprocess 跨 train 内外）成了主要成本。
+ADR 0004 §227's "cross-version reuse" argument no longer supports project-level scope under the new facts; instead the scope mismatch (preprocessing spanning inside and outside of train) has become the dominant cost.
 
-**为什么不选方案 B（UI filter）**：
+**Why approach B (UI filter) was not chosen**:
 
-filter 只换视图——前置时间已经花掉 / 统计源不变 / 聚类源不变。**0/4 真解**。把 filter 当方案 = 把视觉症状当根因。
+A filter only changes the view — the upfront time is already spent / the statistics source is unchanged / the clustering source is unchanged. **0/4 real fixes**. Treating a filter as a solution is mistaking a visual symptom for the root cause.
 
-**为什么 fallback 而不是显式迁移**：
+**Why a fallback instead of an explicit migration**:
 
-train/ 物理 bytes 已经是 preprocess 复制过来的产物（curate 阶段早已发生），唯一丢失的是 origin 反查。30 行代码 lazy 重建就够，零用户感知，比显式脚本 + UI 弹窗省 ~1d 工时 + 零失败回滚成本。
+The physical bytes in train/ are already outputs copied over during preprocessing (which already happened during curation) — the only thing lost is the origin lookup. A 30-line lazy rebuild is enough, with zero perceived user impact, saving ~1 day of effort and zero failure-rollback cost compared to an explicit script + UI dialog.
 
-**为什么 schema 极简化**：
+**Why the schema is kept minimal**:
 
-承袭 ADR 0004 Addendum 1 原则：状态从字段差异隐含推断，过程信息写盘后应丢。这套原则在 0004 已经过两轮迭代验证，本 ADR 继承不引入新规则。
+Carries forward ADR 0004 Addendum 1's principle: state is inferred implicitly from field differences, and process information should be discarded once written. This principle has already been validated through two rounds of iteration in 0004; this ADR inherits it without introducing new rules.
 
-**为什么加 phase 而不是只动 Sidebar UI**：
+**Why add a phase instead of only touching the Sidebar UI**:
 
-加 phase = 让状态机更严格符合 ADR 0007 设计原则；前提是只有隐式 DB migration 无用户感知——这条满足（`_v8_version_status_phase.py` 已经证明 add-only migration 是干净 pattern）。`check_preprocessing` 跟 `check_regularizing` 同 pattern，零设计代价。
+Adding a phase makes the state machine more strictly conform to ADR 0007's design principles; the precondition is that it's purely an implicit DB migration with zero perceived user impact — which is satisfied (`_v8_version_status_phase.py` already proved add-only migrations are a clean pattern). `check_preprocessing` follows the exact same pattern as `check_regularizing`, at zero design cost.
 
-**为什么不撕 ADR 0007 §70 "数据集归属 = 项目级"**：
+**Why ADR 0007 §70 ("dataset ownership = project-level") isn't overturned**:
 
-§70 否决的是"每 version 独立的 train 集（数据集本身 version 级）"——本 ADR 下 train 集合的 source-of-truth 仍是项目级 `download/` 池（curating phase 从 download 复制进 train）；本 ADR 下沉的是**预处理产物**，不是数据集归属。ADR 0007 加 amendment 精确化措辞即可。
+§70 rejected "a per-version independent train set (the dataset itself being version-level)" — under this ADR the train set's source-of-truth is still the project-level `download/` pool (the curating phase copies from download into train); what this ADR moves down is **preprocessing outputs**, not dataset ownership. ADR 0007 just needs an amendment to sharpen the wording.
 
-## 后果
+## Consequences
 
-### 好处
+### Benefits
 
-- 四个用户痛点 4/4 真解：前置时间 / 统计 / 聚类 / scope 错位全部修复
-- 跟用户心智对齐：preprocess 是"对我要训练的图做精细处理"
-- ADR 0007 fork 机制自然承接跨版本复用，不重复发明缓存
-- manifest 模块大幅瘦身（25 函数 → 一半瘦身 + 极简 schema）
-- 老项目零感知升级（隐式 fallback）
-- 去重 / 聚类指标 finally 对训练有意义
+- All 4 user pain points are genuinely fixed: upfront time / statistics / clustering / scope mismatch, all resolved
+- Aligned with user mental models: preprocessing is "fine-tuning the images I'm going to train on"
+- ADR 0007's fork mechanism naturally covers cross-version reuse without reinventing a cache
+- The manifest module is substantially slimmed down (25 functions cut roughly in half + a much simpler schema)
+- Zero-perception upgrade for old projects (implicit fallback)
+- Dedup / clustering metrics finally become meaningful for training
 
-### 代价 / 新增约束
+### Costs / new constraints
 
-- `_copytree("train")` fork 时复制几 GB train + manifest 是真实磁盘代价。用户已接受（"v3 通常只改参数"频次最高）
-- `restore` 在 download 缺失时**真的失败**——有意的，跟 ADR 0004 原则一致，UI 显式失败优于静默假复原
-- 老 `projects/{id}/preprocess/` 目录长期占磁盘——next minor release notes 提醒可手动清，不强制
-- 11 个 preprocess API endpoint URL 从 pid → (pid, vid) **breaking change**（beta 心智 + 前后端同 PR 切换，不做 redirect 兼容期）
-- `_v11_preprocessing_phase` migration 是 ADR 0007 `_v9 destructive` 之后第二次动 phase 列——必须严格在 _v9 之后跑
+- `_copytree("train")` copying several GB of train + manifest during fork is a real disk cost. Already accepted by users ("v3 usually only changes parameters" being the most frequent case)
+- `restore` **genuinely fails** when download is missing — intentional, consistent with ADR 0004's principle; an explicit UI failure beats a silent false restore
+- The old `projects/{id}/preprocess/` directory occupies disk space long-term — the next minor release notes will remind users they can manually clean it up, not enforced
+- 11 preprocess API endpoint URLs change from pid → (pid, vid), a **breaking change** (acceptable given beta expectations + frontend and backend switching in the same PR, no redirect compatibility period)
+- The `_v11_preprocessing_phase` migration is the second time the phase column is touched after ADR 0007's `_v9 destructive` — it must strictly run after _v9
 
-### 还的债 / 未来扩展
+### Debt still owed / future extension
 
-- 老 `preprocess/` 目录的清理：next minor release notes 提醒用户可删；几个 release 后可考虑在 `ensure_train_manifest` 里加"老 manifest 不存在则直接返空"分支（一旦绝大多数老项目已 lazy 重建过，老 fallback 路径就是死代码可清）
-- 如果未来出现"v1 复制到 v2 后想重做某 stage"的高频需求：当前是用户进 v2 显式点"重做 upscale"按钮（手动），将来如果需要可加 fork 时 dialog 询问。但不预投资
-- 如果未来真要支持人工去重审核状态跨 version 共享：本 ADR 显式跳过老 manifest 的 `duplicate_removed` entry。重新引入需要新 schema 字段 + ADR
+- Cleaning up the old `preprocess/` directory: the next minor release notes will remind users they can delete it; after a few releases, consider adding a branch in `ensure_train_manifest` that returns an empty manifest directly if the old manifest doesn't exist (once most old projects have already been lazily rebuilt, the old fallback path becomes dead code that can be cleaned up)
+- If a high-frequency need emerges in the future for "redo a specific stage after copying v1 into v2": currently the user explicitly clicks a "redo upscale" button inside v2 (manual); a fork-time dialog prompt could be added later if needed, but this isn't pre-invested in now
+- If manual dedup review state really needs to be shared across versions in the future: this ADR explicitly skips `duplicate_removed` entries from the old manifest during fallback. Reintroducing this would need a new schema field + an ADR
 
-## 参考
+## References
 
-- 被取代的 ADR：[ADR 0004](0004-preprocess-manifest.md)（含 Addendum 1）
-- 牵连的 ADR：[ADR 0007](0007-project-version-lifecycle-refactor.md)（加 Addendum 1：`preprocessing` phase）
-- 不动的 ADR：[ADR 0008](0008-studio-restructure-0.11.0.md)（模块边界）/ [ADR 0009](0009-logging-error-system.md)（日志体系）
-- 实施细节（file:line 改动清单 + 4 PR 切片 + 测试 case + 风险清单）：[`docs/design/preprocess-train-scope-plan.md`](../design/preprocess-train-scope-plan.md)
-- 关键代码文件：
-  - `studio/services/preprocess/manifest.py`（schema + `ensure_train_manifest` + `entry_origin` / `restore`）
-  - `studio/services/projects/versions.py:41-58`（`VersionPhase.ORDER` / `SKIPPABLE`）
-  - `studio/services/projects/versions.py:407-498`（`create_version` fork 流程）
-  - `studio/services/projects/phase.py`（`check_preprocessing`）
-  - `studio/infrastructure/migrations/_v11_preprocessing_phase.py`（DB migration）
+- Superseded ADR: [ADR 0004](0004-preprocess-manifest.md) (including Addendum 1)
+- Related ADR: [ADR 0007](0007-project-version-lifecycle-refactor.md) (gains Addendum 1: the `preprocessing` phase)
+- Unchanged ADRs: [ADR 0008](0008-studio-restructure-0.11.0.md) (module boundaries) / [ADR 0009](0009-logging-error-system.md) (logging system)
+- Implementation detail (file:line change list + 4-PR breakdown + test cases + risk list): [`docs/design/preprocess-train-scope-plan.md`](../design/preprocess-train-scope-plan.md)
+- Key code files:
+  - `studio/services/preprocess/manifest.py` (schema + `ensure_train_manifest` + `entry_origin` / `restore`)
+  - `studio/services/projects/versions.py:41-58` (`VersionPhase.ORDER` / `SKIPPABLE`)
+  - `studio/services/projects/versions.py:407-498` (`create_version` fork flow)
+  - `studio/services/projects/phase.py` (`check_preprocessing`)
+  - `studio/infrastructure/migrations/_v11_preprocessing_phase.py` (DB migration)

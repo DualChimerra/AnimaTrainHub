@@ -1,4 +1,4 @@
-"""argparse_bridge —— pydantic 模型 → argparse parser 的反向生成器测试。"""
+"""argparse_bridge -- tests for the pydantic model -> argparse parser generator."""
 from __future__ import annotations
 
 from typing import Literal, Optional
@@ -11,12 +11,12 @@ from studio.schema import TrainingConfig
 
 
 # ---------------------------------------------------------------------------
-# 类型映射 —— 用最小 fixture 模型逐一检查
+# Type mapping -- checked one by one with a minimal fixture model
 # ---------------------------------------------------------------------------
 
 
 class _Sample(BaseModel):
-    """覆盖 bridge 支持的所有类型分支。"""
+    """Covers every type branch supported by the bridge."""
     name: str = Field("alpha")
     count: int = Field(3, ge=0)
     rate: float = Field(0.5)
@@ -40,45 +40,49 @@ def test_float_field_parsed_as_float() -> None:
 
 def test_bool_uses_paired_flag() -> None:
     parser = bridge.build_parser(_Sample, add_config_arg=False)
-    # 默认 True
+    # default True
     assert parser.parse_args([]).enabled is True
-    # --no-enabled 翻转
+    # --no-enabled flips it
     assert parser.parse_args(["--no-enabled"]).enabled is False
-    # --enabled 显式开启
+    # --enabled turns it on explicitly
     assert parser.parse_args(["--enabled"]).enabled is True
 
 
 def test_bool_field_named_no_x_uses_paired_store_actions() -> None:
-    """字段名以 no_ 开头时退化成两个互斥 store_true/store_false flag。
+    """Field names starting with no_ fall back to a pair of mutually exclusive
+    store_true/store_false flags.
 
-    py3.13+ argparse 拒绝把 --no-X 塞给 BooleanOptionalAction（issue #170）。
-    本用例 codify 退化路径：默认值保留 / --no-X 设 True / --X 设 False。
+    py3.13+ argparse rejects passing --no-X to BooleanOptionalAction (issue #170).
+    This test codifies the fallback path: default preserved / --no-X sets True /
+    --X sets False.
     """
     from studio.schema import TrainingConfig
 
     parser = bridge.build_parser(TrainingConfig, add_config_arg=False)
-    # 默认 True（schema 里 no_progress 默认 True）
+    # default True (no_progress defaults to True in the schema)
     assert parser.parse_args([]).no_progress is True
-    # --no-progress 显式打开（向后兼容旧 CLI 习惯）
+    # --no-progress explicitly turns it on (backward compatible with old CLI habits)
     assert parser.parse_args(["--no-progress"]).no_progress is True
-    # --progress 关闭 → no_progress=False
+    # --progress turns it off -> no_progress=False
     assert parser.parse_args(["--progress"]).no_progress is False
 
 
 def test_help_tolerates_percent_in_description() -> None:
-    """description 含裸 `%` 时 format_help 不应崩，且输出仍是单个 `%`。
+    """format_help should not crash when description contains a bare `%`, and
+    the output should still show a single `%`.
 
-    argparse 把 description 当 printf 模板做 `% params` 展开，未 escape 的
-    `%` 会触发 ValueError。Schema description 同时供 Web UI / i18n 使用，
-    不应被 argparse 语义污染 —— bridge 一层兜底转义。
+    argparse expands description as a printf template via `% params`; an
+    unescaped `%` triggers a ValueError. Schema descriptions are also used by
+    the Web UI / i18n, so they should not be polluted by argparse semantics --
+    the bridge escapes them as a fallback.
     """
     class _PctSample(BaseModel):
-        ratio: float = Field(0.5, description="新值占 90%；越大响应越快")
+        ratio: float = Field(0.5, description="new value is 90%; higher responds faster")
 
     parser = bridge.build_parser(_PctSample, add_config_arg=False)
-    text = parser.format_help()  # 修复前在 py3.10+ 直接 ValueError
-    # 用户看到的仍是单个 %（不是 %%）
-    assert "占 90%；" in text
+    text = parser.format_help()  # used to raise ValueError outright on py3.10+
+    # the user still sees a single % (not %%)
+    assert "is 90%;" in text
     assert "%%" not in text
 
 
@@ -102,14 +106,14 @@ def test_optional_str_default_is_none() -> None:
 
 
 def test_dest_matches_field_name() -> None:
-    """dest 必须用下划线（YAML 字段名），而非 CLI 的连字符形式。"""
+    """dest must use underscores (the YAML field name), not the CLI's hyphenated form."""
     parser = bridge.build_parser(_Sample, add_config_arg=False)
     ns = parser.parse_args(["--optional-path", "x"])
     assert hasattr(ns, "optional_path") and not hasattr(ns, "optional-path")
 
 
 # ---------------------------------------------------------------------------
-# CLI alias —— 通过 json_schema_extra 显式声明
+# CLI alias -- declared explicitly via json_schema_extra
 # ---------------------------------------------------------------------------
 
 
@@ -121,13 +125,13 @@ def test_cli_alias_overrides_default_flag() -> None:
     parser = bridge.build_parser(_Aliased, add_config_arg=False)
     ns = parser.parse_args(["--lr", "5e-5"])
     assert ns.learning_rate == 5e-5
-    # 默认 flag --learning-rate 不应该再存在（不支持）
+    # the default flag --learning-rate should no longer exist (unsupported)
     with pytest.raises(SystemExit):
         parser.parse_args(["--learning-rate", "5e-5"])
 
 
 # ---------------------------------------------------------------------------
-# YAML 合并语义（刀 1 / R1：suppress parser + namespace_from_config）
+# YAML merge semantics (suppress parser + namespace_from_config)
 # ---------------------------------------------------------------------------
 
 
@@ -137,7 +141,7 @@ def _sparse(argv: list[str], model_cls=_Sample) -> "bridge.argparse.Namespace":
 
 
 def test_suppress_parser_yields_only_explicit_keys() -> None:
-    """suppress_defaults=True 时 namespace 只含用户显式传入的键。"""
+    """With suppress_defaults=True the namespace only contains keys the user passed explicitly."""
     assert vars(_sparse([])) == {}
     ns = _sparse(["--count", "7", "--no-enabled"])
     assert vars(ns) == {"count": 7, "enabled": False}
@@ -147,20 +151,21 @@ def test_yaml_fills_fields_cli_did_not_set() -> None:
     args = _sparse([])
     merged = bridge.namespace_from_config(args, {"count": 99}, _Sample)
     assert merged.count == 99
-    # 未出现在 CLI / YAML 的字段落回 schema 默认
+    # fields absent from both CLI and YAML fall back to the schema default
     assert merged.name == "alpha" and merged.enabled is True
 
 
 def test_cli_wins_over_yaml() -> None:
     args = _sparse(["--count", "7"])
     merged = bridge.namespace_from_config(args, {"count": 99}, _Sample)
-    assert merged.count == 7  # CLI 优先
+    assert merged.count == 7  # CLI wins
 
 
 def test_cli_explicit_default_value_still_wins() -> None:
-    """显式传「恰好等于默认值」的值也算显式 —— 旧「值==默认值」近似的盲区，
-    SUPPRESS 探测下 CLI 精确优先。"""
-    args = _sparse(["--count", "3"])  # 3 == schema 默认
+    """Explicitly passing a value that happens to equal the default still counts as
+    explicit -- the old "value == default" heuristic had a blind spot here; with
+    SUPPRESS detection the CLI wins exactly."""
+    args = _sparse(["--count", "3"])  # 3 == schema default
     merged = bridge.namespace_from_config(args, {"count": 99}, _Sample)
     assert merged.count == 3
 
@@ -173,7 +178,8 @@ def test_yaml_unknown_keys_ignored() -> None:
 
 
 def test_non_schema_namespace_keys_pass_through() -> None:
-    """CLI-only 开关（--interactive 等非 schema 键）原样带回输出 namespace。"""
+    """CLI-only switches (--interactive and other non-schema keys) pass through
+    to the output namespace unchanged."""
     args = _sparse([])
     args.interactive = True
     args.monitor_state_file = None
@@ -184,7 +190,8 @@ def test_non_schema_namespace_keys_pass_through() -> None:
 
 
 def test_namespace_from_config_runs_validators() -> None:
-    """合并结果整体过 pydantic —— 互斥等非法组合 fail-fast，不再静默放行。"""
+    """The merged result is validated by pydantic as a whole -- invalid combinations
+    (like mutually exclusive options) fail fast instead of being silently allowed."""
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError, match="loss_weighting"):
@@ -196,11 +203,14 @@ def test_namespace_from_config_runs_validators() -> None:
 
 
 def test_krea2_pruned_yaml_gets_family_defaults() -> None:
-    """shuffle_caption 拒训 bug 的回归测试（docs/design/config-pipeline-refactor.md §1）：
+    """Regression test for the shuffle_caption training-rejection bug
+    (docs/design/config-pipeline-refactor.md #1):
 
-    krea2 落盘 config 的 shuffle_caption 被 show_when 裁剪不落盘；trainer 加载
-    缺键必须走 FAMILY_CONFIG_DEFAULTS overlay 落回 False（krea2 语义），而不是
-    argparse 裸默认 True（anima 语义）——否则能力校验拒训。
+    krea2's on-disk config has shuffle_caption pruned by show_when, so it never
+    gets saved; when the trainer loads it, the missing key must fall back to
+    False via the FAMILY_CONFIG_DEFAULTS overlay (krea2 semantics), not
+    argparse's bare default of True (anima semantics) -- otherwise capability
+    validation rejects the run.
     """
     from studio.domain.common import capability_violations
     from studio.domain.config_prune import prune_inactive_fields
@@ -208,24 +218,24 @@ def test_krea2_pruned_yaml_gets_family_defaults() -> None:
     pruned = prune_inactive_fields(
         TrainingConfig(model_family="krea2").model_dump(mode="python")
     )
-    assert "shuffle_caption" not in pruned  # 前提：裁剪确实裁掉了它
+    assert "shuffle_caption" not in pruned  # precondition: pruning actually removed it
     merged = bridge.namespace_from_config(_sparse([], TrainingConfig), pruned, TrainingConfig)
     assert merged.shuffle_caption is False
     assert capability_violations("krea2", vars(merged)) == []
 
 
 # ---------------------------------------------------------------------------
-# 真实 TrainingConfig 全量自检
+# Full self-check against the real TrainingConfig
 # ---------------------------------------------------------------------------
 
 
 def test_training_config_builds_without_collisions() -> None:
-    """全量字段都能注册到一个 parser，没有 dest / flag 冲突。"""
+    """Every field registers on a single parser with no dest/flag collisions."""
     parser = bridge.build_parser(TrainingConfig)
-    # --config 由 add_config_arg=True 自动加
+    # --config is added automatically by add_config_arg=True
     ns = parser.parse_args([])
     assert hasattr(ns, "config")
-    # 抽样字段都能解析出正确类型
+    # sampled fields all parse to the correct type
     assert ns.lora_rank == 32
     assert ns.lora_type == "lora"
     assert ns.cache_latents is True
@@ -235,7 +245,7 @@ def test_training_config_builds_without_collisions() -> None:
 
 
 def test_training_config_cli_smoke() -> None:
-    """模拟用户从 CLI 改几个字段。"""
+    """Simulates a user changing a few fields from the CLI."""
     parser = bridge.build_parser(TrainingConfig)
     ns = parser.parse_args([
         "--lora-rank", "64",
@@ -292,7 +302,7 @@ def test_training_config_cli_came() -> None:
     ])
     assert ns.optimizer_type == "came"
     assert ns.came_beta1 == 0.85
-    assert ns.came_beta2 == 0.999  # 默认值
+    assert ns.came_beta2 == 0.999  # default value
     assert ns.came_beta3 == 0.9995
     assert ns.came_eps2 == 1e-15
     assert ns.came_clip_threshold == 0.8
@@ -342,7 +352,7 @@ def test_training_config_cli_cosine_cycles_float_lists() -> None:
 
 
 def test_training_config_yaml_round_trip() -> None:
-    """走完 CLI → YAML 合并这一条路径，确认 yaml_dict 字段都能被读进 args。"""
+    """Runs the full CLI -> YAML merge path, confirming yaml_dict fields all get read into args."""
     args = bridge.namespace_from_config(
         _sparse([], TrainingConfig),
         {
@@ -360,15 +370,15 @@ def test_training_config_yaml_round_trip() -> None:
 
 
 def test_training_config_help_does_not_crash() -> None:
-    """生成 help 文本时不应触发任何 NoneType / 格式错误。"""
+    """Generating the help text should not trigger any NoneType / formatting errors."""
     parser = bridge.build_parser(TrainingConfig)
     text = parser.format_help()
     assert "--lora-rank" in text
-    assert "--no-cache-latents" in text  # bool 字段的反向 flag
+    assert "--no-cache-latents" in text  # reverse flag for a bool field
 
 
 def test_training_config_cli_ppsf() -> None:
-    """ProdigyPlusScheduleFree CLI 字段都能解析出来。"""
+    """All ProdigyPlusScheduleFree CLI fields parse correctly."""
     parser = bridge.build_parser(TrainingConfig)
     ns = parser.parse_args([
         "--optimizer-type", "prodigy_plus_schedulefree",
@@ -387,7 +397,7 @@ def test_training_config_cli_ppsf() -> None:
 
 
 def test_training_config_yaml_ppsf() -> None:
-    """PPSF 字段能通过 YAML 合并到 namespace。"""
+    """PPSF fields can be merged into the namespace via YAML."""
     args = bridge.namespace_from_config(
         _sparse([], TrainingConfig),
         {
@@ -409,12 +419,12 @@ def test_training_config_yaml_ppsf() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SqrtZ3 三 PR 新增字段：bridge 自动生成 CLI flag 验证
+# Fields added across three PRs: verify bridge auto-generates the CLI flags
 # ---------------------------------------------------------------------------
 
 
 def test_training_config_emits_detail_inv_t_flags() -> None:
-    """PR #72 引入 detail_inv_t_min/max；bridge 应自动生成 --detail-inv-t-min/--max。"""
+    """PR #72 introduced detail_inv_t_min/max; bridge should auto-generate --detail-inv-t-min/--max."""
     parser = bridge.build_parser(TrainingConfig)
     ns = parser.parse_args([
         "--detail-inv-t-min", "1.5",
@@ -425,22 +435,22 @@ def test_training_config_emits_detail_inv_t_flags() -> None:
 
 
 def test_training_config_emits_timestep_mix_low_prob_flag() -> None:
-    """PR #73 引入 timestep_mix_low_prob；bridge 应自动生成 --timestep-mix-low-prob。"""
+    """PR #73 introduced timestep_mix_low_prob; bridge should auto-generate --timestep-mix-low-prob."""
     parser = bridge.build_parser(TrainingConfig)
     ns = parser.parse_args(["--timestep-mix-low-prob", "0.25"])
     assert ns.timestep_mix_low_prob == 0.25
 
 
 def test_training_config_emits_timestep_schedule_shift_flag() -> None:
-    """PR #73 引入 timestep_schedule_shift（PR-A 重命名后名）；bridge 应自动生成
-    --timestep-schedule-shift。"""
+    """PR #73 introduced timestep_schedule_shift (the name after PR-A's rename);
+    bridge should auto-generate --timestep-schedule-shift."""
     parser = bridge.build_parser(TrainingConfig)
     ns = parser.parse_args(["--timestep-schedule-shift", "1.5"])
     assert ns.timestep_schedule_shift == 1.5
 
 
 def test_training_config_emits_mixed_uniform_modes() -> None:
-    """PR #73 引入两个新 mode；Literal choices 应被 bridge 接受。"""
+    """PR #73 introduced two new modes; the Literal choices should be accepted by bridge."""
     parser = bridge.build_parser(TrainingConfig)
     ns_low = parser.parse_args(["--timestep-sampling", "mixed_uniform_low"])
     assert ns_low.timestep_sampling == "mixed_uniform_low"
@@ -449,7 +459,7 @@ def test_training_config_emits_mixed_uniform_modes() -> None:
 
 
 def test_training_config_emits_loss_type_and_huber_flags() -> None:
-    """PR #75 引入 loss_type / huber_c；bridge 应自动生成 --loss-type / --huber-c。"""
+    """PR #75 introduced loss_type / huber_c; bridge should auto-generate --loss-type / --huber-c."""
     parser = bridge.build_parser(TrainingConfig)
     ns = parser.parse_args(["--loss-type", "huber", "--huber-c", "0.2"])
     assert ns.loss_type == "huber"

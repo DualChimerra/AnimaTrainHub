@@ -1,23 +1,26 @@
 /**
- * ConfigSkeleton — Schema 表单的加载骨架。
+ * ConfigSkeleton -- loading skeleton for the Schema form.
  *
- * 抽自 Train.tsx 的 `ConfigSkeleton` 和 Presets.tsx 的 `SkeletonGroups`。两边
- * 结构（N 组 × M 行的"label bar + input bar"）几乎一致，只是外观风格不同：
- *   - Train 页：每组带 border + bg-surface 卡片，沉浸感强（variant='card'）
- *   - Presets 页：扁平展开节省空间（variant='flat'）
+ * Extracted from Train.tsx's `ConfigSkeleton` and Presets.tsx's `SkeletonGroups`.
+ * Both share nearly the same structure (N groups x M rows of "label bar + input
+ * bar"), just with a different look:
+ *   - Train page: each group has a border + bg-surface card, stronger sense of depth (variant='card')
+ *   - Presets page: flat layout to save space (variant='flat')
  *
- * 顺带修 Designer P2 提到的 a11y 问题：role="status" 放外层在卸载时不会播报
- * "加载完成"。这里 sr-only 文本保留，但本组件返回时 caller 应保证只在
- * `loading === true` 期间挂载它（卸载 = 隐式表示加载完成），调用方页面如果
- * 要"加载完成"播报应在页面顶层挂一个独立的 aria-live region。
+ * Also fixes the a11y issue Designer P2 flagged: putting role="status" on the
+ * outer element doesn't announce "loading complete" on unmount. The sr-only
+ * text stays, but callers returning this component should only mount it while
+ * `loading === true` (unmounting implicitly means loading finished); a caller
+ * page that needs an explicit "loading complete" announcement should mount its
+ * own aria-live region at the page's top level.
  */
 
 interface ConfigSkeletonProps {
-  /** sr-only / aria-label 文本，默认 "加载配置中" */
+  /** sr-only / aria-label text, defaults to "Loading config…" */
   label?: string
-  /** 各组的行数，默认 [5, 6, 4, 5] */
+  /** Row count per group, defaults to [5, 6, 4, 5] */
   groups?: number[]
-  /** 'card' = 每组带卡片边框（Train 风格）；'flat' = 扁平（Presets 风格）。默认 'card' */
+  /** 'card' = each group has a card border (Train style); 'flat' = flat (Presets style). Defaults to 'card' */
   variant?: 'card' | 'flat'
 }
 

@@ -1,13 +1,14 @@
-"""批量标签操作（PP4）。
+"""Bulk tag operations (PP4).
 
 scope = {kind: 'all' | 'folder' | 'files', folder?, names?}
-所有读写都用 `read_caption` / `write_caption`，自动适配 `.txt`（逗号分隔）
-与 `.json`（参考 docs/user-guide/caption-format.md，已简化为 {"tags": [...]}）。
+All reads/writes go through `read_caption` / `write_caption`, which auto-adapt
+to `.txt` (comma-separated) and `.json` (see
+docs/user-guide/caption-format.md, simplified to {"tags": [...]}).
 
-写时：
-- 如果该图已有 `.json` → 写 `.json`，更新 tags 字段
-- 否则写 `.txt`
-- add/remove 不会改变文件格式
+On write:
+- If the image already has a `.json` -> write `.json`, updating the tags field
+- Otherwise write `.txt`
+- add/remove never changes the file format
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ ScopeKind = Literal["all", "folder", "files"]
 
 
 def caption_path(image: Path) -> Path | None:
-    """返回图片对应的 caption 文件路径；若没有 caption 文件，返回 None。"""
+    """Return the caption file path corresponding to the image; returns None if there is no caption file."""
     txt = image.with_suffix(".txt")
     js = image.with_suffix(".json")
     if js.exists():
@@ -39,7 +40,7 @@ def caption_path(image: Path) -> Path | None:
 
 
 def read_tags(image: Path) -> list[str]:
-    """统一读 caption（txt / json）；不存在 → []。"""
+    """Uniformly read the caption (txt / json); returns [] if it doesn't exist."""
     p = caption_path(image)
     if p is None:
         return []
@@ -62,13 +63,13 @@ def read_tags(image: Path) -> list[str]:
             if isinstance(tags, list):
                 return [str(t) for t in tags]
         return []
-    # txt: 逗号分隔
+    # txt: comma-separated
     text = p.read_text(encoding="utf-8")
     return [t.strip() for t in text.split(",") if t.strip()]
 
 
 def write_tags(image: Path, tags: list[str]) -> Path:
-    """写 caption。已有 .json 就更新；否则写 .txt。"""
+    """Write the caption. Updates .json if it already exists; otherwise writes .txt."""
     js = image.with_suffix(".json")
     if js.exists():
         try:
@@ -108,7 +109,7 @@ def _scope_image_paths(scope: dict[str, Any], train_dir: Path) -> list[Path]:
             return []
         return _imgs_in(train_dir / folder)
     if kind == "files":
-        # 新形式（PP4 拆分后用）：items=[{folder, name}, ...]，跨 folder
+        # New form (used after the PP4 split): items=[{folder, name}, ...], spanning folders
         items = scope.get("items")
         if isinstance(items, list):
             out: list[Path] = []
@@ -123,7 +124,7 @@ def _scope_image_paths(scope: dict[str, Any], train_dir: Path) -> list[Path]:
                 if p.exists():
                     out.append(p)
             return out
-        # 旧形式：folder + names（保留兼容）
+        # Old form: folder + names (kept for compatibility)
         folder = str(scope.get("folder") or "")
         names = scope.get("names") or []
         if not folder or not isinstance(names, list):
@@ -150,7 +151,7 @@ def _imgs_in(d: Path) -> list[Path]:
 def stats(
     scope: dict[str, Any], train_dir: Path, top: int = 50
 ) -> list[tuple[str, int]]:
-    """统计 tag 频率，返回 top N。"""
+    """Tally tag frequency, returning the top N."""
     counter: Counter[str] = Counter()
     for img in _scope_image_paths(scope, train_dir):
         for tag in read_tags(img):
@@ -165,7 +166,7 @@ def add_tags(
     *,
     position: Literal["front", "back"] = "back",
 ) -> int:
-    """对 scope 内所有 caption 加 tags（已有的不重复）。返回受影响文件数。"""
+    """Add tags to every caption within scope (existing ones aren't duplicated). Returns the number of affected files."""
     new = [t.strip() for t in tags if t.strip()]
     if not new:
         return 0
@@ -213,7 +214,7 @@ def replace_tag(
         cur = read_tags(img)
         if old_s not in cur:
             continue
-        # 替换并保持顺序；如果 new 已在列表里就只删 old，避免重复
+        # Replace while preserving order; if new is already in the list, just drop old to avoid a duplicate
         out: list[str] = []
         seen: set[str] = set()
         for t in cur:
@@ -228,7 +229,7 @@ def replace_tag(
 
 
 def dedupe(scope: dict[str, Any], train_dir: Path) -> int:
-    """每个文件去重（保持顺序，首次出现保留）。返回受影响文件数。"""
+    """Dedupe within each file (order preserved, first occurrence kept). Returns the number of affected files."""
     affected = 0
     for img in _scope_image_paths(scope, train_dir):
         cur = read_tags(img)
@@ -246,17 +247,18 @@ def dedupe(scope: dict[str, Any], train_dir: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# single-image helpers (用在 GET/PUT /captions/{folder}/{filename})
+# single-image helpers (used in GET/PUT /captions/{folder}/{filename})
 # ---------------------------------------------------------------------------
 
 
 def list_captions_in_folder(
     train_dir: Path, folder: str, *, preview: int = 5, full: bool = False
 ) -> list[dict[str, Any]]:
-    """列文件夹内所有图片 + tag 信息。
+    """List all images in the folder plus tag info.
 
-    full=True 时附带完整 tags 和 format（给前端缓存模型用）；
-    否则只返回 tag 数 + 前 N 个 preview（给缩略图列表用）。
+    When full=True, includes the complete tags and format (used by the
+    frontend's cache model); otherwise only returns the tag count + the
+    first N previews (used by the thumbnail list).
     """
     d = train_dir / folder
     out: list[dict[str, Any]] = []
@@ -284,7 +286,7 @@ def list_captions_in_folder(
 def list_all_captions(
     train_dir: Path, *, preview: int = 5, full: bool = False
 ) -> list[dict[str, Any]]:
-    """列 train/ 下所有 folder 的图片 + tag 信息，每项标注所属 folder。"""
+    """List images plus tag info across every folder under train/, with each item tagged with its owning folder."""
     if not train_dir.exists():
         return []
     out: list[dict[str, Any]] = []

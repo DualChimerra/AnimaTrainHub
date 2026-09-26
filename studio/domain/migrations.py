@@ -1,31 +1,36 @@
-"""遗留 yaml schema 迁移函数 —— 老字段名 → 新字段名映射。
+"""Legacy yaml schema migration functions — old field name → new field name mapping.
 
-两处调用：
-  1. 各 model 的 `@model_validator(mode='before')` —— pydantic 校验前先洗
-  2. runtime/anima_train.py 等子进程的 `apply_yaml_config` 之前显式调一次
-     —— 因为 argparse_bridge.merge_yaml_into_namespace 不走 pydantic validator,
-     需要这层兜底
+Called from two places:
+  1. Each model's `@model_validator(mode='before')` — cleans up data before
+     pydantic validation
+  2. Explicitly, once, before `apply_yaml_config` in subprocesses such as
+     runtime/anima_train.py — because argparse_bridge.merge_yaml_into_namespace
+     doesn't go through the pydantic validator, so it needs this fallback layer
 
-注意：不使用 `from __future__ import annotations`——Pydantic v2 + Python 3.12+
-在延迟求值模式下会将 typing._SpecialForm 当成 schema key，触发 AttributeError。
+Note: does NOT use `from __future__ import annotations` — under Pydantic v2 +
+Python 3.12+'s deferred evaluation, that would turn typing._SpecialForm into a
+schema key and raise AttributeError.
 """
 from typing import Any
 
-# PP6.1 退役的内置 HTTP monitor server 字段 —— 值早已不生效，schema 字段已删。
-# 历史上每份 dump 都把这组默认值写进 yaml，所以读老配置时必须静默丢弃，
-# 不能进 _tolerant_validate 的 dropped_fields 提示（否则所有旧 config.yaml /
-# 预设一打开就弹兼容横幅）。TrainingConfig extra="ignore" 与 argparse_bridge
-# 跳过未知键已保证不报错，这个集合只服务 dropped_fields 的降噪。
+# Built-in HTTP monitor server fields retired in PP6.1 — the values have long
+# had no effect, and the schema fields were removed. Historically every dump
+# wrote this set of defaults into the yaml, so when reading old configs they
+# must be silently dropped, and must NOT go through _tolerant_validate's
+# dropped_fields notice (otherwise every old config.yaml / preset would pop a
+# compatibility banner on open). TrainingConfig's extra="ignore" and
+# argparse_bridge skipping unknown keys already guarantee no error; this set
+# only serves to quiet the dropped_fields noise.
 RETIRED_MONITOR_KEYS = frozenset({"no_monitor", "monitor_host", "monitor_port", "no_browser"})
 
 
 def migrate_legacy_save_keys(data: Any) -> Any:
-    """把老 cfg 的 save_every / save_state_every 改名带单位后缀。
+    """Rename the old config's save_every / save_state_every to their unit-suffixed names.
 
     save_every       → save_every_epochs   (epoch-based)
     save_state_every → save_state_every_steps (step-based)
 
-    Idempotent；新名已存在则丢弃同义旧名。
+    Idempotent; if the new name already exists, the equivalent old name is discarded.
     """
     if not isinstance(data, dict):
         return data
@@ -40,24 +45,30 @@ def migrate_legacy_save_keys(data: Any) -> Any:
 
 
 def migrate_noise_enhancement_type(data: Any) -> Any:
-    """对齐 kohya: `noise_offset` 与金字塔噪声互斥；用单一 type 字段管控。
+    """Align with kohya: `noise_offset` and pyramid noise are mutually exclusive; controlled by a single type field.
 
-    两步：
-      1. 老 yaml 没有 `noise_enhancement_type` 时按现状字段推导：
+    Two steps:
+      1. When old yaml has no `noise_enhancement_type`, derive it from the
+         existing fields:
             pyramid_noise_iters > 0   → "pyramid"
             noise_offset > 0          → "offset"
-            都为 0                    → "none"
-         历史 bug 配置（两者都 > 0）：选 "pyramid"。理由：Anima 旧 `make_noise`
-         实现末尾 `noise = cur / cur.std().clamp(...)` 归一化会稀释 noise_offset
-         的常数偏移，实际生效的主要是 pyramid，所以推导到 pyramid 跟用户主观
-         观察最接近。
-      2. 反组字段强制清零 —— kohya_ss issue #2599 教训：序列化层就要互斥，
-         UI 隐藏字段不等于清值，否则 yaml 残值会进训练。
-         （历史注:argparse 路径曾绕开 pydantic validator;刀 1 / R1 起 trainer
-         与 Studio 同走 TrainingConfig 构造,本迁移对两路统一生效。runtime
-         make_noise 侧另有 noise_params_from_args 按 type 分派作纵深防御。）
+            both 0                    → "none"
+         For the historical buggy config (both > 0): choose "pyramid". Reason:
+         the normalization at the end of Anima's old `make_noise` implementation
+         (`noise = cur / cur.std().clamp(...)`) dilutes noise_offset's constant
+         bias, so pyramid is what actually dominates in practice — deriving to
+         pyramid best matches what users would subjectively observe.
+      2. Force the opposite group's field to zero — lesson from kohya_ss issue
+         #2599: the fields must be mutually exclusive at the serialization
+         layer; a hidden UI field is not the same as a cleared value, otherwise
+         a leftover yaml value would leak into training.
+         (History note: the argparse path used to bypass the pydantic
+         validator; since blade 1 / R1, both the trainer and Studio go through
+         TrainingConfig construction, so this migration now applies uniformly
+         to both paths. The runtime make_noise side additionally has
+         noise_params_from_args dispatching by type as defense in depth.)
 
-    Idempotent：已显式给了 `noise_enhancement_type` 就直接尊重。
+    Idempotent: if `noise_enhancement_type` was already given explicitly, it's respected as-is.
     """
     if not isinstance(data, dict):
         return data
@@ -82,7 +93,7 @@ def migrate_noise_enhancement_type(data: Any) -> Any:
 
 
 def _coerce_num(v: Any) -> float:
-    """yaml 可能把数字读成 str / None；为 type 推导宽容地转 float。"""
+    """yaml may read a number as str / None; convert leniently to float for type derivation."""
     if v is None:
         return 0.0
     try:

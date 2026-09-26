@@ -1,16 +1,17 @@
-"""推理采样：sigma 调度 + ER-SDE solver + sample_image（训练/生成共用）。
+"""Inference sampling: sigma schedule + ER-SDE solver + sample_image (shared by training/generation).
 
-抽自原 runtime/anima_train.py L822-961 + L1677-1815（ADR 0003 PR-A）。
+Extracted from the original runtime/anima_train.py L822-961 + L1677-1815 (ADR 0003 PR-A).
 
-公开：
-- sample_image — 训练时采样预览 + 生成 CLI 共用入口（被 sister script 调）
+Public:
+- sample_image -- shared entry point for training-time preview sampling + the generate CLI (called by the sister script)
 
-内部：
-- _time_snr_shift / _flow_sigmas_simple — ComfyUI ModelSamplingDiscreteFlow 对齐
-- _default_noise_sampler / _sample_er_sde_const_x0 — ER-SDE-Solver-3 在 CONST flow 下的实现
+Internal:
+- _time_snr_shift / _flow_sigmas_simple -- matches ComfyUI ModelSamplingDiscreteFlow
+- _default_noise_sampler / _sample_er_sde_const_x0 -- ER-SDE-Solver-3 implementation under CONST flow
 
-注：sample_t / make_noise / compute_loss_weight 是 *训练 step* 用的采样工具，
-不在本模块——见 training.timestep_sampling / training.noise / training.loss_weighting。
+Note: sample_t / make_noise / compute_loss_weight are sampling utilities for
+the *training step* and are not in this module -- see
+training.timestep_sampling / training.noise / training.loss_weighting.
 """
 
 from __future__ import annotations
@@ -51,8 +52,9 @@ def _set_model_xformers_enabled(model, enabled: bool) -> bool:
         for cls in type(model).__mro__
         if getattr(cls, "__module__", None)
     }
-    # exec-load 退役后模块身份唯一（多模型 PR-2a）；真名兜底覆盖「model 是
-    # wrapper/dummy、MRO 不含模型模块」的调用方
+    # Module identity is unique now that exec-load has been retired (multi-model
+    # PR-2a); the literal name here is a fallback that covers callers where
+    # `model` is a wrapper/dummy whose MRO doesn't include the model module.
     module_names.add("modeling.anima.cosmos_predict2_modeling")
 
     was_enabled = False
@@ -80,12 +82,15 @@ def _module_device(module) -> torch.device | None:
 
 
 def _decode_offload_targets(model, qwen_model) -> tuple:
-    """VAE decode 期允许 offload 的模块。
+    """Modules allowed to be offloaded during VAE decode.
 
-    block swap 生效时 DiT 必须跳过：恢复用的一刀切 ``.to(device)`` 会把换出层
-    的 CPU pinned 主副本整个搬上卡——swap 白做、瞬时占用=完整模型（小卡直接
-    OOM）；且换出后 DiT 常驻只剩零头，offload 它本就无意义。标记由
-    loader.place_model_for_block_swap 落在 model 上。
+    When block swap is active, the DiT must be skipped: the blanket
+    ``.to(device)`` used to restore modules would move the swapped-out
+    layers' pinned CPU master copy entirely back onto the GPU -- wasting the
+    swap and hitting a peak usage equal to the full model (an immediate OOM
+    on a small card); and once swapped, what's resident on the DiT is
+    already down to a sliver, so offloading it is pointless anyway. The
+    marker is set on the model by loader.place_model_for_block_swap.
     """
     if int(getattr(model, "blocks_to_swap", 0) or 0) > 0:
         return (qwen_model,)
@@ -141,14 +146,15 @@ def _time_snr_shift(alpha: float, t: torch.Tensor) -> torch.Tensor:
 
 def _flow_sigmas_simple(steps: int, *, shift: float = 3.0, timesteps: int = 1000, device: str = "cpu") -> torch.Tensor:
     """
-    复刻 ComfyUI:
-    - supported_models.Anima 的 sampling_settings: shift=3.0, multiplier=1.0
+    Reproduces ComfyUI:
+    - supported_models.Anima's sampling_settings: shift=3.0, multiplier=1.0
     - ModelSamplingDiscreteFlow + simple_scheduler(model_sampling, steps)
 
-    返回：sigmas (steps+1,) float32，从高到低，末尾带 0.0。
-    注意：ComfyUI 的 simple_scheduler 原样返回首项 1.0；KSampler 在进入
-    具体 sampler 后才做 offset_first_sigma_for_snr。不要在 scheduler 层提前
-    offset，否则 txt2img 初始 noise_scaling 会和 ComfyUI 不同。
+    Returns: sigmas (steps+1,) float32, high to low, ending with 0.0.
+    Note: ComfyUI's simple_scheduler returns the first item as 1.0 as-is;
+    KSampler only applies offset_first_sigma_for_snr after entering the
+    concrete sampler. Don't offset it early at the scheduler level, or the
+    txt2img initial noise_scaling will differ from ComfyUI's.
     """
     ts = torch.arange(1, timesteps + 1, device=device, dtype=torch.float32) / float(timesteps)  # (0, 1]
     sigmas_full = _time_snr_shift(float(shift), ts)  # (0, 1]
@@ -161,18 +167,20 @@ def _flow_sigmas_simple(steps: int, *, shift: float = 3.0, timesteps: int = 1000
 
 
 def _flow_sigmas_sgm_uniform(steps: int, *, shift: float = 3.0, timesteps: int = 1000, multiplier: int = 1000, device: str = "cpu") -> torch.Tensor:
-    """SGM uniform scheduler —— 逐行对齐 ComfyUI normal_scheduler(sgm=True)。
+    """SGM uniform scheduler -- matches ComfyUI normal_scheduler(sgm=True) line for line.
 
-    ModelSamplingDiscreteFlow 语义：
-      sigma_max/min = sigma 表两端 = time_snr_shift(shift, {1, 1/timesteps})
-      timestep(σ)   = σ * multiplier
+    ModelSamplingDiscreteFlow semantics:
+      sigma_max/min = the two ends of the sigma table = time_snr_shift(shift, {1, 1/timesteps})
+      timestep(sigma)   = sigma * multiplier
       sigma(ts)     = time_snr_shift(shift, ts / multiplier)
-    sgm 分支：linspace(timestep(σ_max), timestep(σ_min), steps+1)[:-1] 再各自
-    sigma() 回 σ，末尾 append 0。注意这里对 σ_max/σ_min 做了「二次 shift」——
-    σ 已经是 shift 后的值，timestep 不反 shift，sigma() 又 shift 一次。这是
-    ComfyUI 的既有行为，刻意复刻以对齐出图。
+    sgm branch: linspace(timestep(sigma_max), timestep(sigma_min), steps+1)[:-1],
+    then map each back to sigma via sigma(), and append 0 at the end. Note
+    this applies a "double shift" to sigma_max/sigma_min -- sigma is already
+    the shifted value, timestep doesn't unshift it, and sigma() shifts it
+    again. This is ComfyUI's existing behavior, deliberately reproduced here
+    to match its output.
     """
-    # sigma 表两端（已 shift）
+    # the two ends of the sigma table (already shifted)
     sigma_max = float(_time_snr_shift(float(shift), torch.tensor(1.0)))
     sigma_min = float(_time_snr_shift(float(shift), torch.tensor(1.0 / timesteps)))
     start = sigma_max * multiplier  # timestep(sigma_max)
@@ -243,8 +251,9 @@ def _prepare_comfy_ksampler_txt2img_latent(
 ) -> torch.Tensor:
     """Build the same empty latent shape path as the target Comfy workflow."""
     latent = torch.zeros(
-        # (1, 4, ...) 是 ResolutionMaster workflow parity（4ch 空 latent → repeat 补齐），
-        # 4 不是本模型的 latent 通道数，保持字面量
+        # (1, 4, ...) is ResolutionMaster workflow parity (4ch empty latent ->
+        # repeat to fill in); the 4 is not this model's latent channel count,
+        # keep it as a literal
         (1, 4, height // _ANIMA_LATENT.spatial_stride, width // _ANIMA_LATENT.spatial_stride),
         device=device,
         dtype=torch.float32,
@@ -256,8 +265,9 @@ def _prepare_comfy_ksampler_txt2img_latent(
     )
 
 
-# ER-SDE-Solver 实现 + _default_noise_sampler 已搬到 training.inference_samplers.er_sde
-# （ADR 0003 PR-C plugin registry）。sample_image 通过 build_inference_sampler 派发。
+# The ER-SDE-Solver implementation + _default_noise_sampler have moved to
+# training.inference_samplers.er_sde (ADR 0003 PR-C plugin registry).
+# sample_image dispatches to them via build_inference_sampler.
 
 
 @torch.no_grad()
@@ -273,16 +283,18 @@ def sample_image(
     phase_callback=None,
     seed: int | None = None,
 ):
-    """采样出图（Comfy-style，唯一线路）—— 训练预览 / Generate / RegAI 共用。
+    """Sample-generate an image (Comfy-style, the only path) -- shared by training preview / Generate / RegAI.
 
-    对齐 ComfyUI KSampler：raw prompt 进 Qwen、SDTokenizer 式 T5 权重、
-    CFG 合批 forward、CPU seeded 初始噪声。exact parity 仅在 Generate
-    runtime（comfy_qwen3 encoder + xformers）下成立；训练预览 / RegAI 用
-    HF Qwen，是 Comfy-style 而非逐 bit 一致。
+    Matches ComfyUI KSampler: raw prompt goes into Qwen, SDTokenizer-style T5
+    weights, CFG batched into one forward, CPU-seeded initial noise. Exact
+    parity only holds under the Generate runtime (comfy_qwen3 encoder +
+    xformers); training preview / RegAI use HF Qwen, so they're Comfy-style
+    rather than bit-for-bit identical.
 
     Args:
-        negative_prompt: 负面提示词；None 与空串等价（对齐 ComfyUI：负面
-            就是 workflow 里写了什么，没有隐式默认串）
+        negative_prompt: the negative prompt; None is equivalent to an empty
+            string (matches ComfyUI: the negative prompt is exactly whatever
+            was written in the workflow, with no implicit default string)
         sampler_name: er_sde / dpmpp_3m_sde
         scheduler: simple / sgm_uniform
     """
@@ -304,10 +316,10 @@ def sample_image(
         logger.info(f"[Debug] VAE scale: mean_shape={m.shape}, std_inv_shape={s.shape}")
         logger.info(f"[Debug] VAE scale values: mean={m.mean().item():.4f}, std_inv={s.mean().item():.4f}")
 
-    # 对齐 ComfyUI：负面提示词没有隐式默认，None 即空。
+    # Matches ComfyUI: the negative prompt has no implicit default; None means empty.
     negative_prompt = "" if negative_prompt is None else str(negative_prompt)
 
-    # 文本编码（CLIP/T5+Qwen）—— phase 上报供进度条覆盖非采样阶段
+    # Text encoding (CLIP/T5+Qwen) -- phase reporting lets the progress bar cover the non-sampling stages
     if phase_callback:
         phase_callback("clip")
     try:
@@ -334,17 +346,17 @@ def sample_image(
                 cross = F.pad(cross, (0, 0, 0, 512 - cross.shape[1]))
             return cross
 
-        # 有条件 (positive prompt)
+        # conditional (positive prompt)
         cross_cond = build_cross(prompt)
 
-        # 无条件/负面提示词 (negative prompt)
+        # unconditional/negative prompt
         cross_uncond = build_cross(negative_prompt)
 
     except Exception as e:
         logger.error(f"[Debug] Encoding failed: {e}")
         raise e
 
-    # sigmas（对齐 ComfyUI supported_models.Anima: shift=3.0, multiplier=1.0）
+    # sigmas (matches ComfyUI supported_models.Anima: shift=3.0, multiplier=1.0)
     lat_h = height // _ANIMA_LATENT.spatial_stride
     lat_w = width // _ANIMA_LATENT.spatial_stride
     _scheduler_builders = {
@@ -353,14 +365,14 @@ def sample_image(
     }
     sched_fn = _scheduler_builders.get(str(scheduler).lower().strip())
     if sched_fn is None:
-        # _resolve_parity_sampler_scheduler 已在入口校验过；这里兜底防御
+        # Already validated at the entry point by _resolve_parity_sampler_scheduler; this is a defensive fallback
         raise ValueError(
             f"unsupported Comfy parity sampler/scheduler: "
             f"{str(sampler_name).lower().strip()}+{str(scheduler).lower().strip()}"
         )
     sigmas = sched_fn(steps, shift=3.0, device=device)
 
-    # 初始化噪声（ComfyUI CONST.noise_scaling: x = sigma*noise + (1-sigma)*latent_image；txt2img latent_image=0）
+    # Initialize noise (ComfyUI CONST.noise_scaling: x = sigma*noise + (1-sigma)*latent_image; txt2img latent_image=0)
     empty_latent = _prepare_comfy_ksampler_txt2img_latent(height, width, device="cpu")
     x = _prepare_comfy_t2i_noise(tuple(empty_latent.shape), sigmas, device=device, seed=seed)
     logger.info(f"[Debug] Latents init: {x.shape}, mean={x.mean().item():.4f}, std={x.std().item():.4f}")
@@ -368,8 +380,10 @@ def sample_image(
     pad_mask = torch.zeros(1, 1, lat_h, lat_w, device=device, dtype=dtype)
     device_type = "cuda" if str(device).startswith("cuda") else "cpu"
 
-    # NaN 重试若关掉了 xformers，采样结束后要恢复——否则一次 NaN 会让整个
-    # 进程余生都跑 SDPA（不再是 exact parity）且用户无感知。
+    # If NaN retry turned xformers off, it must be restored once sampling
+    # finishes -- otherwise a single NaN would leave the whole rest of the
+    # process running on SDPA (no longer exact parity) with the user none
+    # the wiser.
     xformers_disabled_for_nan = False
 
     def denoise_fn(x_in: torch.Tensor, sigma_in: torch.Tensor) -> torch.Tensor:
@@ -421,7 +435,7 @@ def sample_image(
     sampler_name_l = str(sampler_name).lower().strip()
     logger.info(f"[Debug] Sampler={sampler_name_l}, Scheduler={scheduler}, steps={steps}, cfg={cfg_scale}")
 
-    # PR-C：通过 inference_samplers plugin registry 派发；白名单已在入口校验
+    # PR-C: dispatched through the inference_samplers plugin registry; the whitelist was already validated at the entry point
     from training.inference_samplers import build_inference_sampler
     sampler_fn = build_inference_sampler(sampler_name_l)
     if sampler_fn is None:
@@ -443,12 +457,13 @@ def sample_image(
         x = sampler_fn(denoise_fn, x, sigmas, **sampler_kwargs)
     finally:
         if xformers_disabled_for_nan:
-            # 本张图剩余步数已用 SDPA 跑完（保持步内一致）；进程级开关复位，
-            # 下一张图重新尝试 xformers。
+            # The remaining steps for this image already ran on SDPA (keeps
+            # it consistent within the image); reset the process-level
+            # switch so the next image tries xformers again.
             _set_model_xformers_enabled(model, True)
-            logger.warning("xformers re-enabled after per-image SDPA fallback（本张图非 exact parity）")
+            logger.warning("xformers re-enabled after per-image SDPA fallback (this image is not exact parity)")
 
-    # VAE 解码
+    # VAE decode
     if phase_callback:
         phase_callback("vae")
     latents = x.to(device=device, dtype=dtype)
@@ -456,14 +471,18 @@ def sample_image(
     del denoise_fn, x, cross_cond, cross_uncond, pad_mask, sigmas, empty_latent
     offloaded_modules: list[tuple[object, torch.device]] = []
     try:
-        # VAEWrapper.decode 按 tiling(auto/on/off) 决策整图/分块。
-        # offload 改为 free-VRAM 驱动、与分块统一（取代旧的「仅 fp32 才 offload」——dtype
-        # 不是显存压力的准确代理：bf16+大图/常驻同样会爆）：只在「腾出显存就能整图且快」时
-        # 才把 DiT+Qwen 挪到 CPU，避免峰值越崖时白搬占系统内存。决策见
-        # VAEWrapper.should_offload_for_whole_decode。
+        # VAEWrapper.decode picks whole-image vs. tiled decode based on
+        # tiling(auto/on/off). Offloading is now driven by free VRAM and
+        # unified with tiling (replacing the old "only offload for fp32" rule
+        # -- dtype isn't an accurate proxy for VRAM pressure: bf16 with a
+        # large image/resident models can OOM just the same): DiT+Qwen only
+        # move to CPU when freeing VRAM would let the whole image decode in
+        # one pass and do so quickly, to avoid pointlessly moving things to
+        # host memory when it wouldn't clear the peak. See the decision logic
+        # in VAEWrapper.should_offload_for_whole_decode.
         _should_offload = getattr(vae, "should_offload_for_whole_decode", None)
         if device_type == "cuda" and callable(_should_offload) and _should_offload(latents):
-            logger.info("[Debug] VAE decode: 显存紧张且峰值在崖下，offload 非活跃模块以整图 decode")
+            logger.info("[Debug] VAE decode: VRAM is tight but the peak is just under the cliff, offloading inactive modules to decode the whole image at once")
             offloaded_modules = _offload_modules_for_vae_decode(
                 *_decode_offload_targets(model, qwen_model)
             )
@@ -471,7 +490,7 @@ def sample_image(
         images = images.squeeze(2)  # [B,C,H,W]
         images = (images.clamp(-1, 1) + 1) / 2
 
-        # 转 PIL
+        # convert to PIL
         img = images[0].permute(1, 2, 0).cpu().float().numpy()
         img = (img * 255).clip(0, 255).astype(np.uint8)
         pil_image = Image.fromarray(img)

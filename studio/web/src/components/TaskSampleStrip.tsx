@@ -22,9 +22,9 @@ import { api, type TaskSample } from '../api/client'
 import { useEventStream } from '../lib/useEventStream'
 import ImagePreviewModal from './ImagePreviewModal'
 
-const THUMB_PX = 72
+const THUMB_PX = 84
 /** 缩略图请求宽度：2× 显示尺寸，HiDPI 屏不糊。 */
-const THUMB_REQ = 160
+const THUMB_REQ = 192
 
 function marks(s: TaskSample): string {
   const parts: string[] = []
@@ -35,9 +35,9 @@ function marks(s: TaskSample): string {
 
 function shortMarks(s: TaskSample): string {
   const parts: string[] = []
-  if (s.epoch != null) parts.push(`ep${s.epoch}`)
-  if (s.step != null) parts.push(String(s.step))
-  return parts.join('·')
+  if (s.epoch != null) parts.push(`ep ${s.epoch}`)
+  if (s.step != null) parts.push(s.step.toLocaleString())
+  return parts.join(' · ')
 }
 
 export default function TaskSampleStrip({ taskId, live = false }: {
@@ -58,7 +58,9 @@ export default function TaskSampleStrip({ taskId, live = false }: {
   const load = useCallback(async () => {
     try {
       const r = await api.listTaskSamples(taskId)
-      setItems(r.items)
+      // Oldest first, so the strip reads left → right as training went on.
+      setItems([...r.items].sort((x, y) =>
+        (x.epoch ?? -1) - (y.epoch ?? -1) || (x.step ?? -1) - (y.step ?? -1)))
     } catch {
       setItems([])  // 网络错 / task 没了 → 当作没图，队列页不弹错
     }
@@ -117,72 +119,53 @@ export default function TaskSampleStrip({ taskId, live = false }: {
   return (
     <div
       ref={hostRef}
-      className="border-t border-subtle px-[22px] py-2.5"
+      className="ds-samples"
       // 行本身是「点进详情」的按钮，采样条的点击不该顺带导航。
       onClick={(e) => e.stopPropagation()}
     >
+      <div className="ds-samples-head">
+        <span className="ds-cap">{t('queue.samples')}</span>
+        {items && <span className="ds-samples-count">{items.length}</span>}
+      </div>
       {items === null ? (
-        <div className="flex gap-1.5">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div
-              key={i}
-              className="rounded-sm bg-overlay opacity-40 shrink-0"
-              style={{ width: THUMB_PX, height: THUMB_PX }}
-            />
+        <div className="ds-samples-row">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="ds-sample-thumb ds-skel" style={{ width: THUMB_PX, height: THUMB_PX }} />
           ))}
         </div>
       ) : (
-        <>
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-xs text-fg-tertiary font-mono uppercase tracking-wider">
-              {t('queue.samples')}
-            </span>
-            <span className="text-xs text-fg-tertiary font-mono">
-              {t('queue.samplesCount', { n: items.length })}
-            </span>
-          </div>
-          <div
-            ref={scrollRef}
-            onScroll={(e) => {
-              const el = e.currentTarget
-              followRef.current =
-                el.scrollWidth - el.scrollLeft - el.clientWidth < 24
-            }}
-            className="flex gap-1.5 overflow-x-auto pb-1"
-            style={{ scrollbarWidth: 'thin' }}
-            data-testid={`sample-strip-${taskId}`}
-          >
-            {items.map((s, i) => {
-              const caption = shortMarks(s)
-              return (
-                <button
-                  key={s.filename}
-                  type="button"
-                  onClick={() => setZoomIdx(i)}
-                  title={marks(s) || s.filename}
-                  className="shrink-0 flex flex-col items-center gap-0.5 p-0 bg-transparent border-none cursor-zoom-in"
-                >
-                  <div
-                    className="rounded-sm overflow-hidden border border-subtle hover:border-accent transition-colors bg-sunken"
-                    style={{ width: THUMB_PX, height: THUMB_PX }}
-                  >
-                    <img
-                      src={api.sampleImageUrl(s.filename, taskId, THUMB_REQ)}
-                      alt=""
-                      loading="lazy"
-                      className="w-full h-full object-cover block"
-                    />
-                  </div>
-                  {caption && (
-                    <span className="text-[10px] font-mono leading-tight text-fg-tertiary">
-                      {caption}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        </>
+        <div
+          ref={scrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget
+            followRef.current =
+              el.scrollWidth - el.scrollLeft - el.clientWidth < 24
+          }}
+          className="ds-samples-row"
+          data-testid={`sample-strip-${taskId}`}
+        >
+          {items.map((s, i) => {
+            const caption = shortMarks(s)
+            return (
+              <button
+                key={s.filename}
+                type="button"
+                onClick={() => setZoomIdx(i)}
+                title={marks(s) || s.filename}
+                className="ds-sample"
+              >
+                <span className="ds-sample-thumb" style={{ width: THUMB_PX, height: THUMB_PX }}>
+                  <img
+                    src={api.sampleImageUrl(s.filename, taskId, THUMB_REQ)}
+                    alt=""
+                    loading="lazy"
+                  />
+                </span>
+                {caption && <span className="ds-sample-cap">{caption}</span>}
+              </button>
+            )
+          })}
+        </div>
       )}
 
       {zoomIdx !== null && items && items[zoomIdx] && (

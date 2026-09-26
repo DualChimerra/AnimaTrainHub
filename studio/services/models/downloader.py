@@ -1,10 +1,12 @@
-"""逐模型高层下载流程 + 异步状态跟踪（PR-3.8 拆出 4-way 第 3 个）。
+"""Per-model high-level download flows + async status tracking (PR-3.8, the 3rd of
+a 4-way split).
 
-含 Anima / Krea 2 训练资产与各类工具模型的逐模型下载函数，调 sources.py 的
-download_flat[_ms] 实际下载，调 paths.py / families 拿 target Path 和模型清单。
+Contains per-model download functions for Anima / Krea 2 training assets and
+various tooling models; calls sources.py's download_flat[_ms] to do the actual
+download, and paths.py / families to get the target Path and model manifest.
 
-异步：DownloadStatus / start_download_async / trigger 把同步下载包成后台 thread，
-向 event_bus 推 model_download_changed。
+Async: DownloadStatus / start_download_async / trigger wrap a synchronous download
+in a background thread, pushing model_download_changed to the event_bus.
 """
 from __future__ import annotations
 
@@ -67,16 +69,19 @@ from .paths import (
 from . import sources as _sources
 from .sources import MS_ANIMA_TEXT_ENCODER_PATH
 
-# 提示：跨文件调用 download_flat[_ms] / _get_download_source / _resolve_endpoint /
-# _ms_wd14_repo_id 一律走 _sources.X(...) —— 这样测试 monkeypatch
-# `studio.services.models.sources.X` 才会生效。若改成 `from .sources import X`
-# 则会 bind 成本 module 的 local name，patch sources 模块对 downloader 内调用无效。
+# Note: cross-file calls to download_flat[_ms] / _get_download_source /
+# _resolve_endpoint / _ms_wd14_repo_id must always go through _sources.X(...) --
+# that's what makes test monkeypatching of `studio.services.models.sources.X`
+# actually take effect. If instead written as `from .sources import X`, it would
+# bind a local name in this module, and patching the sources module would have no
+# effect on calls made from within downloader.
 
 def download_taeflux(
     *, root: Optional[Path] = None,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """同步下载 TAEFlux（config + weights）到本地。任意一个文件失败则返 False。"""
+    """Synchronously download TAEFlux (config + weights) locally. Returns False if
+    any single file fails."""
     target_dir = taeflux_dir(root)
     target_dir.mkdir(parents=True, exist_ok=True)
     ok = True
@@ -93,20 +98,21 @@ def download_anima_main(
     if variant == "latest":
         variant = LATEST_ANIMA
     if variant not in ANIMA_VARIANTS:
-        on_log(f"✗ 未知 variant {variant!r}")
+        on_log(f"✗ Unknown variant {variant!r}")
         return False
     target = anima_main_target(root, variant)
     subpath = ANIMA_VARIANTS[variant]
-    on_log(f"\n📥 Anima 主模型 [{variant}] (~4 GB)")
+    on_log(f"\n\U0001F4E5 Anima base model [{variant}] (~4 GB)")
     if _sources._source_for("training") == "modelscope":
         return _sources.download_flat_ms(ANIMA_REPO, subpath, target, on_log=on_log)
     return _sources.download_flat(ANIMA_REPO, subpath, target, on_log=on_log)
 
 
 def download_anima_vae(root: Path, *, on_log: Callable[[str], None] = print) -> bool:
-    # 落点是族无关共享资产（Krea2 同用）；下载渠道走 Anima repo（文件在那儿）。
+    # The destination is a family-agnostic shared asset (also used by Krea2); the
+    # download channel goes through the Anima repo (where the file lives).
     target = qwen_image_vae_target(root)
-    on_log("\n📥 Anima VAE (~250 MB)")
+    on_log("\n\U0001F4E5 Anima VAE (~250 MB)")
     if _sources._source_for("training") == "modelscope":
         return _sources.download_flat_ms(ANIMA_REPO, ANIMA_VAE_PATH, target, on_log=on_log)
     return _sources.download_flat(ANIMA_REPO, ANIMA_VAE_PATH, target, on_log=on_log)
@@ -115,16 +121,17 @@ def download_anima_vae(root: Path, *, on_log: Callable[[str], None] = print) -> 
 def download_krea2_main(
     root: Path, variant: str, *, on_log: Callable[[str], None] = print
 ) -> bool:
-    """从 HuggingFace 官方仓库或 ModelScope Comfy-Org 镜像下载 Krea2。"""
+    """Download Krea2 from the official HuggingFace repo or the ModelScope Comfy-Org
+    mirror."""
     if variant == "latest":
         variant = LATEST_KREA2
     info = KREA2_VARIANTS.get(variant)
     if info is None:
-        on_log(f"✗ 未知 Krea 2 variant {variant!r}")
+        on_log(f"✗ Unknown Krea 2 variant {variant!r}")
         return False
     target = krea2_main_target(root, variant)
     size_gb = float(info.get("size_estimate", 0)) / 1e9
-    on_log(f"\n📥 Krea 2 [{variant}] (~{size_gb:.1f} GB) → {target}")
+    on_log(f"\n\U0001F4E5 Krea 2 [{variant}] (~{size_gb:.1f} GB) -> {target}")
     if _sources._source_for("training") == "modelscope":
         return _sources.download_flat_ms(
             str(info["ms_repo"]), str(info["ms_subpath"]), target, on_log=on_log,
@@ -137,14 +144,14 @@ def download_krea2_main(
 def download_qwen3_vl(
     root: Path, *, on_log: Callable[[str], None] = print
 ) -> bool:
-    """下载 Krea 2 使用的完整 Qwen3-VL-4B-Instruct transformers 目录。"""
+    """Download the full Qwen3-VL-4B-Instruct transformers directory used by Krea 2."""
     target_dir = qwen3_vl_dir(root)
     target_dir.mkdir(parents=True, exist_ok=True)
     use_modelscope = _sources._source_for("training") == "modelscope"
     source_label = "ModelScope" if use_modelscope else "HuggingFace"
     on_log(
-        f"\n📥 Krea 2 文本编码器 Qwen3-VL-4B-Instruct "
-        f"(~8.89 GB, {source_label}) → {target_dir}"
+        f"\n\U0001F4E5 Krea 2 text encoder Qwen3-VL-4B-Instruct "
+        f"(~8.89 GB, {source_label}) -> {target_dir}"
     )
     ok = True
     for filename in QWEN3_VL_FILES:
@@ -165,16 +172,18 @@ def download_qwen3_vl(
 def download_qwen3_vl_fp8(
     root: Path, *, on_log: Callable[[str], None] = print
 ) -> bool:
-    """下载官方 fp8_scaled 单文件 TE + config/tokenizer 小文件到独立目录。
+    """Download the official single-file fp8_scaled text encoder + small
+    config/tokenizer files into a separate directory.
 
-    权重来自 Comfy-Org/Krea-2（HF 与 ModelScope 同 repo 布局）；小文件来自
-    Qwen 官方 repo（单文件里没有，loader 需要 config 建结构、tokenizer
-    编码）。
+    The weights come from Comfy-Org/Krea-2 (same repo layout on HF and
+    ModelScope); the small files come from the official Qwen repo (not present in
+    the single-file build, but needed by the loader to build the structure from
+    config and to encode with the tokenizer).
     """
     target_dir = qwen3_vl_fp8_dir(root)
     target_dir.mkdir(parents=True, exist_ok=True)
     use_ms = _sources._source_for("training") == "modelscope"
-    on_log(f"\n📥 Krea 2 文本编码器 Qwen3-VL fp8 (~5.24 GB) → {target_dir}")
+    on_log(f"\n\U0001F4E5 Krea 2 text encoder Qwen3-VL fp8 (~5.24 GB) -> {target_dir}")
     download = _sources.download_flat_ms if use_ms else _sources.download_flat
     ok = download(
         QWEN3_VL_FP8_REPO, QWEN3_VL_FP8_SUBPATH,
@@ -189,20 +198,23 @@ def download_qwen3_vl_fp8(
 
 
 def download_qwen3(root: Path, *, on_log: Callable[[str], None] = print) -> bool:
-    """下载文本编码器（Qwen3）。
+    """Download the text encoder (Qwen3).
 
-    - HuggingFace 源：从 Qwen/Qwen3-0.6B-Base 下载完整目录所需的 6 个文件。
-    - ModelScope 源：从 circlestone-labs/Anima 下载权重文件，另外从
-      Qwen/Qwen3-0.6B-Base 补齐 tokenizer / config 文件，确保本地
-      text_encoders/ 是 transformers 可直接加载的完整目录。
+    - HuggingFace source: downloads the 6 files needed for a complete directory
+      from Qwen/Qwen3-0.6B-Base.
+    - ModelScope source: downloads weight files from circlestone-labs/Anima, and
+      separately fills in tokenizer / config files from Qwen/Qwen3-0.6B-Base, so
+      the local text_encoders/ ends up as a directory transformers can load
+      directly.
     """
     target_dir = qwen_dir(root)
     target_dir.mkdir(parents=True, exist_ok=True)
     ok = True
 
     if _sources._source_for("training") == "modelscope":
-        on_log(f"\n📥 Anima 文本编码器（ModelScope 权重 + HF tokenizer）→ {target_dir}")
-        # 魔搭 Anima repo 里只有权重；训练脚本仍要求完整 transformers 目录。
+        on_log(f"\n\U0001F4E5 Anima text encoder (ModelScope weights + HF tokenizer) -> {target_dir}")
+        # The ModelScope Anima repo only has the weights; the training script
+        # still requires a complete transformers directory.
         ok &= _sources.download_flat_ms(
             ANIMA_REPO,
             MS_ANIMA_TEXT_ENCODER_PATH,
@@ -216,7 +228,7 @@ def download_qwen3(root: Path, *, on_log: Callable[[str], None] = print) -> bool
                 ok = False
         return ok
 
-    on_log(f"\n📥 Qwen3-0.6B-Base (~1.2 GB) → {target_dir}")
+    on_log(f"\n\U0001F4E5 Qwen3-0.6B-Base (~1.2 GB) -> {target_dir}")
     for f in QWEN_FILES:
         if not _sources.download_flat(QWEN_REPO, f, target_dir / f, on_log=on_log):
             ok = False
@@ -227,7 +239,7 @@ def download_t5_tokenizer(
     root: Path, *, on_log: Callable[[str], None] = print
 ) -> bool:
     target_dir = t5_tokenizer_dir(root)
-    on_log(f"\n📥 T5 tokenizer (3 个文件) → {target_dir}")
+    on_log(f"\n\U0001F4E5 T5 tokenizer (3 files) -> {target_dir}")
     target_dir.mkdir(parents=True, exist_ok=True)
     ok = True
     for f in T5_FILES:
@@ -248,7 +260,7 @@ def download_cltagger(
         cfg.model_path,
         cfg.tag_mapping_path,
     )
-    on_log(f"\n📥 CLTagger → {target_root}")
+    on_log(f"\n\U0001F4E5 CLTagger -> {target_root}")
     target_root.mkdir(parents=True, exist_ok=True)
     ok = True
     for f in cltagger_required_files(model_path, tag_mapping_path):
@@ -263,32 +275,34 @@ def download_upscaler(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """下载放大器权重到 `{models_root}/upscalers/{filename}`。
+    """Download upscaler weights to `{models_root}/upscalers/{filename}`.
 
-    源选择：按 _sources._source_for("upscaler") 取偏好；对应源缺失时透明回退到另一个源
-    （e.g. R-ESRGAN_4x+Anime6B 没有 HF 镜像 → 用户即便选了 HF 也走 MS）。
+    Source selection: preference is taken from _sources._source_for("upscaler");
+    when the preferred source doesn't have the file, transparently falls back to
+    the other source (e.g. R-ESRGAN_4x+Anime6B has no HF mirror -> even if the
+    user picked HF, it goes through MS).
     """
     if label not in UPSCALER_VARIANTS:
-        on_log(f"✗ 未知放大器 {label!r}")
+        on_log(f"✗ Unknown upscaler {label!r}")
         return False
     info = UPSCALER_VARIANTS[label]
     hf_src = info.get("hf")
     ms_src = info.get("ms")
     if hf_src is None and ms_src is None:
-        on_log(f"✗ 放大器 {label!r} 未配置任何下载源")
+        on_log(f"✗ Upscaler {label!r} has no configured download source")
         return False
 
     target = upscaler_target(label, root)
     size_mb = info.get("size_mb", 64)
     prefer_ms = _sources._source_for("upscaler") == "modelscope"
-    on_log(f"\n📥 放大器 {label} (~{size_mb} MB) → {target}")
+    on_log(f"\n\U0001F4E5 Upscaler {label} (~{size_mb} MB) -> {target}")
 
     if prefer_ms and ms_src is not None:
         return _sources.download_flat_ms(ms_src[0], ms_src[1], target, on_log=on_log)
     if hf_src is not None:
         return _sources.download_flat(hf_src[0], hf_src[1], target, on_log=on_log)
-    # 偏好 HF 但 HF 缺失 → fallback MS
-    on_log(f"   ⚠ HF 无镜像，回退 ModelScope")
+    # HF preferred but missing -> fall back to ModelScope
+    on_log("   ⚠ No HF mirror, falling back to ModelScope")
     return _sources.download_flat_ms(ms_src[0], ms_src[1], target, on_log=on_log)  # type: ignore[index]
 
 
@@ -300,26 +314,29 @@ def download_upscaler_custom(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """自定义 repo 下载：用户指定 HF/MS 仓库 + 文件名，落到 `{upscalers}/{filename}`。
+    """Custom-repo download: the user specifies an HF/MS repo + filename, saved to
+    `{upscalers}/{filename}`.
 
-    扩展名白名单同 UPSCALER_EXTS（.pth / .safetensors）。filename 仅作落地文件名，
-    repo 内子路径直接走 repo_id + filename — 大多数 upscaler repo 都把权重摆在
-    根目录，需要子目录的话用户可以在 filename 里写 `subdir/foo.pth` 这种相对路径，
-    但落地时会被剥成纯文件名（避免穿越）。
+    The extension allowlist matches UPSCALER_EXTS (.pth / .safetensors). filename
+    is only used for the saved filename -- the in-repo subpath is passed straight
+    through as repo_id + filename (most upscaler repos keep their weights at the
+    root; if a subdirectory is needed, the user can write a relative path like
+    `subdir/foo.pth` in filename, but it's stripped down to a bare filename on
+    save, to prevent path traversal).
     """
     if source not in ("hf", "ms"):
-        on_log(f"✗ 未知下载源 {source!r}（支持 hf / ms）")
+        on_log(f"✗ Unknown download source {source!r} (supported: hf / ms)")
         return False
     repo_subpath = filename
-    save_name = Path(filename).name  # 剥目录前缀，仅保留纯文件名
+    save_name = Path(filename).name  # strip the directory prefix, keep only the bare filename
     if "/" in save_name or "\\" in save_name or ".." in save_name:
-        on_log(f"✗ 非法文件名 {save_name!r}")
+        on_log(f"✗ Invalid filename {save_name!r}")
         return False
     if not save_name.lower().endswith(UPSCALER_EXTS):
-        on_log(f"✗ 仅支持 {UPSCALER_EXTS} 扩展名，收到 {save_name!r}")
+        on_log(f"✗ Only {UPSCALER_EXTS} extensions are supported, got {save_name!r}")
         return False
     target = upscaler_dir(root) / save_name
-    on_log(f"\n📥 自定义放大器 [{source}] {repo_id}/{repo_subpath} → {target}")
+    on_log(f"\n\U0001F4E5 Custom upscaler [{source}] {repo_id}/{repo_subpath} -> {target}")
     if source == "ms":
         return _sources.download_flat_ms(repo_id, repo_subpath, target, on_log=on_log)
     return _sources.download_flat(repo_id, repo_subpath, target, on_log=on_log)
@@ -332,24 +349,28 @@ def download_main_custom(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """统一来源候选的第三方主模型单文件下载 → `{models_root}/diffusion_models/`。
+    """Single-file download of a third-party base model from a unified source
+    candidate -> `{models_root}/diffusion_models/`.
 
-    filename 是 repo 内路径（可含子目录），落地时剥成纯文件名（与官方
-    variant 同目录，文件名即身份）。走 download_flat 的「有 MS 映射用 MS、
-    否则 HF」默认逻辑——自定义 repo 无映射即直连 HF。
+    filename is the in-repo path (may include subdirectories), stripped down to a
+    bare filename on save (same directory as the official variants, where the
+    filename itself is the identity). Goes through download_flat's default logic
+    of "use MS if a mapping exists, otherwise HF" -- a custom repo with no mapping
+    just connects to HF directly.
     """
     save_name = Path(filename).name
     if not save_name.lower().endswith(".safetensors"):
-        on_log(f"✗ 仅支持 .safetensors，收到 {save_name!r}")
+        on_log(f"✗ Only .safetensors is supported, got {save_name!r}")
         return False
     r = root or models_root()
     target = r / "diffusion_models" / save_name
-    on_log(f"\n📥 自定义主模型 {repo_id}/{filename} → {target}")
+    on_log(f"\n\U0001F4E5 Custom base model {repo_id}/{filename} -> {target}")
     return _sources.download_flat(repo_id, filename, target, on_log=on_log)
 
 
 def _download_candidate(domain: str, filename: str) -> "secrets.SourceCandidate":
-    """按 filename 查该 domain 的下载型候选（trigger / delete 共用）。"""
+    """Look up a download-type candidate for this domain by filename (shared by
+    trigger / delete)."""
     for c in secrets.load().model_sources.get(domain, []):
         if c.kind == "download" and c.filename == filename:
             return c
@@ -357,7 +378,8 @@ def _download_candidate(domain: str, filename: str) -> "secrets.SourceCandidate"
 
 
 def _custom_family(model_id: str) -> Optional[str]:
-    """`{family}_custom` 形式的 model_id → family id（未注册族返回 None）。"""
+    """A model_id of the form `{family}_custom` -> family id (returns None for an
+    unregistered family)."""
     from .families import FAMILY_ASSETS
 
     family = model_id[: -len("_custom")]
@@ -370,10 +392,12 @@ def download_wd14(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """下载 WD14 单个 model_id 的两个文件到 `{models_root}/wd14/{safe_id}/`。
+    """Download the two files for a single WD14 model_id to
+    `{models_root}/wd14/{safe_id}/`.
 
-    ModelScope 源：SmilingWolf/* → fireicewolf/*（fireicewolf 在魔搭镜像了全套）。
-    没有 MS 映射（非 SmilingWolf 前缀）时自动回退 HF。
+    ModelScope source: SmilingWolf/* -> fireicewolf/* (fireicewolf mirrors the
+    full set on ModelScope). Automatically falls back to HF when there's no MS
+    mapping (i.e. not a SmilingWolf-prefixed id).
     """
     r = root or models_root()
     target = wd14_target_dir(r, model_id)
@@ -382,14 +406,14 @@ def download_wd14(
     if _sources._source_for("wd14") == "modelscope":
         ms_repo = _sources._ms_wd14_repo_id(model_id)
         if ms_repo:
-            on_log(f"\n📥 WD14 {model_id} → {target}（via ModelScope: {ms_repo}）")
+            on_log(f"\n\U0001F4E5 WD14 {model_id} -> {target} (via ModelScope: {ms_repo})")
             for f in WD14_FILES:
                 if not _sources.download_flat_ms(ms_repo, f, target / f, on_log=on_log):
                     ok = False
             return ok
-        on_log(f"\n📥 WD14 {model_id}：无魔搭映射，回退 HuggingFace")
+        on_log(f"\n\U0001F4E5 WD14 {model_id}: no ModelScope mapping, falling back to HuggingFace")
     else:
-        on_log(f"\n📥 WD14 {model_id} → {target}")
+        on_log(f"\n\U0001F4E5 WD14 {model_id} -> {target}")
     for f in WD14_FILES:
         if not _sources.download_flat(model_id, f, target / f, on_log=on_log):
             ok = False
@@ -403,21 +427,24 @@ def download_eval_model(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """下载 CLIP / DINO eval 模型整个 repo 到 `{models_root}/eval/{kind}/{safe_id}/`。
+    """Download the whole repo for a CLIP / DINO eval model to
+    `{models_root}/eval/{kind}/{safe_id}/`.
 
-    源选择：eval 源选 modelscope 且有镜像映射时走 MS，否则（无映射 / 选 HF）走
-    HuggingFace —— 与 wd14 同样的「有 MS 映射用 MS、否则回退 HF」逻辑。
+    Source selection: goes through MS when the eval source is set to modelscope
+    and a mirror mapping exists, otherwise (no mapping / HF selected) goes
+    through HuggingFace -- the same "use MS if mapped, otherwise fall back to HF"
+    logic as wd14.
     """
     r = root or models_root()
     target = eval_model_target_dir(r, kind, model_id)
     if _sources._source_for("eval") == "modelscope":
         ms_repo = _sources._ms_eval_repo_id(model_id)
         if ms_repo:
-            on_log(f"\n📥 {kind.upper()} {model_id} → {target}（via ModelScope: {ms_repo}）")
+            on_log(f"\n\U0001F4E5 {kind.upper()} {model_id} -> {target} (via ModelScope: {ms_repo})")
             return _sources.download_snapshot_ms(ms_repo, target, on_log=on_log)
-        on_log(f"\n📥 {kind.upper()} {model_id}：无魔搭映射，回退 HuggingFace")
+        on_log(f"\n\U0001F4E5 {kind.upper()} {model_id}: no ModelScope mapping, falling back to HuggingFace")
     else:
-        on_log(f"\n📥 {kind.upper()} {model_id} → {target}")
+        on_log(f"\n\U0001F4E5 {kind.upper()} {model_id} -> {target}")
     return _sources.download_snapshot(model_id, target, on_log=on_log)
 
 
@@ -428,13 +455,17 @@ def ensure_eval_model(
     *,
     on_log: Callable[[str], None] = print,
 ) -> Path:
-    """返回 eval 模型本地目录，缺失则先下载（懒加载兜底，路径与下载卡片一致）。
+    """Return the local directory for an eval model, downloading first if missing
+    (lazy-load fallback, using the same path as the download card).
 
-    与 wd14 `_resolve_model_dir` 同模式：跑 eval 时用户若没预下载，自动下到项目
-    目录，`from_pretrained` 指向它。已就绪（有 config.json）直接返回。
+    Same pattern as wd14's `_resolve_model_dir`: if the user hasn't pre-downloaded
+    when running eval, it auto-downloads into the project directory and
+    `from_pretrained` points at it. If already present (has config.json), returns
+    it directly.
 
-    若 ``model_id`` 本身是一个已存在的本地模型目录（用户在文本框直接填了路径），
-    直接用它、不当 repo id 下载。
+    If ``model_id`` is itself an existing local model directory (the user typed a
+    path directly into the text field), it's used as-is rather than treated as a
+    repo id to download.
     """
     local = Path(str(model_id)).expanduser()
     if local.is_dir() and (local / "config.json").exists():
@@ -447,7 +478,8 @@ def ensure_eval_model(
     return target
 
 
-# CCIP（anime 角色身份）：只下变体子目录里的 3 个文件，别整库拉（含 torch ckpt + png）。
+# CCIP (anime character identity): only download the 3 files under the variant
+# subdirectory, not the whole repo (which also has torch ckpt + png files).
 CCIP_REPO = "deepghs/ccip_onnx"
 CCIP_FILES = ("model_feat.onnx", "model_metrics.onnx", "metrics.json")
 
@@ -458,11 +490,12 @@ def download_ccip_model(
     *,
     on_log: Callable[[str], None] = print,
 ) -> bool:
-    """下 deepghs/ccip_onnx 指定变体的 3 个文件到 `{models_root}/eval/ccip/{variant}/`。"""
+    """Download the 3 files for a given deepghs/ccip_onnx variant to
+    `{models_root}/eval/ccip/{variant}/`."""
     r = root or models_root()
     eval_ccip_root = r / "eval" / "ccip"
     patterns = [f"{variant}/{f}" for f in CCIP_FILES]
-    on_log(f"\n📥 CCIP {variant} → {ccip_model_dir(r, variant)}")
+    on_log(f"\n\U0001F4E5 CCIP {variant} -> {ccip_model_dir(r, variant)}")
     return _sources.download_snapshot(
         CCIP_REPO, eval_ccip_root, allow_patterns=patterns, on_log=on_log,
     )
@@ -474,7 +507,8 @@ def ensure_ccip_model(
     *,
     on_log: Callable[[str], None] = print,
 ) -> Path:
-    """返回 CCIP 变体本地目录，缺 3 个文件则先下载（懒加载兜底）。"""
+    """Return the local directory for a CCIP variant, downloading first if any of
+    the 3 files are missing (lazy-load fallback)."""
     r = root or models_root()
     target = ccip_model_dir(r, variant)
     if all((target / f).exists() for f in CCIP_FILES):
@@ -484,7 +518,7 @@ def ensure_ccip_model(
 
 
 # ---------------------------------------------------------------------------
-# 异步下载状态机
+# Async download state machine
 # ---------------------------------------------------------------------------
 
 
@@ -503,7 +537,7 @@ _DOWNLOADS: dict[str, DownloadStatus] = {}
 
 
 def get_status_snapshot() -> dict[str, dict[str, Any]]:
-    """端点序列化用：浅拷贝当前所有 download status。"""
+    """For endpoint serialization: a shallow copy of every current download status."""
     with _LOCK:
         return {
             k: {
@@ -519,27 +553,32 @@ def get_status_snapshot() -> dict[str, dict[str, Any]]:
 
 
 def _failure_summary(log: list[str]) -> str:
-    """从下载日志里提取一句可操作的失败原因（给前端 toast / message 用）。
+    """Extract a single actionable failure reason from the download log (for the
+    frontend toast / message).
 
-    download_flat 把错误写成 `   ✗ ...`；gated / 授权类失败再追加 `   ↳ ...提示`
-    （含 token / 申请授权指引）。优先返回带提示的那条，否则退回最后一条 ✗ 错误，
-    都没有再退到通用串。避免前端只看到 badge 红了却不知为何（原因只在终端 / 折叠
-    日志里）。
+    download_flat writes errors as `   ✗ ...`; gated / auth failures append a
+    further `   ↳ ...hint` line (with token / access-request guidance).
+    Prefers the line with a hint, otherwise falls back to the last ✗ error
+    line, and finally to a generic string if neither exists. This avoids the
+    frontend showing a red badge with no clue why (the reason otherwise only
+    lives in the terminal / a collapsed log).
     """
     err = next((ln.strip() for ln in reversed(log) if ln.lstrip().startswith("✗")), "")
     hint = next((ln.strip() for ln in reversed(log) if "↳" in ln), "")
     if hint:
         return f"{err} {hint}".strip() if err else hint
-    return err or "下载失败，详见下载日志"
+    return err or "Download failed; see the download log for details"
 
 
 def start_download_async(
     key: str, fn: Callable[[Callable[[str], None]], bool]
 ) -> DownloadStatus:
-    """启动后台 thread 跑 `fn(on_log)`；fn 返回 True=成功。
+    """Start a background thread running `fn(on_log)`; fn returns True on success.
 
-    `key` 是任务标识，重复启动同 key（仍 running）会复用现有 status。
-    完成 / 失败时通过 `bus.publish` 推 `model_download_changed` SSE 事件。
+    `key` is the task identifier; starting again with the same key while it's
+    still running reuses the existing status.
+    On completion / failure, publishes a `model_download_changed` SSE event via
+    `bus.publish`.
     """
     with _LOCK:
         existing = _DOWNLOADS.get(key)
@@ -555,9 +594,12 @@ def start_download_async(
             ds.log.append(line)
             if len(ds.log) > 200:
                 del ds.log[:-200]
-        # 回显到 backend stdout —— UI ring buffer 容量 200 行；长下载早期日志会被
-        # 截掉，print 让 studio_*.log / 终端保留完整流，调试 / oncall 排错时能直接 grep。
-        # 锁外执行避免持锁做 I/O 拖慢其它 download tasks 写日志。
+        # Echoed to backend stdout -- the UI ring buffer only holds 200 lines, so
+        # early lines of a long download would otherwise get truncated; printing
+        # keeps the full stream in studio_*.log / the terminal, so it can be
+        # grepped directly when debugging / on-call. Done outside the lock to
+        # avoid holding it during I/O and slowing down other download tasks'
+        # log writes.
         print(line, flush=True)
 
     def _run() -> None:
@@ -597,13 +639,16 @@ def start_download_async(
 
 
 def delete_asset(model_id: str, variant: Optional[str] = None) -> None:
-    """删除一个已下载资产（下载按钮的逆操作：用户先删除、再下载）。
+    """Delete an already-downloaded asset (the reverse of the download button: the
+    user deletes first, then re-downloads).
 
-    目标路径全部由服务端 target 函数解析——不接受任意路径；对应 key 的
-    下载进行中拒绝。覆盖下载中心全部资产 id：训练模型区（主模型 variant /
-    VAE / 文本编码器 / tokenizer）、打标（wd14 / cltagger）、eval 指标
-    （clip / dino / ccip）、放大器（预设 + 自定义文件名）。文件被占用
-    （模型已加载 / 训练中）时 OSError 原样转可操作报错。
+    Target paths are always resolved by server-side target functions -- arbitrary
+    paths are never accepted; deletion is refused while the corresponding key's
+    download is in progress. Covers every asset id in the download center:
+    the training models section (base model variants / VAE / text encoder /
+    tokenizer), tagging (wd14 / cltagger), eval metrics (clip / dino / ccip), and
+    upscalers (presets + custom filenames). If the file is in use (model loaded /
+    training in progress), the OSError is passed through as an actionable error.
     """
     import shutil
 
@@ -642,7 +687,8 @@ def delete_asset(model_id: str, variant: Optional[str] = None) -> None:
         if preset is None:
             raise ValueError(f"unknown cltagger variant {variant!r}")
         key = f"cltagger:{variant}"
-        # 只删该版本子目录——v1/v2 同 repo 根下可并存多版本
+        # Only delete this version's subdirectory -- v1/v2 can coexist under the
+        # same repo root
         target = cltagger_target_root(root, preset["model_id"]) / Path(
             preset["model_path"]
         ).parent
@@ -660,7 +706,8 @@ def delete_asset(model_id: str, variant: Optional[str] = None) -> None:
     elif model_id == "upscaler":
         if not variant:
             raise ValueError("upscaler needs variant=label")
-        # 预设 label 或自定义文件名；upscaler_target 自带路径穿越校验
+        # a preset label or a custom filename; upscaler_target has its own
+        # path-traversal validation
         key = (
             f"upscaler:{variant}"
             if variant in UPSCALER_VARIANTS
@@ -668,13 +715,14 @@ def delete_asset(model_id: str, variant: Optional[str] = None) -> None:
         )
         target = upscaler_target(variant, root)
     elif model_id == "cltagger_custom":
-        # fork repo 专属根目录整删（与官方 repo 目录隔离，安全）
+        # delete the entire dedicated root for a fork repo (kept isolated from
+        # the official repo directory, so this is safe)
         if not variant:
             raise ValueError("cltagger_custom needs variant=repo")
         key = f"cltagger_custom:{variant}"
         target = cltagger_target_root(root, variant)
     elif model_id == "upscaler_custom":
-        # 统一来源 download 候选落盘的文件（filename 即身份）
+        # a file saved from a unified-source download candidate (filename is the identity)
         if not variant:
             raise ValueError("upscaler_custom needs variant=filename")
         save_name = Path(variant).name
@@ -705,9 +753,11 @@ def delete_asset(model_id: str, variant: Optional[str] = None) -> None:
 
 
 def trigger(model_id: str, variant: Optional[str] = None) -> str:
-    """便于端点调用的入口：根据 model_id 选对应的 download_* 函数 + 启动异步。
+    """Convenience entry point for endpoints: picks the matching download_*
+    function based on model_id + starts it asynchronously.
 
-    返回 status key（前端用来拼 SSE 关心的 key）。
+    Returns the status key (used by the frontend to build the SSE key it cares
+    about).
     """
     root = models_root()
     if model_id == "anima_main":
@@ -765,8 +815,10 @@ def trigger(model_id: str, variant: Optional[str] = None) -> str:
         return key
     if model_id == "cltagger":
         cfg = secrets.load().cltagger
-        # variant 可指定预设 label（覆盖 cfg 当前的 repo/path），便于 UI 一键
-        # 下载非"当前选中"的版本。未指定时用 cfg 当前路径。
+        # variant can specify a preset label (overriding cfg's current
+        # repo/path), letting the UI one-click download a version other than
+        # the "currently selected" one. When unspecified, uses cfg's current
+        # path.
         if variant:
             preset = CLTAGGER_VERSIONS.get(variant)
             if preset is None:
@@ -822,8 +874,9 @@ def trigger(model_id: str, variant: Optional[str] = None) -> str:
         )
         return key
     if model_id == "cltagger_custom":
-        # fork repo 候选（镜像覆盖退役后的替代，D4）：variant=repo，双文件
-        # 相对路径从候选 extra 取，下载到该 fork 专属根目录。
+        # a fork-repo candidate (a mirror replacement after retirement, D4):
+        # variant=repo, both files' relative paths come from the candidate's
+        # extra, downloaded into that fork's dedicated root.
         if not variant:
             raise ValueError("cltagger_custom needs variant=repo")
         cand = next(
@@ -846,8 +899,9 @@ def trigger(model_id: str, variant: Optional[str] = None) -> str:
         )
         return key
     if model_id == "upscaler_custom":
-        # 统一来源 download 候选（variant=filename；repo 从候选记录取，
-        # 源跟全局 download_sources.upscaler）。key 与扫盘行一致。
+        # a unified-source download candidate (variant=filename; repo comes from
+        # the candidate record, source follows the global
+        # download_sources.upscaler setting). key matches the disk-scan row.
         if not variant:
             raise ValueError("upscaler_custom needs variant=filename")
         cand = _download_candidate("upscaler", variant)

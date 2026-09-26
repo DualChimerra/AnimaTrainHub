@@ -1,4 +1,4 @@
-"""Phase 2 文本缓存协议：key、sidecar、varlen safetensors 与失效重算。"""
+"""Phase 2 text cache contract: key, sidecar, varlen safetensors, and invalidation/recompute."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def test_caption_roundtrip_preserves_varlen_bfloat16_and_is_atomic(tmp_path):
     loaded = store.read_caption(entry)
 
     assert loaded is not None
-    assert loaded["hidden_states"].shape == (7, 12, 8)  # varlen，未 pad 512
+    assert loaded["hidden_states"].shape == (7, 12, 8)  # varlen, not padded to 512
     assert loaded["hidden_states"].dtype == torch.bfloat16
     assert torch.equal(loaded["attention_mask"], encoded["attention_mask"])
     assert not list(tmp_path.glob(entry.cache_path.name + ".*.tmp"))

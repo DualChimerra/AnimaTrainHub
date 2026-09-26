@@ -25,7 +25,7 @@
   --blue-soft:#e9f0fb; --blue-text:#39619c; --blue-line:#d9e5f6;
   --r-card:16px; --r-ctl:10px; --r-tile:9px;
   --sh-card:0 1px 2px rgba(20,22,20,.035);
-  --font:'Geist','Inter',system-ui,sans-serif; --mono:'Geist Mono',ui-monospace,Menlo,monospace;
+  --font:'Geist','Inter',system-ui,sans-serif; --mono:var(--font); --code:'Geist Mono',ui-monospace,Menlo,Consolas,monospace;
 }
 
 
@@ -582,7 +582,7 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 
 /* the mockup reset left-aligned every button; keep that for the rows that
    render as <button> (next step, settings) */
-.ds-nav-item, .ds-step, .ds-verpill { text-align: left; }
+.ds-nav-item, .ds-step, .ds-verpill, .ds-projcard { text-align: left; }
 
 /* project overview: main table + 400px side column, 4 KPIs */
 .ds-ov-main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 14px; align-items: start; }
@@ -619,7 +619,7 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-seg-item:disabled, .ds-chip:disabled, .ds-chip-add:disabled, .ds-searchgroup > button:disabled { opacity: .45; cursor: not-allowed; }
 
 /* ===== tag edit (mockup TagEdit) ===== */
-.ds-te-grid{display:grid;grid-template-columns:270px minmax(0,1fr) 320px;grid-template-rows:minmax(0,1fr);gap:14px;flex:1;min-height:0;padding-top:2px}
+.ds-te-grid{display:grid;grid-template-columns:292px minmax(0,1fr) 340px;grid-template-rows:minmax(0,1fr);gap:14px;flex:1;min-height:0;padding-top:2px}
 @media (max-width:1100px){.ds-te-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:none}.ds-te-grid > .ds-card{min-height:420px}}
 .ds-ctl[aria-disabled="true"], .ds-kebab:disabled { opacity: .45; cursor: not-allowed; }
 
@@ -692,3 +692,225 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-model-row.ds-is-on{background:var(--green-soft);border-color:var(--green-line)}
 .ds-model-row input[type=radio]{accent-color:var(--green-600)}
 .ds-model-row > code.w-32{width:auto;flex:1 1 64px;min-width:0}
+
+/* ===========================================================================
+   v8 · app polish
+   =========================================================================== */
+
+/* the app fills the window: the mockup's floating frame was only the artboard */
+.ds-viewport{padding:0;background:var(--panel)}
+.ds-app{border:0;border-radius:0;box-shadow:none}
+
+/* type: one sans family everywhere (with tabular figures for numbers);
+   the monospace face is reserved for real code — paths, config keys, YAML, logs */
+.ds-app{font-variant-numeric:tabular-nums}
+.ds-code,.ds-yaml,.ds-console,.ds-app code,.ds-app pre,.ds-app kbd,.ds-kbd,.ds-inp.ds-code,textarea.ds-code{font-family:var(--code);letter-spacing:0;font-variant-numeric:normal}
+.ds-eyebrow{font-size:11.5px;font-weight:500;letter-spacing:0}
+.ds-cap{font-size:10.5px;font-weight:600;letter-spacing:.06em}
+.ds-step-tail,.ds-nav-tail{font-size:11px;font-weight:500}
+.ds-verpill{font-size:12px;font-weight:500}
+.ds-projcard-slug{font-size:11px}
+.ds-subtitle code{font-size:11px}
+.ds-crumbs .ds-mono{font-size:12.5px}
+
+/* ── motion ──────────────────────────────────────────────────────────────── */
+:root{--ease-out:cubic-bezier(.22,1,.36,1);--ease-spring:cubic-bezier(.34,1.56,.64,1)}
+@keyframes ds-fade-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes ds-fade{from{opacity:0}to{opacity:1}}
+@keyframes ds-pop-in{from{opacity:0;transform:scale(.96) translateY(-3px)}to{opacity:1;transform:none}}
+@keyframes ds-slide-in-right{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
+@keyframes ds-toast-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes ds-dialog-in{from{opacity:0;transform:translateY(8px) scale(.97)}to{opacity:1;transform:none}}
+
+/* page content eases in on navigation */
+.ds-page-anim{animation:ds-fade-up .32s var(--ease-out) both}
+
+/* interactive surfaces answer hover / press smoothly */
+.ds-btn-primary,.ds-btn-dark,.ds-btn-danger,.ds-ctl,.ds-iconbtn,.ds-kebab,.ds-seg-item,.ds-pill,.ds-tab,.ds-btab,
+.ds-chip,.ds-chip-add,.ds-nav-item,.ds-step,.ds-verpill,.ds-projcard,.ds-optcard,.ds-rowgo,.ds-verrow,.ds-menu-item,
+.ds-actgroup button,.ds-actgroup a,.ds-brand-collapse,.ds-tb-icon,.ds-tb-chip,.ds-inp,.ds-stepper,.ds-card,.ds-qcard{
+  transition:background-color .16s ease,color .16s ease,border-color .16s ease,box-shadow .2s ease,transform .16s var(--ease-out),opacity .16s ease}
+.ds-btn-primary:hover:not(:disabled){background:var(--green-600)}
+.ds-btn-dark:hover:not(:disabled){background:#2a2d30}
+.ds-btn-danger:hover:not(:disabled){background:#fbdcdc}
+.ds-ctl:hover:not(:disabled),.ds-iconbtn:hover:not(:disabled){border-color:var(--line-3);color:var(--ink)}
+.ds-iconbtn:hover:not(:disabled) svg,.ds-ctl:hover:not(:disabled) svg{color:var(--ink)}
+.ds-btn-primary:active:not(:disabled),.ds-btn-dark:active:not(:disabled),.ds-btn-danger:active:not(:disabled),
+.ds-ctl:active:not(:disabled),.ds-iconbtn:active:not(:disabled),.ds-seg-item:active,.ds-pill:active,.ds-chip:active,
+.ds-rowgo:active,.ds-optcard:active{transform:scale(.97)}
+.ds-kebab:hover,.ds-kebab.ds-is-open,.ds-iconbtn.ds-is-open{background:var(--sunken);color:var(--ink)}
+.ds-nav-item:not(.ds-is-active):hover,.ds-step:not(.ds-is-active):not([aria-disabled="true"]):hover{background:var(--hover);color:var(--ink)}
+.ds-nav-item:not(.ds-is-active):hover svg{color:var(--ink-2)}
+.ds-seg-item:not(.ds-is-active):hover,.ds-pill:not(.ds-is-active):hover{color:var(--ink);background:rgba(20,22,20,.04)}
+.ds-tab:not(.ds-is-active):hover{color:var(--ink-2)}
+.ds-optcard:not(.ds-is-on):hover{border-color:var(--line-3);box-shadow:0 4px 14px -8px rgba(20,22,20,.18)}
+.ds-verrow{cursor:pointer}
+.ds-verrow:not(.ds-is-active):hover{background:var(--hover)}
+.ds-verrow:hover .ds-rowgo{border-color:var(--line-3);color:var(--ink);transform:translateX(2px)}
+.ds-inp:hover:not([disabled]),.ds-stepper:hover{border-color:var(--line-3)}
+.ds-inp:focus,.ds-inp:focus-visible,.ds-stepper:focus-within{outline:none;border-color:var(--green-600);box-shadow:0 0 0 3px var(--green-soft)}
+select.ds-inp{cursor:pointer}
+select.ds-select-open{border-color:var(--green-600);box-shadow:0 0 0 3px var(--green-soft)}
+.ds-stepper button:hover:not(:disabled){background:var(--hover);color:var(--ink)}
+.ds-meter i,.ds-slider-track i{transition:width .45s var(--ease-out)}
+
+/* switch knob slides instead of jumping */
+.ds-switch{transition:background-color .2s ease}
+.ds-switch i{left:2px;right:auto;transition:transform .22s var(--ease-spring)}
+.ds-switch.ds-on i{left:2px;right:auto;transform:translateX(15px)}
+.ds-cbox{transition:background-color .15s ease,border-color .15s ease}
+.ds-radio{transition:border-width .18s var(--ease-spring),border-color .15s ease}
+.ds-tab{transition:color .16s ease,border-color .2s ease}
+
+/* skeleton shimmer for loading placeholders */
+@keyframes ds-shimmer{from{background-position:-200px 0}to{background-position:calc(200px + 100%) 0}}
+.ds-skel{background:linear-gradient(90deg,var(--sunken) 0,var(--hover) 50%,var(--sunken) 100%) no-repeat var(--sunken);background-size:200px 100%;animation:ds-shimmer 1.2s linear infinite;border-radius:8px}
+
+/* ── popover / menu / dropdown list ────────────────────────────────────── */
+.ds-pop{background:var(--panel);border:1px solid var(--line-2);border-radius:12px;padding:4px;overflow-y:auto;
+  box-shadow:0 1px 2px rgba(20,22,20,.05),0 16px 40px -14px rgba(20,22,20,.28);font-family:var(--font);font-size:12.5px;color:var(--ink);
+  letter-spacing:-.01em;opacity:0;font-variant-numeric:tabular-nums}
+.ds-pop.ds-pop-in{animation:ds-pop-in .16s var(--ease-out) both}
+.ds-menu-item{display:flex;align-items:center;gap:9px;width:100%;min-height:31px;padding:0 10px;border-radius:8px;
+  font-size:12.5px;color:var(--ink);text-align:left;cursor:pointer;white-space:nowrap;user-select:none;background:none;border:0;font-family:inherit}
+.ds-menu-item:hover:not(:disabled):not(.ds-is-disabled),.ds-menu-item.ds-is-hover{background:var(--sunken)}
+.ds-menu-item.ds-is-on{font-weight:600}
+.ds-menu-item.ds-is-err{color:var(--red-text)}
+.ds-menu-item.ds-is-err:hover:not(:disabled){background:var(--red-soft)}
+.ds-menu-item:disabled,.ds-menu-item.ds-is-disabled{opacity:.42;cursor:not-allowed}
+.ds-menu-ico{width:16px;display:grid;place-items:center;color:var(--ink-3);flex:none}
+.ds-menu-item.ds-is-err .ds-menu-ico{color:inherit}
+.ds-menu-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.ds-menu-hint{flex:none;font-size:11px;color:var(--ink-4);font-weight:400}
+.ds-menu-check{flex:none;color:var(--green-text);display:grid;place-items:center}
+.ds-menu-sep{height:1px;background:var(--line);margin:4px 6px}
+.ds-menu-group,.ds-menu-head{padding:8px 10px 5px;font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-4)}
+.ds-menu-sub{display:block;font-size:11px;font-weight:400;color:var(--ink-3);margin-top:1px;overflow:hidden;text-overflow:ellipsis}
+.ds-menu-item.ds-tall{min-height:40px;padding-top:5px;padding-bottom:5px}
+.ds-menu-add{color:var(--green-text);font-weight:500}
+.ds-menu-add .ds-menu-ico{color:var(--green-text)}
+
+/* ── toasts & dialogs ───────────────────────────────────────────────────── */
+.ds-toast{animation:ds-toast-in .28s var(--ease-spring) both}
+.ds-dialog-anim{animation:ds-dialog-in .22s var(--ease-out) both}
+.ds-backdrop-anim{animation:ds-fade .18s ease both}
+
+/* ── settings drawer: roomier ───────────────────────────────────────────── */
+.ds-drawer{width:min(920px,calc(100vw - 40px))}
+.ds-scrim{animation:ds-fade .2s ease both}
+.ds-set-grid{grid-template-columns:210px minmax(0,1fr)}
+.ds-set-body{padding:12px 24px 20px;gap:16px}
+.ds-set-head{padding:18px 24px 0}
+
+/* ── schema form: each schema group is its own block ────────────────────── */
+.ds-fgroups{display:flex;flex-direction:column;gap:12px;padding:14px;background:var(--area);border-top:1px solid var(--line);border-radius:0 0 var(--r-card) var(--r-card)}
+.ds-fgroup{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--sh-card);scroll-margin-top:12px}
+.ds-fgroup-head{display:flex;align-items:center;gap:10px;padding:13px 16px 11px}
+.ds-fgroup-title{font-size:13.5px;font-weight:600;letter-spacing:-.02em}
+.ds-fgroup-count{margin-left:auto;font-size:11px;color:var(--ink-3);flex:none}
+.ds-fgroup .ds-field{margin:0 16px;padding:12px 0;border-bottom:0;border-top:1px solid var(--line);align-items:center;gap:20px}
+.ds-fgroup .ds-field.ds-stack{align-items:stretch;gap:8px}
+.ds-fgroup .ds-field-ctl{width:300px}
+.ds-fgroup .ds-field.ds-stack .ds-field-ctl{width:100%}
+.ds-fgroup .ds-field-name{gap:7px}
+.ds-fgroup .ds-field-name .ds-label{font-size:13px}
+@media (max-width:760px){.ds-fgroup .ds-field{flex-direction:column;align-items:stretch;gap:8px}.ds-fgroup .ds-field-ctl{width:100%}}
+.ds-tipbox .ds-tip-key{display:block;margin-top:6px;font-family:var(--code);font-size:10.5px;color:var(--ink-4)}
+.ds-tipbox{animation:ds-fade .12s ease both}
+
+/* option cards inside a form row (model family) */
+.ds-optcards.ds-compact .ds-optcard{padding:10px 12px;align-items:center}
+.ds-optcards.ds-compact .ds-optcard-desc{margin-top:2px}
+
+@media (prefers-reduced-motion:reduce){
+  .ds-page-anim,.ds-pop.ds-pop-in,.ds-toast,.ds-dialog-anim,.ds-backdrop-anim,.ds-scrim,.ds-tipbox{animation:none;opacity:1}
+  .ds-switch i{transition:none}
+}
+
+/* every modal backdrop fades in and its panel rises (legacy dialogs too) */
+.fixed.bg-zinc-950\/40{animation:ds-fade .18s ease both}
+.fixed.bg-zinc-950\/40 > *:not(.ds-dialog-anim){animation:ds-dialog-in .22s var(--ease-out) both}
+@media (prefers-reduced-motion:reduce){.fixed.bg-zinc-950\/40,.fixed.bg-zinc-950\/40 > *{animation:none}}
+
+/* version list rows: actions on hover, context menu highlight */
+.ds-verrow-tools{display:flex;align-items:center;gap:4px;flex:none}
+.ds-verrow-tools .ds-kebab{opacity:0;transition:opacity .15s ease,background-color .15s ease}
+.ds-verrow:hover .ds-verrow-tools .ds-kebab,.ds-verrow:focus-within .ds-verrow-tools .ds-kebab,.ds-verrow-tools .ds-kebab.ds-is-open{opacity:1}
+.ds-verrow.ds-is-menu:not(.ds-is-active){background:var(--hover)}
+.ds-verrow:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--green-600)}
+
+/* queue card: numbers above the bar, one line for every status */
+.ds-qcard-bar{flex-direction:column;align-items:stretch;gap:7px;padding:10px 15px 12px}
+.ds-qcard-bar .ds-meter{flex:none}
+.ds-qcard-stats{font-family:var(--font);font-size:11.5px;gap:14px;flex-wrap:wrap}
+.ds-qcard-stats b{font-weight:600}
+.ds-qcard-stats .ds-qnext{margin-left:auto;color:var(--amber-text)}
+
+/* sample strip (queue cards, task page) */
+.ds-samples{border-top:1px solid var(--line);padding:10px 15px 12px;cursor:default}
+.ds-samples-head{display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.ds-samples-count{font-size:10.5px;font-weight:500;color:var(--ink-3);background:var(--sunken);border-radius:999px;padding:1px 7px}
+.ds-samples-row{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}
+.ds-sample{display:flex;flex-direction:column;align-items:center;gap:4px;flex:none;background:none;border:0;padding:0;cursor:zoom-in}
+.ds-sample-thumb{display:block;border-radius:9px;overflow:hidden;background:var(--sunken);box-shadow:0 0 0 1px var(--line);transition:box-shadow .18s ease,transform .18s var(--ease-out)}
+.ds-sample-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.ds-sample:hover .ds-sample-thumb{box-shadow:0 0 0 2px var(--green-600),0 6px 16px -8px rgba(20,22,20,.3);transform:translateY(-1px)}
+.ds-sample-cap{font-size:10.5px;color:var(--ink-3);line-height:1.2}
+
+/* save bar under editors (tag edit): a real footer, not a squeezed log line */
+.ds-savebar{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;border-top:1px solid var(--line);background:var(--panel);font-size:12.5px;color:var(--ink-2);transition:background-color .25s ease,border-color .25s ease,color .25s ease}
+.ds-savebar.ds-is-dirty{background:var(--green-soft);border-top-color:var(--green-line);color:var(--green-text)}
+.ds-savebar-status{display:flex;align-items:center;gap:9px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ds-savebar-act{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+.ds-savebar .ds-btn-primary:disabled{opacity:1;background:var(--sunken);color:var(--ink-3);cursor:default}
+.ds-ctl.ds-is-open{border-color:var(--line-3);background:var(--sunken)}
+.ds-savepoint{display:flex;align-items:center;gap:8px;padding:8px 10px;border-top:1px solid var(--line);font-size:12px}
+
+/* crop tool: toolbar with filters, then filmstrip / canvas / side panels */
+.ds-crop-imginfo{font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;max-width:340px}
+.ds-crop-imginfo b{font-weight:500;color:var(--ink-2)}
+.ds-crop-grid{display:grid;grid-template-columns:212px minmax(0,1fr) 300px;gap:14px;flex:1;min-height:0;padding:14px 17px 16px}
+.ds-crop-canvas{min-width:0;min-height:0;overflow:hidden;border-radius:12px;background:var(--area);border:1px solid var(--line)}
+.ds-crop-side{display:flex;flex-direction:column;gap:12px;min-height:0;overflow-y:auto}
+.ds-crop-panel{border:1px solid var(--line);border-radius:12px;background:var(--card);display:flex;flex-direction:column;flex:none}
+.ds-crop-panel-head{display:flex;align-items:center;gap:8px;padding:11px 14px 9px}
+.ds-crop-panel-title{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;letter-spacing:-.015em}
+.ds-crop-rects{display:flex;flex-direction:column;gap:6px;padding:0 10px 10px;max-height:320px;overflow-y:auto}
+.ds-crop-rect{display:flex;align-items:center;gap:9px;padding:7px 8px;border:1px solid var(--line-2);border-radius:10px;background:var(--card);cursor:pointer;transition:border-color .15s ease,background-color .15s ease}
+.ds-crop-rect:hover{border-color:var(--line-3)}
+.ds-crop-rect.ds-is-on{border-color:var(--green-600);background:#fbfdf7}
+.ds-crop-rect-ar{width:40px;min-height:22px;max-height:44px;flex:none;display:grid;place-items:center;border:1px dashed var(--line-3);border-radius:6px;background:var(--sunken);font-size:10px;color:var(--ink-3)}
+.ds-crop-rect-label{flex:1;min-width:0;border:0;background:transparent;font-size:12.5px;font-weight:500;color:var(--ink);outline:none;padding:0}
+.ds-kebab.ds-danger:hover{background:var(--red-soft);color:var(--red-text)}
+.ds-crop-panel-foot{border-top:1px solid var(--line);padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.ds-crop-ar{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;color:var(--ink-3)}
+.ds-crop-ar .ds-inp{width:160px}
+@media (max-width:1100px){.ds-crop-grid{grid-template-columns:minmax(0,1fr)}.ds-crop-canvas{min-height:420px}}
+.ds-crop-panel-head{flex-wrap:wrap;row-gap:2px}.ds-crop-panel-title{white-space:nowrap}
+
+/* inpaint tool panel */
+.ds-ip-body{display:flex;flex-direction:column;gap:12px;padding:2px 14px 14px}
+.ds-ip-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.ds-ip-label{font-size:12px;color:var(--ink-3);flex:none;min-width:70px}
+.ds-ip-slider{display:grid;grid-template-columns:70px minmax(0,1fr) auto;align-items:center;gap:10px}
+.ds-ip-swatch{position:relative;width:30px;height:30px;border-radius:9px;box-shadow:inset 0 0 0 1px rgba(20,22,20,.14);cursor:pointer;flex:none;overflow:hidden}
+.ds-ip-swatch input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.ds-ip-recent{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0}
+.ds-ip-dot{width:22px;height:22px;border-radius:7px;box-shadow:inset 0 0 0 1px rgba(20,22,20,.14);transition:transform .15s var(--ease-spring)}
+.ds-ip-dot:hover{transform:scale(1.12)}
+.ds-ip-dot.ds-is-on{box-shadow:0 0 0 2px var(--panel),0 0 0 4px var(--green-600)}
+/* native range sliders anywhere: the accent green, never the OS blue */
+input[type=range]{accent-color:var(--green-600)}
+.ds-drawer .ds-optcards{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+@media (min-width:900px){.ds-drawer .ds-field{flex-direction:row;align-items:center;gap:20px}.ds-drawer .ds-field.ds-stack{flex-direction:column;align-items:stretch}.ds-drawer .ds-field-ctl{width:340px;align-items:stretch}.ds-drawer .ds-field.ds-stack .ds-field-ctl{width:100%}}
+
+/* modal dialogs built on the design system */
+.ds-modal{background:var(--panel);border:1px solid var(--line-2);border-radius:16px;box-shadow:0 24px 64px -20px rgba(20,22,20,.35),0 2px 8px rgba(20,22,20,.06);padding:20px 22px;display:flex;flex-direction:column;gap:14px;font-family:var(--font);color:var(--ink);letter-spacing:-.01em}
+.ds-modal-head{display:flex;align-items:center;gap:11px}
+.ds-modal-title{margin:0;font-size:16px;font-weight:600;letter-spacing:-.025em}
+.ds-modal-field{display:flex;flex-direction:column;gap:6px}
+.ds-modal-label{font-size:12px;font-weight:500;color:var(--ink-2)}
+.ds-modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+@keyframes ds-palette-in{from{opacity:0;transform:translateX(-50%) translateY(-6px) scale(.98)}to{opacity:1;transform:translateX(-50%)}}
+.ds-palette{animation:ds-palette-in .2s var(--ease-out) both}
+@media (prefers-reduced-motion:reduce){.ds-palette{animation:none}}

@@ -34,16 +34,17 @@ describe('FamilySwitchDialog', () => {
         onCancel={() => {}}
       />,
     )
-    // 路径区（等宽新旧对照）与参数区分组渲染；model_family 自身行不列出
+    // paths section (monospace old/new comparison) and params section render as separate
+    // groups; the model_family field's own row is not listed
     await screen.findByText('G:/models/krea2-raw-bf16.safetensors')
     expect(screen.getByText('Transformer Path')).toBeInTheDocument()
     expect(screen.getByText('Sample Sampler Name')).toBeInTheDocument()
     expect(screen.queryByText('Model Family')).not.toBeInTheDocument()
-    // 空值占位 + 布尔值本地化
-    expect(screen.getByText('（空）')).toBeInTheDocument()
-    expect(screen.getByText(/是/)).toBeInTheDocument()
+    // empty-value placeholder + localized boolean
+    expect(screen.getByText('(empty)')).toBeInTheDocument()
+    expect(screen.getByText(/Yes/)).toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: '切换' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Switch' }))
     expect(onApply).toHaveBeenCalledWith(switched)
   })
 
@@ -60,7 +61,7 @@ describe('FamilySwitchDialog', () => {
       />,
     )
     await screen.findByText('Transformer Path')
-    await userEvent.click(screen.getByRole('button', { name: '取消' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onCancel).toHaveBeenCalled()
     expect(onApply).not.toHaveBeenCalled()
   })
@@ -78,6 +79,6 @@ describe('FamilySwitchDialog', () => {
     await waitFor(() => {
       expect(screen.getByText(/boom/)).toBeInTheDocument()
     })
-    expect(screen.getByRole('button', { name: '切换' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Switch' })).toBeDisabled()
   })
 })

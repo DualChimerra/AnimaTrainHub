@@ -79,15 +79,10 @@ export function useTagSuggest({
   const suggestions = useMemo(() => {
     if (off || !open || dict.status !== 'ready' || !tokenInfo.token) return []
     return findSuggestions(tokenInfo.token, {
-      entries: dict.entries,
       tagKeys: dict.tagKeys,
       compactedKeys: dict.compactedKeys,
-      reverse: dict.reverse,
     })
-  }, [
-    off, open, tokenInfo.token,
-    dict.status, dict.entries, dict.tagKeys, dict.compactedKeys, dict.reverse,
-  ])
+  }, [off, open, tokenInfo.token, dict.status, dict.tagKeys, dict.compactedKeys])
 
   // suggestions 列表变化时重置 active
   const sugKey = suggestions.map((s) => s.tag).join('|')

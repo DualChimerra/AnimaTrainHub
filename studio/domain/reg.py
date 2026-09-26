@@ -1,11 +1,14 @@
-"""先验生成 schema —— 对应 runtime/anima_reg_ai.py 的 JSON 配置。
+"""Prior generation schema — corresponds to the JSON config for runtime/anima_reg_ai.py.
 
-设计来自 DreamBooth prior preservation：训练损失同时见到「LoRA 学到的样子」和
-「base 模型本来的样子」，让 LoRA 只学差异。**不带 LoRA** —— 出现 LoRA
-反而会把要保留的 prior 给覆盖了。
+Design comes from DreamBooth prior preservation: the training loss sees both
+"what the LoRA has learned" and "what the base model originally looked like"
+at the same time, so the LoRA only learns the difference. **No LoRA is
+attached** here — attaching one would overwrite the very prior we're trying to
+preserve.
 
-注意：不使用 `from __future__ import annotations`——Pydantic v2 + Python 3.12+
-在延迟求值模式下会将 typing._SpecialForm 当成 schema key，触发 AttributeError。
+Note: does NOT use `from __future__ import annotations` — under Pydantic v2 +
+Python 3.12+'s deferred evaluation, that would turn typing._SpecialForm into a
+schema key and raise AttributeError.
 """
 from typing import Any, Literal
 
@@ -16,33 +19,36 @@ from .generate import validate_sampling_for_family
 
 
 class RegAiConfig(BaseModel):
-    """先验生成的 JSON 配置（对应 runtime/anima_reg_ai.py）。
+    """JSON config for prior generation (corresponds to runtime/anima_reg_ai.py).
 
-    设计来自 DreamBooth prior preservation：训练损失同时见到「LoRA 学到的样子」和
-    「base 模型本来的样子」，让 LoRA 只学差异。**不带 LoRA** —— 出现 LoRA
-    反而会把要保留的 prior 给覆盖了。
+    Design comes from DreamBooth prior preservation: the training loss sees
+    both "what the LoRA has learned" and "what the base model originally
+    looked like" at the same time, so the LoRA only learns the difference.
+    **No LoRA is attached** here — attaching one would overwrite the very
+    prior we're trying to preserve.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # 模型族（服务端从 version config 读取——先验生成是 version 级操作，
-    # 族跟随该 version 的训练配置，不是用户请求级选择）
+    # Model family (read server-side from the version config — prior generation
+    # is a version-level operation; the family follows that version's training
+    # config, it's not a per-request user choice)
     model_family: Literal["anima", "krea2"] = Field("anima")
 
-    # 模型路径（服务端从 secrets 填充）
+    # Model paths (filled server-side from secrets)
     transformer_path: str = Field("")
     vae_path: str = Field("")
     text_encoder_path: str = Field("")
     t5_tokenizer_path: str = Field("")
 
-    # 数据目录（服务端填充）
+    # Data directories (filled server-side)
     train_dir: str = Field("")
     reg_dir: str = Field("")
 
-    # 生成控制
+    # Generation controls
     excluded_tags: list[str] = Field(
         default_factory=list,
-        description="排除的 tag（不参与 prompt 拼接）",
+        description="Excluded tags (not included in the prompt)",
     )
     negative_prompt: str = Field("")
     width: int = Field(1024, ge=256, le=4096)
@@ -51,25 +57,26 @@ class RegAiConfig(BaseModel):
     cfg_scale: float = Field(4.0, ge=0.0, le=20.0)
     sampler_name: Literal["er_sde", "dpmpp_3m_sde", "euler"] = Field("er_sde")
     scheduler: Literal["simple", "sgm_uniform"] = Field("simple")
-    seed: int = Field(0, description="随机种子（0=随机）")
+    seed: int = Field(0, description="Random seed (0 = random)")
     incremental: bool = Field(
         False,
-        description="补足模式：跳过 reg 子文件夹中已有以 train_stem 开头的图（重启续跑用）",
+        description="Fill-in mode: skip images already present in the reg subfolder whose filenames start with train_stem (for resuming after a restart)",
     )
-    # 本 fork：reg 子文件夹 Kohya repeat 前缀可配置（独立于 train repeat）
+    # This fork: the reg subfolder's Kohya repeat prefix is configurable (independent of the train repeat)
     repeat: int = Field(
         1,
         ge=1,
         le=100,
         description=(
-            "reg 子文件夹 Kohya 风格 repeat 前缀（N_label）。reg 集独立于 train "
-            "repeat，默认 1（DreamBooth 标准：reg 每张每 epoch 见 1 次）。"
+            "Kohya-style repeat prefix (N_label) for the reg subfolder. The reg set's "
+            "repeat is independent of the train repeat; defaults to 1 (DreamBooth "
+            "standard: each reg image is seen once per epoch)."
         ),
     )
     mixed_precision: str = Field("bf16")
     attention_backend: AttentionBackend = Field(
         "flash_attn",
-        description="Attention backend：none（SDPA）/ xformers / flash_attn",
+        description="Attention backend: none (SDPA) / xformers / flash_attn",
     )
 
     @model_validator(mode="after")

@@ -1,111 +1,113 @@
-# Style-Friendly SNR Sampler（风格 LoRA 专用 timestep 采样）
+# Style-Friendly SNR Sampler (timestep sampling for style LoRAs)
 
-> 状态：**已实现**（`timestep_sampling: style_friendly`），opt-in / default-off。
-> 不选本模式时全链路逐字节等价于改动前。
-> 论文：[Style-Friendly SNR Sampler for Style-Driven Generation](https://arxiv.org/abs/2411.14793)
-> （在 FLUX-dev / SD3.5 上验证；两者与 Anima 同为 rectified flow，数学可直接搬）。
+> Status: **implemented** (`timestep_sampling: style_friendly`), opt-in / default-off.
+> When this mode isn't selected, the whole pipeline is byte-for-byte equivalent to before the change.
+> Paper: [Style-Friendly SNR Sampler for Style-Driven Generation](https://arxiv.org/abs/2411.14793)
+> (validated on FLUX-dev / SD3.5; both are rectified flow like Anima, so the math carries over directly).
 
-## 1. 解决什么问题
+## 1. What problem this solves
 
-训练一个 step 要先抽一个噪声水平 `t`。**不同噪声档学到的东西不一样**：
+A training step first draws a noise level `t`. **Different noise bands teach the model different things**:
 
-| t 区间 | 模型在这一档能看到什么 | 学到的是 |
+| t range | what the model can see at this level | what it learns |
 |---|---|---|
-| 高（≈0.8-0.99） | 只剩大团色块与明暗关系 | 用色、光照、构图、块面、整体气质 = **风格** |
-| 中（≈0.4-0.7） | 轮廓与形体成形 | 结构、解剖、姿态 |
-| 低（≈0.05-0.3） | 细线与纹理 | 笔触颗粒、毛发丝、噪点 = **细节/易过拟合区** |
+| high (≈0.8-0.99) | only large color blobs and light/dark relationships | color, lighting, composition, blocking, overall mood = **style** |
+| mid (≈0.4-0.7) | outlines and form taking shape | structure, anatomy, pose |
+| low (≈0.05-0.3) | fine lines and texture | brush texture, fur strands, noise grain = **detail / easily overfit region** |
 
-SD3/Anima 默认的 `logit_normal` 把火力摊在中段，风格档欠采样。论文的观察是：
-把 log-SNR 分布整体推向低值（= 高噪声）后风格贴合度显著上升——**rank 32 + 本采样器
-超过 rank 128 + SD3 采样器**，即"采到正确的噪声档"比"堆可训练参数"更划算。
+SD3/Anima's default `logit_normal` concentrates firepower in the mid range, undersampling the style band. The paper's observation is:
+pushing the log-SNR distribution as a whole toward low values (= high noise) significantly improves style fidelity — **rank 32 with this
+sampler beats rank 128 with the SD3 sampler**, i.e. "sampling the right noise band" is more cost-effective than "stacking trainable
+parameters."
 
-对风格 LoRA 的实际意义：想要"整体气质像，但别把数据集的细节死记硬背下来"时，
-这是比调 rank / LR / 步数更直接的旋钮。
+The practical implication for style LoRAs: when you want "the overall mood to match, without memorizing the dataset's details," this is a
+more direct lever than tuning rank / LR / step count.
 
-## 2. 数学
+## 2. Math
 
-本仓库 rectified flow 约定：`t=0` 数据端、`t=1` 噪声端、`x_t = (1-t)·x0 + t·x1`。
+This repo's rectified flow convention: `t=0` is the data end, `t=1` is the noise end, `x_t = (1-t)·x0 + t·x1`.
 
 ```
-SNR = ((1-t)/t)²                  # 信号/噪声功率比
+SNR = ((1-t)/t)²                  # signal-to-noise power ratio
 λ   = log-SNR = 2·ln((1-t)/t)
-t   = sigmoid(-λ/2)               # 反解
+t   = sigmoid(-λ/2)               # inverse
 ```
 
-采样：`λ ~ N(style_snr_mean, style_snr_sigma²)` → `t = sigmoid(-λ/2)`。
+Sampling: `λ ~ N(style_snr_mean, style_snr_sigma²)` → `t = sigmoid(-λ/2)`.
 
-实现：`runtime/training/timestep_sampling.py::sample_t_style_friendly`。
+Implementation: `runtime/training/timestep_sampling.py::sample_t_style_friendly`.
 
-## 3. 怎么开
+## 3. How to enable it
 
 ```yaml
-timestep_sampling: style_friendly   # 新增枚举值
-style_snr_mean: -6.0                # log-SNR 均值；论文 FLUX/SD3.5 配方
-style_snr_sigma: 2.0                # log-SNR 标准差；论文推荐 2.0-3.0
+timestep_sampling: style_friendly   # new enum value
+style_snr_mean: -6.0                # log-SNR mean; the paper's FLUX/SD3.5 recipe
+style_snr_sigma: 2.0                # log-SNR standard deviation; paper recommends 2.0-3.0
 ```
 
-| mean | 中位 t | 效果 |
+| mean | median t | effect |
 |---|---|---|
-| -8 | ≈0.982 | 极端风格档；结构/细节几乎不学 |
-| **-6** | **≈0.953** | 论文配方，风格优先 |
-| -4 | ≈0.881 | 风格为主 + 一点结构 |
-| -2 | ≈0.731 | 约等于现默认 `logit_normal + shift 3`（≈0.75） |
-| 0 | 0.5 | 中性 |
+| -8 | ≈0.982 | extreme style band; structure/detail are barely learned |
+| **-6** | **≈0.953** | the paper's recipe, style-prioritized |
+| -4 | ≈0.881 | mostly style + a bit of structure |
+| -2 | ≈0.731 | roughly equivalent to the current default `logit_normal + shift 3` (≈0.75) |
+| 0 | 0.5 | neutral |
 
-`style_snr_sigma` 是窗口宽度：小 = 火力集中但覆盖窄（该档过拟合风险），
-大 = 覆盖宽但回到摊薄。先用 2.0。
+`style_snr_sigma` is the window width: smaller = firepower concentrated but narrow coverage (overfitting risk in that band),
+larger = wide coverage but back to being diluted. Start with 2.0.
 
-## 3.5 与现默认的精确关系
+## 3.5 Exact relationship to the current default
 
-现默认 `logit_normal + timestep_shift=s` **恰好是本模式的一个特例**：
+The current default `logit_normal + timestep_shift=s` is **exactly a special case of this mode**:
 
 ```
-u = sigmoid(z), z~N(0,1)；Möbius shift 在 log-odds 上是平移 logit(t) = z + ln s
+u = sigmoid(z), z~N(0,1); the Möbius shift is a translation in log-odds space, logit(t) = z + ln s
 λ = 2·ln((1-t)/t) = -2·logit(t)  ⇒  λ ~ N(-2·ln s, 2²)
 ```
 
-即 `shift=s` ≡ `style_friendly(mean=-2·ln s, sigma=2)`：
+That is, `shift=s` ≡ `style_friendly(mean=-2·ln s, sigma=2)`:
 
-| timestep_shift | 等价 style_snr_mean | 中位 t |
+| timestep_shift | equivalent style_snr_mean | median t |
 |---|---|---|
 | 2.0 | -1.39 | 0.667 |
 | 2.5 | -1.83 | 0.714 |
-| **3.0（现默认）** | **-2.20** | 0.749 |
+| **3.0 (current default)** | **-2.20** | 0.749 |
 | 4.0 | -2.77 | 0.799 |
 
-论文的风格档配方是 **-6**——比现默认低近 4 个 log-SNR 单位。这就是"默认配置离风格档
-有多远"的量化答案，也是为什么单纯调大 `timestep_shift` 到不了那儿：要做到 mean=-6
-需要 shift≈20，远超字段上限 10（且那条路径的 sigma 被写死为 2，不可调）。
+The paper's style-band recipe is **-6** — nearly 4 log-SNR units lower than the current default. This is the quantified answer to
+"how far the default config is from the style band," and also why simply increasing `timestep_shift` can't get you there: reaching
+mean=-6 would require shift≈20, far beyond the field's cap of 10 (and sigma on that path is hardcoded to 2, not adjustable).
 
-对照（sigma=2.0）：
+For comparison (sigma=2.0):
 
-| style_snr_mean | 中位 t | 样本落在 t>0.9 的比例 |
+| style_snr_mean | median t | fraction of samples with t>0.9 |
 |---|---|---|
 | -8 | 0.982 | 96% |
 | -6 | 0.953 | 79% |
 | -5 | 0.924 | 62% |
 | -4 | 0.881 | 42% |
 | -3 | 0.817 | 24% |
-| -2.2（= 现默认） | 0.749 | 13% |
+| -2.2 (= current default) | 0.749 | 13% |
 
-契约由 `test_is_a_strict_generalisation_of_logit_normal_shift` 钉死。
+This contract is pinned down by `test_is_a_strict_generalisation_of_logit_normal_shift`.
 
-## 4. 与既有旋钮的关系
+## 4. Relationship to existing knobs
 
-- **`timestep_shift` 不参与**。它是 Möbius 偏移、作用在 logit-normal 内部的 `u` 上；
-  本模式的偏移完全由 `style_snr_mean` 给定，两者叠加 = 双重偏移。schema 在选中本模式时
-  隐藏该字段，`sample_t` 也不读它（`test_sample_t_dispatches_and_ignores_timestep_shift`）。
-- **`timestep_schedule_shift` 仍叠加**（默认 1.0 = 恒等）。它是采样后的全局 σ schedule 偏移，
-  与本模式正交；一般保持 1.0。
-- **`timestep_shift_resolution_aware` 仍独立生效**：按每图 token 数做分辨率修正。
-  注意它与本模式叠加时同样是乘法复合——原生分辨率训练下大图会被再往噪声端推一截。
-- **`loss_weighting=detail_inv_t`** 与本模式方向相反（强化低 t 细节）。同开等于一边踩油门
-  一边踩刹车，不推荐。
-- **InfoNoise**：开启时正式阶段由自适应 CDF 接管分布，本模式只作为热身期 baseline
-  （用户设的 mean/sigma 会被透传过去）。
+- **`timestep_shift` doesn't participate.** It's a Möbius offset that acts on the `u` inside logit-normal; this mode's offset comes
+  entirely from `style_snr_mean`, and stacking both would be a double offset. The schema hides this field when this mode is selected,
+  and `sample_t` doesn't read it either (`test_sample_t_dispatches_and_ignores_timestep_shift`).
+- **`timestep_schedule_shift` still stacks** (default 1.0 = identity). It's a global σ-schedule offset applied after sampling, orthogonal
+  to this mode; generally keep it at 1.0.
+- **`timestep_shift_resolution_aware` still applies independently**: it does a per-image resolution correction based on token count.
+  Note that when combined with this mode it's still a multiplicative composition — under native-resolution training, large images get
+  pushed further toward the noise end.
+- **`loss_weighting=detail_inv_t`** points in the opposite direction from this mode (it emphasizes low-t detail). Using both together is
+  like hitting the gas and the brake at once — not recommended.
+- **InfoNoise**: when enabled, the adaptive CDF takes over the distribution during the main phase; this mode only serves as the
+  warmup-phase baseline (the user's mean/sigma settings are passed through to it).
 
-## 5. 测试
+## 5. Tests
 
-`tests/test_style_friendly_sampler.py`（纯 CPU）：约定映射、论文默认落点、
-mean 单调性、sigma 宽度、开区间、shift 不参与、schedule_shift 仍叠加、
-registry 接线、`mean=0.0` 不被 falsy 默认吞掉、schema 字段与 show_when。
+`tests/test_style_friendly_sampler.py` (CPU-only): convention mapping, the paper's default landing point,
+mean monotonicity, sigma width, open interval, shift not participating, schedule_shift still stacking,
+registry wiring, `mean=0.0` not being swallowed by a falsy default, schema field and show_when.

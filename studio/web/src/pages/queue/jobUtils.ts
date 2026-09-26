@@ -1,3 +1,4 @@
+import i18n from '../../i18n'
 /** 数据作业共享工具（DataJobsPanel + QueueDetail 共用）。
  *  R-5 台账合并后作业就是 task（task_type = kind），工具全部按 Task 形状取字段。 */
 import type { Task, TaskType } from '../../api/client'
@@ -36,7 +37,7 @@ export function fmtJobDuration(start: number | null, end: number | null): string
 
 export function fmtJobTime(ts: number | null | undefined): string {
   if (!ts) return '—'
-  return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false })
+  return new Date(ts * 1000).toLocaleString(i18n.language, { hour12: false })
 }
 
 /** 作业 kind → 原生步骤页深链（download 是 project 级，其余 version 级；

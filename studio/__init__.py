@@ -1,41 +1,43 @@
-"""AnimaStudio — 训练监控、配置编辑与任务队列守护进程。
+"""AnimaStudio — training monitor, config editor, and task queue daemon.
 
-## 顶层架构（0.11.0 重构后，详 ADR-0008）
+## Top-level architecture (post-0.11.0 restructure, see ADR-0008)
 
-studio/ 4 层（依赖方向：自上而下，**不允许反向**）：
+studio/ has 4 layers (dependency direction: top to bottom, **never reversed**):
 
 ```
-    api/             HTTP 表面（FastAPI app + 27 router + schemas + deps）
-      ↓
-    services/        业务服务（11 子包：tagging / booru / reg / inference /
-                    models / preprocess / projects / dataset / presets /
-                    runtime / data_io）
-      ↓
-    domain/          pydantic 模型（TrainingConfig 643 行 + LoRA / XY / Generate
-                    / RegAi + migrations）
-      ↓
-    infrastructure/  路径常量 / 数据库 / event bus / secrets / 日志 / argparse
-                    桥接 / migrations
+    api/             HTTP surface (FastAPI app + 27 routers + schemas + deps)
+      |
+    services/        business services (11 subpackages: tagging / booru / reg /
+                    inference / models / preprocess / projects / dataset /
+                    presets / runtime / data_io)
+      |
+    domain/          pydantic models (TrainingConfig, 643 lines + LoRA / XY /
+                    Generate / RegAi + migrations)
+      |
+    infrastructure/  path constants / db / event bus / secrets / logging /
+                    argparse bridge / migrations
 ```
 
-`supervisor/`（任务调度守护线程）和 `workers/`（4 个子进程入口）跨层使用，
-不归 4 层之一。
+`supervisor/` (the task-scheduling daemon thread) and `workers/` (4 subprocess
+entry points) cut across layers and don't belong to any one of the 4.
 
-## 入口文件
+## Entry files
 
-- `server.py` — 51 行 shim，re-export `app` / `main`，给老 `from studio.server`
-  路径兼容（真实实现在 api/app.py / api/main.py）
-- `cli.py` — `python -m studio` launcher（build / run / dev / test 子命令）
-- `__main__.py` — `python -m studio` 入口
+- `server.py` — a 51-line shim that re-exports `app` / `main` for backward
+  compatibility with `from studio.server` (the real implementation lives in
+  api/app.py / api/main.py)
+- `cli.py` — the `python -m studio` launcher (build / run / dev / test subcommands)
+- `__main__.py` — the `python -m studio` entry point
 
 ## __version__
 
-全仓库版本号唯一来源（single source of truth）：
-- FastAPI app 通过它注入 `app.version` + `/api/health` 暴露
-- 前端 Sidebar 通过 `/api/health` 拉取，不再硬编码
-- `studio/web/package.json` 的 version 字段需手动同步保持一致
-- 每次 release 改这里 + 在 CHANGELOG.md 加一段 + 同步 package.json
+The single source of truth for the version number across the whole repo:
+- the FastAPI app injects it as `app.version`, exposed via `/api/health`
+- the frontend Sidebar fetches it from `/api/health` instead of hardcoding it
+- `studio/web/package.json`'s version field must be kept in sync manually
+- on every release: bump this, add a CHANGELOG.md entry, and sync package.json
 
-版本规则：MAJOR.MINOR.PATCH（语义版本，但 0.x 阶段 MINOR 即视为破坏性升级）。
+Version scheme: MAJOR.MINOR.PATCH (semver, but during the 0.x phase a MINOR
+bump is treated as a breaking change).
 """
 __version__ = "0.20.2"

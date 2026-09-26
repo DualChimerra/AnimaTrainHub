@@ -1,13 +1,14 @@
-"""LR scheduler plugin registry（ADR 0003 PR-C）。
+"""LR scheduler plugin registry (ADR 0003 PR-C).
 
-加新 scheduler（warmup_cosine / one_cycle / polynomial）的步骤：
-1. 写 training/schedulers/{variant}.py 含 `build(args, optimizer, total_steps)`
-2. 本文件 BUILDERS 字典加一行
-3. studio/schema.py 的 lr_scheduler Literal 加枚举值 + 该 variant 专属字段
+To add a new scheduler (warmup_cosine / one_cycle / polynomial):
+1. Write training/schedulers/{variant}.py with `build(args, optimizer, total_steps)`.
+2. Add a line to the BUILDERS dict in this file.
+3. Add the enum value (and any variant-specific fields) to the lr_scheduler
+   Literal in studio/schema.py.
 
-详见 ADR 0003 "Case 7: warmup_cosine"。
+See ADR 0003 "Case 7: warmup_cosine" for details.
 
-特殊键 "none" 不开文件：build_scheduler 直接返回 None。
+The special key "none" has no file: build_scheduler returns None directly.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from training.schedulers import (
 __all__ = ["BUILDERS", "build_scheduler", "validate_schema_consistency"]
 
 
-# "none" 不在 BUILDERS —— build_scheduler 显式判一下返回 None。
+# "none" is not in BUILDERS -- build_scheduler special-cases it and returns None.
 BUILDERS: dict[str, Callable] = {
     "constant_then_cosine": constant_then_cosine.build,
     "cosine": cosine.build,
@@ -34,18 +35,18 @@ BUILDERS: dict[str, Callable] = {
     "cosine_with_warmup": cosine_with_warmup.build,
 }
 
-# schema 允许 "none" 但 BUILDERS 不收录；validate_schema_consistency 据此放行
+# schema allows "none" but BUILDERS doesn't list it; validate_schema_consistency exempts it
 SCHEMA_ONLY_OPTIONS = {"none"}
 
 
 def build_scheduler(args, optimizer, total_steps: Optional[int]):
-    """按 args.lr_scheduler 派发；"none" 或未配置返回 None。"""
+    """Dispatch on args.lr_scheduler; "none" or unset returns None."""
     lr_sched = (getattr(args, "lr_scheduler", "none") or "none").lower()
     if lr_sched == "none":
         return None
     if lr_sched not in BUILDERS:
         raise ValueError(
-            f"未知 lr_scheduler={lr_sched!r}；已注册: {sorted(BUILDERS)} + 'none'"
+            f"Unknown lr_scheduler={lr_sched!r}; registered: {sorted(BUILDERS)} + 'none'"
         )
     return BUILDERS[lr_sched](args, optimizer, total_steps)
 
@@ -58,8 +59,8 @@ def validate_schema_consistency() -> None:
     registered = set(BUILDERS)
     if schema_options != registered:
         raise RuntimeError(
-            f"scheduler 注册与 schema 不同步（PR-C registry）：\n"
-            f"  schema 有但未注册: {schema_options - registered}\n"
-            f"  注册但 schema 没列: {registered - schema_options}\n"
-            f"  （schema-only 跳过校验: {SCHEMA_ONLY_OPTIONS}）"
+            f"Scheduler registration is out of sync with the schema (PR-C registry):\n"
+            f"  in schema but not registered: {schema_options - registered}\n"
+            f"  registered but not in schema: {registered - schema_options}\n"
+            f"  (schema-only, skipped: {SCHEMA_ONLY_OPTIONS})"
         )

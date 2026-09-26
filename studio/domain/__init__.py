@@ -1,16 +1,18 @@
-"""studio.domain — pydantic schema 单一权威源（无 I/O）。
+"""studio.domain — single source of truth for the pydantic schema (no I/O).
 
-从原 studio/schema.py 976 行拆出。结构：
+Split out of the original studio/schema.py (976 lines). Structure:
   - common.py      _meta() helper, AttentionBackend, GROUP_ORDER
   - migrations.py  migrate_legacy_save_keys
-  - training.py    TrainingConfig（最大类 643 行；本次结构 PR 保持单类单文件）
+  - training.py    TrainingConfig (largest class, 643 lines; this restructuring PR
+                    keeps one class per file)
   - lora.py        LoraEntry
   - xy_matrix.py   XYAxisType, XYAxisSpec, XYMatrixSpec, _check_axis_values
   - generate.py    GenerateConfig
   - reg.py         RegAiConfig
 
-注意：不使用 `from __future__ import annotations`——Pydantic v2 + Python 3.12+
-在延迟求值模式下会将 typing._SpecialForm 当成 schema key，触发 AttributeError。
+Note: does NOT use `from __future__ import annotations` — under Pydantic v2 +
+Python 3.12+'s deferred evaluation, that would turn typing._SpecialForm into a
+schema key and raise AttributeError.
 """
 from .common import AttentionBackend, GROUP_ORDER, _meta
 from .comfy_parity import (

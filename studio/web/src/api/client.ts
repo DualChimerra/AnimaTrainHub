@@ -1,9 +1,9 @@
-// 与 FastAPI 守护进程交互的薄封装。
-// 开发时由 Vite proxy 转发到 127.0.0.1:8765；生产部署时与 API 同源。
+// Thin wrapper around interaction with the FastAPI daemon.
+// In dev it's forwarded by the Vite proxy to 127.0.0.1:8765; in production it's same-origin with the API.
 
-// ADR-0009 PR-3 C3: 把后端回的 X-Trace-Id 写到 atom，给 ErrorBoundary /
-// window.onerror 上报时带上（让开发者在 server log 能 join "前端崩前最后一次
-// API 失败" 跟 "用户实际看到的 toast"）。
+// ADR-0009 PR-3 C3: write the X-Trace-Id returned by the backend to an atom, so ErrorBoundary /
+// window.onerror reports can attach it (letting developers join "the last API failure before the
+// frontend crashed" with "the toast the user actually saw" in the server log).
 import { setLastApiTraceId } from '../lib/errors/report'
 import i18n from '../i18n'
 
@@ -25,7 +25,7 @@ export interface SystemStats {
   cpu_pct: number
   ram_used_gb: number
   ram_total_gb: number
-  /** null = NVML 不可用 (无 NVIDIA / 驱动缺失)；[] = NVML 可用但 0 卡。两种都不显示 GPU pill。 */
+  /** null = NVML unavailable (no NVIDIA / driver missing); [] = NVML available but 0 cards. Neither shows a GPU pill. */
   gpu: GpuStats[] | null
 }
 
@@ -42,30 +42,32 @@ export interface SchemaProperty {
   control?: string
   cli_alias?: string
   show_when?: string
-  /** option 级 show_when（多模型 P4-2）：enum 值 → 表达式（语法同 show_when），
-   * 求值为假的选项从下拉隐藏。未列出的选项永远可见；当前已选中的值即使被
-   * 门控也保留显示（表单如实反映 config，越族值由后端校验报错）。 */
+  /** Option-level show_when (multi-model P4-2): enum value -> expression (same syntax as show_when),
+   * options evaluating to false are hidden from the dropdown. Unlisted options are always visible; the
+   * currently selected value stays visible even if gated (the form reflects config as-is, the backend
+   * rejects out-of-range values on validation). */
   option_show_when?: Record<string, string>
-  /** 当此表达式为真时字段在 UI 上 disabled（值由 SchemaForm 自动回退到 default）。
-   * 表达式语法与 show_when 一致：`key==value` / `key!=value`。
-   * 例：lr_scheduler 在 optimizer_type=prodigy_plus_schedulefree 时被 disable。 */
+  /** When this expression is true, the field is disabled in the UI (value auto-falls back to default via SchemaForm).
+   * Expression syntax matches show_when: `key==value` / `key!=value`.
+   * Example: lr_scheduler is disabled when optimizer_type=prodigy_plus_schedulefree. */
   disable_when?: string
-  /** option 级禁值（刀 2 / R2 v2，D4）：enum 值 → 表达式为真时该选项灰显
-   * 不可选（不隐藏——用户能看见为什么不可选，title 显示 disable_hint）。
-   * 后端 _enforce_disable_rules 消费同一份声明做校验。 */
+  /** Option-level disable value (knife 2 / R2 v2, D4): enum value -> when the expression is true, that
+   * option is greyed out and unselectable (not hidden -- the user can see why it's unselectable via
+   * the disable_hint title). The backend's _enforce_disable_rules consumes the same declaration for validation. */
   option_disable_when?: Record<string, string>
-  /** disable_when 触发时写回的值；缺省回退到 default。 */
+  /** Value to write back when disable_when triggers; falls back to default if unset. */
   disable_value?: unknown
-  /** disable_when 触发时显示的提示徽章文本。 */
+  /** Hint badge text shown when disable_when triggers. */
   disable_hint?: string
-  /** 条件说明文字：当 alt_description_when 表达式为真时，替换 description 显示。 */
+  /** Conditional description text: replaces description when the alt_description_when expression is true. */
   alt_description?: string
-  /** 触发 alt_description 的条件表达式，语法同 show_when。 */
+  /** Condition expression that triggers alt_description, same syntax as show_when. */
   alt_description_when?: string
-  /** 高级模式专属字段，简单模式下隐藏。 */
+  /** Advanced-mode-only field, hidden in simple mode. */
   advanced?: boolean
-  /** 后端打了 hidden=True 的字段：值仍随 ConfigData 透传 / 保存，但 SchemaForm
-   * 不渲染。用于「该字段对当前用户群无意义但 schema 必须保留」的兜底场景。 */
+  /** A field the backend marked hidden=True: the value still passes through / saves with ConfigData, but
+   * SchemaForm doesn't render it. Used as a fallback for "this field is meaningless to the current user
+   * group but the schema must keep it". */
   hidden?: boolean
   anyOf?: Array<{ type?: string }>
   items?: SchemaProperty
@@ -246,10 +248,11 @@ export interface EvalMetricResult {
   baseline?: boolean
   /** 各指标相对 baseline 的净增益 Δ = checkpoint 值 − baseline 值。 */
   delta?: Record<string, number>
-  /** baseline 各指标值（参考）。 */
+  /** Per-metric baseline values (for reference). */
   baseline_metrics?: Record<string, number>
-  /** 出图阶段（eval_samples run.json）的状态 + 逐图汇总 {total, pending, running,
-   *  done, failed}。出图是评估里最耗时的部分；用它显示「出图 done/total」子进度。 */
+  /** Status of the sample-generation stage (eval_samples run.json) plus a per-image summary
+   *  {total, pending, running, done, failed}. Sample generation is the most time-consuming part
+   *  of evaluation; used to show a "generating done/total" sub-progress. */
   sample_run?: {
     run_id: string
     path?: string
@@ -260,8 +263,8 @@ export interface EvalMetricResult {
   }
 }
 
-/** 训练后 / 手动评估的一条 job（inline 训练时评估无 job）。按 run_id 关联到某个
- *  checkpoint 行，用来取原始日志（含报错）。 */
+/** A post-training / manual evaluation job (inline in-training evaluation has no job). Related to a
+ *  checkpoint row via run_id, used to fetch the raw log (including errors). */
 export interface EvalJobInfo {
   id: number
   kind: 'eval_samples' | 'eval_clip' | 'eval_dino' | string
@@ -279,9 +282,10 @@ export interface EvalMetricsListResponse {
   results: EvalMetricResult[]
 }
 
-/** Preset messages 序列里的单条 item。
- *  - type='text'：普通文本，需指定 role；content 是 prompt 内容
- *  - type='image'：图片占位 item，打标时后端塞入当前图片；UI 不可编辑 content，但可拖动位置
+/** A single item in the preset messages sequence.
+ *  - type='text': plain text, must specify role; content is the prompt text
+ *  - type='image': image placeholder item, the backend fills in the current image while tagging;
+ *    the UI can't edit content but can drag it to reorder
  */
 export interface LLMMessage {
   type: 'text' | 'image'
@@ -289,8 +293,9 @@ export interface LLMMessage {
   content: string
 }
 
-/** 单个 LLM tagger preset = 一整套 endpoint + messages + 生成参数。
- *  builtin 仅标识 id 在内置列表（用于 UI 显示 "重置为默认"），不锁字段。
+/** A single LLM tagger preset = a full set of endpoint + messages + generation params.
+ *  builtin only flags that the id is in the built-in list (used to show "Reset to default" in the
+ *  UI); it doesn't lock the fields.
  */
 export interface LLMPreset {
   id: string
@@ -336,12 +341,12 @@ export interface LLMConnectionTestResult {
 
 export interface WD14Config {
   model_id: string
-  /** 候选模型列表；用户在「设置 → WD14」里维护，model_id 必属于该列表。 */
+  /** Candidate model list; the user maintains it under "Settings -> WD14", model_id must be in this list. */
   model_ids: string[]
   threshold_general: number
   threshold_character: number
   blacklist_tags: string[]
-  /** PP8 — batch 推理大小；CPU EP 时强制 1。 */
+  /** PP8 -- batch inference size; forced to 1 on the CPU EP. */
   batch_size: number
 }
 
@@ -361,12 +366,12 @@ export interface CLTaggerConfig {
   batch_size: number
 }
 
-/** PR-S2 — PyTorch 安装状态 + 驱动检测 + 推荐 cu tag。 */
+/** PR-S2 -- PyTorch install status + driver detection + recommended cu tag. */
 export type TorchCuTag = 'cu128' | 'cu126' | 'cu124' | 'cu118' | 'cpu'
 export interface TorchStatus {
   installed: boolean
   version: string | null              // "2.5.0+cu128"
-  cuda_build: TorchCuTag | null       // 解析自 +suffix
+  cuda_build: TorchCuTag | null       // parsed from the +suffix
   cuda_available: boolean             // torch.cuda.is_available()
   device_name: string | null          // "NVIDIA GeForce RTX 5090"
   cuda_detect: {
@@ -374,79 +379,85 @@ export interface TorchStatus {
     driver_version: string | null
     gpu_name: string | null
   }
-  recommended_cu_tag: TorchCuTag      // 按驱动版本推荐
-  /** 装了 CPU wheel 但有 NVIDIA GPU → 误装，UI 显示「重装为 CUDA 版」红色提示。 */
+  recommended_cu_tag: TorchCuTag      // recommended based on driver version
+  /** CPU wheel installed but an NVIDIA GPU is present -> mis-installed, UI shows a red "reinstall CUDA build" hint. */
   is_cpu_with_gpu: boolean
-  /** 装了 CUDA wheel 但 cuda.is_available()=False → 驱动 / WSL 问题，pip 修不了。 */
+  /** CUDA wheel installed but cuda.is_available()=False -> driver / WSL issue, pip can't fix it. */
   is_cuda_build_unavailable: boolean
 }
-/** torch reinstall 总是 deferred：server 写 marker，下次 launcher 启动时跑 pip。
- *  这样避开 Windows 上 torch .pyd 已被 server 进程加载、pip 无法 replace 的死锁。 */
+/** torch reinstall is always deferred: the server writes a marker, and pip runs on the next launcher
+ *  start. This avoids a deadlock on Windows where the torch .pyd is already loaded by the server
+ *  process and pip can't replace it. */
 export interface TorchReinstallResult {
-  pending: true                       // 永远 true，提示 UI 走「请重启」分支
-  target: string                      // 用户传的（"auto" 等）
-  tag: TorchCuTag                     // 实际选定（auto 已被 server 解析）
-  message: string                     // 中文人话提示，UI 直接显示
+  pending: true                       // always true, tells the UI to show the "please restart" branch
+  target: string                      // what the user passed ("auto" etc.)
+  tag: TorchCuTag                     // actually selected (auto already resolved by the server)
+  message: string                     // human-readable status message, shown directly in the UI
 }
 
-/** PR-7b — Flash Attention 安装状态 + 环境检测 + GitHub 候选 wheel。 */
+/** PR-7b -- Flash Attention install status + environment detection + candidate GitHub wheels. */
 export interface FlashAttnEnv {
   python_tag: string                 // cp311
-  cuda_tag: string | null            // cu128 / null = 没 nvidia-smi 也没 torch
-  cuda_ver: string | null            // 12.8（PyTorch 编译时绑定，flash_attn ABI 跟它走）
-  /** nvidia-smi 报告的驱动支持的最高 CUDA；与 cuda_ver 可能不同。
-   * 排错时给用户看："驱动支持 cu130，PyTorch 是 cu128，应装 cu128 wheel"。 */
+  cuda_tag: string | null            // cu128 / null = no nvidia-smi and no torch
+  cuda_ver: string | null            // 12.8 (bound at PyTorch build time, flash_attn ABI follows it)
+  /** Highest CUDA supported by the driver, as reported by nvidia-smi; may differ from cuda_ver.
+   * Shown to the user for troubleshooting: "driver supports cu130, PyTorch is cu128, install the cu128 wheel". */
   driver_cuda_ver: string | null
   torch_tag: string | null           // torch2.5
   torch_ver: string | null
-  /** 'cu128' / 'cu130' = CUDA 版 torch；'cpu' = CPU 版（装不了 flash_attn）；
-   *  null = torch 未装 / 检测失败。UI 用 'cpu' 触发「先重装 CUDA 版」提示。 */
+  /** 'cu128' / 'cu130' = CUDA build of torch; 'cpu' = CPU build (can't install flash_attn);
+   *  null = torch not installed / detection failed. UI uses 'cpu' to trigger a "reinstall CUDA build first" hint. */
   torch_cuda_build: string | null
   platform: 'linux_x86_64' | 'win_amd64' | null
 }
 export interface FlashAttnCandidate {
   url: string
   name: string                       // flash_attn-2.8.3+cu128torch2.5-cp311-cp311-win_amd64.whl
-  notes: string[]                    // 兼容性说明（CUDA 大版本不同 / Python 不兼容）
-  usable: boolean                    // false = Python ABI 不匹配，UI 灰显但允许强装
+  notes: string[]                    // compatibility notes (CUDA major version mismatch / Python incompatible)
+  usable: boolean                    // false = Python ABI mismatch, UI greys it out but still allows forcing install
 }
 export interface FlashAttnStatus {
   installed: boolean
   version: string | null
   env: FlashAttnEnv
-  candidates: FlashAttnCandidate[]   // 按 score 降序，最多 20
-  fetch_error: string | null         // GitHub API 限流 / 网络异常
+  candidates: FlashAttnCandidate[]   // sorted by score descending, max 20
+  fetch_error: string | null         // GitHub API rate-limited / network error
 }
 export interface FlashAttnInstallResult {
   installed: boolean
   version: string | null
   url: string
-  stdout_tail: string                // pip 输出末 40 行
+  stdout_tail: string                // last 40 lines of pip output
   restart_required: boolean
 }
 
-/** onnxruntime 装包状态 + nvidia-smi 检测 + 平台标识（前端用来按平台 disable 按钮）。 */
+/** onnxruntime install status + nvidia-smi detection + platform id (used by the frontend to disable
+ *  buttons per platform). */
 export interface WD14Runtime {
   installed: 'onnxruntime' | 'onnxruntime-gpu' | 'onnxruntime-directml' | null
   version: string | null
   providers: string[]
   cuda_available: boolean
-  /** DirectML EP 可用（Windows + 装了 onnxruntime-directml 时为 true）。 */
+  /** DirectML EP available (true on Windows with onnxruntime-directml installed). */
   directml_available: boolean
-  /** 后端 sys.platform：'win32' / 'linux' / 'darwin' 等。Settings UI 据此 disable
-   *  跨平台不可用的按钮（DirectML 仅 Windows；GPU + nvidia-* wheel 仅 Linux 最优）。 */
+  /** Backend sys.platform: 'win32' / 'linux' / 'darwin' etc. The Settings UI uses this to disable
+   *  buttons unavailable on the current platform (DirectML is Windows-only; GPU + nvidia-* wheel is
+   *  best on Linux). */
   platform: string
-  /** 装的包（dist-info）与当前进程已 import 的 .pyd 不一致 → 需重启 Studio。 */
+  /** The installed package (dist-info) doesn't match the .pyd already imported by the current process
+   *  -> Studio needs a restart. */
   restart_required: boolean
-  /** PP9.5 — InferenceSession 创建时实际 dlopen 报的错（如缺 libcurand.so.10）；
-   *  非 null 表示已自动降级到 CPU EP，UI 应提示用户装 CUDA 库或换 DirectML。 */
+  /** PP9.5 -- the actual dlopen error reported when creating an InferenceSession (e.g. missing
+   *  libcurand.so.10); non-null means it already auto-fell-back to the CPU EP, and the UI should
+   *  prompt the user to install CUDA libraries or switch to DirectML. */
   cuda_load_error: string | null
-  /** torch 的 CUDA 大版本（onnxruntime-gpu build 锚点）：12 / 13 / null。
-   *  装的 ORT build 必须同 major，否则 import 期 dlopen 挂（cu128 torch → 12）。 */
+  /** torch's CUDA major version (the anchor for the onnxruntime-gpu build): 12 / 13 / null.
+   *  The installed ORT build must match the same major version, or import-time dlopen hangs
+   *  (cu128 torch -> 12). */
   torch_cuda_major?: number | null
-  /** 已装 ORT 的 CUDA 大版本与 torch 不一致（如装成 cu13 但 torch 是 cu12）。 */
+  /** The installed ORT's CUDA major version doesn't match torch's (e.g. cu13 installed but torch is cu12). */
   ort_cuda_major_mismatch?: boolean
-  /** PP9.5 — torch 自带 CUDA so 预加载结果（Linux 才会 applied=true）。 */
+  /** PP9.5 -- result of preloading torch's bundled CUDA .so files (applied=true only on Linux). */
   preload?: {
     applied: boolean
     platform_skip: boolean
@@ -466,8 +477,9 @@ export interface WD14InstallResult extends WD14Runtime {
   installed_pkg: string | null
   installed_version: string | null
   stdout_tail: string
-  /** PP9.6 — GPU 路径连同装的 nvidia-*-cu12 wheels 报告；CPU 路径或非 Linux 为 null。
-   *  含 `error` 字段表示 onnxruntime-gpu 装好但 CUDA wheels 装失败（不致命）。 */
+  /** PP9.6 -- for the GPU path, reports the installed nvidia-*-cu12 wheels alongside it; null for the
+   *  CPU path or non-Linux. Presence of an `error` field means onnxruntime-gpu installed fine but the
+   *  CUDA wheels failed to install (non-fatal). */
   cuda_runtime: {
     installed: string[]
     skipped: string[]
@@ -485,76 +497,83 @@ export const DEFAULT_WD14_MODELS: readonly string[] = [
 ]
 
 export interface ModelsConfig {
-  /** fork 预设到 version 时是否自动用全局模型路径覆盖 4 个模型字段。
-   * ON（默认）：多数用户场景，4 字段在 UI 上 disabled；fork 始终用 Settings 全局。
-   * OFF：独立模型用户，fork 尊重预设值，4 字段可编辑 + picker。 */
+  /** Whether forking a preset to a version automatically overrides the 4 model fields with the
+   * global model paths.
+   * ON (default): the common case, the 4 fields are disabled in the UI; a fork always uses the
+   * Settings global paths.
+   * OFF: for users with independent models, a fork respects the preset value, the 4 fields are
+   * editable + have a picker. */
   auto_sync_paths: boolean
-  /** 训练模型根目录；null/空 → 回退 REPO_ROOT/models/（云端机改这里） */
+  /** Root directory for training models; null/empty -> falls back to REPO_ROOT/models/ (change this on cloud machines) */
   root: string | null
-  /** 当前默认主模型：官方 variant key（1.0 / preview3-base / ...）或
-   * custom_anima_paths 里的某个本地 .safetensors 路径。
-   * Studio 创建新 version 时把它展开成绝对路径写到 yaml.transformer_path；
-   * 已存在 version 不动（保证训练重现性）。 */
+  /** The current default base model: either an official variant key (1.0 / preview3-base / ...) or
+   * a local .safetensors path from custom_anima_paths.
+   * Studio expands it to an absolute path written to yaml.transformer_path when creating a new
+   * version; existing versions are left untouched (to keep training reproducible). */
   selected_anima: string
-  /** 按模型族保存的默认主模型：variant key 或已注册的本地路径。 */
+  /** Default base model saved per model family: a variant key or a registered local path. */
   selected: Record<string, string>
-  /** 按模型族选中的文本编码器：官方 variant（krea2："bf16"|"fp8"，缺失=bf16）
-   * 或用户注册的本地编码器目录绝对路径。决定训练新建 version 的
-   * text_encoder_path 默认 + 测试出图 TE 默认。 */
+  /** Text encoder selected per model family: an official variant (krea2: "bf16"|"fp8", missing = bf16)
+   * or an absolute path to a user-registered local encoder directory. Determines the
+   * text_encoder_path default for new training versions + the default TE for test generation. */
   selected_te?: Record<string, string>
-  /** 选中的 VAE：空串 = 官方 qwen_image_vae 落点，否则本地 .safetensors
-   * 绝对路径（VAE 族无关，两族共用一个选择）。 */
+  /** Selected VAE: empty string = the official qwen_image_vae location, otherwise a local
+   * .safetensors absolute path (family-agnostic, both families share one selection). */
   selected_vae?: string
-  /** 用户注册的本地 custom 主模型（.safetensors 绝对路径）。微调训练 /
-   * 在微调权重上测试出图用；仅登记路径，不下载不复制。 */
+  /** User-registered local custom base models (.safetensors absolute paths). Used for fine-tune
+   * training / test generation on fine-tuned weights; only registers the path, doesn't download or copy. */
   custom_anima_paths: string[]
-  /** 预处理默认放大器：预设 label（"4x-AnimeSharp" 等）或 custom 文件名
-   * （"my-anime.pth"）。Preprocess 页和 worker 用它定权重路径。 */
+  /** Default preprocessing upscaler: a preset label ("4x-AnimeSharp" etc.) or a custom filename
+   * ("my-anime.pth"). Used by the Preprocess page and the worker to resolve the weights path. */
   selected_upscaler: string
 }
 
 export interface QueueConfig {
-  /** R-1 资源档位：exclusive（训练/正则 AI/出图/评估出图）运行时是否放行
-   *  light 档（打标/超分/正则构建/评估指标，小模型）。默认 true。独占档
-   *  永不并行，不受此开关影响。 */
+  /** R-1 resource tier: whether the exclusive tier (train/regularization AI/generate/eval generate)
+   *  lets the light tier (tagging/upscale/regularization build/eval metrics, small models) run
+   *  concurrently while it's active. Default true. The exclusive tier never runs in parallel with
+   *  itself regardless of this switch. */
   light_tasks_during_train: boolean
 }
 
-/** Phase 2 commit 14 — 测试出图 daemon 行为。 */
+/** Phase 2 commit 14 -- test-generation daemon behavior. */
 export interface GenerateSecretsConfig {
-  /** TAEFlux 中间步预览节流。0=关；>0 → daemon 每 N 步推 256px JPEG。
-   * 模型缺失时 daemon 静默回退（无预览不影响出图）。 */
+  /** TAEFlux intermediate-step preview throttle. 0=off; >0 -> the daemon pushes a 256px JPEG every N steps.
+   * The daemon silently falls back when the model is missing (no preview doesn't block generation). */
   preview_every_n_steps: number
-  /** 注意力后端默认值（design 决策：用户配置一次，不每次出图都改）。
-   * Generate 页 enqueue 自动注入；Settings 训练 tab 切换。 */
+  /** Default attention backend (design decision: the user configures it once, not on every
+   * generation). Auto-injected when enqueuing from the Generate page; switched from the Settings
+   * training tab. */
   attention_backend: AttentionBackend
-  /** 测试出图 VAE decode 精度。bf16（默认）对齐 ComfyUI 现代 GPU 的 auto
-   * VAE dtype；fp32 全精度（decode 前 daemon 临时 offload DiT/Qwen 腾显存）。 */
+  /** VAE decode precision for test generation. bf16 (default) matches ComfyUI's auto VAE dtype on
+   * modern GPUs; fp32 is full precision (the daemon temporarily offloads DiT/Qwen to free VRAM before decode). */
   vae_precision: 'bf16' | 'fp32'
-  /** 测试出图 daemon 闲置 N 分钟自动卸载模型释放 VRAM。0 = 关闭，模型常驻
-   * 直到手动点"清理显存"。计时只在 idle + 模型 loaded 时跑。 */
+  /** Auto-unload the model to free VRAM after the test-generation daemon idles for N minutes. 0 =
+   * off, the model stays resident until "Clear VRAM" is clicked manually. The timer only runs while
+   * idle + model loaded. */
   idle_timeout_minutes: number
-  /** 出图任务超时兜底：超 N 分钟未完成强制终止 daemon 进程（卡死场景普通
-   * 取消无效）。0（默认）= 不开启。 */
+  /** Generation task timeout fallback: force-kill the daemon process if it hasn't finished after N
+   * minutes (normal cancel doesn't work in a hung state). 0 (default) = disabled. */
   task_timeout_minutes: number
-  /** 测试出图显存策略（krea2 生效）。auto=按空闲显存决定文本编码器与 DiT
-   * 是否让位；save_vram=强制顺序化（峰值最低，每图多几秒搬运）；
-   * performance=全部常驻显存（峰值最高、零搬运）。 */
+  /** Test-generation VRAM strategy (applies to krea2). auto = decide whether the text encoder and
+   * DiT yield based on free VRAM; save_vram = force sequential (lowest peak, a few extra seconds of
+   * transfer per image); performance = keep everything resident (highest peak, zero transfer). */
   vram_policy: 'auto' | 'save_vram' | 'performance'
-  /** 内存/显存水位保护：加载大模型前按权重文件大小预算内存与空闲显存，
-   * 不足时中止并报错。**默认关**（估算偏保守，配置足够的机器误拒率高）；
-   * 关闭时资源不足会继续加载，可能触发整机换页卡顿。 */
+  /** Memory/VRAM headroom guard: before loading a large model, budget RAM and free VRAM against the
+   * weight file size, aborting with an error if insufficient. **Off by default** (the estimate is
+   * conservative, causing a high false-reject rate on well-provisioned machines); when off,
+   * insufficient resources let loading proceed anyway, which may trigger system-wide paging stalls. */
   ram_guard: boolean
-  /** 开后每次出图自动落盘到 studio_data/test/<date>/{single,xy}/image_N.png。
-   * 默认关；compare 模式始终不落盘。 */
+  /** When on, each generation is automatically saved to disk at studio_data/test/<date>/{single,xy}/image_N.png.
+   * Off by default; compare mode never saves to disk. */
   save_test_images: boolean
 }
 
-/** 训练侧全局行为开关（Settings → 训练）。 */
+/** Global training-side behavior switches (Settings -> Training). */
 export interface TrainingSecretsConfig {
-  /** 训练 / AI 先验的内存/显存水位保护。语义同 `generate.ram_guard`，默认关。
-   * block swap 的 pinned 内存护栏**不受此开关影响**（锁定内存不可换页，
-   * 出路是调小 blocks_to_swap）。 */
+  /** Memory/VRAM headroom guard for training / AI regularization priors. Same semantics as
+   * `generate.ram_guard`, off by default. Block-swap's pinned-memory guard rail **is not affected by
+   * this switch** (locked memory can't be paged out, the fix is to lower blocks_to_swap). */
   ram_guard: boolean
 }
 
@@ -565,31 +584,32 @@ export interface ProxyConfig {
     no_proxy: string;
 }
 
-/** 运行模式（本 fork）。`''` = 用户还没选过 → 首屏弹选择框。 */
+/** Runtime mode (this fork). `''` = the user hasn't chosen yet -> a chooser pops up on first screen. */
 export type RuntimeMode = 'local' | 'colab'
 
 export interface RuntimeConfig {
-  /** `''` / `'local'` / `'colab'`。空串表示未选择。 */
+  /** `''` / `'local'` / `'colab'`. Empty string means not chosen. */
   mode: RuntimeMode | ''
-  /** 是否已走过一次选择流程（mode 非空时必为 true）。 */
+  /** Whether the user has already gone through the chooser flow once (must be true when mode is non-empty). */
   asked: boolean
 }
 
-/** GET/PUT /api/runtime 的载荷。 */
+/** Payload of GET/PUT /api/runtime. */
 export interface RuntimeInfo {
-  /** 生效的用户选择（env override 优先）；`''` = 还没选过。 */
+  /** The effective user choice (env override takes priority); `''` = not chosen yet. */
   mode: RuntimeMode | ''
-  /** secrets 里落盘的选择（不含 env override）。 */
+  /** The choice persisted in secrets (excluding env override). */
   stored: RuntimeMode | ''
-  /** 后端探测结果，只用于预选，不代替用户决定。 */
+  /** Backend detection result, only used to preselect, never overrides the user's decision. */
   detected: RuntimeMode
-  /** 「现在就要一个值」时的兜底：mode || detected。 */
+  /** Fallback for "need a value right now": mode || detected. */
   effective: RuntimeMode
-  /** ALS_RUNTIME_MODE 的值（未设为 `''`）。 */
+  /** Value of ALS_RUNTIME_MODE (unset = `''`). */
   env_override: RuntimeMode | ''
-  /** true = 环境变量钉死了模式，UI 不弹框也不允许改。 */
+  /** true = an env var pins the mode, the UI neither pops a dialog nor allows changing it. */
   locked: boolean
-  /** 探测判据，设置区展开可看（用户自查为什么被判成某模式）。 */
+  /** Detection signals, visible when the settings section is expanded (lets the user check why a
+   *  mode was inferred). */
   signals: Record<string, boolean>
   modes: RuntimeMode[]
   environment: {
@@ -603,8 +623,8 @@ export interface RuntimeInfo {
   }
 }
 
-/** Tag 翻译词典 — meta 字段。kind=default：来自首启自动下载或用户点 "恢复默认"；
- *  kind=user：用户手动上传。前端 Settings UI 用 source_name / entry_count 显示。 */
+/** Autocomplete tag list — meta. kind=default: downloaded automatically on
+ *  first start; kind=user: uploaded by hand. */
 export interface TagDictionaryMeta {
   source_name: string
   source_url: string
@@ -619,7 +639,7 @@ export interface TagDictionaryMetaResponse {
 }
 
 export interface TagDictionaryPayload {
-  entries: Record<string, string[]>
+  tags: string[]
   meta: TagDictionaryMeta
 }
 
@@ -632,11 +652,11 @@ export interface Secrets {
   wandb: WandBConfig
   modelscope: ModelScopeConfig
   eval_metrics: EvalMetricModelsConfig
-  /** 旧的全局下载源（已退役为迁移种子，无 UI）。新模型按类型在 download_sources 里各自选。 */
+  /** Legacy global download source (retired to a migration seed, no UI). New models each choose per-type in download_sources. */
   download_source: string
-  /** 按类型下载源：{training|wd14|upscaler: 'huggingface'|'modelscope'}。固定 HF 的类型不在内。 */
+  /** Download source per type: {training|wd14|upscaler: 'huggingface'|'modelscope'}. Types pinned to HF aren't included. */
   download_sources: Record<string, string>
-  // JoyCaption 已合并为 llm_tagger 的 builtin preset
+  // JoyCaption has been merged into llm_tagger's builtin preset
   llm_tagger: LLMTaggerConfig
   wd14: WD14Config
   cltagger: CLTaggerConfig
@@ -644,12 +664,12 @@ export interface Secrets {
   queue: QueueConfig
   generate: GenerateSecretsConfig
   training: TrainingSecretsConfig
-  /** 本 fork：Colab / Local 运行模式的持久化选择。 */
+  /** This fork: persisted choice of Colab / Local runtime mode. */
   runtime: RuntimeConfig
   proxy: ProxyConfig
 }
 
-/** PUT /api/secrets 的 body：嵌套的 partial dict；MASK ("***") 表示「保持不变」。 */
+/** Body of PUT /api/secrets: a nested partial dict; MASK ("***") means "keep unchanged". */
 export type SecretsPatch = Partial<{
   [K in keyof Secrets]: Partial<Secrets[K]>
 }>
@@ -662,42 +682,42 @@ export interface ModelFileStatus {
   mtime: number
 }
 
-/** 族主模型的官方 variant（多模型 P4-5 统一形状；anima 无 purpose/repo 细分）。 */
+/** Official variant of a family's base model (multi-model P4-5 unified shape; anima has no purpose/repo split). */
 export interface FamilyMainVariantInfo extends ModelFileStatus {
   variant: string
   is_latest: boolean
   target_path: string
-  /** 'preset' = 可下载的官方 variant；'custom' = 本地 checkpoint 候选。 */
+  /** 'preset' = a downloadable official variant; 'custom' = a local checkpoint candidate. */
   kind?: 'preset' | 'custom'
   is_current?: boolean
-  /** variant 级 repo（krea2：Raw/Turbo 各自的 HF 仓库）；anima 用 section repo。 */
+  /** Variant-level repo (krea2: separate HF repos for Raw/Turbo); anima uses the section repo. */
   repo?: string
-  /** 用途声明（krea2：raw=training / turbo=inference）。 */
+  /** Purpose declaration (krea2: raw=training / turbo=inference). */
   purpose?: 'training' | 'inference'
   size_estimate?: number
 }
 
-/** 用户注册的本地 custom 主模型（PathPicker 选盘上已有的 .safetensors）。 */
+/** A user-registered local custom base model (.safetensors already present in the PathPicker's disk picker). */
 export interface CustomModelInfo extends ModelFileStatus {
-  /** 注册的绝对路径（也是选中时写入 selected_anima 的值）。 */
+  /** Registered absolute path (also the value written to selected_anima when chosen). */
   path: string
-  /** 文件名，列表展示用。 */
+  /** Filename, for list display. */
   name: string
 }
 
-/** 族主模型 catalog 区块的统一形状（anima_main / krea2_main 同构，P4-5）。 */
+/** Unified shape of a family main-model catalog section (anima_main / krea2_main share this shape, P4-5). */
 export interface FamilyMainCatalog {
   id: string
   name: string
   description: string
   repo: string
   variants: FamilyMainVariantInfo[]
-  /** 本地注册的 custom 主模型列表。 */
+  /** List of locally registered custom base models. */
   custom: CustomModelInfo[]
-  /** 当前选中的主模型：variant key 或 custom 路径。 */
+  /** Currently selected base model: a variant key or a custom path. */
   selected: string
   latest: string
-  /** 许可展示（krea2 社区许可；anima 无）。 */
+  /** License display (krea2 community license; anima has none). */
   license?: string
   license_url?: string
 }
@@ -716,7 +736,7 @@ export interface ModelDirCatalog {
   description: string
   repo: string
   target_dir: string
-  /** krea2_text_encoder 专属：选中的 TE（'bf16' | 'fp8' | 本地目录绝对路径）。 */
+  /** krea2_text_encoder only: the selected TE ('bf16' | 'fp8' | local directory absolute path). */
   selected?: string
   files: Array<{ name: string; exists: boolean; size: number; mtime: number }>
 }
@@ -770,7 +790,7 @@ export interface EvalVariantInfo {
   target_path: string
   exists: boolean
   size: number
-  /** 下载前的预估大小（bytes）；未知 model_id 为 0。 */
+  /** Estimated size before download (bytes); 0 for an unknown model_id. */
   size_estimate: number
 }
 
@@ -790,36 +810,36 @@ export interface ModelDownloadStatus {
   log_tail: string[]
 }
 
-/** 统一模型来源候选行（catalog.model_sources[domain]，后端拼好能力位）。
- *  docs/design/model-source-unification.md §6。 */
+/** A unified model-source candidate row (catalog.model_sources[domain], capability bits assembled
+ *  by the backend). docs/design/model-source-unification.md sec.6. */
 export interface ModelSourceRow {
   kind: 'preset' | 'download' | 'local' | 'scanned'
-  /** 用户候选的原始存储记录（DELETE 的身份键）；preset / scanned 行为 null。 */
+  /** The user candidate's raw storage record (identity key for DELETE); null for preset / scanned rows. */
   candidate: ModelSourceCandidate | null
-  /** 写进该 domain 选中值字段的值（repo id / 绝对路径 / 文件名）。 */
+  /** The value written into that domain's selected-value field (repo id / absolute path / filename). */
   value: string
   label: string
-  /** 行副标题（放大器描述 / 自定义候选的 repo 来源等）。 */
+  /** Row subtitle (upscaler description / repo source for custom candidates, etc.). */
   description: string
-  /** POST /api/models/download 的 model_id；local 候选为 null（不可下载）。 */
+  /** model_id for POST /api/models/download; null for local candidates (not downloadable). */
   download_id: string | null
-  /** 下载触发的 variant 参数（默认 = value；主模型/放大器候选 = repo 内文件路径）。 */
+  /** variant param passed to the download trigger (default = value; for main-model/upscaler candidates, the in-repo file path). */
   download_variant: string | null
-  /** catalog.downloads 的 status key；local 候选为 null。 */
+  /** status key in catalog.downloads; null for local candidates. */
   status_key: string | null
   exists: boolean
   size: number
   files?: Array<{ name: string; exists: boolean; size: number; mtime: number }> | null
   size_estimate: number
   is_current: boolean
-  /** 内置 preset 不可移除（保护默认）。 */
+  /** Built-in presets can't be removed (protects the defaults). */
   removable: boolean
-  /** local 候选永不从 UI 删除磁盘文件。 */
+  /** Local candidates never delete the on-disk file from the UI. */
   deletable: boolean
   extra: Record<string, string>
 }
 
-/** POST/DELETE /api/model-sources/{domain} 的候选描述。 */
+/** Candidate description for POST/DELETE /api/model-sources/{domain}. */
 export interface ModelSourceCandidate {
   kind: 'download' | 'local'
   repo?: string
@@ -841,7 +861,7 @@ export interface UpscalerVariant {
   exists: boolean
   size: number
   mtime: number
-  /** @deprecated 兼容老 build，新代码用 hf_repo/ms_repo */
+  /** @deprecated kept for old builds, new code uses hf_repo/ms_repo */
   repo?: string
 }
 export interface UpscalersCatalog {
@@ -849,7 +869,7 @@ export interface UpscalersCatalog {
   name: string
   description: string
   default: string
-  /** 当前选中的放大器（来自 secrets.models.selected_upscaler，回退 default） */
+  /** Currently selected upscaler (from secrets.models.selected_upscaler, falls back to default) */
   current: string
   target_dir: string
   variants: UpscalerVariant[]
@@ -878,22 +898,22 @@ export interface ModelsCatalog {
   wd14: WD14Catalog
   cltagger: CLTaggerCatalog
   eval_metrics?: EvalMetricsCatalog
-  /** 评估指标 registry（Settings 复选框列表）。 */
+  /** Eval metric registry (Settings checkbox list). */
   eval_metric_catalog?: EvalMetricCatalogItem[]
   upscalers?: UpscalersCatalog
-  /** 统一来源候选行（泛化候选卡消费；键 = domain：wd14 / eval_clip / ...）。 */
+  /** Unified source candidate rows (consumed by the generic candidate card; key = domain: wd14 / eval_clip / ...). */
   model_sources?: Record<string, ModelSourceRow[]>
-  /** 按类型的下载源选项：current = 当前选中，available = 可选源（长度 1 = 固定单源）。 */
+  /** Download source options per type: current = currently selected, available = selectable sources (length 1 = fixed single source). */
   download_source_options: Record<string, { current: string; available: string[] }>
   downloads: Record<string, ModelDownloadStatus>
 }
 
 // ---- projects / versions (PP1) -------------------------------------------
 
-// ADR-0007 PR-5: 老 ProjectStage / VersionStage 已删（DB 列也由 v9 destructive 删）。
-// 用 VersionStatus + VersionPhase 替代。
+// ADR-0007 PR-5: the old ProjectStage / VersionStage are gone (their DB columns also dropped by v9's destructive migration).
+// Replaced by VersionStatus + VersionPhase.
 
-/** ADR-0007 §11.3-B 新模型：version 运行态状态机（5 enum）。 */
+/** ADR-0007 sec.11.3-B new model: version runtime status state machine (5 enum values). */
 export type VersionStatus =
   | 'preparing'
   | 'training'
@@ -901,9 +921,9 @@ export type VersionStatus =
   | 'failed'
   | 'canceled'
 
-/** ADR-0007 §11.3-B 新模型：version 准备 cursor（仅 status=preparing 时有意义）。
- *  按 PHASE_ORDER 顺序：curating → preprocessing → editing →
- *  regularizing → ready（自动打标步骤已移除）。 */
+/** ADR-0007 sec.11.3-B new model: version preparation cursor (only meaningful when status=preparing).
+ *  In PHASE_ORDER order: curating -> preprocessing -> editing ->
+ *  regularizing -> ready (the auto-tagging step has been removed). */
 export type VersionPhase =
   | 'curating'
   | 'preprocessing'
@@ -917,7 +937,7 @@ export const PHASE_ORDER: VersionPhase[] = [
 
 export const PHASE_SKIPPABLE: VersionPhase[] = ['preprocessing', 'regularizing']
 
-/** ADR-0007 §11.5-A: advance / skip phase endpoint response。 */
+/** ADR-0007 sec.11.5-A: advance / skip phase endpoint response. */
 export interface PhaseAdvanceResult {
   advanced: boolean
   ok: boolean
@@ -942,15 +962,15 @@ export interface Version {
   project_id: number
   label: string
   config_name: string | null
-  /** ADR-0007 §11.3-B: 运行态主状态机（5 enum）。 */
+  /** ADR-0007 sec.11.3-B: main runtime status state machine (5 enum values). */
   status: VersionStatus
-  /** ADR-0007 §11.3-B: phase cursor，仅 status=preparing 时有意义。 */
+  /** ADR-0007 sec.11.3-B: phase cursor, only meaningful when status=preparing. */
   phase: VersionPhase
   last_failure_reason: string | null
   created_at: number
   output_lora_path: string | null
   note: string | null
-  /** 触发词；由 Step 4 (Tagging) 写入，打标时 prepend 到每张 caption；空串=未启用。 */
+  /** Trigger word; written by Step 4 (Tagging), prepended to each caption while tagging; empty string = disabled. */
   trigger_word: string
   stats?: VersionStats
 }
@@ -960,14 +980,14 @@ export interface ProjectSummary {
   slug: string
   title: string
   active_version_id: number | null
-  /** ADR-0007 §11.8-E: 项目卡片右上角 status badge / 卡片显 version 名（list 端点 enrich）。 */
+  /** ADR-0007 sec.11.8-E: project card's top-right status badge / card shows the version name (enriched by the list endpoint). */
   active_version_label: string | null
   active_version_status: VersionStatus | null
-  /** v12: preparing 时的 phase cursor（badge 显示"准备中 · 打标"）；无 active version 为 null。 */
+  /** v12: phase cursor while preparing (badge shows "Preparing - Tagging"); null when there's no active version. */
   active_version_phase: VersionPhase | null
   created_at: number
   updated_at: number
-  /** v12: 非 null = 已归档（软隐藏）。list 归档/活跃都返回，切分在前端。 */
+  /** v12: non-null = archived (soft-hidden). The list endpoint returns both archived/active; splitting happens on the frontend. */
   archived_at: number | null
   note: string | null
   download_image_count?: number
@@ -996,7 +1016,7 @@ export interface Job {
   params: string
   params_decoded?: Record<string, unknown> | null
   status: JobStatus
-  /** v16 — 入队时间；老作业 NULL（入队时刻未记录，UI 显示 —）。 */
+  /** v16 -- enqueue time; NULL for old jobs (enqueue time wasn't recorded then, UI shows -). */
   created_at?: number | null
   started_at: number | null
   finished_at: number | null
@@ -1038,21 +1058,21 @@ export interface BundleImportResult {
 
 // ---- preprocess (ADR 0010 train scope) -----------------------------------
 
-/** 裁剪页工作集一项（train scope，rel path 形式）：name + 像素尺寸 + 是否已处理。 */
+/** An item in the crop page's workspace (train scope, rel path form): name + pixel size + processed flag. */
 export interface CropWorkspaceItem {
   name: string
-  /** download/ 下原图名（origin）；下游还原走这个名。 */
+  /** Original filename under download/ (origin); downstream restoration uses this name. */
   source: string
   w: number
   h: number
   mtime: number
   size: number
   processed: boolean
-  /** 训练 mask sidecar 的 mtime；无 mask 时 null。兼作角标判据 + cache-buster。 */
+  /** mtime of the training mask sidecar; null when there's no mask. Doubles as the badge condition + cache-buster. */
   mask_mtime: number | null
 }
 
-/** 涂抹保存结果：产物统一 .png，源非 png 时 name 会改（X.jpg → X.png）。 */
+/** Inpaint save result: output is always .png, name changes if the source wasn't png (X.jpg -> X.png). */
 export interface InpaintSaveResult {
   name: string
   origin: string
@@ -1062,13 +1082,13 @@ export interface InpaintSaveResult {
   h: number
 }
 
-/** 总览页「已删除」tab 一项：被去重审核标记的 entry。物理图仍在 download/{source}。 */
+/** An item on the overview page's "Removed" tab: an entry marked by dedup review. The physical image still lives at download/{source}. */
 export interface DuplicateRemovedItem {
-  /** manifest entry 的 key（一般 == source）。restore 时按这个名传。 */
+  /** The manifest entry's key (usually == source). Passed under this name for restore. */
   name: string
-  /** download/ 下原图名（origin）。缩略图按 source + bucket=download 取。 */
+  /** Original filename under download/ (origin). Thumbnails are fetched by source + bucket=download. */
   source: string
-  /** 像素尺寸 — origin 文件不存在时 null。 */
+  /** Pixel size -- null when the origin file doesn't exist. */
   w: number | null
   h: number | null
   mtime: number
@@ -1077,30 +1097,31 @@ export interface DuplicateRemovedItem {
 
 // ---- ADR 0010 train-scope types -----------------------------------------
 
-/** ADR 0010 train scope: 列 versions/{label}/train/ 全部图 + manifest 元数据。
- *  替代老 `{processed, pending}` 双 list 概念——新模型下 train/ 即"训练集 grid"，
- *  状态从字段差异隐含推断（详 ADR 0010 §Manifest schema v2 + backend
- *  `_is_processed`：扩展名变 / `_cN` 后缀 / train size != download size）。 */
+/** ADR 0010 train scope: lists all images under versions/{label}/train/ plus manifest metadata.
+ *  Replaces the old `{processed, pending}` dual-list concept -- under the new model, train/ IS the
+ *  "training set grid", and state is inferred implicitly from field differences (see ADR 0010
+ *  sec.Manifest schema v2 + backend `_is_processed`: extension change / `_cN` suffix / train size != download size). */
 export interface TrainImage {
-  /** POSIX rel path "{N_label}/{image}"（如 "1_data/X.png"）。 */
+  /** POSIX rel path "{N_label}/{image}" (e.g. "1_data/X.png"). */
   name: string
   mtime: number
   size: number
-  /** PIL 读图头；损坏 / 物理不存在 null。 */
+  /** Read from the image header via PIL; null if corrupt / physically missing. */
   w: number | null
   h: number | null
-  /** download/ 下原图名（无 sub-folder 结构）；restore 反查走这个。 */
+  /** Original filename under download/ (no sub-folder structure); restore lookup uses this. */
   origin: string | null
-  /** @deprecated 兼容字段；后端两个字段值相同。 */
+  /** @deprecated compatibility field; the backend keeps both fields equal. */
   source: string | null
-  /** download/{origin} 物理缺失（restore 会落 no_origin）。 */
+  /** download/{origin} is physically missing (restore lands it as no_origin). */
   orphan: boolean
-  /** 人工去重审核标记。UI 区分"训练参与" vs "审核跳过"。 */
+  /** Manual dedup review mark. The UI distinguishes "included in training" vs "skipped by review". */
   duplicate_removed: boolean
-  /** ADR 0010 状态推断（backend `_is_processed`）：upscale / crop / 转码过的 train
-   *  文件 → true；curate 时复制的原样副本 → false。UI 用这个画"已处理"徽章。 */
+  /** ADR 0010 state inference (backend `_is_processed`): a train file that was upscaled / cropped /
+   *  transcoded -> true; an as-is copy made during curate -> false. The UI uses this to draw the
+   *  "processed" badge. */
   processed: boolean
-  /** 老 schema 透传字段（新 entry 一律 null；前端容忍）。 */
+  /** Old-schema passthrough fields (always null for new entries; frontend tolerates this). */
   model: string | null
   scale: number | null
   action: string | null
@@ -1110,8 +1131,9 @@ export interface TrainImage {
   elapsed_seconds: number | null
 }
 
-/** ADR 0010 §Restore 语义：restore 返三组：成功 / manifest 无 entry / download
- *  缺失。`no_origin` 给 UI 三选项 [拖入替换 / 保留 / 移除] 用。 */
+/** ADR 0010 sec.Restore semantics: restore returns three groups: succeeded / no manifest entry /
+ *  missing from download. `no_origin` feeds the UI's three options [drag in a replacement / keep /
+ *  remove]. */
 export interface TrainRestoreResult {
   restored: string[]
   missing: string[]
@@ -1121,32 +1143,32 @@ export interface TrainRestoreResult {
 // ---- curation (PP3) -------------------------------------------------------
 
 /**
- * Curation 列表里的一项：文件名 + 磁盘 mtime（unix 秒）。
- * mtime 用于支持「按下载时间」排序；后端不做排序保证（除按 name 字典序的稳定输出），
- * 排序由前端按用户偏好决定。
+ * An item in the Curation list: filename + on-disk mtime (unix seconds).
+ * mtime supports sorting "by download time"; the backend makes no sort guarantee (other than a
+ * stable name-lexicographic order), sorting is decided by the frontend per user preference.
  */
 export interface CurationItem {
   name: string
   mtime: number
-  /** ADR 0010 fixup（2026-06-04）：train 区项目带 download 原图文件名（按
-   *  train manifest entry.origin 反查；老项目无 manifest → fallback 用 name
-   *  自身）。Curation 右侧 thumb 走 `download` bucket + 这个 origin，显示
-   *  **预处理前的样子**——避免 multi-crop fan-out / 去重 / upscale 改字节
-   *  让筛选页缩略图"位置移动"。预处理结果用 Preprocess Overview 看。
-   *  left 区项目（download 候选）这个字段缺失/无意义。 */
+  /** ADR 0010 fixup (2026-06-04): train-side items carry the original download filename (looked up
+   *  via the train manifest entry.origin; old projects with no manifest -> falls back to name
+   *  itself). Curation's right-side thumb uses the `download` bucket + this origin, showing
+   *  **the pre-processing look** -- avoiding multi-crop fan-out / dedup / upscale byte changes
+   *  making the curation page thumbnail "shift position". View processed results in Preprocess
+   *  Overview instead. Missing/meaningless for left-side items (download candidates). */
   origin?: string
 }
 
 export interface CurationView {
-  left: CurationItem[] // download − train − validation
-  right: Record<string, CurationItem[]> // folder → items
+  left: CurationItem[] // download - train - validation
+  right: Record<string, CurationItem[]> // folder -> items
   download_total: number
   train_total: number
   folders: string[]
 }
 
-/** held-out 验证集里的一张图：扁平列表（无文件夹概念），但带物理 `folder`
- *  供缩略图寻址（version thumb 的 validation bucket 需要）与精确删除。 */
+/** A single image in the held-out validation set: a flat list (no folder concept), but carries a
+ *  physical `folder` for thumbnail addressing (needed by the version thumb's validation bucket) and precise deletion. */
 export interface ValidationItem {
   name: string
   mtime: number
@@ -1154,8 +1176,8 @@ export interface ValidationItem {
 }
 
 export interface CurationValidationView {
-  left: CurationItem[] // download − train − validation（与训练集同候选池）
-  right: ValidationItem[] // validation 全量扁平
+  left: CurationItem[] // download - train - validation (shares the candidate pool with the training set)
+  right: ValidationItem[] // full flat validation list
   download_total: number
   val_total: number
 }
@@ -1166,10 +1188,10 @@ export interface CopyResult {
   missing: string[]
 }
 
-/** 去重扫描请求体。算法内部还有一批阈值/性能参数，但都已固化为后端常量，
- *  UI 只暴露这两项：
- *   - match_scope：只查全图重复，还是连同分镜差分/裁剪一起（both 才开裁剪检测）
- *   - sensitivity：差分/裁剪判定的松紧（驱动后端 variant_score + crop_score） */
+/** Dedup scan request body. The algorithm internally has a batch of threshold/perf parameters, but
+ *  they've all been baked into backend constants; the UI only exposes these two:
+ *   - match_scope: whether to check only full-image duplicates, or also scene-variant diffs/crops (crop detection only turns on with 'both')
+ *   - sensitivity: looseness/strictness of the variant/crop verdict (drives the backend's variant_score + crop_score) */
 export interface DuplicateScanOptions {
   match_scope: 'strict' | 'both'
   sensitivity: 'loose' | 'standard' | 'strict'
@@ -1253,7 +1275,7 @@ export interface CaptionPreview {
   has_caption: boolean
 }
 
-/** full=1 时返回的 caption 列表项；含完整 tags + format。 */
+/** Caption list item returned when full=1; includes full tags + format. */
 export interface CaptionEntry extends CaptionPreview {
   tags: string[]
   format: 'txt' | 'json' | 'none'
@@ -1319,21 +1341,21 @@ export interface RegMeta {
   failed_tags: string[]
   train_tag_distribution: Record<string, number>
   auto_tagged: boolean
-  /** A3 — 实际跑过 auto_tag 的 tagger 名（"wd14" / "cltagger" / ...）；
-   * null = 没跑 / 旧 meta 未带此字段。auto_tagged=true 但此字段为 null
-   * 视作旧版本数据（未知 tagger）。 */
+  /** A3 -- name of the tagger that actually ran auto_tag ("wd14" / "cltagger" / ...);
+   * null = didn't run / old meta lacks this field. auto_tagged=true with this field null is
+   * treated as old-version data (unknown tagger). */
   auto_tag_kind?: string | null
-  /** B1（PR-2）—— 该 reg 集生成时的 build_mode；老 meta 无此字段 → 后端
-   * 默认填 'mirror'。前端 mode 切换拦截优先看这个；fallback 才靠 reg.files
-   * 路径前缀推断。 */
+  /** B1 (PR-2) -- the build_mode at the time this reg set was generated; old meta lacking this
+   * field -> backend defaults to 'mirror'. The frontend's mode-switch interception checks this
+   * first; only falls back to inferring from reg.files path prefixes. */
   build_mode?: string
   incremental_runs: number
-  // PP5.5 — 后处理摘要（postprocessed_at 为 null 表示未跑或 K 找不到）
+  // PP5.5 -- postprocess summary (postprocessed_at is null when it hasn't run or K couldn't be found)
   postprocessed_at: number | null
   postprocess_clusters: number | null
   postprocess_method: string | null
   postprocess_max_crop_ratio: number | null
-  // "scrape" = booru 拉取，"ai_base" = base 模型先验生成；缺省按 "scrape" 处理（旧 meta 兼容）
+  // "scrape" = pulled from booru, "ai_base" = generated from the base model prior; defaults to "scrape" when absent (old meta compat)
   generation_method?: 'scrape' | 'ai_base'
 }
 
@@ -1349,22 +1371,23 @@ export interface RegTagCount {
   count: number
 }
 
-// PP6.2 — Train config (version 私有，独立于全局 preset 池)
+// PP6.2 -- Train config (private to the version, independent of the global preset pool)
 export interface VersionConfigResponse {
   has_config: boolean
   config: ConfigData | null
-  /** 服务端强制覆盖的项目特定字段（前端表单应 disabled 这些） */
+  /** Project-specific fields force-overridden by the server (the frontend form should disable these) */
   project_specific_fields: string[]
-  /** fork preset 时后端将注入的项目预填值（项目路径 + 全局模型路径 + reg
-   * 检测）。新建预设预览表单用它显示「保存后会得到的值」。无论 has_config
-   * 与否都返回 —— 新建预设可以在 version 已有 config 的状态下被点（覆盖
-   * 当前预设），所以这个 hint 跟 has_config 状态无关。 */
+  /** Project prefill values the backend will inject when forking a preset (project path + global
+   * model path + reg detection). Used by the new-preset preview form to show "the value you'll get
+   * after saving". Returned regardless of has_config -- creating a new preset can be clicked while
+   * the version already has a config (overwriting the current preset), so this hint is independent
+   * of has_config's state. */
   project_specific_defaults?: ConfigData
   dropped_fields?: string[]
   defaulted_fields?: string[]
 }
 
-/** 训练集 ARB 桶分布（后端用真 BucketManager 算）。count = 有效样本数（含 repeat × fan-out）。 */
+/** Training set ARB bucket distribution (computed by the backend's real BucketManager). count = effective sample count (including repeat x fan-out). */
 /** Pre-run estimate: does it fit, and how long will it take.
  *
  *  Both halves are independently optional. `speed` is null until this project
@@ -1399,9 +1422,10 @@ export interface BucketDistribution {
     reso: number
     buckets: Array<{ w: number; h: number; count: number }>
   }>
-  /** NaViT 打包预估（config.navit_packing 时才有）。packs_per_epoch = 优化器
-   *  steps/epoch 的分子（后端用真 NavitPackBatchSampler 模拟，epoch-0 精确）。
-   *  sizes 仅 native 模式非空 = 原生尺寸直方图（此模式下 ARB 桶不存在）。 */
+  /** NaViT packing estimate (only present when config.navit_packing is set). packs_per_epoch =
+   *  numerator of optimizer steps/epoch (simulated by the backend's real NavitPackBatchSampler,
+   *  exact for epoch-0). sizes is non-empty only in native mode = native-size histogram (ARB
+   *  buckets don't exist in this mode). */
   navit?: {
     packs_per_epoch: number
     samples: number
@@ -1419,24 +1443,25 @@ export interface BucketDistribution {
 export interface RegBuildRequest {
   excluded_tags?: string[]
   auto_tag?: boolean
-  /** A3 — auto-tag 用的 tagger。当前 UI 只暴露 wd14 / cltagger；
-   * 后端 422 校验同样收紧到这两个。 */
+  /** A3 -- tagger used for auto-tag. The current UI only exposes wd14 / cltagger;
+   * backend 422 validation is likewise restricted to these two. */
   auto_tag_kind?: 'wd14' | 'cltagger'
   api_source?: 'gelbooru' | 'danbooru'
-  /** 默认 true（增量）—— 用户决策：避免开始生成时清掉昨天好不容易拉的图。
-   * false = full：worker 入口先清 reg/（含 .deleted_ids.json）。 */
+  /** Default true (incremental) -- user's decision: avoid wiping out yesterday's hard-won pulled
+   * images when starting a new generation. false = full: the worker clears reg/ (including
+   * .deleted_ids.json) up front. */
   incremental?: boolean
-  /** A4 v2 — build 完后 worker 自动跑 dedup + 不够 incremental 补足循环，
-   * 最多 3 轮，在分辨率聚类前。默认 true。 */
+  /** A4 v2 -- after building, the worker automatically runs dedup + an incremental top-up loop when
+   * short, up to 3 rounds, before resolution clustering. Default true. */
   auto_dedup?: boolean
-  /** B1（PR-2）—— 构建模式：
-   * - mirror：镜像 train 子文件夹（5_concept/、1_general/ ...），target_count 忽略
-   * - flat：所有图进 1_data/ 单桶，target_count 决定总图数（null = train 总数）
-   * 默认 flat；切换前提是 reg 集已清空（前端拦截）。 */
+  /** B1 (PR-2) -- build mode:
+   * - mirror: mirrors the train subfolders (5_concept/, 1_general/ ...), target_count is ignored
+   * - flat: all images go into a single 1_data/ bucket, target_count determines the total image count (null = train's total count)
+   * Default flat; switching requires the reg set to already be empty (frontend intercepts this). */
   build_mode?: 'mirror' | 'flat'
-  /** B1（PR-2）—— flat 模式下目标图数；null = 用 train 总图数。 */
+  /** B1 (PR-2) -- target image count in flat mode; null = use train's total image count. */
   target_count?: number | null
-  // PP5.5 进阶
+  // PP5.5 advanced
   skip_similar?: boolean
   aspect_ratio_filter_enabled?: boolean
   min_aspect_ratio?: number
@@ -1445,17 +1470,17 @@ export interface RegBuildRequest {
   postprocess_max_crop_ratio?: number
 }
 
-/** Attention backend 三选一 — 替代原 xformers/flash_attn 双 bool。 */
-/** secrets.generate.attention_backend：'auto' = 按装了什么用（默认）；
- *  显式值（flash_attn/xformers/none）则强制。GenerateRequest 也接此 type
- *  作为 per-request 覆盖（前端不再发；server 自动从 secrets 读 + auto 解析）。 */
+/** Attention backend, one of three -- replaces the original xformers/flash_attn dual bool. */
+/** secrets.generate.attention_backend: 'auto' = use whatever's installed (default);
+ *  an explicit value (flash_attn/xformers/none) forces it. GenerateRequest also accepts this type
+ *  as a per-request override (the frontend no longer sends it; the server auto-reads from secrets + resolves auto). */
 export type AttentionBackend = 'auto' | 'none' | 'xformers' | 'flash_attn'
 
-/** PR-9 — 先验生成（base 模型反向出 reg 集，无 LoRA）。 */
+/** PR-9 -- prior generation (base model generates a reg set in reverse, no LoRA). */
 export interface RegAiRequest {
   excluded_tags?: string[]
-  /** 本次先验生成临时选用的底模（官方 variant key 或本地 custom 路径）；
-   *  省略 → server 用 Settings 里的 selected_anima。 */
+  /** Base model temporarily selected for this prior generation (an official variant key or a local
+   *  custom path); omitted -> the server uses Settings' selected_anima. */
   base_model?: string
   negative_prompt?: string
   width?: number
@@ -1470,34 +1495,35 @@ export interface RegAiRequest {
   mixed_precision?: string
 }
 
-/** PR-9 — 测试出图（独立工具页，多 LoRA + multi-prompt）。 */
+/** PR-9 -- test generation (a standalone tool page, multi-LoRA + multi-prompt). */
 export interface LoraEntry {
   path: string
   scale: number
-  /** 来自 picker 的项目 / 版本绑定；外部文件无 */
+  /** Project / version binding from the picker; absent for external files */
   project_id?: number | null
   version_id?: number | null
-  /** 仅 placeholder 状态用：历史回填时 resolve 失败保留原 basename
-   *  （如 "my-lora.safetensors"），让 SidebarLoras 渲染 ⚠ placeholder 卡片
-   *  提示用户重选。`path` 非空时此字段被忽略；submit 时 path='' 的 entry
-   *  会被 `.filter(l => l.path.trim())` 跳过，不影响 daemon。 */
+  /** Placeholder state only: when resolving fails on history backfill, keeps the original basename
+   *  (e.g. "my-lora.safetensors"), letting SidebarLoras render a warning placeholder card
+   *  prompting the user to reselect. Ignored once `path` is non-empty; entries with path='' on
+   *  submit get skipped by `.filter(l => l.path.trim())`, not sent to the daemon. */
   name?: string | null
 }
 
-/** XY 矩阵：单 task 内循环全图，前端按 (yi, xi) 排成 grid。
- *  设了 xy_matrix 时后端强制 prompts 单条 + count=1（避免排列爆炸）。
- *  v1 不支持 lora_path 轴（缺 unhook 接口，留 v2）。 */
+/** XY matrix: loop the whole grid within a single task, the frontend lays it out as a (yi, xi) grid.
+ *  When xy_matrix is set, the backend forces prompts to a single entry + count=1 (to avoid a
+ *  combinatorial explosion).
+ *  v1 doesn't support a lora_path axis (missing an unhook interface, left for v2). */
 export type XYAxisType =
   | 'lora_scale'
   | 'steps'
   | 'cfg_scale'
-  | 'lora_ckpt'  // 同一 LoRA 的不同 step/epoch ckpt（找过拟合拐点）
+  | 'lora_ckpt'  // different step/epoch checkpoints of the same LoRA (for finding the overfit inflection point)
 
 export interface XYAxisSpec {
   axis: XYAxisType
-  /** 类型按 axis 派生：steps→int；lora_scale/cfg_scale→number；lora_ckpt→string(path) */
+  /** Value type derived from axis: steps -> int; lora_scale/cfg_scale -> number; lora_ckpt -> string (path) */
   values: Array<number | string>
-  /** axis=lora_scale / lora_ckpt 时必填 —— 绑定到 lora_configs 哪一项 */
+  /** Required when axis=lora_scale / lora_ckpt -- which lora_configs entry it's bound to */
   lora_index?: number | null
 }
 
@@ -1508,13 +1534,13 @@ export interface XYMatrixSpec {
 
 export interface GenerateRequest {
   prompts: string[]
-  /** 底模所属模型族（多模型 P4-4）；省略 = anima。 */
+  /** Model family the base model belongs to (multi-model P4-4); omitted = anima. */
   model_family?: 'anima' | 'krea2'
-  /** 本次出图临时选用的底模（官方 variant key 或本地 custom 路径）；
-   *  省略 → server 用 Settings 里该族的 selected。 */
+  /** Base model temporarily selected for this generation (an official variant key or a local
+   *  custom path); omitted -> the server uses that family's selected from Settings. */
   base_model?: string
-  /** 本次出图的文本编码器 variant（krea2 生效）：省略 = 跟随下载中心选中
-   *  的 TE（selected_te）；显式 bf16/fp8 临时覆盖（与 base_model 对称）。 */
+  /** Text encoder variant for this generation (applies to krea2): omitted = follow the download
+   *  center's selected TE (selected_te); an explicit bf16/fp8 temporarily overrides it (symmetric with base_model). */
   text_encoder?: 'bf16' | 'fp8'
   negative_prompt?: string
   width?: number
@@ -1528,16 +1554,16 @@ export interface GenerateRequest {
   lora_configs?: LoraEntry[]
   mixed_precision?: string
   attention_backend?: AttentionBackend
-  /** 设值时 prompts 限单条 + count=1（schema 校验） */
+  /** When set, prompts is limited to a single entry + count=1 (schema validation) */
   xy_matrix?: XYMatrixSpec | null
-  /** 前端构造的 GenerateParamsSnapshot dict，server 不解释结构、透传到
-   *  daemon → image_done 时塞进加密 cache payload header。
-   *  /api/generate/cache/index 时返还作为 CacheEntry.params 回填用。 */
+  /** A GenerateParamsSnapshot dict built by the frontend; the server doesn't interpret its
+   *  structure, passes it through to the daemon -> stuffed into the encrypted cache payload header
+   *  on image_done. Returned by /api/generate/cache/index for backfilling as CacheEntry.params. */
   params_snapshot?: Record<string, unknown> | null
 }
 
-/** GET /api/generate/cache/index — 当前 session 加密磁盘 cache 索引。
- *  server 端 SessionCache 按 task_id 聚合返回；前端转成 CacheEntry。 */
+/** GET /api/generate/cache/index -- index of the current session's encrypted on-disk cache.
+ *  The server-side SessionCache aggregates it by task_id; the frontend converts it to CacheEntry. */
 export interface CacheGenerateHistoryEntry {
   /** "cache:<task_id>" */
   id: string
@@ -1545,85 +1571,85 @@ export interface CacheGenerateHistoryEntry {
   mode: 'single' | 'xy'
   /** Unix timestamp ms */
   createdAt: number
-  /** 该 task 的所有文件名（XY 时按文件名排序） */
+  /** All filenames from this task (sorted by filename for XY) */
   filenames: string[]
   /** GenerateParamsSnapshot dict */
   params: Record<string, unknown>
-  /** 仅 mode=xy 存在；列每张图的 xy 位置，PreviewXYGrid 重建网格用 */
+  /** Present only for mode=xy; lists each image's xy position, used by PreviewXYGrid to rebuild the grid */
   samples?: Array<{
     filename: string
     xy: { xi: number; yi: number; xv: string | number; yv: string | number | null }
   }>
 }
 
-/** 落盘测试图历史 entry（GET /api/generate/disk-history）。
- *  params 是 GenerateParamsSnapshot（前端用 paramsSnapshot.ts 的类型解读），
- *  这里用 unknown 让 api/client.ts 不依赖 pages 层类型。 */
+/** An on-disk test-image history entry (GET /api/generate/disk-history).
+ *  params is a GenerateParamsSnapshot (the frontend interprets it via paramsSnapshot.ts's types);
+ *  typed as unknown here so api/client.ts doesn't depend on the pages layer's types. */
 export interface DiskGenerateHistoryEntry {
-  /** 稳定 ID："disk:<date>:<mode>:image_<N>"；前端按此 dedup */
+  /** Stable ID: "disk:<date>:<mode>:image_<N>"; the frontend dedupes by this */
   id: string
   /** YYYY-MM-DD */
   date: string
   mode: 'single' | 'xy'
   filename: string
-  /** 服务端绝对路径，用于和 IDB entry.diskPath 做 dedup */
+  /** Server-side absolute path, used to dedupe against the IDB entry.diskPath */
   path: string
   /** /api/generate/disk-image/<date>/<mode>/<filename> */
   url: string
-  /** Unix timestamp（sidecar 写入或 fallback 文件 mtime） */
+  /** Unix timestamp (written by the sidecar, or falls back to the file's mtime) */
   created_at: number
   schema_version: number
-  /** sidecar 里的 params object（前端按 GenerateParamsSnapshot 解读） */
+  /** The params object inside the sidecar (the frontend interprets it as GenerateParamsSnapshot) */
   params: Record<string, unknown>
 }
 
-/** version output/ 下扫到的 training_state_step*.pt（断点续训用）。 */
+/** A training_state_step*.pt found under a version's output/ (used for resuming training). */
 export interface StateCkpt {
-  /** global_step 数 */
+  /** global_step count */
   step: number
-  /** 显示用："step 2476" */
+  /** Display text: "step 2476" */
   label: string
-  /** 绝对路径 */
+  /** Absolute path */
   path: string
-  /** 文件 mtime 时间戳 */
+  /** File mtime timestamp */
   mtime: number
 }
 
-/** 项目级按 version 分组的 ckpt 列表（resume_state / resume_lora picker 用）。 */
+/** Project-level ckpt list grouped by version (used by the resume_state / resume_lora picker). */
 export interface VersionCkptGroup<T> {
   version_id: number
-  /** version label，如 "baseline" / "high-lr" */
+  /** Version label, e.g. "baseline" / "high-lr" */
   label: string
   items: T[]
 }
 
-/** version output/ 下扫到的 LoRA ckpt 文件（GET .../lora_ckpts）。 */
+/** A LoRA checkpoint file found under a version's output/ (GET .../lora_ckpts). */
 export interface LoraCkpt {
   /** 'final' / 'step' / 'epoch' / 'other' */
   kind: 'final' | 'step' | 'epoch' | 'other'
-  /** step / epoch 数；final / other 为 0 */
+  /** step / epoch count; 0 for final / other */
   value: number
-  /** 显示用：'final' / 'step 2476' / 'epoch 5' / 文件名 */
+  /** Display text: 'final' / 'step 2476' / 'epoch 5' / filename */
   label: string
-  /** 绝对路径 */
+  /** Absolute path */
   path: string
-  /** 文件 mtime 时间戳 */
+  /** File mtime timestamp */
   mtime: number
 }
 
 
-// ── Checkpoint soup（合并多个 adapter / merge several adapters）────────────
+// -- Checkpoint soup (merge several adapters) --------------------------------
 
-/** soup 目录里的一个文件（上传的原料 或 合并出来的成品）。 */
+/** A file in the soup directory (an uploaded ingredient, or a merged result). */
 export interface SoupFile {
   name: string
-  /** 绝对路径——merge / generate 都按路径引用 */
+  /** Absolute path -- both merge / generate reference it by path */
   path: string
   size: number
   mtime: number
 }
 
-/** 一个 adapter 的"指纹"：合并前据此判断能不能平均。 */
+/** An adapter's "fingerprint": used to judge whether it can be averaged before merging. */
 export interface SoupSourceInfo {
   name: string
   path: string
@@ -1638,7 +1664,7 @@ export interface SoupSourceInfo {
   module: string | null
 }
 
-/** POST /api/soup/inspect —— ok=false 时 errors 说明为什么不能合并。 */
+/** POST /api/soup/inspect -- when ok=false, errors explains why it can't be merged. */
 export interface SoupCompatibility {
   ok: boolean
   errors: string[]
@@ -1652,7 +1678,7 @@ export interface SoupMergeResult extends SoupFile {
 }
 
 
-// ── Trigger word detection ──────────────────────────────────────────────────
+// -- Trigger word detection --------------------------------------------------
 export interface TriggerCandidate {
   word: string
   count: number
@@ -1668,19 +1694,19 @@ export interface TriggerDetectResult {
   current: string
 }
 
-// ── Remote access（手机远程访问 / phone access over a quick tunnel）───────────
+// -- Remote access (phone access over a quick tunnel) ------------------------
 
-/** GET /api/tunnel —— `url` 已带 ?k=<key>，没有 key 的请求会被 401。 */
+/** GET /api/tunnel -- `url` already carries ?k=<key>, requests without the key get a 401. */
 export interface TunnelState {
   running: boolean
-  /** 完整可分享链接（含访问密钥）；未开启时 null */
+  /** Full shareable link (includes the access key); null when not enabled */
   url: string | null
   port: number | null
   started_at: number | null
   error: string | null
   binary: string
   installed: boolean
-  /** 当前平台有没有官方预编译二进制（没有 → 只能手动装） */
+  /** Whether the current platform has an official precompiled binary (if not -> manual install only) */
   can_install: boolean
   log: string[]
   /** provider the running tunnel was started with */
@@ -1702,14 +1728,14 @@ export interface TunnelState {
 
 export type TunnelProvider = 'cloudflare' | 'tailscale' | 'ngrok'
 
-/** Phase 2 commit 14 — TAEFlux 模型状态（GET /api/generate/taeflux/status）。 */
+/** Phase 2 commit 14 -- TAEFlux model status (GET /api/generate/taeflux/status). */
 export interface TaeFluxStatus {
   available: boolean
   dir: string
   files: string[]
 }
 
-/** Phase 2 — Inference daemon 当前状态（GET /api/generate/daemon/status）。 */
+/** Phase 2 -- current inference daemon status (GET /api/generate/daemon/status). */
 export interface DaemonStatus {
   state: 'stopped' | 'starting' | 'idle' | 'busy' | 'unloading'
   model_loaded: boolean
@@ -1717,7 +1743,7 @@ export interface DaemonStatus {
   alive: boolean
 }
 
-/** xformers 安装状态 / 安装结果（简化版，对照 FlashAttnStatus）。 */
+/** xformers install status / install result (simplified version, compare with FlashAttnStatus). */
 export interface XformersStatus {
   installed: boolean
   version: string | null
@@ -1733,18 +1759,18 @@ export interface XformersInstallResult {
 export type TaskStatus =
   'pending' | 'running' | 'done' | 'failed' | 'canceled' | 'paused' | 'scheduled'
 
-/** tasks.task_type 的合法值。R-3 台账合并起含九类数据作业 kind。
- *  档位：exclusive = train/reg_ai/generate/eval_samples；light = 其余；io = download。 */
+/** Valid values of tasks.task_type. The R-3 ledger merge folded in nine kinds of data-job kind.
+ *  Tiers: exclusive = train/reg_ai/generate/eval_samples; light = everything else; io = download. */
 export type TaskType =
   | 'train' | 'reg_ai' | 'generate'
   | 'download' | 'preprocess' | 'tag' | 'reg_build'
   | 'eval_samples' | 'eval_clip' | 'eval_dino' | 'eval_tag' | 'eval_ccip'
 
-/** R-5 档位视图参数：GPU 视图 = exclusive，数据视图 = data（light+io）。 */
+/** R-5 tier view param: GPU view = exclusive, data view = data (light+io). */
 export type QueueResourceClass = 'exclusive' | 'data'
 
-/** Terminal task statuses — UI 一般禁用这些上的操作按钮（cancel / pause 等）。
- *  `paused` **不**进 terminal — 它可被 resume 复活。 */
+/** Terminal task statuses -- the UI generally disables action buttons (cancel / pause etc.) on these.
+ *  `paused` is **not** terminal -- it can be revived via resume. */
 export const TERMINAL_TASK_STATUSES: ReadonlyArray<TaskStatus> = [
   'done', 'failed', 'canceled',
 ]

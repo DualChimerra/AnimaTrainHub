@@ -1,31 +1,42 @@
-"""按 UI 可见性元数据裁剪 yaml 落盘不需要的字段。
+"""Prune fields not needed on disk from the yaml, based on UI visibility metadata.
 
-两条裁剪规则（studio/web/src/lib/schema.ts 的 pruneInactiveConfig 是同一
-语义的前端镜像，YAML 预览抽屉靠它和落盘内容一致，改语义必须两边同步）：
+Two pruning rules (studio/web/src/lib/schema.ts's pruneInactiveConfig is the
+frontend mirror of the same semantics; the YAML preview drawer depends on it
+matching what's actually saved to disk, so keep both sides in sync if the
+semantics change):
 
-1. show_when 求值为假 —— 当前配置下 UI 不可见、值不生效的字段
-   （求值器 eval_show_when 逐字镜像前端 evalShowWhen）。
-2. hidden=True 且值等于 schema 默认值 —— UI 永不渲染的字段（终端体验旋钮、
-   trigger_word 等），默认值落盘纯属噪音；非默认值（裸 CLI 用户手写覆盖 /
-   Tagging 页写入的 trigger_word）照常保留。
+1. show_when evaluates false -- a field that's not visible in the UI and
+   whose value doesn't take effect under the current config (the
+   eval_show_when evaluator mirrors the frontend's evalShowWhen verbatim).
+2. hidden=True and the value equals the schema default -- a field the UI
+   never renders (advanced/expert-only knobs, trigger_word, etc); saving the
+   default value to disk is pure noise, while a non-default value (a bare
+   CLI user's manual override, or trigger_word written by the Tagging page)
+   is kept as usual.
 
-runtime 侧的安全性（config 管线刀 1 / R1 起）：trainer 加载 yaml 走与 Studio
-同一条 TrainingConfig 构造路径（argparse_bridge.namespace_from_config），缺失
-键经 pydantic 默认值 + FAMILY_CONFIG_DEFAULTS 族 overlay 补齐 —— 与保存端裁剪
-前的读回值逐字段一致。历史教训：旧 merge_yaml_into_namespace 用 argparse 裸
-默认补缺键、不走族 overlay，krea2 上被裁掉的 shuffle_caption 落回 anima 语义
-默认 True 而拒训；裁剪的安全性永远以「trainer 读回 == 保存端读回」为准。
+Runtime-side safety (since config pipeline cut 1 / R1): the trainer loads the
+yaml through the same TrainingConfig construction path as Studio
+(argparse_bridge.namespace_from_config); missing keys get filled in via
+pydantic defaults + the FAMILY_CONFIG_DEFAULTS family overlay -- matching the
+saving side's pre-prune values field-for-field. Lesson learned: the old
+merge_yaml_into_namespace filled missing keys with bare argparse defaults and
+skipped the family overlay, so a pruned shuffle_caption on krea2 fell back to
+anima's semantic default of True and broke training. Pruning safety is always
+judged by "trainer read-back == saving side's read-back".
 
-不裁 disable_when —— 命中的字段被前端 reset 到 disable_value，而
-disable_value 可能不等于字段默认值（如 Prodigy 时 lr_scheduler 被钉在
-"none"），裁掉会让 runtime 读回默认值改变行为，所以保留。
+disable_when is never pruned -- a field it hits gets reset by the frontend to
+disable_value, and disable_value may not equal the field's default (e.g. with
+Prodigy, lr_scheduler is pinned to "none"); pruning it would change behavior
+by making runtime read back the default instead, so it's kept.
 """
 from typing import Any
 
 from pydantic import BaseModel
 
-# 求值器已下沉 config_rules(零依赖叶子,training 的 validator 也要用,放这边
-# 会与 `config_prune → training` 成环);此处 re-export 保持既有消费方不变。
+# The evaluator lives in config_rules (a zero-dependency leaf that training's
+# validator also needs; putting it here would create a
+# `config_prune -> training` cycle); re-exported here to keep existing
+# consumers unchanged.
 from .config_rules import _MISSING, _js_str, eval_show_when  # noqa: F401
 from .training import TrainingConfig
 
@@ -33,11 +44,12 @@ from .training import TrainingConfig
 def prune_inactive_fields(
     dumped: dict[str, Any], model_cls: type[BaseModel] = TrainingConfig
 ) -> dict[str, Any]:
-    """从 model_dump 结果里删掉 show_when 求值为假的字段，以及 hidden=True
-    且仍是 schema 默认值的字段。
+    """Remove fields whose show_when evaluates false, and fields with hidden=True still at the schema default, from a model_dump result.
 
-    所有表达式都对完整的 `dumped` 求值（与前端对完整表单 state 求值一致），
-    先删的字段不影响后续判断。disable_when 字段与无元数据字段原样保留。
+    Every expression is evaluated against the full `dumped` dict (matching
+    the frontend evaluating against the whole form state), so fields removed
+    earlier don't affect later checks. disable_when fields and fields without
+    metadata are kept as-is.
     """
     out = dict(dumped)
     for name, field in model_cls.model_fields.items():

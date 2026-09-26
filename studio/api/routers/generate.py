@@ -1,19 +1,20 @@
-"""测试出图 + daemon 控制 + TAEFlux（PR-6 commit 5 从 server.py 抽出）。
+"""Test generation + daemon control + TAEFlux (PR-6 commit 5, extracted from server.py).
 
-8 routes：
-    POST /api/generate                          启动出图 task（daemon 跑）
-    GET  /api/generate/{task_id}                查询测试 task 状态
-    GET  /api/generate/taeflux/status           中间步预览模型是否就绪
-    POST /api/generate/taeflux/install          同步下载 TAEFlux（~1.6MB 秒级）
+8 routes:
+    POST /api/generate                          start a test generate task (runs on daemon)
+    GET  /api/generate/{task_id}                query test task status
+    GET  /api/generate/taeflux/status           whether the mid-step preview model is ready
+    POST /api/generate/taeflux/install          synchronously download TAEFlux (~1.6MB, seconds)
     GET  /api/generate/daemon/status            daemon state / model_loaded / busy
-    GET  /api/generate/daemon/logs              ring buffer 日志（since_seq / limit）
-    POST /api/generate/daemon/unload            手动卸载（busy 时 409）
-    GET  /api/generate/{task_id}/sample/{filename}  从 generate_cache 取 PNG bytes
+    GET  /api/generate/daemon/logs              ring buffer log (since_seq / limit)
+    POST /api/generate/daemon/unload            manual unload (409 while busy)
+    GET  /api/generate/{task_id}/sample/{filename}  fetch PNG bytes from generate_cache
 
-测试出图不持久化（commit 10 起）：daemon 把 PNG bytes base64 推回 server 入
-generate_cache（内存 dict），HTTP 这里从 cache 取。tempdir 仅装 config.json，
-task 结束 supervisor 仍调 cleanup_generate_tempdir 清掉空目录。server 重启 →
-内存 cache 自动没；强杀也不残留。
+Test generation is not persisted (since commit 10): the daemon pushes PNG bytes back to
+the server as base64 into generate_cache (an in-memory dict); HTTP reads from that cache.
+The tempdir only holds config.json; when the task ends the supervisor still calls
+cleanup_generate_tempdir to remove the empty directory. Server restart -> in-memory cache
+is gone automatically; a force-kill leaves nothing behind either.
 """
 from __future__ import annotations
 
@@ -56,9 +57,12 @@ TEST_IMAGES_DIR = STUDIO_DATA / "test"
 
 
 def _write_generate_cover(task_id: Optional[int], cover_path: Path) -> None:
-    """0.17 P-I forward-write：落盘时把封面图（磁盘）相对地址写进 task.generate_cover
-    （相对 TEST_IMAGES_DIR，_v14 列）。前端暂不读；未来 DB 驱动出图时间线据此定位/判
-    存在。task_id 缺省（老前端/异常）或写失败时静默跳过——纯攒未来数据，不影响出图。"""
+    """0.17 P-I forward-write: when saving to disk, write the cover image's (on-disk)
+    relative path into task.generate_cover (relative to TEST_IMAGES_DIR, _v14 column).
+    The frontend doesn't read this yet; a future DB-driven generation timeline can use it
+    to locate/verify existence. Silently skipped when task_id is missing (old frontend /
+    exception) or the write fails -- this only accumulates data for the future and never
+    affects the actual generation."""
     if task_id is None:
         return
     try:
@@ -71,33 +75,36 @@ def _write_generate_cover(task_id: Optional[int], cover_path: Path) -> None:
     except Exception:
         logger.warning("write generate_cover for task %s failed", task_id, exc_info=True)
 
-# v2 命名（决策 #6）：父目录区分 mode，文件名仅 "<label> N.png"
+# v2 naming (decision #6): parent directory distinguishes mode, filename is just "<label> N.png"
 _DISPLAY_LABELS = {"single": "single image", "xy": "xy plot"}
 _V2_SINGLE_RE = re.compile(r"^single image (\d+)\.png$")
 _V2_XY_RE = re.compile(r"^xy plot (\d+)\.png$")
-# v1 legacy：image_N.png（旧版命名），扫描时仍读取，但新写入只用 v2
+# v1 legacy: image_N.png (old naming), still read when scanning, but new writes only use v2
 _V1_NAME_RE = re.compile(r"^image_(\d+)\.png$")
 
-# XY 文件夹布局（恢复 PreviewXYGrid 历史回看）：
+# XY folder layout (restores PreviewXYGrid history browsing):
 #   <date>/xy/xy plot <N>/{xy plot.png, cell x<i> y<j>.png, ...}
-# composite 是合成大图（导出 + 缩略图来源）；cell 是每格原图（PreviewXYGrid + 拖进 Comfy）
+# composite is the merged big image (export + thumbnail source); cell is each cell's
+# original image (PreviewXYGrid + drag into Comfy)
 _XY_FOLDER_RE = re.compile(r"^xy plot (\d+)$")
 _XY_TMP_FOLDER_RE = re.compile(r"^\.xy plot \d+\.tmp$")
 _XY_CELL_RE = re.compile(r"^cell x(\d+) y(\d+)\.png$")
 _XY_COMPOSITE_NAME = "xy plot.png"
 
-# 路径校验（disk-image / thumb / delete 全套共用）
+# Path validation (shared by the whole disk-image / thumb / delete family)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DISK_MODES = ("single", "xy")
 _PNG_NAME_SAFE_RE = re.compile(r"^[a-zA-Z0-9 ._-]+\.png$")
 
 
 def _next_image_index(dir_: Path, mode: str) -> int:
-    """扫描 dir 下当前 mode 的 PNG 文件，返回下一个 1-based 序号。
+    """Scan the PNG files for the given mode under dir and return the next 1-based index.
 
-    决策 #11：无并发跑图场景，不做 O_EXCL / 锁；序号扫 max+1 + atomic 写即可。
-    决策 #6：v2 命名 1-based（"single image 1" 比 0 直观），v1 legacy `image_N`
-    若同目录混存按合并扫一组取 max+1。
+    Decision #11: no concurrent generation scenario, so no O_EXCL / locking; scanning for
+    max+1 plus an atomic write is enough.
+    Decision #6: v2 naming is 1-based ("single image 1" reads more naturally than 0); if
+    v1 legacy `image_N` files coexist in the same directory, scan both as one group and
+    take max+1.
     """
     if not dir_.is_dir():
         return 1
@@ -111,20 +118,21 @@ def _next_image_index(dir_: Path, mode: str) -> int:
         if m_v2:
             max_n = max(max_n, int(m_v2.group(1)))
         elif m_v1:
-            # v1 legacy 0-based；映射到 v2 编号空间 +1 避免冲突
+            # v1 legacy is 0-based; map into v2's numbering space (+1) to avoid collisions
             max_n = max(max_n, int(m_v1.group(1)) + 1)
     return max_n + 1
 
 
 def _next_xy_folder_index(xy_dir: Path) -> int:
-    """XY 模式下一个文件夹 1-based 序号。
+    """Next 1-based folder index for XY mode.
 
-    扫两个空间防撞：
-    - 新格式子文件夹 `xy plot N/`（_XY_FOLDER_RE）
-    - legacy 平铺文件 `xy plot N.png`（_V2_XY_RE） —— PR #245 早期落盘的，
-      虽然不会出现在 history 但残留磁盘上时不能复用编号
+    Scans two namespaces to avoid collisions:
+    - new-format subfolders `xy plot N/` (_XY_FOLDER_RE)
+    - legacy flat files `xy plot N.png` (_V2_XY_RE) -- written by early PR #245, which
+      won't show up in history but if left on disk their numbers still can't be reused
 
-    决策 #11：单用户无并发跑图，不做锁；扫描 + atomic mkdir 即可。
+    Decision #11: single user, no concurrent generation, so no locking; scan + atomic
+    mkdir is enough.
     """
     if not xy_dir.is_dir():
         return 1
@@ -142,10 +150,12 @@ def _next_xy_folder_index(xy_dir: Path) -> int:
 
 
 def _cleanup_xy_tmp_folders() -> None:
-    """import-time 清理上次 server crash 留下的 `.xy plot N.tmp/` 半成品。
+    """At import time, clean up leftover `.xy plot N.tmp/` half-finished folders from a
+    previous server crash.
 
-    save 流程：先写到 sibling tmp 文件夹，全部 cell 落盘后 os.replace 成
-    正式名。中途 crash 会留 tmp 文件夹。每次模块 import 扫一遍清。
+    Save flow: first write to a sibling tmp folder, then once every cell is on disk,
+    os.replace to the final name. A crash mid-way leaves a tmp folder behind. Swept once
+    per module import.
     """
     if not TEST_IMAGES_DIR.is_dir():
         return
@@ -160,19 +170,20 @@ def _cleanup_xy_tmp_folders() -> None:
                 shutil.rmtree(p, ignore_errors=True)
 
 
-# import-time 清理（上次 server crash 留下的 tmp 文件夹）
+# Import-time cleanup (tmp folders left over from a previous server crash)
 _cleanup_xy_tmp_folders()
 
 
 @router.post("/api/generate")
 def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
-    """启动测试出图 task。"""
+    """Start a test generate task."""
     from ...services.inference.core import generate_tempdir
     from ...services.models.families import get_assets
 
     model_paths = _resolve_model_paths(body.base_model, family=body.model_family)
-    # TE variant 覆盖（krea2）：请求显式给 bf16/fp8 时覆盖 selected_te 默认
-    # （default_paths 已按 selected_te 解析）；fp8 未下载给可操作报错。
+    # TE variant override (krea2): when the request explicitly sets bf16/fp8, override
+    # the selected_te default (default_paths already resolves by selected_te); if fp8
+    # isn't downloaded, raise an actionable error.
     if body.text_encoder and body.model_family == "krea2":
         from ...services.models.families.krea2 import qwen3_vl_dir_for
         from ...services.models.paths import models_root
@@ -185,8 +196,9 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
                        "and retry once it has finished downloading.",
             )
         model_paths["text_encoder_path"] = str(te_dir)
-    # Turbo 检测（A4/C9）：官方蒸馏 variant → daemon 走 8 步/guidance 0/固定 mu
-    # 的采样时刻表默认；custom 权重无 purpose 元数据按非蒸馏处理
+    # Turbo detection (A4/C9): for the official distilled variant, the daemon defaults to
+    # the 8-step/guidance-0/fixed-mu sampling schedule; custom weights with no purpose
+    # metadata are treated as non-distilled.
     distilled = bool(get_assets(body.model_family).is_distilled_path(
         model_paths.get("transformer_path", "")))
 
@@ -196,17 +208,19 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
         )
         db.update_task(conn, task_id, task_type="generate")
 
-    # create_task 已把 task 落成 pending+generate，但 config_path 还没写；supervisor
-    # _dispatch_exclusive_tasks 会跳过 config_path=NULL 的 generate task（视为还在入队），等
-    # 下面 config.json 落库后再派。这里任一步失败必须把 task 标 failed，否则它会以
-    # config_path=NULL 永远 pending（dispatcher 永远跳过）。
+    # create_task already lands the task as pending+generate, but config_path isn't
+    # written yet; supervisor's _dispatch_exclusive_tasks skips generate tasks with
+    # config_path=NULL (treats them as still enqueuing) until config.json is persisted
+    # below. If any step here fails we must mark the task failed, otherwise it stays
+    # pending forever with config_path=NULL (the dispatcher will always skip it).
     try:
         tempdir = generate_tempdir(task_id)
         tempdir.mkdir(parents=True, exist_ok=True)
 
-        # 测试出图走 Comfy-style runtime。xformers backend 可提供 pinned oracle
-        # 的 exact KSampler parity；flash_attn/none 可生成但不保证 exact parity。
-        # preview 节流仍读 settings；训练 / RegAI 的 backend 选择不受影响。
+        # Test generation uses the Comfy-style runtime. The xformers backend can provide
+        # exact KSampler parity with the pinned oracle; flash_attn/none can generate but
+        # don't guarantee exact parity. Preview throttling still reads from settings;
+        # backend selection for training / RegAI is unaffected.
         try:
             gen_cfg = secrets.load().generate
             attn_default = gen_cfg.attention_backend
@@ -249,16 +263,18 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
             xy_matrix=body.xy_matrix.model_dump() if body.xy_matrix else None,
         )
 
-        # commit 14：注入 daemon 端用的 preview 节流参数（settings 全局开关）
+        # commit 14: inject the preview throttling parameter used on the daemon side
+        # (global toggle in settings)
         cfg_dict = force_comfy_parity_runtime_config(
             cfg.model_dump(),
             force_exact_ksampler_backend=False,
         )
         cfg_dict["preview_every_n_steps"] = preview_n
 
-        # 决策 #15：task 启动时冻结 save_test_images，避免用户中途切开关导致
-        # 一 task 内一半图走 cache 一半落盘。daemon submit_task 读这个字段
-        # 存到 _ActiveTask.save_to_disk，_handle_image_done 决定 SSE delivery
+        # Decision #15: freeze save_test_images when the task starts, to avoid the user
+        # flipping the toggle mid-task and having half the images in a task go to cache
+        # and half to disk. daemon submit_task reads this field into
+        # _ActiveTask.save_to_disk, and _handle_image_done decides SSE delivery from it.
         try:
             cfg_dict["save_test_images_at_dispatch"] = bool(
                 secrets.load().generate.save_test_images
@@ -266,10 +282,11 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
         except Exception:
             cfg_dict["save_test_images_at_dispatch"] = False
 
-        # 前端 params snapshot 透传：路由 → config.json → supervisor →
-        # daemon.submit_task → _ActiveTask.params_snapshot → cache.put 时
-        # 跟 PNG bytes 一起塞进加密 payload header。下划线前缀提示 daemon
-        # 子进程不读这个字段（cfg 透传不解析）。
+        # Frontend params snapshot passthrough: route -> config.json -> supervisor ->
+        # daemon.submit_task -> _ActiveTask.params_snapshot -> stuffed into the encrypted
+        # payload header alongside the PNG bytes when cache.put runs. The underscore
+        # prefix signals that the daemon subprocess doesn't read this field (cfg
+        # passthrough doesn't parse it).
         if body.params_snapshot:
             cfg_dict["_anima_params_snapshot_"] = body.params_snapshot
 
@@ -289,9 +306,12 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
         bus.publish({"type": "task_state_changed", "task_id": task_id, "status": "failed"})
         raise HTTPException(500, f"failed to enqueue generate task: {e}")
 
-    # 0.17 P-I forward-write：把参数快照落 DB（generate_params 列，_v14）。前端暂不读，
-    # 为未来「纯 DB 出图时间线」攒数据——那时按 params + generate_cover(出图完成时写)
-    # 直接定位/回填，无需扫盘、无需迁移。参数就是前端随 body 发来的 params_snapshot。
+    # 0.17 P-I forward-write: persist the params snapshot to the DB (generate_params
+    # column, _v14). The frontend doesn't read this yet; it accumulates data for a future
+    # "DB-only generation timeline" -- at that point params + generate_cover (written
+    # when generation finishes) can locate/backfill directly, with no disk scan and no
+    # migration needed. The params are exactly the params_snapshot the frontend sends
+    # with the body.
     generate_params = (
         json.dumps(body.params_snapshot, ensure_ascii=False)
         if body.params_snapshot else None
@@ -308,7 +328,7 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
 
 @router.get("/api/generate/{task_id}")
 def get_generate_task(task_id: int) -> dict[str, Any]:
-    """查询测试 task 状态。"""
+    """Query the status of a test task."""
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task or task.get("task_type") != "generate":
@@ -320,13 +340,13 @@ def get_generate_task(task_id: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# /api/generate/daemon — 测试 daemon 状态查询 + 手动卸载（commit 13）
+# /api/generate/daemon -- test daemon status query + manual unload (commit 13)
 # ---------------------------------------------------------------------------
 
 
 @router.get("/api/generate/taeflux/status")
 def get_taeflux_status() -> dict[str, Any]:
-    """commit 14：查询 TAEFlux 模型是否就绪（中间步预览依赖）。"""
+    """commit 14: query whether the TAEFlux model is ready (needed for mid-step preview)."""
     from ...services import models as _md
     d = _md.taeflux_dir()
     return {
@@ -338,7 +358,7 @@ def get_taeflux_status() -> dict[str, Any]:
 
 @router.post("/api/generate/taeflux/install")
 def install_taeflux() -> dict[str, Any]:
-    """同步下载 TAEFlux（~1.6MB，秒级）。已存在直接返回 OK。"""
+    """Synchronously download TAEFlux (~1.6MB, seconds). Returns OK immediately if it already exists."""
     from ...services import models as _md
     if _md.taeflux_available():
         return {"ok": True, "noop": True}
@@ -356,11 +376,13 @@ _TOKENIZER_CACHE: dict[str, Any] = {}
 
 @router.post("/api/generate/token_count")
 def count_prompt_tokens(body: dict) -> dict[str, Any]:
-    """prompt 的真实 token 数（前端角标用；tokenizer 与训练/推理同源）。
+    """Real token count of a prompt (for the frontend badge; same tokenizer as
+    training/inference).
 
-    krea2 的文本条件训练口径 512 token，超出部分模型没见过（不拦截、
-    不警告——质量后果由用户掌握，前端只给中性计数）。tokenizer 惰性
-    加载并缓存；不可用时返回 tokens=null，前端隐藏角标。
+    krea2's text-conditioning training budget is 512 tokens; anything beyond that the
+    model never saw (not blocked, not warned -- the quality consequences are the user's
+    call, the frontend just shows a neutral count). The tokenizer is lazily loaded and
+    cached; when unavailable, returns tokens=null and the frontend hides the badge.
     """
     text = str(body.get("text") or "")
     family = str(body.get("model_family") or "anima")
@@ -393,7 +415,7 @@ def count_prompt_tokens(body: dict) -> dict[str, Any]:
 
 @router.get("/api/generate/daemon/status")
 def get_daemon_status() -> dict[str, Any]:
-    """查询 daemon 当前状态。前端 DaemonControls 用。"""
+    """Query the daemon's current status. Used by the frontend's DaemonControls."""
     from ...services.inference.daemon import get_daemon
     daemon = get_daemon()
     return {
@@ -406,9 +428,10 @@ def get_daemon_status() -> dict[str, Any]:
 
 @router.get("/api/generate/daemon/logs")
 def get_daemon_logs(since_seq: int = 0, limit: int = 2000) -> dict[str, Any]:
-    """读 daemon stderr ring buffer。前端日志抽屉打开时拉历史；增量靠 SSE。
+    """Read the daemon stderr ring buffer. Used by the frontend to pull history when the
+    log drawer opens; incremental updates come via SSE.
 
-    since_seq>0 时只返新于该 seq 的行。
+    When since_seq>0, only returns lines newer than that seq.
     """
     from ...services.inference.daemon import get_daemon
     return get_daemon().read_logs(since_seq=since_seq, limit=limit)
@@ -416,10 +439,11 @@ def get_daemon_logs(since_seq: int = 0, limit: int = 2000) -> dict[str, Any]:
 
 @router.post("/api/generate/daemon/unload")
 def unload_daemon() -> dict[str, Any]:
-    """手动卸载 daemon 模型（释放 VRAM）。busy 时拒绝（409）。
+    """Manually unload the daemon's model (frees VRAM). Rejected (409) while busy.
 
-    卸载完成后 supervisor 会推 daemon_state_changed SSE，前端按钮自动 disable。
-    下次用户点「开始生成」daemon 按需重 load。
+    Once unloaded, the supervisor pushes a daemon_state_changed SSE and the frontend
+    button auto-disables. The next time the user clicks "start generating," the daemon
+    loads on demand.
     """
     from ...services.inference.daemon import get_daemon
     daemon = get_daemon()
@@ -436,11 +460,13 @@ def unload_daemon() -> dict[str, Any]:
 
 @router.get("/api/generate/{task_id}/sample/{filename}")
 def get_generate_sample(task_id: int, filename: str) -> Any:
-    """读 generate task 的输出图（commit 10：从 server 内存 cache 取，无磁盘）。
+    """Read an output image for a generate task (commit 10: from the server's in-memory
+    cache, no disk involved).
 
-    daemon 出图完成后把 PNG bytes 推回 server 入 generate_cache；HTTP 这里
-    直接返回 bytes。LRU / 客户端断连清理在 commit 11 加 —— 在那之前 cache
-    跟着 supervisor finalize 释放（一 task 一组 entry，task 终止时全清）。
+    Once the daemon finishes generating, it pushes the PNG bytes back to the server into
+    generate_cache; HTTP returns the bytes directly here. LRU / client-disconnect cleanup
+    was added in commit 11 -- before that, the cache is released alongside supervisor
+    finalize (one group of entries per task, all cleared when the task ends).
     """
     _validate_component_or_400(filename)
     if not filename.lower().endswith(".png"):
@@ -455,11 +481,13 @@ def get_generate_sample(task_id: int, filename: str) -> Any:
             "Image not found", code="image.not_found",
             details={"task_id": task_id, "filename": filename}, http_status=404,
         )
-    # 用 no-store 不是 _thumb_response 那套 no-cache + ETag：
-    # generate cache 同 (task_id, filename) 内容会随重跑覆盖（用户改 prompt 重生成），
-    # 没有稳定 ETag 可发；用 no-store 让浏览器每次都重拉，永远拿到最新结果。
-    # 带宽代价小：用户在测试出图页主动看才命中本 endpoint，QPS 低。
-    # （Thumbnail / dataset 那种内容稳定的图，继续用 _thumb_response 的 ETag。）
+    # Uses no-store rather than the no-cache + ETag combo from _thumb_response: content
+    # for the same (task_id, filename) in the generate cache can be overwritten by a
+    # rerun (user tweaks the prompt and regenerates), so there's no stable ETag to send;
+    # no-store makes the browser always refetch and get the latest result.
+    # Bandwidth cost is small: this endpoint is only hit when the user is actively
+    # watching the test-generation page, so QPS is low.
+    # (Thumbnails / dataset images, whose content is stable, keep using _thumb_response's ETag.)
     return Response(
         content=data,
         media_type="image/png",
@@ -471,15 +499,17 @@ SCHEMA_VERSION = 2
 
 
 def _format_a1111_parameters(params: dict[str, Any]) -> str:
-    """组装 a1111 兼容的 `parameters` tEXt 块（ComfyUI / WebUI / Civitai 等通用）。
+    """Assemble an a1111-compatible `parameters` tEXt block (generally understood by
+    ComfyUI / WebUI / Civitai etc).
 
-    格式：
+    Format:
         <prompt> [<lora:name:scale> ...]
         Negative prompt: <neg>
         Steps: N, Sampler: ..., Schedule type: ..., CFG scale: N, Seed: N, Size: WxH
 
-    LoRA 用 <lora:basename-without-ext:scale> 语法（a1111/ComfyUI 标准）。
-    xy_draft / dataset_pick 不入此块（a1111 没标准字段；用 anima_params 取）。
+    LoRA uses the <lora:basename-without-ext:scale> syntax (a1111/ComfyUI standard).
+    xy_draft / dataset_pick are not included in this block (a1111 has no standard field
+    for them; use anima_params instead).
     """
     prompts = params.get("prompts") or [""]
     prompt = prompts[0] if isinstance(prompts, list) else str(prompts)
@@ -488,7 +518,7 @@ def _format_a1111_parameters(params: dict[str, Any]) -> str:
     for lo in loras:
         if not isinstance(lo, dict):
             continue
-        name = str(lo.get("name") or "").rsplit(".", 1)[0]  # 去 .safetensors
+        name = str(lo.get("name") or "").rsplit(".", 1)[0]  # strip .safetensors
         if not name:
             continue
         scale = lo.get("scale", 1.0)
@@ -511,19 +541,22 @@ def _format_a1111_parameters(params: dict[str, Any]) -> str:
 
 
 def _inject_png_metadata(raw: bytes, params: dict[str, Any], *, mode: str) -> bytes:
-    """注入 PNG tEXt 块到图：
-       - `anima_params` —— 结构化 JSON，**zTXt 压缩**（决策 #17），本程序回填用
-       - `parameters`   —— a1111 兼容文本（决策 #7：xy **不写**，矩阵图单图拖
-         进 a1111 参数语义对不上）；仅 single 模式写
+    """Inject PNG tEXt blocks into an image:
+       - `anima_params` -- structured JSON, **zTXt compressed** (decision #17), used by
+         this program's own reimport
+       - `parameters`   -- a1111-compatible text (decision #7: **not written** for xy,
+         since dragging a single cell from a matrix image into a1111 doesn't make sense
+         parameter-wise); only written in single mode
 
-    失败返回原 bytes（不阻塞落盘主流程）。
+    Returns the original bytes on failure (does not block the main save flow).
     """
     try:
         from PIL import Image, PngImagePlugin
         img = Image.open(io.BytesIO(raw))
         info = PngImagePlugin.PngInfo()
-        # zip=True → zTXt 压缩块（PIL 9+），XY cells[] 时 anima_params 可能 6KB+，
-        # 压缩后通常 1-2KB，a1111 不识别 anima_params 反正会跳过
+        # zip=True -> zTXt compressed block (PIL 9+); with XY cells[], anima_params can
+        # be 6KB+, usually compresses down to 1-2KB, and a1111 doesn't recognize
+        # anima_params so it just skips it anyway
         info.add_text("anima_params", json.dumps(params, ensure_ascii=False), zip=True)
         if mode == "single":
             info.add_text("parameters", _format_a1111_parameters(params))
@@ -538,15 +571,17 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def _decode_png_text_chunk(ctype: bytes, data: bytes) -> str | None:
-    """从 PNG 文本 chunk 取出 keyword==`anima_params` 的文本；非该 keyword /
-    解析失败返 None。
+    """Extract the text for the `anima_params` keyword from a PNG text chunk; returns
+    None for any other keyword or on parse failure.
 
-    - tEXt：keyword\\0 + latin-1 明文
-    - zTXt：keyword\\0 + 压缩方法(1 字节) + zlib 压缩流（latin-1）
-    - iTXt：keyword\\0 + 压缩 flag(1) + 压缩方法(1) + 语言\\0 + 翻译 keyword\\0 + 文本(utf-8)
+    - tEXt: keyword\\0 + latin-1 plain text
+    - zTXt: keyword\\0 + compression method (1 byte) + zlib compressed stream (latin-1)
+    - iTXt: keyword\\0 + compression flag(1) + compression method(1) + language\\0 +
+      translated keyword\\0 + text (utf-8)
 
-    解码用 PIL 读 PNG 文本块的同一套规则（tEXt/zTXt → latin-1，iTXt → utf-8），
-    保证与旧 PIL 实现逐值一致。
+    Decoding follows the same rules PIL uses for reading PNG text chunks (tEXt/zTXt ->
+    latin-1, iTXt -> utf-8), to stay byte-for-byte consistent with the old PIL-based
+    implementation.
     """
     keyword, sep, rest = data.partition(b"\x00")
     if not sep or keyword != b"anima_params":
@@ -561,8 +596,8 @@ def _decode_png_text_chunk(ctype: bytes, data: bytes) -> str | None:
                 return None
             comp_flag = rest[0]
             body = rest[2:]
-            _, _, body = body.partition(b"\x00")  # 跳语言 tag
-            _, _, body = body.partition(b"\x00")  # 跳翻译 keyword
+            _, _, body = body.partition(b"\x00")  # skip language tag
+            _, _, body = body.partition(b"\x00")  # skip translated keyword
             return (zlib.decompress(body) if comp_flag else body).decode("utf-8")
     except Exception:
         return None
@@ -570,16 +605,19 @@ def _decode_png_text_chunk(ctype: bytes, data: bytes) -> str | None:
 
 
 def _read_png_anima_params(path: Path) -> dict[str, Any] | None:
-    """从 PNG `anima_params` tEXt / zTXt / iTXt 块解析 params；无 / 解析失败返 None。
+    """Parse params from a PNG's `anima_params` tEXt / zTXt / iTXt block; returns None if
+    absent or on parse failure.
 
-    直接顺序扫 PNG chunk，读到第一个 IDAT（像素数据起始）前找 `anima_params`
-    文本块即停。`anima_params` 由 `PngInfo.add_text(..., zip=True)` 写成 zTXt 且
-    位于 IDAT 之前，必然在 header 区命中。
+    Scans PNG chunks in order directly, looking for the `anima_params` text block before
+    the first IDAT (pixel data start), stopping there. `anima_params` is written by
+    `PngInfo.add_text(..., zip=True)` as zTXt and sits before IDAT, so it's guaranteed to
+    be found in the header region.
 
-    原实现走 `PIL.Image.open` 只读 header（不 decode 像素），但实测 PIL open 每
-    文件 ~30-40ms，disk-history 扫数百张落盘图要 10-15s（冷缓存可达 ~1min）。
-    手写 chunk 扫描每文件 ~0.1ms（实测 356 张 15s → 0.04s，~350×），且对全部
-    历史 PNG 与旧实现逐值一致。
+    The original implementation used `PIL.Image.open` to only read the header (no pixel
+    decode), but measured PIL open at ~30-40ms per file, making a disk-history scan over
+    hundreds of saved images take 10-15s (up to ~1min on a cold cache). A hand-written
+    chunk scan runs ~0.1ms per file (measured: 356 files, 15s -> 0.04s, ~350x), and stays
+    byte-for-byte consistent with the old implementation across the whole PNG history.
     """
     try:
         with open(path, "rb") as f:
@@ -592,7 +630,7 @@ def _read_png_anima_params(path: Path) -> dict[str, Any] | None:
                 length = int.from_bytes(head[:4], "big")
                 ctype = head[4:8]
                 if ctype == b"IDAT":
-                    return None  # 到像素数据，header 区没有 anima_params
+                    return None  # reached pixel data; header region has no anima_params
                 if ctype in (b"tEXt", b"zTXt", b"iTXt"):
                     text = _decode_png_text_chunk(ctype, f.read(length))
                     f.read(4)  # CRC
@@ -600,19 +638,20 @@ def _read_png_anima_params(path: Path) -> dict[str, Any] | None:
                         parsed = json.loads(text)
                         return parsed if isinstance(parsed, dict) else None
                 else:
-                    f.seek(length + 4, 1)  # 跳 chunk data + CRC（IHDR 等）
+                    f.seek(length + 4, 1)  # skip chunk data + CRC (IHDR etc.)
     except Exception:
         return None
 
 
 def _migrate_anima_params(meta: dict[str, Any]) -> dict[str, Any]:
-    """v1 → v2 schema 迁移（决策 #18）。
+    """v1 -> v2 schema migration (decision #18).
 
-    v1: `lora_configs[].path` 是绝对路径（旧 schema 直接存 path）
-    v2: `loras[].name` basename + project_id/version_id；不存绝对路径
+    v1: `lora_configs[].path` is an absolute path (old schema stored the path directly)
+    v2: `loras[].name` is a basename + project_id/version_id; no absolute path stored
 
-    迁移规则：v1 PNG → 把 `lora_configs[].path` 末段 basename 当 v2 `loras[].name`，
-    保留 project_id/version_id/scale；旧 path 丢弃（隐私 + 跨机器死链）。
+    Migration rule: for a v1 PNG, take the basename of the last segment of
+    `lora_configs[].path` as v2's `loras[].name`, keep project_id/version_id/scale, and
+    drop the old path (privacy + it would be a dead link on another machine).
     """
     version = meta.get("schema_version", 1)
     if version >= 2:
@@ -635,19 +674,19 @@ def _migrate_anima_params(meta: dict[str, Any]) -> dict[str, Any]:
             meta["loras"] = new_loras
         meta["schema_version"] = 2
         return meta
-    # 未知版本 → 当作 v2 透传（forward-compat）
+    # Unknown version -> pass through as v2 (forward-compat)
     return meta
 
 
 def _enrich_params_server_side(
     params: dict[str, Any], *, task_id: int | None, mode: str
 ) -> dict[str, Any]:
-    """server 端补全 params 的服务端信息（避免前端伪造 / 漏字段）。
+    """Fill in server-side info on params (avoids frontend forgery / missing fields).
 
-    - `schema_version` 强制覆盖为当前版本
-    - `created_at` 落盘时刻（Unix 秒）
-    - `task_id` 来自 enqueue（前端不传 / 不可信任）
-    - `mode` 来自路由参数（前端不传）
+    - `schema_version` is forced to the current version
+    - `created_at` is the on-disk write timestamp (Unix seconds)
+    - `task_id` comes from enqueue (not sent by / not trusted from the frontend)
+    - `mode` comes from the route parameter (not sent by the frontend)
     """
     params = dict(params)
     params["schema_version"] = SCHEMA_VERSION
@@ -659,11 +698,12 @@ def _enrich_params_server_side(
 
 
 def _atomic_write_png(target: Path, raw: bytes) -> None:
-    """原子写 PNG：写 tmp + os.replace（决策 #11 crash safety）。
+    """Atomically write a PNG: write to tmp + os.replace (decision #11 crash safety).
 
-    server 在写到一半挂掉时不会留半截 PNG 让 disk-history 扫到（半截 PNG 无
-    PNG IEND chunk，PIL 解析失败，disk-history 会跳过这条；但用户在文件管理
-    器里看到一半文件仍是噪音）。tmp + replace 让 target 出现的瞬间内容已完整。
+    If the server crashes mid-write, disk-history won't ever scan a half-written PNG
+    (one with no IEND chunk fails PIL parsing and disk-history skips it), but the user
+    would still see a half-written file in a file manager, which is noise. tmp + replace
+    means the target only appears once its content is complete.
     """
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_bytes(raw)
@@ -671,7 +711,7 @@ def _atomic_write_png(target: Path, raw: bytes) -> None:
 
 
 def _decode_params_field(raw: str, field: str) -> dict[str, Any]:
-    """`params` / per-cell manifest 元素 → dict。失败抛 HTTPException 400."""
+    """`params` / a per-cell manifest element -> dict. Raises HTTPException 400 on failure."""
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -698,22 +738,25 @@ async def save_test_image(
     cells: list[UploadFile] = File(default=[]),
     cells_manifest: str = Form(""),
 ) -> dict[str, Any]:
-    """落盘测试出图。
+    """Save a test-generated image to disk.
 
-    **single mode** → `studio_data/test/<YYYY-MM-DD>/single/single image <N>.png`
-    返回 `{path, index, filename}` —— `cells` / `cells_manifest` 必须空，否则 400。
+    **single mode** -> `studio_data/test/<YYYY-MM-DD>/single/single image <N>.png`
+    returns `{path, index, filename}` -- `cells` / `cells_manifest` must be empty,
+    otherwise 400.
 
-    **xy mode** → `studio_data/test/<YYYY-MM-DD>/xy/xy plot <N>/{xy plot.png, cell x<i> y<j>.png ...}`
-    - `image` = composite 大图（导出 + 缩略图来源），按 mode='xy' 注 anima_params，不写 a1111
-    - `cells` = 每格原图 N 张；`cells_manifest` = JSON 数组 [{xi:int, yi:int, params:dict}]，
-      与 `cells` 同序；每 cell 按 mode='single' 注 anima_params + a1111
-    - 校验：len(cells)==len(manifest)，无重复 (xi,yi)
-    - atomic：先写 sibling `.xy plot <N>.tmp/`，全部 cell 落盘后 `os.replace` 成正式名；
-      任一步失败 → `shutil.rmtree(tmp)` 抛 500
-    - 返回 `{folder, composite, cells: [path,...]}`
+    **xy mode** -> `studio_data/test/<YYYY-MM-DD>/xy/xy plot <N>/{xy plot.png, cell x<i> y<j>.png ...}`
+    - `image` = the composite big image (export + thumbnail source), gets anima_params
+      injected with mode='xy', no a1111 block
+    - `cells` = N individual cell images; `cells_manifest` = a JSON array
+      [{xi:int, yi:int, params:dict}], in the same order as `cells`; each cell gets
+      anima_params + a1111 injected with mode='single'
+    - Validation: len(cells)==len(manifest), no duplicate (xi,yi)
+    - Atomic: first written to sibling `.xy plot <N>.tmp/`, once every cell is on disk
+      `os.replace` to the final name; any failure -> `shutil.rmtree(tmp)` and raise 500
+    - Returns `{folder, composite, cells: [path,...]}`
 
-    其它（含 "compare"）→ 400. Settings.save_test_images=False → 403.
-    server 端 enrich 强制 schema_version/created_at/task_id/mode。
+    Anything else (including "compare") -> 400. Settings.save_test_images=False -> 403.
+    Server-side enrich always forces schema_version/created_at/task_id/mode.
     """
     if mode not in ("single", "xy"):
         raise ValidationError(
@@ -762,7 +805,7 @@ async def save_test_image(
     if not cells:
         raise HTTPException(400, "xy mode requires at least one cell")
 
-    # 校验 manifest 条目 + 收集 (xi, yi) 防重
+    # Validate manifest entries + collect (xi, yi) to guard against duplicates
     seen_xy: set[tuple[int, int]] = set()
     cell_specs: list[tuple[int, int, dict[str, Any]]] = []
     for i, entry in enumerate(manifest):
@@ -783,14 +826,14 @@ async def save_test_image(
             raise HTTPException(400, f"cells_manifest[{i}].params: must be a JSON object")
         cell_specs.append((xi, yi, cell_params or {}))
 
-    # composite 注入 anima_params（mode='xy'，不写 a1111）
+    # Inject anima_params into the composite (mode='xy', no a1111 block)
     composite_bytes = raw
     if params:
         composite_decoded = _decode_params_field(params, "params")
         composite_enriched = _enrich_params_server_side(composite_decoded, task_id=task_id, mode="xy")
         composite_bytes = _inject_png_metadata(composite_bytes, composite_enriched, mode="xy")
 
-    # 读所有 cell bytes（在文件夹分配前，避免半写）
+    # Read all cell bytes (before allocating the folder, to avoid a half-written result)
     cell_bytes_list: list[bytes] = []
     for i, cell_upload in enumerate(cells):
         cb = await cell_upload.read()
@@ -798,7 +841,7 @@ async def save_test_image(
             raise HTTPException(400, f"cells[{i}]: empty body")
         cell_bytes_list.append(cb)
 
-    # 分配 folder + tmp 路径
+    # Allocate the folder + tmp path
     xy_dir = TEST_IMAGES_DIR / date.today().isoformat() / "xy"
     xy_dir.mkdir(parents=True, exist_ok=True)
     idx = _next_xy_folder_index(xy_dir)
@@ -823,7 +866,8 @@ async def save_test_image(
             cell_path = tmp_dir / f"cell x{xi} y{yi}.png"
             _atomic_write_png(cell_path, cell_payload)
             cell_paths.append(cell_path)
-        # atomic rename tmp → final (Windows: target must not exist, 我们刚 _next_xy_folder_index 保证)
+        # atomic rename tmp -> final (Windows requires the target not exist, which
+        # _next_xy_folder_index already guarantees)
         os.replace(tmp_dir, final_dir)
     except HTTPException:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -842,32 +886,35 @@ async def save_test_image(
 
 
 # ---------------------------------------------------------------------------
-# 磁盘历史浏览：扫 PNG `anima_params` tEXt 块列 entries，按图片 URL 单独服务
+# Disk history browsing: scan PNG `anima_params` tEXt blocks into entries, serve
+# individual images by URL
 # ---------------------------------------------------------------------------
 
 
 def _disk_history_id(date_str: str, mode: str, filename: str) -> str:
-    """前端 dedup / merge 用的稳定 id。
+    """Stable id for frontend dedup / merge.
 
-    用 sha1 短哈希替代直接拼 filename —— filename 含空格（决策 #6 "single image 1"）
-    塞进 React key / data-testid / URL fragment 会踩坑。哈希 12 位足够全局唯一。
+    Uses a short sha1 hash instead of the raw filename -- filenames contain spaces
+    (decision #6, "single image 1"), which causes trouble when stuffed into a React key
+    / data-testid / URL fragment. A 12-char hash is unique enough globally.
     """
     h = hashlib.sha1(f"{date_str}/{mode}/{filename}".encode("utf-8")).hexdigest()[:12]
     return f"disk:{h}"
 
 
 def _url_quote_filename(filename: str) -> str:
-    """文件名内空格 / 中文等 URL encode（决策 #6 文件名带空格）。后端返 URL
-    时直接 encode 好，前端拼接禁止。"""
+    """URL-encode spaces / non-ASCII characters etc. in a filename (decision #6:
+    filenames may contain spaces). The backend encodes it before returning the URL; the
+    frontend must never concatenate raw filenames itself."""
     return quote(filename, safe="")
 
 
 def _scan_single_dir(single_dir: Path, date_str: str) -> list[dict[str, Any]]:
-    """扫一个 `<date>/single/` 目录的所有 PNG，返回 disk-history entry 列表。"""
+    """Scan all PNGs in a `<date>/single/` directory and return a list of disk-history entries."""
     out: list[dict[str, Any]] = []
     for img in single_dir.glob("*.png"):
         if img.name.endswith(".tmp.png"):
-            continue  # atomic write tmp file 兜底
+            continue  # fallback guard for atomic-write tmp files
         params = _read_png_anima_params(img)
         if params is None:
             continue
@@ -895,14 +942,16 @@ def _scan_single_dir(single_dir: Path, date_str: str) -> list[dict[str, Any]]:
 def _build_xy_meta_from_folder(
     folder: Path, composite_params: dict[str, Any], date_str: str, folder_name: str,
 ) -> dict[str, Any] | None:
-    """读 XY 文件夹下所有 cell 文件，按 composite 的 xy_draft 反查 xv/yv，
-    拼成 disk-history entry 的 `xy_meta` 字段。
+    """Read every cell file under an XY folder, and using the composite's xy_draft, look
+    up each cell's xv/yv to assemble the disk-history entry's `xy_meta` field.
 
-    决策：只读 composite 的 anima_params（一次 file open），cell 的 xi/yi
-    从文件名 parse（regex），xv/yv 从 composite.xy_draft.x.raw/y.raw split
-    后查表。**不**逐 cell 打开 anima_params —— 5×5 矩阵 1 次 open 而非 26 次。
+    Design: only the composite's anima_params is read (one file open); each cell's xi/yi
+    is parsed from the filename (regex), and xv/yv are looked up from
+    composite.xy_draft.x.raw/y.raw after splitting. Anima_params is **not** opened per
+    cell -- a 5x5 matrix means 1 open instead of 26.
 
-    返回 None 表示 composite 缺 xy_draft（异常状态，前端兜底走 <img>）。
+    Returns None if the composite is missing xy_draft (an abnormal state; the frontend
+    falls back to a plain <img>).
     """
     xy_draft = composite_params.get("xy_draft")
     if not isinstance(xy_draft, dict):
@@ -952,21 +1001,22 @@ def _build_xy_meta_from_folder(
 
 
 def _scan_xy_dir(xy_dir: Path, date_str: str) -> list[dict[str, Any]]:
-    """扫一个 `<date>/xy/` 目录 —— 只看子文件夹（新布局），跳所有平铺文件（legacy）。
+    """Scan a `<date>/xy/` directory -- only look at subfolders (the new layout), skip
+    all flat files (legacy).
 
-    每个匹配 `_XY_FOLDER_RE` 的子文件夹：
-    - 必须有 `xy plot.png` composite，否则跳过整个 folder
-    - 读 composite 的 anima_params，调 `_build_xy_meta_from_folder` 出 cells
+    For each subfolder matching `_XY_FOLDER_RE`:
+    - must have an `xy plot.png` composite, otherwise skip the whole folder
+    - read the composite's anima_params, call `_build_xy_meta_from_folder` for the cells
     """
     out: list[dict[str, Any]] = []
     for folder in xy_dir.iterdir():
         if not folder.is_dir():
-            continue  # legacy 平铺 `xy plot N.png` 文件不再出现在 history（用户决策）
+            continue  # legacy flat `xy plot N.png` files no longer appear in history (product decision)
         if not _XY_FOLDER_RE.match(folder.name):
             continue
         composite = folder / _XY_COMPOSITE_NAME
         if not composite.is_file():
-            continue  # 没 composite 的文件夹（半成品 / 用户手动 mkdir）跳过
+            continue  # a folder with no composite (half-finished / user-created manually) is skipped
         params = _read_png_anima_params(composite)
         if params is None:
             continue
@@ -995,15 +1045,16 @@ def _scan_xy_dir(xy_dir: Path, date_str: str) -> list[dict[str, Any]]:
 
 
 def _scan_png_metadata(limit: int) -> list[dict[str, Any]]:
-    """扫 TEST_IMAGES_DIR 下所有 <date>/{single,xy}/ 的 anima_params。
+    """Scan anima_params under every <date>/{single,xy}/ in TEST_IMAGES_DIR.
 
-    - single 模式：扫 `<date>/single/*.png`
-    - xy 模式：扫 `<date>/xy/xy plot <N>/{composite + cells}` 子文件夹
-      （legacy 平铺 `<date>/xy/xy plot N.png` 不入列表 —— 用户决策 hide）
+    - single mode: scans `<date>/single/*.png`
+    - xy mode: scans `<date>/xy/xy plot <N>/{composite + cells}` subfolders
+      (legacy flat `<date>/xy/xy plot N.png` is excluded from the list -- product decision to hide it)
 
-    没 anima_params 的 PNG 不入列表（老数据 / 客户端没传 params）。
-    决策 #16：composite 只读 header（不 load 像素）；cell 不读 PNG（用文件名 parse + composite xy_draft 反查 xv/yv）。
-    决策 #18：v1→v2 migrate。
+    PNGs with no anima_params are excluded from the list (old data / client didn't send params).
+    Decision #16: only the composite header is read (no pixel load); cells aren't opened
+    as PNGs at all (xv/yv is derived from the filename + the composite's xy_draft).
+    Decision #18: v1->v2 migration.
     """
     if not TEST_IMAGES_DIR.is_dir():
         return []
@@ -1023,10 +1074,12 @@ def _scan_png_metadata(limit: int) -> list[dict[str, Any]]:
 
 @router.get("/api/generate/disk/history")
 def list_disk_history(limit: int = 500) -> dict[str, Any]:
-    """列出所有落盘测试图（按 PNG `anima_params` tEXt 扫），按 created_at desc 排。
+    """List every test image saved to disk (scanned from PNG `anima_params` tEXt),
+    sorted by created_at desc.
 
-    前端历史栏拉一次 merge 到 IndexedDB 视图；entry.id 稳定，前端按 id dedup。
-    没有 anima_params 的图（老数据 / 客户端没传 params）不入列表。
+    The frontend history sidebar pulls this once and merges into its IndexedDB view;
+    entry.id is stable so the frontend dedups by id. Images without anima_params (old
+    data / client didn't send params) are excluded from the list.
     """
     limit = max(1, min(int(limit), 2000))
     return {"entries": _scan_png_metadata(limit)}
@@ -1034,28 +1087,31 @@ def list_disk_history(limit: int = 500) -> dict[str, Any]:
 
 @router.get("/api/generate/cache/index")
 def list_cache_index() -> dict[str, Any]:
-    """当前 session 加密磁盘 cache 里所有 entry 的索引（save_test_images=false
-    时前端历史栏唯一来源）。
+    """Index of every entry in the current session's encrypted disk cache (the only
+    source for the frontend history sidebar when save_test_images=false).
 
-    server 进程 SessionCache 维护活跃 entry → 这里直接 dump；按 createdAt
-    desc 排。entry 里的 params snapshot 是图入 cache 时跟 PNG bytes 一起塞
-    进加密 payload header 的那份，进程死了一起没。
+    The server process's SessionCache tracks live entries -> just dumped here, sorted by
+    createdAt desc. Each entry's params snapshot is the one stuffed into the encrypted
+    payload header alongside the PNG bytes when the image entered the cache; it dies with
+    the process.
 
-    刷新 / 切路由都拉这里 → 前端零持久化层，零脏数据可能。
+    Refreshing / switching routes both pull from here -> zero persistence layer on the
+    frontend, zero chance of stale data.
     """
     from ...services.inference import disk_cache as generate_cache
     try:
         return {"entries": generate_cache.list_index()}
     except RuntimeError:
-        # cache 尚未 init（理论上不该发生，lifespan startup 已建好）
+        # cache not yet initialized (shouldn't happen in theory, lifespan startup already sets it up)
         return {"entries": []}
 
 
 def _resolve_disk_png(date_str: str, mode: str, filename: str) -> Path:
-    r"""三种 endpoint（image / thumb / delete）共用的路径校验 + resolve。
+    r"""Path validation + resolution shared by the three endpoints (image / thumb / delete).
 
-    校验：date 格式 / mode 枚举 / filename 安全字符集（无 / \ .. 等）/ 扩展名 .png
-    返回：实际磁盘 Path（不保证 exists，由调用方决定 404 时机）
+    Validates: date format / mode enum / filename safe character set (no / \ .. etc.) /
+    .png extension.
+    Returns: the actual on-disk Path (existence not guaranteed; the caller decides when to 404).
     """
     if not _DATE_RE.match(date_str):
         raise HTTPException(400, "invalid date")
@@ -1063,7 +1119,7 @@ def _resolve_disk_png(date_str: str, mode: str, filename: str) -> Path:
         raise HTTPException(400, "invalid mode")
     if not _PNG_NAME_SAFE_RE.match(filename):
         raise HTTPException(400, "invalid filename")
-    # 二次防御：safe_join 反 traversal
+    # Extra defense: safe_join against traversal
     base = (TEST_IMAGES_DIR / date_str / mode).resolve()
     try:
         path = (base / filename).resolve()
@@ -1076,7 +1132,8 @@ def _resolve_disk_png(date_str: str, mode: str, filename: str) -> Path:
 
 @router.get("/api/generate/disk/image/{date_str}/{mode}/{filename}")
 def get_disk_image(date_str: str, mode: str, filename: str) -> Any:
-    """读落盘测试图（前端历史栏点击磁盘 entry 时大图来源）。"""
+    """Read a test image saved to disk (used as the large-image source when the frontend
+    history sidebar clicks a disk entry)."""
     path = _resolve_disk_png(date_str, mode, filename)
     if not path.is_file():
         raise NotFoundError(
@@ -1084,7 +1141,8 @@ def get_disk_image(date_str: str, mode: str, filename: str) -> Any:
             details={"date": date_str, "mode": mode, "filename": filename},
             http_status=404,
         )
-    # 落盘图内容稳定（序号递增不覆盖），可强 cache
+    # Content of a saved image is stable (indices only increase, never overwritten), so
+    # it can be cached aggressively
     return FileResponse(
         path, media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
@@ -1096,11 +1154,13 @@ def get_disk_thumb(
     date_str: str, mode: str, filename: str,
     w: int = Query(128, ge=32, le=512),
 ) -> Any:
-    """PIL 在线生成缩略图（决策 Dev v1 / Arch v2）—— 替代前端 IDB dataURL cache。
+    """Generate a thumbnail on the fly with PIL (Dev v1 / Arch v2 decision) -- replaces
+    the frontend's IDB dataURL cache.
 
-    - ETag = sha1(file mtime + size + w)；304 命中直接返
-    - Cache-Control: public, max-age=86400（落盘图内容稳定）
-    - 失败 fallback 原图（避免缩略生成 bug 阻塞历史栏）
+    - ETag = sha1(file mtime + size + w); returned directly on a 304 hit
+    - Cache-Control: public, max-age=86400 (saved-image content is stable)
+    - Falls back to the original image on failure (so a thumbnail-generation bug doesn't
+      block the history sidebar)
     """
     path = _resolve_disk_png(date_str, mode, filename)
     if not path.is_file():
@@ -1120,8 +1180,10 @@ def get_disk_thumb(
             details={"date": date_str, "mode": mode, "filename": filename},
             http_status=404,
         ) from exc
-    # 这里没有直接读 request header，由 FastAPI / Starlette 处理 304 略复杂；
-    # 简化方案：返 ETag + Cache-Control，浏览器自管 304 转换（max-age 内不再请求）
+    # We don't read the request header directly here since letting FastAPI / Starlette
+    # handle 304 conversion is more complex; simplified approach: return ETag +
+    # Cache-Control and let the browser manage its own 304 conversion (no re-request
+    # within max-age).
     try:
         from PIL import Image
         with Image.open(path) as img:
@@ -1142,19 +1204,20 @@ def get_disk_thumb(
 
 
 # ---------------------------------------------------------------------------
-# XY 文件夹专用 routes（新布局）
+# XY folder-specific routes (new layout)
 #
-# 注：DELETE /api/generate/disk/<date>/xy/<folder> 必须在
-# `delete_disk_image`（5 段通配 {date}/{mode}/{filename}）之前注册，
-# 否则后者会先匹配（FastAPI 按注册顺序匹配，3 段通配会先吞 xy/<folder>）。
+# Note: DELETE /api/generate/disk/<date>/xy/<folder> must be registered before
+# `delete_disk_image` (the 5-segment wildcard {date}/{mode}/{filename}), otherwise the
+# latter would match first (FastAPI matches in registration order, and the 3-segment
+# wildcard would swallow xy/<folder> first).
 # ---------------------------------------------------------------------------
 
 
 def _resolve_disk_xy_cell(date_str: str, folder: str, filename: str) -> Path:
-    """XY 文件夹下 composite / cell 文件的路径校验 + resolve。
+    """Path validation + resolution for a composite / cell file inside an XY folder.
 
-    校验：date / folder（必须匹配 `xy plot N`）/ filename（_PNG_NAME_SAFE_RE）。
-    返回实际磁盘 Path（不保证 exists）。
+    Validates: date / folder (must match `xy plot N`) / filename (_PNG_NAME_SAFE_RE).
+    Returns the actual on-disk Path (existence not guaranteed).
     """
     if not _DATE_RE.match(date_str):
         raise HTTPException(400, "invalid date")
@@ -1174,7 +1237,8 @@ def _resolve_disk_xy_cell(date_str: str, folder: str, filename: str) -> Path:
 
 @router.get("/api/generate/disk/image/{date_str}/xy/{folder}/{filename}")
 def get_disk_xy_image(date_str: str, folder: str, filename: str) -> Any:
-    """读 XY 文件夹下的 composite 或 cell PNG（PreviewXYGrid 回看 + 拖进 Comfy 复用）。"""
+    """Read the composite or a cell PNG inside an XY folder (reused by PreviewXYGrid
+    history browsing + dragging into Comfy)."""
     path = _resolve_disk_xy_cell(date_str, folder, filename)
     if not path.is_file():
         raise NotFoundError(
@@ -1193,7 +1257,7 @@ def get_disk_xy_thumb(
     date_str: str, folder: str, filename: str,
     w: int = Query(128, ge=32, le=512),
 ) -> Any:
-    """XY 文件夹下文件的 PIL 缩略图（历史栏 thumb_url 用 composite）。"""
+    """PIL thumbnail for a file inside an XY folder (history sidebar's thumb_url uses the composite)."""
     path = _resolve_disk_xy_cell(date_str, folder, filename)
     if not path.is_file():
         raise NotFoundError(
@@ -1233,9 +1297,10 @@ def get_disk_xy_thumb(
 
 @router.delete("/api/generate/disk/{date_str}/xy/{folder}")
 def delete_disk_xy_folder(date_str: str, folder: str) -> dict[str, Any]:
-    """删除整个 XY 文件夹（composite + 所有 cell）。
+    """Delete an entire XY folder (composite + all cells).
 
-    历史栏点 × 时调；返回 OK + 是否真删（noop=True 表示文件夹本不存在）。
+    Called when the history sidebar's x is clicked; returns OK plus whether anything was
+    actually deleted (noop=True means the folder didn't exist).
     """
     if not _DATE_RE.match(date_str):
         raise HTTPException(400, "invalid date")
@@ -1256,12 +1321,14 @@ def delete_disk_xy_folder(date_str: str, folder: str) -> dict[str, Any]:
 
 @router.delete("/api/generate/disk/{date_str}/{mode}/{filename}")
 def delete_disk_image(date_str: str, mode: str, filename: str) -> dict[str, Any]:
-    """删除落盘单文件测试图（single 模式 / admin 清 legacy XY 平铺文件）。
+    """Delete a single saved test image (single mode / admin cleanup of legacy flat XY files).
 
-    XY 模式新布局走 `delete_disk_xy_folder`；这条路由保留主要是 single
-    与 legacy flat XY 清理。注册顺序在 XY folder DELETE 之后 —— 否则 3 段通配
-    会先吞 `xy/<folder>` 路径（FastAPI 按注册顺序匹配）。
-    返回 OK + 是否真删（noop=True 表示文件本不存在）。安全校验同 image / thumb。
+    The new XY layout goes through `delete_disk_xy_folder`; this route mainly remains for
+    single mode and legacy flat XY cleanup. Registered after the XY folder DELETE route --
+    otherwise the 3-segment wildcard would swallow `xy/<folder>` paths first (FastAPI
+    matches in registration order).
+    Returns OK plus whether anything was actually deleted (noop=True means the file
+    didn't exist). Same safety validation as image / thumb.
     """
     path = _resolve_disk_png(date_str, mode, filename)
     if not path.is_file():

@@ -1,4 +1,4 @@
-"""ADR-0007 §11.5-A: POST /api/projects/{pid}/versions/{vid}/advance-phase + skip-phase 测试。"""
+"""ADR-0007 §11.5-A: tests for POST /api/projects/{pid}/versions/{vid}/advance-phase + skip-phase."""
 from __future__ import annotations
 
 import time
@@ -29,7 +29,7 @@ def client(isolated) -> TestClient:
 
 
 def _make_pv(client: TestClient) -> tuple[dict, dict]:
-    """创建项目 + 默认 version 并返回 (project, version)。"""
+    """Create a project + default version and return (project, version)."""
     p = client.post("/api/projects", json={"title": "P", "initial_version_label": "v1"}).json()
     v = p["versions"][0]
     return p, v
@@ -60,7 +60,7 @@ def test_advance_404_on_missing_version(client: TestClient) -> None:
 
 
 def test_advance_fails_with_empty_train(client: TestClient) -> None:
-    """curating + train 空 → advance 失败 + reason 包含训练集为空。"""
+    """curating + empty train → advance fails + reason mentions the empty train set."""
     p, v = _make_pv(client)
     resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/advance-phase")
     assert resp.status_code == 200
@@ -72,7 +72,7 @@ def test_advance_fails_with_empty_train(client: TestClient) -> None:
 
 
 def test_advance_curating_to_preprocessing_with_image(client: TestClient) -> None:
-    """ADR 0010 加 preprocessing phase（curating 之后）。"""
+    """ADR 0010 adds the preprocessing phase (after curating)."""
     p, v = _make_pv(client)
     vdir = versions.version_dir(p["id"], p["slug"], v["label"])
     _put_image(vdir / "train" / "5_concept", "001", with_caption=False)
@@ -90,7 +90,7 @@ def test_advance_editing_fails_with_missing_caption(client: TestClient) -> None:
     vdir = versions.version_dir(p["id"], p["slug"], v["label"])
     _put_image(vdir / "train" / "5_concept", "001", with_caption=False)
     _put_image(vdir / "train" / "5_concept", "002", with_caption=True)
-    # 本 fork：tagging phase 已移除 —— cursor 推到 editing（caption 校验兜底相同）
+    # In this fork: tagging phase has been removed -- cursor advances to editing (same caption validation fallback)
     with db.connection_for() as conn:
         versions.update_version(conn, v["id"], phase="editing")
 
@@ -112,7 +112,7 @@ def test_skip_404_on_wrong_project(client: TestClient) -> None:
 
 
 def test_skip_fails_when_phase_not_skippable(client: TestClient) -> None:
-    """curating 不可跳过。"""
+    """curating cannot be skipped."""
     p, v = _make_pv(client)
     resp = client.post(f"/api/projects/{p['id']}/versions/{v['id']}/skip-phase")
     body = resp.json()

@@ -1,23 +1,24 @@
-"""FastAPI lifespan + import-time 副作用迁移（PR-5 从 server.py 抽出）。
+"""FastAPI lifespan + migration of import-time side effects (extracted from server.py in PR-5).
 
-PR-5 关键改动：把 `ensure_dirs()` + `db.init_db()` 从 server.py 顶层
-（import-time 副作用）移到 lifespan startup —— 这样 `from studio.server
-import app` 不再触发文件系统初始化，便于测试 / 工具 import 而不写盘。
+Key change in PR-5: moved `ensure_dirs()` + `db.init_db()` from the top level
+of server.py (import-time side effects) into lifespan startup — so that
+`from studio.server import app` no longer triggers filesystem initialization,
+making it easier for tests / tools to import without writing to disk.
 
-启动阶段：
-    1. 装 Windows ProactorEventLoop ConnectionResetError 静音 filter
-    2. ensure_dirs() + db.init_db()  ← PR-5 新位置
-    3. 清扫遗留 generate tempdir（防 supervisor crash 后泄漏）
-    4. 后台下载 TAEFlux（中间步预览，~1.6MB，不阻塞 server）
-    5. event bus 绑定 loop + 配 SSE 连接回调
-    6. Supervisor 启动 + 写入 app.state.supervisor
-    7. SystemStatsSampler 启动
+Startup phase:
+    1. Install the Windows ProactorEventLoop ConnectionResetError silencing filter
+    2. ensure_dirs() + db.init_db()  <- new location as of PR-5
+    3. Sweep up leftover generate tempdirs (guards against leaks after a supervisor crash)
+    4. Background-download TAEFlux (intermediate-step preview, ~1.6MB, doesn't block the server)
+    5. Bind the event bus to the loop + configure SSE connection callbacks
+    6. Start the Supervisor + write it to app.state.supervisor
+    7. Start the SystemStatsSampler
 
-关闭阶段：
-    1. 取消挂着的 SSE disconnect timer
+Shutdown phase:
+    1. Cancel any pending SSE disconnect timer
     2. SystemStatsSampler.stop
-    3. Supervisor.stop（含 daemon stop + 子进程 graceful terminate）
-    4. disk_cache.clear_all（删 session 目录 + key 跟着进程退出一起没）
+    3. Supervisor.stop (includes daemon stop + graceful subprocess termination)
+    4. disk_cache.clear_all (deletes the session directory + the key goes away with the process)
 """
 from __future__ import annotations
 
@@ -41,19 +42,23 @@ logger = logging.getLogger(__name__)
 
 
 def _install_proactor_disconnect_filter(loop: asyncio.AbstractEventLoop) -> None:
-    """吞 Windows + asyncio Proactor 的 cosmetic ConnectionResetError 噪声。
+    """Swallows cosmetic ConnectionResetError noise from Windows + asyncio Proactor.
 
-    Python asyncio 在 Windows 上有 [bpo-44291](https://github.com/python/cpython/issues/87691) 类问题：
-    远端 TCP 强制断开（用户关 tab / 刷新 / SSE 重连，WinError 10054 / 10053）
-    时 `_ProactorBasePipeTransport._call_connection_lost` 走 `socket.shutdown()`
-    抛 `ConnectionResetError` / `ConnectionAbortedError`，但 callback 内部
-    没 catch 这两个 expected error，asyncio 默认 handler 打 traceback 到
-    stderr。server 完全没事，只是日志被刷一行无意义 stack。
+    Python's asyncio has a class of issue on Windows similar to
+    [bpo-44291](https://github.com/python/cpython/issues/87691): when the
+    remote TCP connection is forcibly closed (user closes the tab / refreshes
+    / SSE reconnects, WinError 10054 / 10053), `_ProactorBasePipeTransport._call_connection_lost`
+    goes through `socket.shutdown()` and raises `ConnectionResetError` /
+    `ConnectionAbortedError`. The callback doesn't catch these two expected
+    errors, so asyncio's default handler dumps a traceback to stderr. The
+    server is completely fine — it's just log noise from a meaningless stack
+    trace.
 
-    精确过滤：只在 exception 是 ConnectionResetError / ConnectionAbortedError
-    且 handle repr 含 `_call_connection_lost` 时静默吞掉；其它 asyncio
-    异常仍交给 default handler。仅 Windows 装；其它平台用 SelectorEventLoop
-    没这个 bug。
+    Precise filtering: only silently swallow when the exception is
+    ConnectionResetError / ConnectionAbortedError AND the handle's repr
+    contains `_call_connection_lost`; all other asyncio exceptions still go
+    to the default handler. Only installed on Windows; other platforms use
+    SelectorEventLoop and don't have this bug.
     """
     if os.name != "nt":
         return
@@ -70,16 +75,21 @@ def _install_proactor_disconnect_filter(loop: asyncio.AbstractEventLoop) -> None
 
 
 class _CancelledAsgiNoiseFilter(logging.Filter):
-    """吞 shutdown 收尾取消连接时 uvicorn 的 cosmetic CancelledError 噪声。
+    """Swallows cosmetic CancelledError noise from uvicorn when it cancels
+    connections during shutdown.
 
-    uvicorn 启动参数带 timeout_graceful_shutdown（见 api/main.py）：超时后
-    uvicorn cancel 剩余连接 task（/api/events 等 SSE 长连接），CancelledError
-    从 starlette 冒回 h11 的 run_asgi 时被 `except BaseException` 兜住、按
-    「Exception in ASGI application」打 ERROR + 完整 traceback —— 但这个取消
-    是关停流程主动要求的，不是应用错误，Ctrl+C 一次就刷两大坨假报错。
+    The uvicorn startup args include timeout_graceful_shutdown (see
+    api/main.py): once that times out, uvicorn cancels the remaining
+    connection tasks (long-lived SSE connections like /api/events). When the
+    CancelledError bubbles up from starlette into h11's run_asgi, it gets
+    caught by `except BaseException` and logged as an ERROR with a full
+    traceback under "Exception in ASGI application" — but this cancellation
+    was actively requested by the shutdown flow, not an application error, so
+    a single Ctrl+C floods the log with two big blocks of fake errors.
 
-    精确过滤：只吞 message 为该文案且异常类型是 CancelledError 的记录；
-    其它 ASGI 异常照常打。
+    Precise filtering: only swallow records whose message matches that exact
+    text AND whose exception type is CancelledError; all other ASGI
+    exceptions are logged as usual.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -93,7 +103,8 @@ _cancelled_asgi_filter = _CancelledAsgiNoiseFilter()
 
 
 def _install_uvicorn_cancelled_asgi_filter() -> None:
-    """幂等挂到 uvicorn.error logger（测试里 lifespan 会反复 startup）。"""
+    """Attached idempotently to the uvicorn.error logger (lifespan can run
+    startup repeatedly in tests)."""
     uvicorn_logger = logging.getLogger("uvicorn.error")
     if _cancelled_asgi_filter not in uvicorn_logger.filters:
         uvicorn_logger.addFilter(_cancelled_asgi_filter)
@@ -101,23 +112,27 @@ def _install_uvicorn_cancelled_asgi_filter() -> None:
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
-    """启动绑定 event bus 到当前 loop 并起 supervisor；关闭时停 supervisor。"""
-    # PR-1 C4: 统一日志体系入口 (ADR-0009)。第一行调，让 ensure_dirs / db.init_db
-    # 自己 emit 的 log 也能进 studio.log。setup_logging 自身 mkdir LOGS_DIR
-    # 不需要等 ensure_dirs。env ANIMA_LOGGING_NO_BOOTSTRAP=1 时 noop（测试态）。
+    """On startup, bind the event bus to the current loop and start the
+    supervisor; on shutdown, stop the supervisor."""
+    # PR-1 C4: unified logging entry point (ADR-0009). Called first so that
+    # logs emitted by ensure_dirs / db.init_db themselves also make it into
+    # studio.log. setup_logging mkdirs LOGS_DIR itself and doesn't need to
+    # wait for ensure_dirs. No-op when env ANIMA_LOGGING_NO_BOOTSTRAP=1 (test mode).
     setup_logging("webui", level=os.environ.get("ANIMA_LOG_LEVEL", "INFO"))
 
-    # 装 Windows ProactorEventLoop 的 ConnectionResetError 过滤器（详见 helper docstring）
+    # Install the Windows ProactorEventLoop ConnectionResetError filter (see the helper docstring)
     _install_proactor_disconnect_filter(asyncio.get_running_loop())
-    # 装 shutdown 取消 SSE 连接时的 CancelledError 日志过滤器（详见 class docstring）
+    # Install the CancelledError log filter for SSE connection cancellation during shutdown (see the class docstring)
     _install_uvicorn_cancelled_asgi_filter()
 
-    # PR-5：从 server.py 顶层搬来的 import-time 副作用 —— 现在跟随 app 启动
-    # 才落盘，便于测试 / 工具 import 而不写文件系统。
+    # PR-5: import-time side effects moved from the top of server.py — now
+    # they hit disk only once the app actually starts, making it easier for
+    # tests / tools to import without touching the filesystem.
     ensure_dirs()
     db.init_db()
 
-    # 测试出图 tempdir 遗留清扫（防 supervisor crash 泄漏 anima_gen_* 目录）
+    # Sweep up leftover test-generation tempdirs (guards against supervisor
+    # crashes leaking anima_gen_* directories)
     from ..services.inference.core import cleanup_stale_generate_tempdirs
     from ..services.inference import disk_cache as generate_cache
     from ..services import models as _md
@@ -125,13 +140,18 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
     from ..infrastructure.paths import STUDIO_DATA
     cleanup_stale_generate_tempdirs()
 
-    # 加密磁盘 cache 初始化：startup_clean 清掉残留 session-* 目录（上次 SIGKILL
-    # / 断电 / 正常 shutdown 漏删的），再开一个新 session（随机 session_id + aes_key，
-    # 进程退出 key 一起没 → 残留文件等于乱字节，扫盘工具识不出）。
+    # Encrypted disk cache init: startup_clean wipes leftover session-*
+    # directories (ones a previous SIGKILL / power loss / normal shutdown
+    # failed to delete), then opens a new session (random session_id +
+    # aes_key; the key disappears with the process -> leftover files become
+    # unreadable garbage bytes that disk scanning tools can't identify).
     generate_cache.init(STUDIO_DATA / ".cache" / "generate")
 
-    # TAEFlux（中间步预览）后台下载：跟 server 一起启动；下载失败不阻塞 server。
-    # 如果已下载则 noop；下载期间用户能正常用其他功能，预览功能等下载完才生效。
+    # Background download of TAEFlux (intermediate-step preview): starts
+    # alongside the server; a failed download doesn't block the server. If
+    # already downloaded, this is a no-op; while downloading, the user can
+    # use other features normally — the preview feature just isn't active
+    # until the download finishes.
     def _bg_download_taeflux() -> None:
         try:
             if _md.taeflux_available():
@@ -144,31 +164,31 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
             logger.exception("taeflux background download crashed")
     threading.Thread(target=_bg_download_taeflux, name="taeflux-bg-download", daemon=True).start()
 
-    # Tag 翻译词典（约 30MB SQLite）后台下载：仅当 active.json 不存在时拉取；失败只
-    # log warning，让用户进 Settings 看状态后手动点 "恢复默认词典" 重试。
+    # Background download of the autocomplete tag list (~3.5MB CSV): only
+    # when there is no usable active.json (missing, or the old translation
+    # table format). A failure just logs a warning; the next start retries.
     def _bg_download_tag_dict() -> None:
         from ..infrastructure import tag_dictionary as _td
         try:
-            if _td.ACTIVE_JSON.exists():
+            if _td.load_active() is not None:
                 return
-            logger.info("background-downloading tag dictionary (~30MB)…")
+            logger.info("background-downloading the tag list (~3.5MB)…")
             _td.download_default()
         except Exception as exc:
             logger.warning(
-                "tag dictionary background download failed (%s); "
-                "user can retry from Settings → Tag dictionary",
+                "tag list background download failed (%s); it is retried on the next start",
                 exc,
             )
     threading.Thread(target=_bg_download_tag_dict, name="tag-dict-bg-download", daemon=True).start()
 
     bus.attach_loop(asyncio.get_running_loop())
 
-    # commit 11：SSE 客户端断连 + 30s 缓冲后清 generate cache。
-    # 防刷新/短抖动：用户重连（_on_first_subscribe）取消计时器。
+    # commit 11: clear the generate cache after an SSE client disconnects, with a 30s buffer.
+    # Guards against refresh/brief blips: on reconnect (_on_first_subscribe), the timer is canceled.
     _disconnect_timer: dict[str, Optional[threading.Timer]] = {"t": None}
 
     def _on_last_unsubscribe() -> None:
-        # 已有 timer 不重置（多个客户端各自 unsubscribe 时，最后一个才是关键）
+        # Don't reset an existing timer (when multiple clients each unsubscribe, only the last one matters)
         if _disconnect_timer["t"] is not None:
             return
         timer = threading.Timer(30.0, _flush_cache)
@@ -203,8 +223,10 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
     sup.start()
     app_.state.supervisor = sup
 
-    # PR #37: system stats SSE — 后台 sampler 每 2.5s 采集 + bus.publish。前端
-    # 只 mount 时 GET 一次冷启动，避免 cloud 部署被每客户端独立轮询污染。
+    # PR #37: system stats SSE — a background sampler collects every 2.5s and
+    # calls bus.publish. The frontend only does a single cold-start GET on
+    # mount, to avoid cloud deployments getting hammered by each client
+    # polling independently.
     def _publish_system_stats(payload: dict[str, Any]) -> None:
         bus.publish({"type": "system_stats_updated", "payload": payload})
 
@@ -215,7 +237,7 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        # 取消可能挂着的 disconnect timer，shutdown 阶段不需要再延迟
+        # Cancel any pending disconnect timer — no need for the delay during shutdown
         timer = _disconnect_timer.get("t")
         if timer is not None:
             timer.cancel()
@@ -224,6 +246,7 @@ async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
         # A stray cloudflared would keep a public URL alive pointing at a port
         # that no longer serves anything.
         tunnel.shutdown()
-        # shutdown 清整个 session 目录 + 进程退出 aes_key 一起没（即便 rmtree
-        # 失败，残留文件无 key 也是乱字节，下次启动 startup_clean 兜底）
+        # Shutdown wipes the entire session directory + the aes_key goes away
+        # with the process (even if rmtree fails, leftover files without the
+        # key are just garbage bytes; the next startup_clean covers it)
         generate_cache.clear_all()

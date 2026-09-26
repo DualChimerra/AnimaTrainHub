@@ -1,24 +1,33 @@
-"""disable_when 规则引擎 —— 字段联动声明的双端强制(刀 2 / R2 v2)。
+"""disable_when rule engine -- dual-sided enforcement of field-interaction declarations (cut 2 / R2 v2).
 
-设计(docs/design/config-pipeline-refactor.md §6,D5):不建平行规则表,字段上
-既有的 `disable_when` + `disable_value` + `disable_hint` 元数据就是一条完整的
-「钉值」规则声明(条件 / 钉值 / 理由),`option_disable_when` 是它的 option 级
-姊妹(「禁值」:条件成立时该枚举值不可选)。本模块把这份声明升级为单源多面:
+Design (docs/design/config-pipeline-refactor.md §6, D5): rather than build a
+parallel rule table, the `disable_when` + `disable_value` + `disable_hint`
+metadata already on a field IS the complete "pin value" rule declaration
+(condition / pinned value / reason); `option_disable_when` is its option-level
+sibling ("forbid value": when the condition holds, that enum value can't be
+selected). This module elevates that single declaration into multiple facets:
 
-1. 后端校验 —— TrainingConfig._enforce_disable_rules 调 disable_rule_violations,
-   违反即 raise(替代历史上按对手写的 8 个互斥 validator);
-2. tolerant 修复 —— _tolerant_validate 调 apply_disable_rule_fixes,修复语义与
-   前端 takeover 对齐(写 disable_value,而非笼统回 schema default);
-3. 前端 UI —— SchemaForm 消费同一份元数据做灰显 + takeover(既有行为);
-4. R6 确认弹窗 —— 有损改值清单从同一份声明求值生成。
+1. Backend validation -- TrainingConfig._enforce_disable_rules calls
+   disable_rule_violations and raises on any violation (replacing the old 8
+   hand-written mutual-exclusion validators);
+2. Tolerant fixing -- _tolerant_validate calls apply_disable_rule_fixes, with
+   fix semantics matching the frontend's takeover (writes disable_value,
+   rather than a blanket reset to the schema default);
+3. Frontend UI -- SchemaForm consumes the same metadata for graying out +
+   takeover (existing behavior);
+4. R6 confirmation dialog -- the list of lossy value changes is derived by
+   evaluating the same declaration.
 
-强制判据:disable_when 强制的是「违反时 runtime 静默失效或语义错误」的硬规则。
-UI 引导性的软钉值(如 learning_rate 对 Prodigy 是真实生效的缩放因子,钉 1.0
-只是推荐)列入 ADVISORY_DISABLE_FIELDS,保持 UI-only,不参与校验与修复。
+Enforcement criterion: disable_when enforces hard rules where violating them
+means runtime silently misbehaves or is semantically wrong. UI-guidance-only
+soft pins (e.g. learning_rate is a real, effective scale factor for Prodigy;
+pinning it to 1.0 is only a recommendation) go into ADVISORY_DISABLE_FIELDS,
+staying UI-only and excluded from validation and fixing.
 
-eval_show_when / _js_str 从 config_prune 下沉至此(本模块是零依赖叶子,
-training.py 的 validator 要 import 本模块,而 config_prune import training,
-放那边会成环);config_prune 继续 re-export,既有消费方不受影响。
+eval_show_when / _js_str moved down here from config_prune (this module is a
+zero-dependency leaf; training.py's validator needs to import it, and
+config_prune imports training, so keeping it there would create a cycle);
+config_prune still re-exports them, so existing consumers are unaffected.
 """
 from typing import Any, Mapping
 
@@ -26,23 +35,26 @@ from pydantic import BaseModel
 
 _MISSING = object()
 
-#: disable_when 保持 UI-only 的字段(软钉值)。判据见模块 docstring;
-#: 加字段前先确认「违反它 runtime 是否真的静默失效」——不是的进这里。
+#: Fields where disable_when stays UI-only (soft pins). See the module
+#: docstring for the criterion; before adding a field here, first confirm
+#: that violating it does NOT actually make runtime silently misbehave.
 ADVISORY_DISABLE_FIELDS: frozenset = frozenset({"learning_rate"})
 
-#: tolerant 修复的 gate-first 集合:规则违反且 when 表达式含集合内开关时,
-#: 优先关掉开关本身(保住用户在目标字段上的投入),其余默认修目标字段。
-#: 历史上 presets/io.py 的 InfoNoise 专用垫片(「优先关 InfoNoise 保住
-#: loss_weighting 等配置」)的泛化,该垫片已由本机制替代。
+#: The gate-first set for tolerant fixing: when a violated rule's `when`
+#: expression references a switch in this set, turn that switch off first
+#: (preserving the user's investment in the target field), otherwise fix the
+#: target field by default. This generalizes the old InfoNoise-specific shim
+#: in presets/io.py ("turn off InfoNoise first to preserve loss_weighting
+#: etc"), which this mechanism has replaced.
 TOLERANT_FIX_GATE_FIRST: frozenset = frozenset({"infonoise_enabled"})
 
 
 def _js_str(value: Any) -> str:
-    """JS `String(v)` 的等价物 —— show_when 比较按前端的字符串化语义。
+    """Equivalent of JS `String(v)` -- show_when comparisons follow the frontend's stringification semantics.
 
-    差异点:JS 的 true/false 小写;整数值的 float 不带小数点
-    (String(1.0) === "1",而 Python str(1.0) == "1.0",training.py 里
-    `timestep_schedule_shift!=1` 依赖这一点)。
+    Differences: JS's true/false are lowercase; a float with an integer value
+    has no decimal point (String(1.0) === "1", whereas Python's str(1.0) ==
+    "1.0" -- training.py's `timestep_schedule_shift!=1` relies on this).
     """
     if value is True:
         return "true"
@@ -58,8 +70,9 @@ def _js_str(value: Any) -> str:
 
 
 def eval_show_when(expr: str | None, values: Mapping[str, Any]) -> bool:
-    """schema.ts evalShowWhen 的逐字镜像:`||` 分支 any、`&&` 合取 all、
-    `==`/`!=` 字符串比较;空表达式与解析不出的表达式都返回 True(failsafe)。"""
+    """Verbatim mirror of schema.ts's evalShowWhen: `||` branches are any(),
+    `&&` is all(), `==`/`!=` are string comparisons; an empty expression or
+    one that fails to parse both return True (failsafe)."""
     if not expr:
         return True
     branches = [p.strip() for p in expr.split("||") if p.strip()]
@@ -78,7 +91,7 @@ def eval_show_when(expr: str | None, values: Mapping[str, Any]) -> bool:
 
 
 def _expr_fields(expr: str) -> list[str]:
-    """when 表达式里出现的字段名(比较式左侧),按出现顺序去重。"""
+    """Field names appearing in a when expression (left side of each comparison), de-duplicated in order of appearance."""
     out: list[str] = []
     for branch in expr.split("||"):
         for clause in branch.split("&&"):
@@ -97,10 +110,11 @@ def _schema_default(field) -> Any:
 
 
 def iter_pin_rules(model_cls: type[BaseModel]):
-    """遍历强制钉值规则:yield (field, when_expr, pin_value, hint)。
+    """Iterate over the mandatory pin-value rules: yield (field, when_expr, pin_value, hint).
 
-    pin_value = disable_value(声明了则修复/校验语义与前端 takeover 一致),
-    否则 schema default(前端 takeover 的同款回退)。
+    pin_value = disable_value when declared (so fix/validation semantics
+    match the frontend's takeover), otherwise the schema default (the same
+    fallback the frontend's takeover uses).
     """
     for name, field in model_cls.model_fields.items():
         extra = field.json_schema_extra
@@ -116,9 +130,9 @@ def iter_pin_rules(model_cls: type[BaseModel]):
 
 
 def iter_forbid_rules(model_cls: type[BaseModel]):
-    """遍历禁值规则:yield (field, forbidden_value_str, when_expr, hint)。
+    """Iterate over the forbidden-value rules: yield (field, forbidden_value_str, when_expr, hint).
 
-    来源 = 字段元数据 option_disable_when: {枚举值: when 表达式}。
+    Source = the field metadata's option_disable_when: {enum value: when expression}.
     """
     for name, field in model_cls.model_fields.items():
         extra = field.json_schema_extra

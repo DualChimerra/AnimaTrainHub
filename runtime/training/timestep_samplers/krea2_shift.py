@@ -33,9 +33,9 @@ def krea2_mu(token_counts, *, device=None) -> torch.Tensor:
     """Return Krea2's per-image dynamic-shift ``mu`` (without endpoint clamp)."""
     counts = torch.as_tensor(token_counts, dtype=torch.float32, device=device)
     if counts.ndim != 1:
-        raise ValueError("Krea2 token_counts 必须是一维序列")
+        raise ValueError("Krea2 token_counts must be a 1D sequence")
     if not torch.isfinite(counts).all() or (counts <= 0).any():
-        raise ValueError("Krea2 token_counts 必须全部为有限正数")
+        raise ValueError("Krea2 token_counts must all be finite positive numbers")
 
     slope = (MAX_SHIFT - BASE_SHIFT) / (MAX_IMAGE_SEQ_LEN - BASE_IMAGE_SEQ_LEN)
     intercept = BASE_SHIFT - slope * BASE_IMAGE_SEQ_LEN
@@ -45,11 +45,11 @@ def krea2_mu(token_counts, *, device=None) -> torch.Tensor:
 def apply_krea2_dynamic_shift(t: torch.Tensor, token_counts) -> torch.Tensor:
     """Apply Krea2's per-image ``exp(mu)`` Möbius shift to base timesteps."""
     if t.ndim != 1:
-        raise ValueError("Krea2 timestep 必须是一维 tensor")
+        raise ValueError("Krea2 timestep must be a 1D tensor")
     mu = krea2_mu(token_counts, device=t.device)
     if mu.numel() != t.numel():
         raise ValueError(
-            f"Krea2 token_counts 数量必须等于 batch size：{mu.numel()} != {t.numel()}"
+            f"Krea2 token_counts count must equal batch size: {mu.numel()} != {t.numel()}"
         )
     shift = mu.exp().to(dtype=t.dtype)
     return ((t * shift) / (1 + (shift - 1) * t)).clamp(1e-4, 1 - 1e-4)
@@ -64,15 +64,15 @@ class Krea2ShiftTimestepSampler:
     def __init__(self, sigmoid_scale: float = 1.0):
         self.sigmoid_scale = float(sigmoid_scale)
         if not math.isfinite(self.sigmoid_scale) or self.sigmoid_scale <= 0:
-            raise ValueError("Krea2 sigmoid_scale 必须为有限正数")
+            raise ValueError("Krea2 sigmoid_scale must be a finite positive number")
 
     def sample(self, bs: int, device, *, token_counts=None) -> torch.Tensor:
         if token_counts is None:
-            raise ValueError("Krea2 timestep sampler 需要每个样本的 token_counts")
+            raise ValueError("Krea2 timestep sampler needs per-sample token_counts")
         counts = torch.as_tensor(token_counts)
         if counts.ndim != 1 or counts.numel() != bs:
             raise ValueError(
-                f"Krea2 token_counts 数量必须等于 batch size：{counts.numel()} != {bs}"
+                f"Krea2 token_counts count must equal batch size: {counts.numel()} != {bs}"
             )
         base_t = torch.randn(bs, device=device, dtype=torch.float32)
         base_t = torch.sigmoid(base_t * self.sigmoid_scale)

@@ -70,7 +70,8 @@ export default function QueuePage() {
   // 右键菜单（备注 / 采样条）：null = 关闭；否则记录锚点坐标 + 目标 task。
   const [menu, setMenu] = useState<{ x: number; y: number; task: Task } | null>(null)
   // Sample strips open per task on request (the mockup cards carry none by default).
-  const [stripsShown, setStripsShown] = useState<ReadonlySet<number>>(new Set())
+  // Sample strips are shown by default; this holds the ones the user folded.
+  const [stripsHidden, setStripsHidden] = useState<ReadonlySet<number>>(new Set())
   // null = not chosen yet: active tasks when there are any, otherwise everything.
   const [pickedFilter, setFilter] = useState<ListFilter | null>(null)
   const [historyLimit, setHistoryLimit] = useState(HISTORY_STEP)
@@ -320,7 +321,7 @@ export default function QueuePage() {
   }
 
   const toggleStrip = (taskId: number) => {
-    setStripsShown((prev) => {
+    setStripsHidden((prev) => {
       const next = new Set(prev)
       if (next.has(taskId)) next.delete(taskId)
       else next.add(taskId)
@@ -374,7 +375,7 @@ export default function QueuePage() {
     ...(task.note ? [{ label: t('queue.noteRemove'), tone: 'err' as const, onSelect: () => void saveNote(task, '') }] : []),
   ]
   const stripItem = (task: Task): KebabItem[] => (task.monitor_state_path
-    ? [{ label: stripsShown.has(task.id) ? t('queue.samplesHide') : t('queue.samplesShow'), onSelect: () => toggleStrip(task.id) }]
+    ? [{ label: stripsHidden.has(task.id) ? t('queue.samplesShow') : t('queue.samplesHide'), onSelect: () => toggleStrip(task.id) }]
     : [])
 
   const cardMenu = (task: Task): KebabItem[] => {
@@ -581,7 +582,7 @@ export default function QueuePage() {
                   ahead={pendingOrder.findIndex((x) => x.id === task.id) + (runningTask ? 1 : 0)}
                   held={holdState?.held === true}
                   fmt={fmt}
-                  showStrip={stripsShown.has(task.id) && !!task.monitor_state_path}
+                  showStrip={!stripsHidden.has(task.id) && !!task.monitor_state_path}
                   draggable={task.status === 'pending' && pendingOrder.length > 1}
                   dragOver={overId === task.id && dragId !== task.id}
                   isFirstWaiting={pendingOrder[0]?.id === task.id}
@@ -721,8 +722,13 @@ function QueueCard({
   const run = s === 'running'
   const terminal = TERMINAL.has(s)
 
-  const steps = run && monitor?.step != null && monitor.total_steps ? { step: monitor.step, total: monitor.total_steps } : null
-  const pct = steps ? Math.min(100, Math.round((steps.step / steps.total) * 100)) : s === 'done' ? 100 : 0
+  // Where the run got to: live monitor while running, otherwise the last
+  // saved monitor state (paused / stopped / finished runs).
+  const snap = useStepSnapshot(task.id, !run && !!task.monitor_state_path)
+  const src = run ? monitor : snap
+  const steps = src?.step != null && src.total_steps ? { step: src.step, total: src.total_steps } : null
+  const epochs = src?.epoch != null && src.total_epochs ? { n: src.epoch, total: src.total_epochs } : null
+  const pct = s === 'done' ? 100 : steps ? Math.min(100, Math.round((steps.step / steps.total) * 100)) : 0
 
   const badge = (() => {
     switch (s) {
@@ -747,7 +753,7 @@ function QueueCard({
         ? <><b>~{fmt.dur(finishesAt - startsAt)}</b><i>{t('queue.until', { time: fmt.clock(finishesAt) })}</i></>
         : <><b>—</b><i>{t('queue.summaryUnknown')}</i></>
     }
-    if (s === 'paused') return <><b>{t('queue.stepN', { n: task.paused_step ?? 0 })}</b><i>{task.paused_at ? fmt.ago(task.paused_at) : ''}</i></>
+    if (s === 'paused') return <><b>{task.paused_at ? fmt.ago(task.paused_at) : '—'}</b><i>{t('queue.pausedWhen')}</i></>
     if (s === 'scheduled') return <><b>{task.scheduled_at ? fmt.clock(task.scheduled_at) : '—'}</b><i>{t('queue.scheduledStart')}</i></>
     if (terminal && task.started_at && task.finished_at) {
       return <><b>{fmt.dur(task.finished_at - task.started_at)}</b><i>{s === 'done' ? t('queue.finished') : fmt.ago(task.finished_at)}</i></>
@@ -780,23 +786,21 @@ function QueueCard({
     return <button type="button" onClick={stop(onRetry)}>{t('queue.retry')}</button>
   })()
 
-  const stats = (() => {
-    if (run) {
-      return (
-        <>
-          <b>{steps ? `${pct}%` : '—'}</b>
-          {steps && <span>{steps.step.toLocaleString()} / {steps.total.toLocaleString()}</span>}
-          {monitor?.epoch != null && monitor.total_epochs ? <span>{t('queue.epochOf', { n: monitor.epoch, total: monitor.total_epochs })}</span> : null}
-          {monitor?.speed ? <span>{monitor.speed.toFixed(2)} it/s</span> : null}
-        </>
-      )
-    }
-    if (s === 'pending') return <><b>0%</b>{startsAt != null && finishesAt != null && <span>{t('queue.startAt', { time: fmt.clock(startsAt) })}</span>}</>
-    if (s === 'paused') return task.last_state_epoch != null ? <span>{t('queue.resumeFromEpoch', { n: task.last_state_epoch })}</span> : null
-    if (s === 'scheduled') return <b>0%</b>
-    if (s === 'done') return <><b>100%</b>{task.finished_at && <span>{fmt.ago(task.finished_at)}</span>}</>
-    return <b>{s === 'failed' ? t('status.failed') : t('status.canceled')}</b>
-  })()
+  // One line under the bar for every status: step, epoch, speed, then what
+  // happens next — so the numbers always sit in the same place.
+  const stepLabel = steps
+    ? t('queue.stepOf', { n: steps.step.toLocaleString(), total: steps.total.toLocaleString() })
+    : s === 'paused' && task.paused_step != null ? t('queue.stepN', { n: task.paused_step.toLocaleString() }) : null
+  const stats = (
+    <>
+      <b>{s === 'failed' ? t('status.failed') : s === 'canceled' && !steps ? t('status.canceled') : run && !steps ? '—' : `${pct}%`}</b>
+      {stepLabel && <span>{stepLabel}</span>}
+      {epochs && <span>{t('queue.epochOf', { n: epochs.n, total: epochs.total })}</span>}
+      {run && monitor?.speed ? <span>{monitor.speed.toFixed(2)} it/s</span> : null}
+      {s === 'pending' && startsAt != null && finishesAt != null && <span>{t('queue.startAt', { time: fmt.clock(startsAt) })}</span>}
+      {(s === 'paused' || (terminal && task.is_resumable)) && task.last_state_epoch != null && <span className="ds-qnext">{t('queue.resumeFromEpoch', { n: task.last_state_epoch })}</span>}
+    </>
+  )
 
   return (
     <div
@@ -837,12 +841,12 @@ function QueueCard({
         </span>
       </div>
       <div className="ds-qcard-bar">
+        <span className="ds-qcard-stats">{stats}</span>
         <span className="ds-meter">
           {run && !steps
             ? <i className="animate-pulse" style={{ width: '20%', opacity: 0.5 }} />
-            : <i style={{ width: `${pct}%`, ...(s === 'failed' ? { background: 'var(--red-text)' } : {}) }} />}
+            : <i style={{ width: `${pct}%`, ...(s === 'failed' ? { background: 'var(--red-text)' } : s === 'paused' ? { background: '#d3a53a' } : terminal && s !== 'done' ? { background: 'var(--line-3)' } : {}) }} />}
         </span>
-        <span className="ds-qcard-stats">{stats}</span>
       </div>
       {task.error_msg && s === 'failed' && (
         <div className="ds-qcard-note" style={{ color: 'var(--red-text)' }}>
@@ -861,6 +865,21 @@ function QueueCard({
       {showStrip && <TaskSampleStrip taskId={task.id} live={run} />}
     </div>
   )
+}
+
+/** Step / epoch reached by a task that is not running, read once from its
+ *  saved monitor state (one loss point is enough — only the scalars matter). */
+function useStepSnapshot(taskId: number, enabled: boolean): MonitorState | null {
+  const [snap, setSnap] = useState<MonitorState | null>(null)
+  useEffect(() => {
+    if (!enabled) { setSnap(null); return }
+    let cancelled = false
+    api.getMonitorState(taskId, 1)
+      .then((r) => { if (!cancelled) setSnap(r) })
+      .catch(() => { if (!cancelled) setSnap(null) })
+    return () => { cancelled = true }
+  }, [taskId, enabled])
+  return snap
 }
 
 // ── DataTasksCard ───────────────────────────────────────────────────────────

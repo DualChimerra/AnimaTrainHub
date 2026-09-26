@@ -1,18 +1,18 @@
-"""WD14 打标性能诊断：分阶段计时 + EP / preload / 模型 / 线程数自检。
+"""WD14 tagging performance diagnostics: per-stage timing + EP / preload / model / thread-count self-check.
 
-跑法（仓库根目录）：
-    venv/bin/python tools/bench_wd14.py [<图目录>] [--n 10] [--model <hf_id>]
+How to run (from repo root):
+    venv/bin/python tools/bench_wd14.py [<image_dir>] [--n 10] [--model <hf_id>]
     # Windows: venv\\Scripts\\python.exe tools\\bench_wd14.py ...
 
-不传图目录时默认扫 `studio_data/projects/*/raw_*` 找最近一批图，取前 N 张。
-所有日志同时打 stdout 与 `bench_wd14.log`。
+When no image directory is given, it scans `studio_data/projects/*/raw_*` for the most recent
+batch of images and takes the first N. All logs go to both stdout and `bench_wd14.log`.
 
-它能回答的问题：
-1. 当前 onnxruntime 是 GPU 包还是 CPU 包，CUDA EP 真能用吗？
-2. preload 命中了几个 torch CUDA so？
-3. CPU EP 实际跑在几个 thread？
-4. 单图分阶段：preprocess / session.run / postprocess 各占多少？
-5. CPU vs GPU 的实测吞吐差多少倍（如果两个 provider 都能创 session）？
+Questions it can answer:
+1. Is the current onnxruntime the GPU package or the CPU package, and does the CUDA EP actually work?
+2. How many torch CUDA .so files did preload manage to hit?
+3. How many threads does the CPU EP actually run on?
+4. Per-image breakdown: how much time does preprocess / session.run / postprocess each take?
+5. How much faster is GPU than CPU in measured throughput (if both providers can create a session)?
 """
 from __future__ import annotations
 
@@ -43,12 +43,12 @@ IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
 def find_default_images(n: int) -> list[Path]:
-    """递归扫 studio_data/projects/ 下任意层的图片。
+    """Recursively scan studio_data/projects/ at any depth for images.
 
-    Studio 项目布局：
-      studio_data/projects/{id}-{slug}/download/...        — booru 下来的原图
+    Studio project layout:
+      studio_data/projects/{id}-{slug}/download/...        -- raw images pulled from booru
       studio_data/projects/{id}-{slug}/versions/{label}/train/{folder}/...
-    任一存在均可；不限定子目录名。
+    Either layout works; the subdirectory name is not restricted.
     """
     base = REPO_ROOT / "studio_data" / "projects"
     if not base.exists():
@@ -63,7 +63,7 @@ def find_default_images(n: int) -> list[Path]:
 
 
 def report_environment() -> None:
-    """打 onnxruntime 包名/版本/EP/CPU/preload 状态。"""
+    """Log the onnxruntime package name/version/EP/CPU/preload status."""
     log.info("=" * 60)
     log.info("ENVIRONMENT")
     log.info("=" * 60)
@@ -71,7 +71,7 @@ def report_environment() -> None:
     log.info("platform: %s", sys.platform)
     log.info("cpu count: %s", os.cpu_count())
 
-    # PP9.5 — preload 在本模块 import 时已跑过；直接读结果
+    # PP9.5 -- preload already ran when this module was imported; just read the result
     from studio.services.runtime import onnxruntime as ors
 
     rt = ors.current_runtime()
@@ -95,7 +95,7 @@ def report_environment() -> None:
     for path in pre.get("preloaded") or []:
         log.info("  preload OK: %s", os.path.basename(path))
     for path, reason in pre.get("errors") or []:
-        log.info("  preload FAIL: %s — %s", os.path.basename(path), reason)
+        log.info("  preload FAIL: %s -- %s", os.path.basename(path), reason)
 
     cuda = ors.detect_cuda()
     log.info(
@@ -105,11 +105,12 @@ def report_environment() -> None:
 
 
 def probe_provider(model_path: str, provider: str) -> tuple[bool, str, object]:
-    """真去创 InferenceSession；返回 (ok, msg, session_or_err_str)。
+    """Actually try to create an InferenceSession; returns (ok, msg, session_or_err_str).
 
-    onnxruntime 在请求的 EP dlopen 失败时**不会抛**，会静默降级到下一个可用
-    EP（通常 CPU）。所以 ok 不只看 try/except，还要比对 sess.get_providers()
-    第一项 == requested。不一致 → 报为「降级」，实际是失败。
+    onnxruntime does **not** raise when the requested EP fails to dlopen -- it silently
+    falls back to the next available EP (usually CPU). So `ok` can't just check try/except;
+    it also has to compare sess.get_providers()[0] against the requested provider. A mismatch
+    means it was "silently downgraded", which counts as a failure here.
     """
     import onnxruntime as ort
 
@@ -119,7 +120,7 @@ def probe_provider(model_path: str, provider: str) -> tuple[bool, str, object]:
         return False, str(exc), None
     actual = sess.get_providers()
     if provider not in actual:
-        return False, f"silently downgraded to {actual} (requested {provider} 失败)", None
+        return False, f"silently downgraded to {actual} (requested {provider} failed)", None
     return True, f"providers={actual}", sess
 
 
@@ -130,7 +131,7 @@ def time_stage(fn, *args, **kwargs):
 
 
 def bench_once(tagger, sess, paths: list[Path], label: str) -> None:
-    """对给定 session 跑 paths，分阶段计时打表。"""
+    """Run the given session over paths, timing and printing each stage."""
     import numpy as np
 
     log.info("-" * 60)
@@ -138,18 +139,18 @@ def bench_once(tagger, sess, paths: list[Path], label: str) -> None:
     log.info("intra_op_num_threads: %s", sess.get_session_options().intra_op_num_threads or "(default)")
     log.info("inter_op_num_threads: %s", sess.get_session_options().inter_op_num_threads or "(default)")
 
-    # 注入 session 到 tagger（绕过 prepare 自己创的）
+    # Inject the session into tagger (bypassing the one prepare() would create itself)
     tagger._session = sess
     if not tagger._tags:
-        # selected_tags.csv 必须读出来才能 postprocess；走一次 prepare 拿 tags
-        # （它会再创一个 session，丢掉就行）
+        # selected_tags.csv must be loaded before postprocess can run; do one prepare()
+        # pass to get the tags (it creates another session, which we just discard)
         old = tagger._session
         tagger._session = None
         tagger.prepare()
         tagger._session = old
     name_in = sess.get_inputs()[0].name
 
-    # warmup（首次 run 含 graph 优化 / kernel 编译，必须排除）
+    # warmup (the first run includes graph optimization / kernel compilation, must be excluded)
     from PIL import Image
     with Image.open(paths[0]) as im:
         warm = tagger._preprocess(im)
@@ -187,18 +188,18 @@ def bench_once(tagger, sess, paths: list[Path], label: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("path", nargs="?", help="图目录；不传时自动找 raw_*")
-    parser.add_argument("--n", type=int, default=10, help="跑几张（warmup 不计）")
+    parser.add_argument("path", nargs="?", help="image directory; auto-finds raw_* when omitted")
+    parser.add_argument("--n", type=int, default=10, help="how many images to run (warmup not counted)")
     parser.add_argument(
         "--model",
         default=None,
-        help="覆盖 secrets.wd14.model_id（如 SmilingWolf/wd-vit-tagger-v3）",
+        help="override secrets.wd14.model_id (e.g. SmilingWolf/wd-vit-tagger-v3)",
     )
     parser.add_argument(
         "--provider",
         choices=["auto", "cpu", "gpu", "both"],
         default="both",
-        help="跑哪个 EP；both = 都跑做对比",
+        help="which EP to run; both = run both for comparison",
     )
     args = parser.parse_args()
 
@@ -210,9 +211,9 @@ def main() -> int:
     else:
         paths = find_default_images(args.n)
     if len(paths) < 2:
-        log.error("找不到足够的图（需要 ≥2，找到 %d）。指定路径或先建 project。", len(paths))
+        log.error("Not enough images found (need >=2, found %d). Specify a path or create a project first.", len(paths))
         return 1
-    log.info("images: %d 张，第一张 %s", len(paths), paths[0].name)
+    log.info("images: %d, first is %s", len(paths), paths[0].name)
 
     from studio.services.tagging.wd14 import WD14Tagger
 

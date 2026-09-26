@@ -61,7 +61,7 @@ describe('LocalModelRows', () => {
   it('renders only local candidates and selects one', async () => {
     const onSelect = vi.fn()
     renderRows({ onSelect })
-    // preset 行归各自的下载卡渲染，这里只出本地那条
+    // preset rows render under their own download card; only the local one shows up here
     expect(screen.getAllByRole('radio')).toHaveLength(1)
     await userEvent.click(screen.getByRole('radio'))
     expect(onSelect).toHaveBeenCalledWith('G:/m/ft.safetensors')
@@ -99,7 +99,7 @@ describe('LocalModelRows', () => {
     expect(api.removeModelSource).toHaveBeenCalledWith(
       'anima', { kind: 'local', path: 'G:/m/ft.safetensors' },
     )
-    // 换模式前正被选中 → 在新族里补选，用户不用再点一次
+    // was selected before the mode switch -> gets re-selected in the new family, so the user doesn't have to click again
     expect(selectInDomain).toHaveBeenCalledWith('krea2', 'G:/m/ft.safetensors')
   })
 
@@ -124,9 +124,9 @@ describe('AddLocalModelButton', () => {
       </ToastProvider>,
     )
     await userEvent.click(screen.getByRole('button'))
-    // PathPicker 的底部按钮：直接选中当前目录（浏览请求在 client mock 里没有，
-    // 组件仍会渲染出这个按钮）
-    await userEvent.click(await screen.findByText(/Select current directory|选择当前目录/))
+    // PathPicker's bottom button: selects the current directory directly (the browse
+    // request isn't in the client mock, but the component still renders this button)
+    await userEvent.click(await screen.findByText('Select current directory'))
     await waitFor(() => expect(api.addModelSource).toHaveBeenCalled())
     expect(vi.mocked(api.addModelSource).mock.calls[0][0]).toBe('vae')
     expect(onChanged).toHaveBeenCalled()

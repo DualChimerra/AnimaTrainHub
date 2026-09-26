@@ -1,24 +1,25 @@
-"""runtime 装包 / LLM tagger admin endpoints（PR-6 commit 3 从 server.py 抽出）。
+"""Runtime package install / LLM tagger admin endpoints (PR-6 commit 3, extracted from server.py).
 
-10 routes，按底层组件分 5 个子域共一个 router：
+10 routes, split into 5 subdomains by underlying component, sharing one router:
 
-  wd14 (onnxruntime)：     GET /api/wd14/runtime           当前装包 + 可用 EP
-                           POST /api/wd14/install          切 GPU/CPU 包（同步 pip，要重启）
+  wd14 (onnxruntime):     GET /api/wd14/runtime           currently installed package + available EPs
+                           POST /api/wd14/install          switch GPU/CPU package (sync pip, needs restart)
 
-  torch：                  GET /api/torch/status           torch 当前状态 + 推荐 cu tag
-                           POST /api/torch/reinstall       注册重装请求（启动期执行）
+  torch:                  GET /api/torch/status           current torch status + recommended cu tag
+                           POST /api/torch/reinstall       register a reinstall request (runs at startup)
 
-  flash-attention：        GET /api/flash-attention/status status + 候选 wheel 列表
-                           POST /api/flash-attention/install 装 wheel（要重启）
+  flash-attention:        GET /api/flash-attention/status status + candidate wheel list
+                           POST /api/flash-attention/install install a wheel (needs restart)
 
-  xformers：               GET /api/xformers/status
-                           POST /api/xformers/install      pip 直装（要重启）
+  xformers:                GET /api/xformers/status
+                           POST /api/xformers/install      direct pip install (needs restart)
 
-  llm-tagger admin：       POST /api/llm-tagger/models/refresh  拉 /models 写 preset.model_ids
-                           POST /api/llm-tagger/test            连通性测试（不写 secrets）
+  llm-tagger admin:       POST /api/llm-tagger/models/refresh  pull /models, write to preset.model_ids
+                           POST /api/llm-tagger/test            connectivity test (does not persist secrets)
 
-合一 router 而非 5 router：路由数少（每域 2）+ 共用 install 模式 / 共享
-restart_required 语义，单独 router 太碎。前端 Settings 页也是装在一个抽屉里。
+One combined router instead of 5: each domain only has 2 routes and they share the
+install pattern / restart_required semantics, so splitting further would be too granular.
+The frontend Settings page also keeps them in a single drawer.
 """
 from __future__ import annotations
 
@@ -46,24 +47,25 @@ from ...services.runtime import (
 router = APIRouter()
 
 
-# WD14 runtime / GPU 装包 (PP8) ---------------------------------------------
+# WD14 runtime / GPU package install (PP8) -----------------------------------
 
 
 @router.get("/api/wd14/runtime")
 def wd14_runtime() -> dict[str, Any]:
-    """返回 onnxruntime 当前装的是哪个包 + 可用 EP + nvidia-smi 检测结果。"""
+    """Return which onnxruntime package is currently installed + available EPs + nvidia-smi detection."""
     rt = onnxruntime_setup.current_runtime()
     return {**rt, "cuda_detect": onnxruntime_setup.detect_cuda()}
 
 
 @router.post("/api/wd14/install")
 def wd14_install(body: WD14InstallRequest) -> dict[str, Any]:
-    """切换 onnxruntime 包：先 uninstall 两个互斥包，再装目标。
+    """Switch the onnxruntime package: uninstall the two mutually exclusive packages
+    first, then install the target.
 
-    同步 pip install，几分钟级；前端按钮要带 loading。
-    onnxruntime 是 C extension，装完后**必须重启 Studio** 才能切换 EP（pip 卸装
-    重装不能热替换已 import 的 .pyd/.so）。返回 `restart_required=True` 让前端
-    显式提示。
+    Synchronous pip install, takes minutes; the frontend button must show a loading state.
+    onnxruntime is a C extension, so **Studio must be restarted** after installing before
+    the EP can actually switch (pip uninstall/reinstall can't hot-swap an already-imported
+    .pyd/.so). Returns `restart_required=True` so the frontend can prompt explicitly.
     """
     if body.target not in ("auto", "gpu", "cpu", "directml"):
         raise ValidationError(
@@ -77,7 +79,7 @@ def wd14_install(body: WD14InstallRequest) -> dict[str, Any]:
         raise HTTPException(500, str(exc)) from exc
     stdout = res.pop("stdout", "")
     tail = "\n".join(stdout.splitlines()[-30:])
-    # 同时返回当前进程视角（providers 仍是旧的，UI 用来对比）
+    # Also return the current process's view (providers is still the old one, for the UI to compare against)
     rt = onnxruntime_setup.current_runtime()
     return {
         **res,
@@ -87,29 +89,34 @@ def wd14_install(body: WD14InstallRequest) -> dict[str, Any]:
     }
 
 
-# PyTorch 运行时 / 重装（PR-S2）-------------------------------------------
+# PyTorch runtime / reinstall (PR-S2) ---------------------------------------
 
 
 @router.get("/api/torch/status")
 def torch_status() -> dict[str, Any]:
-    """返回 torch 当前状态 + 驱动检测 + 推荐 cu tag + 误装诊断 flag。
+    """Return torch's current status + driver detection + recommended cu tag +
+    misinstall diagnostic flag.
 
-    UI 用 `is_cpu_with_gpu` 决定是否显著提示「检测到 GPU 但装的是 CPU 版」。
-    `is_cuda_build_unavailable` 标志驱动 / WSL 问题（不是 pip 能修的，UI 给文档链接）。
+    The UI uses `is_cpu_with_gpu` to decide whether to prominently warn "GPU detected
+    but the CPU build is installed". `is_cuda_build_unavailable` flags a driver / WSL
+    issue (not fixable by pip; the UI links to docs).
     """
     return torch_setup.current_status()
 
 
 @router.post("/api/torch/reinstall")
 def torch_reinstall(body: TorchReinstallRequest) -> dict[str, Any]:
-    """注册 torch 重装请求；下次 Studio 启动时由 launcher 进程执行。
+    """Register a torch reinstall request; executed by the launcher process the next
+    time Studio starts.
 
-    为什么不直接装：server 进程已 import 了 torch（flash_attention_setup 等间接拉
-    上的），Windows 上 `torch\\_C.cp311-win_amd64.pyd` 被锁，pip uninstall / replace
-    会撞 [WinError 5] 拒绝访问。改成写 marker → 用户 Ctrl+C 重启 → cli.py 启动
-    时还没 import torch，pip 能正常替换文件。
+    Why not install directly: the server process has already imported torch (pulled in
+    indirectly by flash_attention_setup etc.), and on Windows
+    `torch\\_C.cp311-win_amd64.pyd` is locked, so pip uninstall / replace hits
+    [WinError 5] access denied. Instead we write a marker -> user Ctrl+C's and restarts
+    -> at that point cli.py hasn't imported torch yet, so pip can replace the files
+    normally.
 
-    返回 `{pending: true, target, tag, message}`，UI 显示「请关闭并重启 Studio」。
+    Returns `{pending: true, target, tag, message}`; the UI shows "please close and restart Studio".
     """
     try:
         tag = torch_setup._decide_target_tag(body.target)
@@ -124,25 +131,29 @@ def torch_reinstall(body: TorchReinstallRequest) -> dict[str, Any]:
         "pending": True,
         "target": body.target,
         "tag": tag,
-        "message": "重装请求已注册。请 Ctrl+C 关闭 Studio 后重新运行 studio.bat / studio.sh —— 启动时会自动安装 torch（~3 GB，5-30 分钟），然后正常起 server。",
+        "message": "Reinstall request registered. Press Ctrl+C to close Studio, then rerun studio.bat / studio.sh — torch will be installed automatically on startup (~3 GB, 5-30 minutes), after which the server starts normally.",
     }
 
 
-# FlashAttention runtime（PR-7b）-----------------------------------------
+# FlashAttention runtime (PR-7b) ---------------------------------------
 
 
 @router.get("/api/flash-attention/status")
 def flash_attn_status() -> dict[str, Any]:
-    """返回 flash_attn 安装状态 + 当前环境检测 + GitHub 候选 wheel 列表。
+    """Return flash_attn install status + current environment detection + candidate
+    wheel list from GitHub.
 
-    candidates 里 score / tags 等 UI 不需要的字段已剥掉，只保留 url/name/notes/usable。
-    候选最多取前 20 个，避免 GitHub 历史 release 一大坨刷屏。
-    fetch_error 非 None 表示 GitHub API 请求失败（限流 / 网络 / 国内防火墙）；
-    UI 要展示这条让用户能选择手动粘 URL。
+    Fields the UI doesn't need (score / tags etc.) are stripped from candidates, keeping
+    only url/name/notes/usable. At most the first 20 candidates are kept, to avoid a huge
+    pile of GitHub release history flooding the screen.
+    fetch_error being non-None means the GitHub API request failed (rate limit / network
+    / firewall); the UI should show this so the user can paste a URL manually.
 
-    任何意外异常都包成 fetch_error 返回 200 —— 这是 Settings 页 mount 就拉的诊断
-    数据，宁可降级显示「无法拉候选」也不要 500 把整段 UI 打成「加载失败」让用户
-    误以为后端坏了。真出问题靠 server log 里的 traceback 排查。
+    Any unexpected exception is wrapped into fetch_error and returned as 200 -- this is
+    diagnostic data pulled as soon as the Settings page mounts, so it's better to degrade
+    gracefully to "couldn't fetch candidates" than to 500 the whole UI into "failed to
+    load" and make the user think the backend is broken. Real issues get diagnosed from
+    the traceback in the server log.
     """
     try:
         status = flash_attention_setup.current_status()
@@ -154,7 +165,7 @@ def flash_attn_status() -> dict[str, Any]:
         ]
         return {**status, "env": env, "candidates": slim, "fetch_error": fetch_error}
     except Exception as exc:  # noqa: BLE001
-        # logger.exception 把 traceback 落盘 + 带 trace_id（trace middleware bound）
+        # logger.exception persists the traceback + trace_id (bound by trace middleware)
         import logging  # noqa: PLC0415
         logging.getLogger(__name__).exception("flash_attn status endpoint failed")
         return {
@@ -171,16 +182,18 @@ def flash_attn_status() -> dict[str, Any]:
                 "platform": None,
             },
             "candidates": [],
-            "fetch_error": f"诊断失败：{type(exc).__name__}: {exc}",
+            "fetch_error": f"Diagnostics failed: {type(exc).__name__}: {exc}",
         }
 
 
 @router.post("/api/flash-attention/install")
 def flash_attn_install(body: FlashAttnInstallRequest) -> dict[str, Any]:
-    """安装 flash_attn wheel；url=null 走 service 的自动匹配。
+    """Install a flash_attn wheel; url=null uses the service's automatic matching.
 
-    同步 pip install（远端 wheel ~150MB），可能几分钟；UI 按钮必须带 loading。
-    flash_attn 是 C extension，装完必须重启 Studio 才能切换；返回 restart_required=True。
+    Synchronous pip install (remote wheel ~150MB), can take a few minutes; the UI button
+    must show a loading state.
+    flash_attn is a C extension, so Studio must be restarted after installing before it
+    takes effect; returns restart_required=True.
     """
     try:
         return flash_attention_setup.install(body.url)
@@ -193,22 +206,24 @@ def flash_attn_install(body: FlashAttnInstallRequest) -> dict[str, Any]:
 
 @router.get("/api/xformers/status")
 def xformers_status() -> dict[str, Any]:
-    """返回 xformers 安装状态。
+    """Return xformers install status.
 
-    比 flash_attention/status 简洁很多 —— xformers 走 PyPI 直装，不需要 GitHub
-    候选 wheel 列表 / 环境检测细节（status 里 installed/version 已经够用）。
+    Much simpler than flash_attention/status -- xformers is installed directly from
+    PyPI, so it needs no GitHub candidate wheel list / environment detection detail
+    (installed/version in status is enough).
     """
     return xformers_setup.current_status()
 
 
 @router.post("/api/xformers/install")
 def xformers_install() -> dict[str, Any]:
-    """pip install xformers --index-url <torch-cu-index>。
+    """pip install xformers --index-url <torch-cu-index>.
 
-    同步执行；远端 wheel 通常几十到几百 MB，几分钟级。装失败抛 500，message
-    含 stderr 末尾（多数失败 = 上游 wheel 没覆盖当前 torch+cu 组合）。
+    Runs synchronously; the remote wheel is usually tens to hundreds of MB, taking
+    minutes. Raises 500 on failure, with the message including the tail of stderr (most
+    failures mean the upstream wheel doesn't cover the current torch+cu combination).
 
-    xformers 是 C extension，装完返回 restart_required=True 让 UI 提示重启。
+    xformers is a C extension, so returns restart_required=True to have the UI prompt a restart.
     """
     try:
         return xformers_setup.install()
@@ -231,9 +246,11 @@ def _select_preset(
 
 @router.post("/api/llm-tagger/models/refresh")
 def refresh_llm_tagger_models(body: LLMModelsRefreshRequest) -> dict[str, Any]:
-    """读取 OpenAI-compatible /models，并保存到指定 preset 的 model_ids。
+    """Read the OpenAI-compatible /models endpoint and save the result into the target
+    preset's model_ids.
 
-    `preset_id` 不传时用 current_preset。成功后才落 secrets，避免请求失败时写脏。
+    Uses current_preset when `preset_id` is not given. Only persisted to secrets on
+    success, to avoid writing dirty data when the request fails.
     """
     from ...services.tagging import llm as llm_tagger_svc
 

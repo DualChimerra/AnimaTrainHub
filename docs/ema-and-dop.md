@@ -1,109 +1,108 @@
-# EMA 与 DOP —— 两个「别把风格 LoRA 训废」的开关
+# EMA and DOP — Two switches for "don't wreck the style LoRA"
 
-两者都是 opt-in / default-off，不开时全链路与改动前等价。放在一篇是因为它们解决的是
-风格 LoRA 的同一类痛：**过拟合与选点靠运气**。
+Both are opt-in / default-off; when disabled the whole pipeline is equivalent to before the change.
+They're grouped in one doc because they address the same kind of pain for style LoRAs:
+**overfitting and checkpoint selection being a matter of luck.**
 
 ---
 
-## 1. EMA —— 权重指数滑动平均
+## 1. EMA — Exponential Moving Average of weights
 
-`ema_enabled` / `ema_decay` / `ema_start_ratio` · 实现：`runtime/training/ema.py`
+`ema_enabled` / `ema_decay` / `ema_start_ratio` · implementation: `runtime/training/ema.py`
 
-### 解决什么
+### What it solves
 
-训练到某一步的权重，是「最后一次随机批次把参数推到哪」的结果。相邻 epoch 一个偏这边
-一个偏那边，「第几个 epoch 最好」于是变成抓阄。
+The weights at any given training step are the result of "wherever the last random batch happened to push the parameters." One epoch drifts one way, the next drifts another way, so "which epoch is best" becomes a coin toss.
 
-EMA 在训练途中额外维护一份平滑副本，每次 optimizer.step() 之后
+EMA maintains an extra smoothed copy during training; after every optimizer.step():
 
 ```
-shadow ← decay · shadow + (1 - decay) · 当前权重
+shadow ← decay · shadow + (1 - decay) · current weights
 ```
 
-正常 checkpoint 照存，**额外**再存一份 `*_ema.safetensors`。两个都能拿去试。
+The normal checkpoint is still saved as usual, and an **additional** `*_ema.safetensors` is saved alongside it. You can try either one.
 
-### 怎么设
+### How to configure it
 
-| 字段 | 含义 | 建议 |
+| Field | Meaning | Recommendation |
 |---|---|---|
-| `ema_decay` | 平滑窗口。0.999 ≈ 最近 1000 个 update step | 总步数 2000-3000 → **0.999**；步数很少 → 0.99 |
-| `ema_start_ratio` | 从总步数的百分之多少开始累计 | **0**（含 warmup 已经够）；想只平均平台期 → 0.3 |
+| `ema_decay` | smoothing window. 0.999 ≈ the most recent 1000 update steps | total steps 2000-3000 → **0.999**; very few steps → 0.99 |
+| `ema_start_ratio` | what percentage of total steps in to start accumulating | **0** (with warmup already included, this is enough); to only average over the plateau → 0.3 |
 
-### 两个实现要点
+### Two implementation details
 
-* **影子是 fp32。** 训练权重 bf16 只有 8 位尾数；decay=0.999 的千分之一增量在 bf16
-  累加器里会被直接舍成 0，EMA 静默退化成「一份不动的旧拷贝」。
-* **影子从「开始那一刻的权重」起步**，不是从 LoRA 的零初始化起步；配合
-  `(1+n)/(10+n)` 的 warmup，早期几乎直接跟随当前权重。否则 2760 步后仍有
-  0.999^2760 ≈ 6% 的「零」留在平均里，白白削弱 LoRA 6%。
+* **The shadow is fp32.** Training weights in bf16 only have 8 mantissa bits; the thousandth-scale increment from decay=0.999 gets rounded straight to 0 in a bf16 accumulator, silently degrading EMA into "an unmoving old copy."
+* **The shadow starts from the weights at the moment training begins**, not from the LoRA's zero initialization; combined with the
+  `(1+n)/(10+n)` warmup, it nearly tracks the current weights directly in the early steps. Otherwise, after 2760 steps there would still be
+  0.999^2760 ≈ 6% of "zero" left in the average, needlessly diluting the LoRA by 6%.
 
-落盘复用 adapter 自己的 `save()`（`ema.applied()` 上下文临时换入影子），所以 alpha
-重写 / `ss_*` metadata / 族标记完全一致。影子随训练状态一起存，resume 不丢。
+Saving to disk reuses the adapter's own `save()` (via the `ema.applied()` context manager, which temporarily swaps in the shadow), so alpha
+rewriting / `ss_*` metadata / family tagging all stay consistent. The shadow is saved together with the training state, so it survives resume.
 
 ---
 
-## 2. DOP —— 差分输出保持
+## 2. DOP — Differential Output Preservation
 
-`dop_enabled` / `dop_weight` / `dop_ratio` · 实现：`runtime/training/dop.py`
-来源：kohya-ss/sd-scripts PR #1710、ostris/ai-toolkit 同名功能。
+`dop_enabled` / `dop_weight` / `dop_ratio` · implementation: `runtime/training/dop.py`
+source: kohya-ss/sd-scripts PR #1710, ostris/ai-toolkit's feature of the same name.
 
-### 解决什么
+### What it solves
 
-风格 LoRA 训完常见两个毛病：
+Trained style LoRAs commonly have two problems:
 
-1. 提示词里没有触发词，它照样改图（风格「漏」得到处都是）；
-2. 把数据集的**内容**（同一个典型角色、同一种背景）一起搬进生成结果 ——
-   「不是把风格贴上去，而是把数据集抄过来」。
+1. Even without the trigger word in the prompt, it still alters the image (the style "leaks" everywhere);
+2. It carries over the **content** of the dataset (the same typical character, the same kind of background) into generation results —
+   "instead of applying the style on top, it copies the dataset."
 
-传统解法是正则集：另外准备一堆中性图。DOP 不需要额外图片：
+The traditional fix is a regularization set: prepare a separate batch of neutral images. DOP doesn't need extra images:
 
-1. 拿**同一批训练图**，把 caption 里的触发词去掉；
-2. **关掉适配器**跑一次前向 → 底模本来会画成什么样（no_grad，常量目标）；
-3. **开着适配器**跑同样的输入 → 现在会画成什么样；
-4. 两者 MSE × `dop_weight` 加进总 loss。
+1. Take the **same batch of training images**, strip the trigger word out of the caption;
+2. Run a forward pass with the **adapter turned off** → what the base model would draw on its own (no_grad, a constant target);
+3. Run the same input with the **adapter turned on** → what it draws now;
+4. Add the MSE between the two, times `dop_weight`, into the total loss.
 
-于是 LoRA 被同时教两件事：**带触发词 = 我的风格；不带触发词 = 我什么都不改**。
-内容在两条分支里完全相同，所以「抄内容」这条路拿不到任何奖励。
+This teaches the LoRA two things simultaneously: **with the trigger word = apply my style; without the trigger word = change nothing.**
+The content is identical in both branches, so "copying content" gets no reward on that path.
 
-### 怎么设
+### How to configure it
 
-| 字段 | 含义 | 建议 |
+| Field | Meaning | Recommendation |
 |---|---|---|
-| `dop_weight` | 保持项相对主 loss 的权重（两者同为 MSE，1.0 = 等权） | **1.0**；风格还在漏 → 2-5；风格学不进去 → 0.3-0.5 |
-| `dop_ratio` | 在多大比例的 step 上启用 | **1.0**；嫌慢 → 0.5（约束强度也减半） |
+| `dop_weight` | weight of the preservation term relative to the main loss (both are MSE, 1.0 = equal weight) | **1.0**; if style still leaks → 2-5; if style isn't learned at all → 0.3-0.5 |
+| `dop_ratio` | what fraction of steps it's enabled on | **1.0**; if it's too slow → 0.5 (constraint strength also halves) |
 
-### 前提与代价
+### Prerequisites and cost
 
-* **必须有非空 `trigger_word`。** 保持分支就是「去掉触发词」的那一条；没有触发词
-  两条分支完全一样、约束退化成 0。启动期 fail-fast，不静默降级。
-  触发词在 Train 页顶部的「Trigger word / 触发词」卡片里填写（写入 version，
-  并强制同步进 config.yaml）；「从 caption 识别」会读 train/ 下的 caption，找出
-  （几乎）每条都有的那个词，通常就是开头的 `@handle`。入队训练时若 DOP 已开但
-  version 没有触发词：先沿用 yaml 里已有的值，再尝试从 caption 自动识别（必须
-  100% 覆盖且位于开头或是 `@handle`），都没有才在入队阶段直接报错。
-* **每个启用的 step 多两次前向**（一次 no_grad 参照 + 一次带梯度），约 2-2.5× 单步耗时。
-* **范围（v1）**：标准 rectified flow 路径。与 LeapAlign（自带目标函数）、NaViT
-  打包（逐图 cross 需重新打包）在 schema 层互斥。
-* 适配器必须实现 `disabled()`（临时把缩放置 0）。LyCORIS / OrthoLoRA 都已实现；
-  其它适配器会在启动期报错而不是训到一半才发现。
+* **Requires a non-empty `trigger_word`.** The preservation branch is exactly "with the trigger word removed"; without a trigger word
+  the two branches are identical and the constraint degenerates to 0. This fails fast at startup rather than silently degrading.
+  The trigger word is entered in the "Trigger word" card at the top of the Train page (written to the version and forced to sync into
+  config.yaml); "detect from caption" reads the captions under train/ and finds the word that's present in (almost) every one — usually
+  the leading `@handle`. When enqueuing training with DOP enabled but the version has no trigger word: it first falls back to any existing
+  value in the yaml, then tries auto-detecting from captions (must be 100% coverage and located at the start, or be an `@handle`); only if
+  neither works does it error out at enqueue time.
+* **Every enabled step costs two extra forward passes** (one no_grad reference + one with gradients), roughly 2-2.5× the per-step time.
+* **Scope (v1)**: standard rectified flow path only. Mutually exclusive at the schema level with LeapAlign (which has its own objective
+  function) and NaViT packing (which requires re-packing for per-image cross-attention).
+* The adapter must implement `disabled()` (temporarily zeroing the scale). LyCORIS / OrthoLoRA already implement this;
+  other adapters will error at startup rather than fail midway through training.
 
-监控面板与 wandb 里多一条 `dop_loss` 曲线：它应当先降后平，长期不降说明
-`dop_weight` 太小（约束没咬住）或触发词在 caption 里位置不一致。
+The monitoring dashboard and wandb get an extra `dop_loss` curve: it should decrease first and then flatten. If it stays flat long-term, it means
+`dop_weight` is too small (the constraint isn't biting) or the trigger word's position in the caption is inconsistent.
 
 ---
 
-## 3. 两者一起用
+## 3. Using both together
 
-互不冲突，推荐组合：DOP 管「风格别乱漏、别抄内容」，EMA 管「哪个 checkpoint 都不用赌」。
-风格 LoRA 的一套起手式：
+They don't conflict, and the recommended combination is: DOP handles "don't let the style leak, don't copy content," EMA handles "checkpoint
+selection isn't a gamble." A starter recipe for style LoRAs:
 
 ```yaml
-timestep_sampling: style_friendly   # 火力压在风格档
+timestep_sampling: style_friendly   # concentrate firepower on the style band
 style_snr_mean: -6.0
-dop_enabled: true                   # 不抄内容、不乱漏
+dop_enabled: true                   # don't copy content, don't leak
 dop_weight: 1.0
-ema_enabled: true                   # 选点不靠运气
+ema_enabled: true                   # checkpoint selection isn't a gamble
 ema_decay: 0.999
 ```
 
-测试：`tests/test_ema.py`（12 条）、`tests/test_dop.py`（17 条），均为纯 CPU。
+Tests: `tests/test_ema.py` (12 cases), `tests/test_dop.py` (17 cases), both CPU-only.

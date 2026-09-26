@@ -1,22 +1,26 @@
-"""多个 LoRA 按权重精确 merge 成单个 plain LoRA（调色 POC）。
+"""Merge multiple LoRAs by weight into a single exact plain LoRA (color-grading POC).
 
-背景：Generate 页多 LoRA 叠加是线性的（studio/services/inference/core.py::apply_loras，
-每份 LoRA 独立 inject，forward 累加 delta），即：
+Background: on the Generate page, stacking multiple LoRAs is linear (see
+studio/services/inference/core.py::apply_loras -- each LoRA is injected independently and their
+deltas are summed at forward time), i.e.:
 
     ΔW_total = Σ_i  weight_i · (alpha_i / rank_i) · ΔW_i
 
-因此把若干 LoRA（含 slider 调色 LoRA 的负权重）merge 成一个文件在数学上是
-可精确完成的 —— 不需要 SVD 近似：
+Therefore, merging several LoRAs (including negative-weight color-grading slider LoRAs) into one
+file can be done exactly, mathematically -- no SVD approximation needed:
 
-  - plain LoRA 层：ΔW = up @ down，直接把 weight 烘进因子后按秩维拼接。
-  - LoKr 层（w2 分解形态）：利用 Kronecker 混合积恒等式
+  - Plain LoRA layers: ΔW = up @ down, so the weight can be baked directly into the factors and
+    the results concatenated along the rank dimension.
+  - LoKr layers (w2-decomposed form): using the Kronecker mixed-product identity
         kron(w1, w2a @ w2b) = kron(w1, w2a) @ kron(I, w2b)
-    无损展开成秩 ≤ in_l·r 的两矩阵乘积，再与其他源拼接。
+    this expands losslessly into a product of two matrices of rank <= in_l·r, which can then be
+    concatenated with the other sources.
 
-输出为 algo="lora" 的 kohya 格式文件（lora_unet_* 前缀 + ss_* metadata），
-alpha=rank（缩放因子 1），挂载权重 1.0 即等价于原多 LoRA 组合。
+Output is a kohya-format file with algo="lora" (lora_unet_* prefix + ss_* metadata),
+alpha=rank (scale factor 1), so mounting it at weight 1.0 is equivalent to the original
+multi-LoRA combination.
 
-用法示例（style ×1.0 + 色温 ×-5 + 饱和 ×-5）：
+Usage example (style x1.0 + color-temperature x-5 + saturation x-5):
 
     python tools/lora_merge.py \
         --lora path/to/style.safetensors 1.0 \
@@ -24,9 +28,10 @@ alpha=rank（缩放因子 1），挂载权重 1.0 即等价于原多 LoRA 组合
         --lora path/to/saturation_v6.safetensors -5 \
         --out path/to/merged.safetensors --verify
 
-支持范围（POC）：plain LoRA（Linear 层，无 lora_mid）、LoKr（w1 全矩阵或
-w1_a/w1_b 分解 + w2_a/w2_b 分解）。DoRA（weight_decompose）路径非线性、
-LoKr 双全矩阵形态展开秩过大，均直接报错拒绝。
+Supported scope (POC): plain LoRA (Linear layers, no lora_mid), LoKr (w1 as a full matrix, or
+decomposed as w1_a/w1_b + w2_a/w2_b). The DoRA (weight_decompose) path is non-linear, and the
+LoKr dual-full-matrix form would expand to an excessively large rank -- both are rejected with
+a hard error.
 """
 from __future__ import annotations
 
@@ -45,7 +50,7 @@ from studio.services.inference.core import LoRAMeta, read_lora_meta  # noqa: E40
 
 
 def _load_layers(path: Path) -> dict[str, dict[str, torch.Tensor]]:
-    """按层名（第一个 '.' 之前）分组读取全部张量。"""
+    """Load all tensors grouped by layer name (everything before the first '.')."""
     from safetensors import safe_open
 
     layers: dict[str, dict[str, torch.Tensor]] = {}
@@ -59,50 +64,52 @@ def _load_layers(path: Path) -> dict[str, dict[str, torch.Tensor]]:
 def _layer_factors(
     layer: str, tensors: dict[str, torch.Tensor], meta: LoRAMeta, path: Path
 ) -> tuple[torch.Tensor, torch.Tensor, float]:
-    """单层张量 → (up (out×r), down (r×in), scale)，fp32，未含用户权重。
+    """Single-layer tensors -> (up (out×r), down (r×in), scale), fp32, user weight not applied yet.
 
-    scale = alpha / rank，与 LyCORIS LoConModule / LokrModule 的 self.scale 一致
-    （rs_lora 已在入口拒绝，无 √rank 分支）。
+    scale = alpha / rank, matching LyCORIS LoConModule / LokrModule's self.scale
+    (rs_lora is already rejected at the entry point, so there's no √rank branch here).
     """
     if "dora_scale" in tensors:
-        raise SystemExit(f"{path.name} 层 {layer} 含 dora_scale（DoRA 非线性），无法线性 merge")
+        raise SystemExit(f"{path.name} layer {layer} has dora_scale (DoRA is non-linear), cannot merge linearly")
 
     if "lora_down.weight" in tensors:  # plain LoRA (LoCon)
         down = tensors["lora_down.weight"].float()
         up = tensors["lora_up.weight"].float()
         if "lora_mid.weight" in tensors or down.dim() != 2:
-            raise SystemExit(f"{path.name} 层 {layer} 非 Linear plain LoRA（POC 未支持 conv/tucker）")
+            raise SystemExit(f"{path.name} layer {layer} is not a Linear plain LoRA (conv/tucker not supported by this POC)")
         rank = down.shape[0]
         alpha = float(tensors["alpha"]) if "alpha" in tensors else float(rank)
         return up, down, alpha / rank
 
-    if "lokr_w2_a" in tensors:  # LoKr，w2 分解形态
+    if "lokr_w2_a" in tensors:  # LoKr, w2-decomposed form
         if "lokr_t2" in tensors:
-            raise SystemExit(f"{path.name} 层 {layer} 为 LoKr tucker 形态，POC 未支持")
+            raise SystemExit(f"{path.name} layer {layer} is a LoKr tucker form, not supported by this POC")
         if "lokr_w1" in tensors:
             w1 = tensors["lokr_w1"].float()
         else:
             w1 = (tensors["lokr_w1_a"] @ tensors["lokr_w1_b"]).float()
         w2a = tensors["lokr_w2_a"].float()
         w2b = tensors["lokr_w2_b"].float()
-        # kron(w1, w2a@w2b) = kron(w1, w2a) @ kron(I_{w1列数}, w2b)
+        # kron(w1, w2a@w2b) = kron(w1, w2a) @ kron(I_{w1 col count}, w2b)
         up = torch.kron(w1, w2a)                                # (out, in_l·r)
         down = torch.kron(torch.eye(w1.shape[1]), w2b)          # (in_l·r, in)
-        rank = w2a.shape[1]  # LyCORIS lora_dim；scale = alpha / lora_dim
+        rank = w2a.shape[1]  # LyCORIS lora_dim; scale = alpha / lora_dim
         alpha = float(tensors["alpha"]) if "alpha" in tensors else float(rank)
         return up, down, alpha / rank
 
     if "lokr_w2" in tensors:
         raise SystemExit(
-            f"{path.name} 层 {layer} 为 LoKr 双全矩阵形态，精确展开秩过大，POC 未支持（需 SVD 路径）"
+            f"{path.name} layer {layer} is a LoKr dual-full-matrix form; the exact expansion rank would be "
+            "too large, not supported by this POC (would need an SVD path)"
         )
-    raise SystemExit(f"{path.name} 层 {layer} 张量形态无法识别: {sorted(tensors)}")
+    raise SystemExit(f"{path.name} layer {layer} has an unrecognized tensor shape: {sorted(tensors)}")
 
 
 def _trim_factors(
     up: torch.Tensor, down: torch.Tensor, energy: Optional[float], cap: Optional[int]
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """QR + 核 SVD 把 up@down 截到保留 energy 比例奇异值能量的最小秩，再按 cap 封顶。"""
+    """QR + core SVD truncate up@down to the smallest rank retaining `energy` fraction of the
+    singular-value energy, then cap it by `cap`."""
     q1, r1 = torch.linalg.qr(up)          # up = q1 @ r1
     q2, r2 = torch.linalg.qr(down.T)      # down = r2.T @ q2.T
     u, s, vh = torch.linalg.svd(r1 @ r2.T)
@@ -124,13 +131,13 @@ def merge(
     trim_energy: Optional[float],
     rank_cap: Optional[int],
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-    """执行 merge 并写盘。返回各层最终 (up, down)（fp32，供 verify 复用）。"""
+    """Perform the merge and write to disk. Returns each layer's final (up, down) (fp32, reused by verify)."""
     metas = [read_lora_meta(str(p)) for p, _ in sources]
     for (p, _), m in zip(sources, metas):
         if m.weight_decompose:
-            raise SystemExit(f"{p.name} 训练时开了 weight_decompose（DoRA），非线性，无法 merge")
+            raise SystemExit(f"{p.name} was trained with weight_decompose (DoRA) enabled, which is non-linear and cannot be merged")
         if m.rs_lora:
-            raise SystemExit(f"{p.name} 训练时开了 rs_lora，缩放语义未在 POC 覆盖")
+            raise SystemExit(f"{p.name} was trained with rs_lora enabled; that scaling semantics is not covered by this POC")
 
     all_layers: list[dict[str, dict[str, torch.Tensor]]] = [_load_layers(p) for p, _ in sources]
     layer_names = sorted(set().union(*[set(d) for d in all_layers]))
@@ -144,7 +151,8 @@ def merge(
                 continue
             up, down, scale = _layer_factors(layer, layers[layer], meta, path)
             coeff = weight * scale
-            # 平衡烘焙：|coeff| 开方分摊到两侧，符号归 up，压低半精度存储误差
+            # Balanced baking: split |coeff| via square root between the two sides, sign goes to
+            # up, which keeps half-precision storage error low
             s = abs(coeff) ** 0.5
             ups.append(up * (s if coeff >= 0 else -s))
             downs.append(down * s)
@@ -155,9 +163,10 @@ def merge(
         merged[layer] = (up, down)
         max_rank = max(max_rank, up.shape[1])
 
-    # 每层保留自己的秩（不零填充）。秩 ≠ max_rank 的层写进 lora_reg_dims
-    # （fullmatch 精确 pattern），studio 加载侧由 _apply_reg_dims_ 按层重建形状；
-    # ComfyUI 等外部 loader 直接从张量形状 + per-layer alpha 读，天然兼容。
+    # Each layer keeps its own rank (no zero-padding). Layers whose rank != max_rank are written
+    # into lora_reg_dims (exact fullmatch pattern); on the studio loading side, _apply_reg_dims_
+    # reconstructs the per-layer shape from it. External loaders like ComfyUI read the shape
+    # directly from the tensors + per-layer alpha, so they're naturally compatible.
     state: dict[str, torch.Tensor] = {}
     reg_dims: dict[str, int] = {}
     for layer, (up, down) in merged.items():
@@ -166,12 +175,13 @@ def merge(
             reg_dims[layer] = r
         state[f"{layer}.lora_up.weight"] = up.to(save_dtype).contiguous()
         state[f"{layer}.lora_down.weight"] = down.to(save_dtype).contiguous()
-        # studio 构建侧 scale 恒为 alpha_global/rank_global=1（reg_dims 不重算 scale）；
-        # per-layer alpha=r 让「alpha/rank」式 loader 也得到 scale=1
+        # On the studio build side, scale is always alpha_global/rank_global=1 (reg_dims doesn't
+        # recompute scale); setting per-layer alpha=r makes "alpha/rank"-style loaders also land
+        # on scale=1
         state[f"{layer}.alpha"] = torch.tensor(float(r))
 
-    # metadata 对齐 AnimaLycorisAdapter.save()（utils/lycoris_adapter.py）的约定，
-    # 保证 read_lora_meta / Generate 页按 algo=lora、scale=1 重建
+    # metadata follows the same convention as AnimaLycorisAdapter.save() (utils/lycoris_adapter.py),
+    # so read_lora_meta / the Generate page can reconstruct it as algo=lora, scale=1
     network_args = {
         "algo": "lora",
         "preset": "anima_full",
@@ -196,7 +206,7 @@ def merge(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     save_file(state, str(out_path), metadata=metadata)
     size_mb = out_path.stat().st_size / 1024 / 1024
-    print(f"已写出 {out_path}  (rank={max_rank}, {len(merged)} 层, {size_mb:.0f} MB)")
+    print(f"Wrote {out_path}  (rank={max_rank}, {len(merged)} layers, {size_mb:.0f} MB)")
     return merged
 
 
@@ -205,7 +215,8 @@ def verify(
     out_path: Path,
     spectrum: bool,
 ) -> None:
-    """逐层对比：写盘文件重建的 ΔW vs 各源 ΔW 加权和（fp32 参考）。"""
+    """Per-layer comparison: ΔW reconstructed from the written file vs. the weighted sum of ΔW
+    from each source (fp32 reference)."""
     metas = [read_lora_meta(str(p)) for p, _ in sources]
     all_layers = [_load_layers(p) for p, _ in sources]
     out_meta = read_lora_meta(str(out_path))
@@ -239,16 +250,16 @@ def verify(
             energy_ranks.append(int(torch.searchsorted(cum, 0.999 * cum[-1]).item()) + 1)
 
     print(
-        f"verify: {len(errs)} 层  相对 Frobenius 误差 "
-        f"max={max(errs):.3e} (层 {worst[1]})  mean={sum(errs) / len(errs):.3e}  "
-        f"(仅存储 dtype 量化噪声；fp32 存储时应 <1e-6)"
+        f"verify: {len(errs)} layers  relative Frobenius error "
+        f"max={max(errs):.3e} (layer {worst[1]})  mean={sum(errs) / len(errs):.3e}  "
+        f"(storage-dtype quantization noise only; should be <1e-6 when stored as fp32)"
     )
     if spectrum and energy_ranks:
         energy_ranks.sort()
         n = len(energy_ranks)
         print(
-            f"谱分析: 覆盖 99.9% 能量所需秩  p50={energy_ranks[n // 2]}  "
-            f"p90={energy_ranks[int(n * 0.9)]}  max={energy_ranks[-1]} / 实际 rank {out_meta.rank}"
+            f"spectrum analysis: rank needed to cover 99.9% energy  p50={energy_ranks[n // 2]}  "
+            f"p90={energy_ranks[int(n * 0.9)]}  max={energy_ranks[-1]} / actual rank {out_meta.rank}"
         )
 
 
@@ -262,25 +273,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="append",
         required=True,
         metavar=("PATH", "WEIGHT"),
-        help="源 LoRA 与权重，可重复。权重语义与 Generate 页强度滑条一致",
+        help="source LoRA and its weight, repeatable. Weight semantics match the Generate page's strength slider",
     )
-    parser.add_argument("--out", required=True, help="输出 safetensors 路径")
+    parser.add_argument("--out", required=True, help="output safetensors path")
     parser.add_argument(
         "--dtype", choices=["fp32", "fp16", "bf16"], default="fp16",
-        help="存储 dtype（默认 fp16；fp32 无量化损失但体积翻倍）",
+        help="storage dtype (default fp16; fp32 has no quantization loss but doubles the size)",
     )
     parser.add_argument(
         "--trim-energy", type=float, default=None, metavar="E",
-        help="可选 SVD 截秩，保留奇异值能量比例 E（如 0.999）。默认不截，完全精确",
+        help="optional SVD rank truncation, retaining fraction E of the singular-value energy (e.g. 0.999). No truncation by default, fully exact",
     )
     parser.add_argument(
         "--rank-cap", type=int, default=None, metavar="N",
-        help="可选每层秩上限（SVD 截断，牺牲精度换体积）。默认不封顶",
+        help="optional per-layer rank cap (SVD truncation, trading precision for size). No cap by default",
     )
-    parser.add_argument("--verify", action="store_true", help="写盘后逐层数值校验")
+    parser.add_argument("--verify", action="store_true", help="numerically verify layer by layer after writing")
     parser.add_argument(
         "--spectrum", action="store_true",
-        help="verify 时附带奇异值谱分析（评估未来 resize 空间，较慢）",
+        help="include singular-value spectrum analysis during verify (estimates future resize headroom, slower)",
     )
     args = parser.parse_args(argv)
 
@@ -288,7 +299,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for path_str, weight_str in args.lora:
         path = Path(path_str)
         if not path.exists():
-            raise SystemExit(f"文件不存在: {path}")
+            raise SystemExit(f"File does not exist: {path}")
         sources.append((path, float(weight_str)))
 
     save_dtype = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[args.dtype]

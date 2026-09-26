@@ -1,27 +1,27 @@
-# Anima LoRA 打标指南
+# Anima LoRA Tagging Guide
 
-> 基于 Anima Model Card 和 ComfyUI 官方实现总结的打标最佳实践
+> Best practices for tagging, based on the Anima Model Card and the official ComfyUI implementation
 
-## 核心规则
+## Core rules
 
-### 1. 标签格式：使用空格，不用下划线
+### 1. Tag format: use spaces, not underscores
 
-根据 Anima Model Card 官方示例和 ComfyUI 实现：
-
-```
-✅ 正确: oomuro sakurako, yuru yuri, brown hair, long hair
-❌ 错误: oomuro_sakurako, yuru_yuri, brown_hair, long_hair
-```
-
-**原因**：ComfyUI 的 tokenizer 直接把文本传给 Qwen2Tokenizer/T5Tokenizer，不做下划线转换。Anima 训练数据使用空格分隔。
-
-### 2. 标签顺序（官方推荐）
+Per the official examples in the Anima Model Card and the ComfyUI implementation:
 
 ```
-质量/安全 → 人数 → 角色 → 作品 → 画师 → 外观 → 标签 → 环境. 自然语言描述
+✅ Correct: oomuro sakurako, yuru yuri, brown hair, long hair
+❌ Wrong: oomuro_sakurako, yuru_yuri, brown_hair, long_hair
 ```
 
-| 位置 | 字段 | 示例 |
+**Why**: ComfyUI's tokenizer passes text straight to the Qwen2Tokenizer/T5Tokenizer without converting underscores. Anima's training data uses space-separated tags.
+
+### 2. Tag order (official recommendation)
+
+```
+quality/safety → count → character → series → artist → appearance → tags → environment. natural language description
+```
+
+| Position | Field | Example |
 |------|------|------|
 | 1 | quality | `newest, safe` |
 | 2 | count | `1girl`, `2boys`, `no humans` |
@@ -31,78 +31,78 @@
 | 6 | appearance | `long hair, blue eyes, twintails` |
 | 7 | tags | `smile, standing, looking at viewer` |
 | 8 | environment | `concert stage, spotlight, crowd` |
-| 9 | nl | `.` 句号后接自然语言描述 |
+| 9 | nl | `.` followed by a natural language description |
 
-### 3. 画师标签必须带 `@` 前缀
+### 3. Artist tags must have the `@` prefix
 
 ```
-✅ 正确: @wlop, @sakimichan, @torino aqua
-❌ 错误: wlop, sakimichan, torino aqua
+✅ Correct: @wlop, @sakimichan, @torino aqua
+❌ Wrong: wlop, sakimichan, torino aqua
 ```
 
-**重要**：没有 `@` 前缀的画师标签几乎不起作用！
+**Important**: an artist tag without the `@` prefix barely has any effect!
 
-### 4. 质量标签建议
+### 4. Quality tag recommendations
 
-训练 LoRA 时，**不建议**使用复杂质量标签，只保留：
+When training a LoRA, **avoid** complex quality tags — keep it to just:
 
 ```
 newest, safe
 ```
 
-让 LoRA 专注学习画风和角色，质量标签在推理时由用户自己添加。
+This lets the LoRA focus on learning style and character, while quality tags get added by the user at inference time.
 
-**完整质量标签体系**（推理时使用）：
-- 人工评分：`masterpiece` > `best quality` > `good quality` > `normal quality`
-- 美学评分：`score_9` > `score_8` > ... > `score_1`
-- 年份：`newest`, `recent`, `mid`, `early`, `old` 或 `year 2024`
-- 安全：`safe`, `sensitive`, `nsfw`, `explicit`
+**Full quality tag vocabulary** (for inference):
+- Human rating: `masterpiece` > `best quality` > `good quality` > `normal quality`
+- Aesthetic score: `score_9` > `score_8` > ... > `score_1`
+- Year: `newest`, `recent`, `mid`, `early`, `old`, or `year 2024`
+- Safety: `safe`, `sensitive`, `nsfw`, `explicit`
 
 ---
 
-## 角色变体命名
+## Character variant naming
 
-使用 **空格 + 括号** 表示变体：
+Use a **space + parentheses** to denote variants:
 
-| 变体类型 | 标签格式 |
+| Variant type | Tag format |
 |----------|----------|
-| 基础角色 | `hatsune miku` |
-| 特定服装 | `hatsune miku (racing)` |
-| 年龄变体 | `hatsune miku (adult)` |
-| 世界线/形态 | `hatsune miku (append)` |
+| Base character | `hatsune miku` |
+| Specific outfit | `hatsune miku (racing)` |
+| Age variant | `hatsune miku (adult)` |
+| Alternate timeline/form | `hatsune miku (append)` |
 
 ---
 
-## 固定字段 vs 动态字段
+## Fixed fields vs. dynamic fields
 
-### 固定字段（根据项目/目录自动填充）
+### Fixed fields (auto-filled based on project/directory)
 
-对于特定项目的 LoRA 训练，建议固定以下字段：
+For LoRA training on a specific project, it's recommended to fix the following fields:
 
-| 字段 | 说明 | 示例 |
+| Field | Description | Example |
 |------|------|------|
-| quality | 统一质量标签 | `newest, safe` |
-| series | 作品/项目名 | `my project` |
-| artist | 画师/画风标签 | `@my artist` |
-| character | 角色名（可从目录映射） | `character a` |
+| quality | Uniform quality tag | `newest, safe` |
+| series | Work/project name | `my project` |
+| artist | Artist/style tag | `@my artist` |
+| character | Character name (can be mapped from directory) | `character a` |
 
-### 动态字段（VLM 打标）
+### Dynamic fields (VLM-tagged)
 
-以下字段需要根据每张图片内容动态生成：
+The following fields need to be generated dynamically for each image:
 
-| 字段 | 描述 |
+| Field | Description |
 |------|------|
-| count | 人物数量 (`1girl`, `2boys`, `no humans`) |
-| appearance | 角色外观（发型、发色、瞳色、服装、配饰） |
-| tags | 动作、表情、构图、手持物品 |
-| environment | 背景、场景、光影、氛围 |
-| nl | 1-2 句自然语言描述（放在最后，句号分隔） |
+| count | Character count (`1girl`, `2boys`, `no humans`) |
+| appearance | Character appearance (hairstyle, hair color, eye color, clothing, accessories) |
+| tags | Actions, expressions, composition, held items |
+| environment | Background, scene, lighting, atmosphere |
+| nl | 1-2 sentence natural language description (placed last, separated by a period) |
 
 ---
 
-## VLM 打标
+## VLM tagging
 
-### System Prompt 模板
+### System prompt template
 
 ```
 You are an anime image tagging expert. Output ONLY valid JSON.
@@ -125,7 +125,7 @@ Example:
 {"count": "1girl", "appearance": ["long hair", "blue eyes", "school uniform"], "tags": ["smile", "standing", "looking at viewer"], "environment": ["classroom", "window", "sunlight"], "nl": "A cheerful girl stands by the window in a sunny classroom."}
 ```
 
-### API 调用参数（Gemini 推荐）
+### API call parameters (Gemini recommended)
 
 ```python
 {
@@ -140,52 +140,52 @@ Example:
 }
 ```
 
-**关键参数**：
-- `thinkingBudget: 128` - 限制思考 token，让输出更干净
-- **不要**在 Prompt 中加 `SPECIAL INSTRUCTION` 或 `Danbooru` 等词，可能触发安全过滤
+**Key parameters**:
+- `thinkingBudget: 128` - limits thinking tokens, keeps the output clean
+- **Don't** add words like `SPECIAL INSTRUCTION` or `Danbooru` to the prompt — this may trigger safety filters
 
 ---
 
-## 目录结构自动映射
+## Automatic directory-structure mapping
 
-### 创建角色映射
+### Creating a character map
 
-为你的项目创建角色映射字典：
+Create a character-mapping dictionary for your project:
 
 ```python
-# 示例：角色目录名 → 英文标签
+# Example: character directory name → English tag
 CHAR_MAP = {
-    "角色A": "character a",
-    "角色A-变体": "character a (variant)",
-    "角色B": "character b",
-    # ... 添加你的角色
+    "CharacterA": "character a",
+    "CharacterA-variant": "character a (variant)",
+    "CharacterB": "character b",
+    # ... add your characters
 }
 ```
 
-### 变体/服装映射
+### Variant/outfit mapping
 
-子文件夹名可以自动解析并添加标签：
+Subfolder names can be automatically parsed and turned into tags:
 
-| 类型 | 目录名示例 | 英文 tag | 添加到 |
+| Type | Example directory name | English tag | Added to |
 |------|-----------|----------|--------|
-| **年龄** | `成年` | `(adult)` | 角色名后缀 |
-| **发色** | `金发` | `blonde hair` | appearance |
-| **服装** | `和服` | `kimono` | appearance |
-| **服装** | `泳装` | `swimsuit` | appearance |
-| **服装** | `校服` | `school uniform` | appearance |
-| **状态** | `战斗` | `fighting stance` | tags |
+| **Age** | `adult` | `(adult)` | character name suffix |
+| **Hair color** | `blonde` | `blonde hair` | appearance |
+| **Outfit** | `kimono` | `kimono` | appearance |
+| **Outfit** | `swimsuit` | `swimsuit` | appearance |
+| **Outfit** | `school uniform` | `school uniform` | appearance |
+| **State** | `fighting` | `fighting stance` | tags |
 
-**示例路径解析**：
-- `角色A/金发-便装/xxx.png` → `character a, blonde hair, casual clothes`
-- `角色B/和服/xxx.png` → `character b, kimono`
+**Example path parsing**:
+- `CharacterA/blonde-casual/xxx.png` → `character a, blonde hair, casual clothes`
+- `CharacterB/kimono/xxx.png` → `character b, kimono`
 
 ---
 
-## 最终 Caption 示例
+## Final caption example
 
-**输入图片**：`character/角色A/和服/001.png`
+**Input image**: `character/CharacterA/kimono/001.png`
 
-**VLM 输出（JSON 格式）**：
+**VLM output (JSON format)**:
 ```json
 {
   "count": "1girl",
@@ -196,7 +196,7 @@ CHAR_MAP = {
 }
 ```
 
-**固定字段**：
+**Fixed fields**:
 ```python
 FIXED = {
     "quality": "newest, safe",
@@ -205,57 +205,57 @@ FIXED = {
 }
 ```
 
-**路径自动添加**：`kimono`（来自子文件夹 `和服`）
+**Auto-added from path**: `kimono` (from the subfolder `kimono`)
 
-**最终 Caption**：
+**Final caption**:
 ```
 newest, safe, 1girl, character a, my project, @my artist, long hair, black hair, red eyes, hair ornament, kimono, standing, smile, looking at viewer, upper body, indoors, traditional room, soft lighting. A graceful girl in traditional attire smiles warmly in a serene room.
 ```
 
 ---
 
-## 训练参数建议
+## Training parameter recommendations
 
-### TXT 模式
+### TXT mode
 
 ```yaml
-shuffle_caption: true   # 打乱标签
-keep_tokens: 6          # 保护前 6 个 tag 不被打乱
+shuffle_caption: true   # shuffle tags
+keep_tokens: 6           # protect the first 6 tags from shuffling
                         # newest, safe, 1girl, character, series, artist
 ```
 
-### JSON 模式（推荐）
+### JSON mode (recommended)
 
 ```yaml
-prefer_json: true       # 使用 JSON 文件
-shuffle_caption: true   # 分类内部打乱（appearance/tags/environment）
-keep_tokens: 0          # JSON 模式下固定字段自动在前
+prefer_json: true       # use JSON files
+shuffle_caption: true   # shuffle within each category (appearance/tags/environment)
+keep_tokens: 0           # fixed fields are automatically placed first in JSON mode
 ```
 
 ---
 
-## 常见问题
+## FAQ
 
-### Q: 为什么画师标签不起作用？
+### Q: Why doesn't my artist tag have any effect?
 
-A: 检查是否加了 `@` 前缀。`@wlop` 有效，`wlop` 无效。
+A: Check whether you included the `@` prefix. `@wlop` works, `wlop` doesn't.
 
-### Q: 角色名用下划线还是空格？
+### Q: Should character names use underscores or spaces?
 
-A: **空格**。Anima 训练数据使用空格，下划线会被当作普通字符。
+A: **Spaces**. Anima's training data uses spaces; underscores get treated as literal characters.
 
-### Q: 需要加很多质量标签吗？
+### Q: Do I need a lot of quality tags?
 
-A: 训练时只用 `newest, safe`。推理时再加 `masterpiece, best quality` 等。
+A: Only use `newest, safe` for training. Add things like `masterpiece, best quality` at inference time.
 
-### Q: 自然语言描述放哪里？
+### Q: Where does the natural language description go?
 
-A: 放在最后，用 `.`（句号）分隔：`..., environment tags. Natural language description here.`
+A: At the end, separated by a `.` (period): `..., environment tags. Natural language description here.`
 
 ---
 
-## 参考资料
+## References
 
 - [Anima Model Card](https://huggingface.co/circlestone-labs/Anima)
 - [ComfyUI-AnimaTool Prompt Guide](https://github.com/Moeblack/ComfyUI-AnimaTool/wiki/Prompt-Guide)
-- [ComfyUI 源码 - comfy/text_encoders/anima.py](https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/text_encoders/anima.py)
+- [ComfyUI source - comfy/text_encoders/anima.py](https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/text_encoders/anima.py)

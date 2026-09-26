@@ -1,13 +1,15 @@
-"""DPM-Solver++(3M) SDE for CONST flow —— 逐行对齐 ComfyUI k_diffusion.sample_dpmpp_3m_sde。
+"""DPM-Solver++(3M) SDE for CONST flow -- line-by-line aligned with ComfyUI k_diffusion.sample_dpmpp_3m_sde.
 
-对齐要点（comfy/k_diffusion/sampling.py + comfy/model_sampling.py，GPL-3.0）：
-- λ (CONST half-log-SNR) = sigma.logit().neg() = log((1-σ)/σ)
-- alpha_t = σ_{i+1} * exp(λ_t)  （CONST 下恒等于 1-σ_{i+1}，保留 ComfyUI 写法）
-- offset_first_sigma_for_snr：σ_0 ≥ 1 时替换为 percent_to_sigma(1e-4)
-- 噪声：BrownianTreeNoiseSampler，transform=identity（按 σ 直接做时间轴，
-  **非** -log(σ)），BatchedBrownianTree 在 CPU 上跑（cpu=True）以对齐 RNG。
+Alignment notes (comfy/k_diffusion/sampling.py + comfy/model_sampling.py, GPL-3.0):
+- lambda (CONST half-log-SNR) = sigma.logit().neg() = log((1-sigma)/sigma)
+- alpha_t = sigma_{i+1} * exp(lambda_t)  (always equals 1-sigma_{i+1} under CONST; kept in the ComfyUI form)
+- offset_first_sigma_for_snr: when sigma_0 >= 1, replace it with percent_to_sigma(1e-4)
+- Noise: BrownianTreeNoiseSampler, transform=identity (uses sigma directly as the
+  time axis, **not** -log(sigma)); BatchedBrownianTree runs on CPU (cpu=True) to
+  keep the RNG aligned.
 
-这让 dpmpp_3m_sde 出图对齐 ComfyUI，与用独立 Gaussian 的 [[er_sde]] 拉开差距。
+This makes dpmpp_3m_sde's output match ComfyUI, widening the gap from [[er_sde]],
+which uses independent Gaussian noise.
 """
 
 from __future__ import annotations
@@ -17,9 +19,11 @@ from typing import Optional
 
 import torch
 
-# torchsde 在边界 σ（== tree t0/t1）查询时，因 float32 往返误差产生 ta<t0 / tb>t1
-# 几个 ULP 的越界，打 UserWarning 后 clamp 回边界（数值正确）。ComfyUI 同样命中
-# 此告警、只是不 promote 成 error。这里精准静音该条，避免刷屏。
+# When torchsde queries at boundary sigma values (== tree t0/t1), float32
+# round-trip error produces a ta<t0 / tb>t1 overshoot of a few ULPs, which
+# raises a UserWarning before clamping back to the boundary (numerically
+# correct). ComfyUI hits this same warning too, it just doesn't promote it
+# to an error. We silence exactly this warning here to avoid log spam.
 warnings.filterwarnings(
     "ignore",
     message=r"Should have t[ab][<>]=t[01] but got",
@@ -28,18 +32,20 @@ warnings.filterwarnings(
 
 
 class _BrownianTreeNoiseSampler:
-    """对齐 ComfyUI BrownianTreeNoiseSampler + BatchedBrownianTree。
+    """Aligned with ComfyUI's BrownianTreeNoiseSampler + BatchedBrownianTree.
 
-    transform=identity：t0/t1 直接取 σ_min/σ_max（不做 -log）。tree 在 CPU
-    上构建、查询后搬回原 device，复刻 ComfyUI cpu=True 路径的 RNG 行为。
+    transform=identity: t0/t1 are taken directly as sigma_min/sigma_max (no
+    -log). The tree is built and queried on CPU, then moved back to the
+    original device, replicating ComfyUI's cpu=True RNG behavior.
     """
 
     def __init__(self, x: torch.Tensor, sigma_min: float, sigma_max: float, seed: Optional[int] = None):
         from torchsde import BrownianTree
 
-        # ComfyUI: transform=identity，t0=σ_min, t1=σ_max。统一用 float32 tensor
-        # 存边界（与 __call__ 查询时的 .float() 同精度），避免 float64 边界点
-        # 触发 torchsde 的 ta<t0 / tb>t1 越界告警。
+        # ComfyUI: transform=identity, t0=sigma_min, t1=sigma_max. Store the
+        # boundaries as float32 tensors throughout (matching the .float()
+        # precision used when __call__ queries them), to avoid float64
+        # boundary values triggering torchsde's ta<t0 / tb>t1 overshoot warning.
         t0 = torch.as_tensor(sigma_min, dtype=torch.float32)
         t1 = torch.as_tensor(sigma_max, dtype=torch.float32)
         self._sign = 1
@@ -47,7 +53,7 @@ class _BrownianTreeNoiseSampler:
             t0, t1, self._sign = t1, t0, -1
         if seed is None:
             seed = int(torch.randint(0, 2**63 - 1, ()).item())
-        # cpu=True：tree 在 CPU 上，w0 也在 CPU
+        # cpu=True: the tree lives on CPU, so w0 is on CPU too
         self._device = x.device
         self._dtype = x.dtype
         self._w0 = torch.zeros_like(x, device="cpu")
@@ -67,7 +73,7 @@ class _BrownianTreeNoiseSampler:
 
 
 def _gaussian_noise_sampler(x: torch.Tensor, seed: Optional[int]):
-    """torchsde 不可用时的兜底：独立 Gaussian。"""
+    """Fallback when torchsde isn't available: independent Gaussian noise."""
     if seed is not None:
         if x.device.type == "cpu":
             seed = int(seed) + 1
@@ -89,7 +95,7 @@ def _build_noise_sampler(
     *,
     require_brownian_tree: bool = False,
 ):
-    """优先 BrownianTree（对齐 ComfyUI）；torchsde 缺失时回退独立 Gaussian。"""
+    """Prefer BrownianTree (aligned with ComfyUI); falls back to independent Gaussian noise if torchsde is missing."""
     positive = sigmas[sigmas > 0]
     sigma_min = float(positive.min()) if positive.numel() > 0 else 1e-3
     sigma_max = float(sigmas.max())
@@ -102,16 +108,16 @@ def _build_noise_sampler(
             ) from exc
         import logging
         logging.getLogger(__name__).warning(
-            "torchsde 未安装，dpmpp_3m_sde 回退独立 Gaussian 噪声（与 ComfyUI / er_sde 差异变化）"
+            "torchsde is not installed; dpmpp_3m_sde is falling back to independent Gaussian noise (behavior will diverge from ComfyUI / er_sde)"
         )
         return _gaussian_noise_sampler(x, seed=seed)
 
 
 def _offset_first_sigma_for_snr(sigmas: torch.Tensor, shift: float = 3.0) -> torch.Tensor:
-    """对齐 ComfyUI offset_first_sigma_for_snr（CONST）。
+    """Aligned with ComfyUI's offset_first_sigma_for_snr (CONST).
 
-    σ_0 ≥ 1 会让 logit 爆 inf；ComfyUI 用 percent_to_sigma(1e-4) 替换：
-    = time_snr_shift(shift, 1 - 1e-4)。
+    sigma_0 >= 1 would make logit blow up to inf; ComfyUI replaces it with
+    percent_to_sigma(1e-4) = time_snr_shift(shift, 1 - 1e-4).
     """
     if sigmas.numel() <= 1:
         return sigmas
@@ -136,16 +142,16 @@ def sample(
     step_callback=None,
     **_unused,
 ) -> torch.Tensor:
-    """DPM-Solver++(3M) SDE —— 对齐 ComfyUI。
+    """DPM-Solver++(3M) SDE -- aligned with ComfyUI.
 
     Args:
-        denoise_fn: 输入 (x, sigma) 返回 x0 估计。
-        sigmas: 从高到低的 sigma 序列，末尾带 0.0。
-        eta: SDE 噪声强度（1.0 = ComfyUI 默认；0.0 退化为 ODE 多步）。
-        s_noise: 噪声缩放。
-        shift: ModelSamplingDiscreteFlow shift（用于 σ_0 offset，默认 3.0）。
-        require_brownian_tree: True 时缺少 torchsde 直接失败，不回退 Gaussian。
-        step_callback: 每步回调 (step, total, denoised)。
+        denoise_fn: takes (x, sigma) and returns the x0 estimate.
+        sigmas: sigma sequence from high to low, ending with 0.0.
+        eta: SDE noise strength (1.0 = ComfyUI default; 0.0 degenerates to multistep ODE).
+        s_noise: noise scaling factor.
+        shift: ModelSamplingDiscreteFlow shift (used for the sigma_0 offset, default 3.0).
+        require_brownian_tree: if True, fail immediately when torchsde is missing instead of falling back to Gaussian.
+        step_callback: per-step callback (step, total, denoised).
     """
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     if sigmas.numel() <= 1:
@@ -157,13 +163,14 @@ def sample(
         seed=seed,
         require_brownian_tree=require_brownian_tree,
     )
-    # offset_first_sigma_for_snr（在算 noise_sampler 的 σ_min/σ_max 之后，
-    # 与 ComfyUI 顺序一致：BrownianTreeNoiseSampler 用原始 sigmas[sigmas>0]）
+    # offset_first_sigma_for_snr (applied after computing noise_sampler's
+    # sigma_min/sigma_max, matching ComfyUI's order: BrownianTreeNoiseSampler
+    # uses the raw sigmas[sigmas>0])
     sigmas = _offset_first_sigma_for_snr(sigmas, shift=shift)
     eps = 1e-7
 
     def half_log_snr(sigma: torch.Tensor) -> torch.Tensor:
-        # CONST: log((1-σ)/σ) = logit(σ).neg()
+        # CONST: log((1-sigma)/sigma) = logit(sigma).neg()
         s = sigma.clamp(min=eps, max=1.0 - eps)
         return torch.log((1.0 - s) / s)
 
@@ -187,7 +194,7 @@ def sample(
             lambda_t = half_log_snr(sigmas[i + 1])
             h = lambda_t - lambda_s
             h_eta = h * (eta + 1.0)
-            alpha_t = sigmas[i + 1] * lambda_t.exp()  # = 1 - σ_{i+1} (CONST)
+            alpha_t = sigmas[i + 1] * lambda_t.exp()  # = 1 - sigma_{i+1} (CONST)
 
             x = sigmas[i + 1] / sigma_i * (-h * eta).exp() * x \
                 + alpha_t * (-h_eta).expm1().neg() * denoised

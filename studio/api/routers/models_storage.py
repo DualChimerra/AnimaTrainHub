@@ -1,13 +1,14 @@
-"""模型根目录存储位置 —— 查询 / 迁移到自定义目录（镜像 studio_data，无需重启）。
+"""Models-root storage location — query / migrate to a custom directory (mirrors studio_data, no restart needed).
 
-3 routes：
-    GET  /api/models-root/info            当前/默认位置 + 全量扫描（文件数/字节）
-    POST /api/models-root/migrate         校验 + 起后台复制线程（进度走 SSE）
-    GET  /api/models-root/migrate_status  迁移状态快照（modal 重开 / SSE 漏事件兜底）
+3 routes:
+    GET  /api/models-root/info            current/default location + full scan (file count/bytes)
+    POST /api/models-root/migrate         validate + start a background copy thread (progress via SSE)
+    GET  /api/models-root/migrate_status  migration status snapshot (fallback for modal reopen / missed SSE events)
 
-迁移协议：复制完成后更新 `secrets.models.root`，**立即生效**（`models_root()` 现读
-secret，无指针文件、无需重启）。旧目录保留不删。进度事件：
-`models_root_migrate_progress` / `_done`。
+Migration protocol: once the copy finishes, updates `secrets.models.root`,
+**taking effect immediately** (`models_root()` reads the secret live — no
+pointer file, no restart needed). The old directory is kept, not deleted.
+Progress events: `models_root_migrate_progress` / `_done`.
 """
 from __future__ import annotations
 
@@ -27,8 +28,10 @@ router = APIRouter()
 
 @router.get("/api/models-root/info")
 def models_root_info(scan: bool = True) -> dict[str, Any]:
-    """当前 / 默认位置；scan=true 时附全量扫描（大目录可能要数秒，前端确认 modal
-    加载态等它；Settings 页仅显示路径用 scan=false 免扫盘）。"""
+    """Current / default location; when scan=true, includes a full scan (large
+    directories can take a few seconds — the frontend confirmation modal shows
+    a loading state while it waits; the Settings page only shows the path and
+    uses scan=false to avoid the disk scan)."""
     current = models_root()
     default = svc.default_models_root()
     return {
@@ -41,16 +44,19 @@ def models_root_info(scan: bool = True) -> dict[str, Any]:
 
 @router.post("/api/models-root/migrate")
 def models_root_migrate(body: ModelsRootMigrateRequest) -> dict[str, Any]:
-    """起迁移。约束：无 running task（复制期间训练继续读权重 / move 语义不安全）。
+    """Start a migration. Constraint: no running task (training would keep reading
+    weights during the copy / a move's semantics aren't safe mid-training).
 
-    目标已有非空 models/ 且未传 on_conflict → 409 `target_conflict`（details 带
-    目标现有文件统计 + 同名文件数），前端弹「跳过/覆盖/取消」后带 on_conflict 重发。
+    If the target already has a non-empty models/ dir and on_conflict wasn't
+    passed → 409 `target_conflict` (details include stats on the target's
+    existing files + how many share a name); the frontend shows a
+    "skip/overwrite/cancel" prompt and resends with on_conflict.
     """
     _check_no_running_tasks()
     try:
         svc.start_migration(Path(body.target), on_conflict=body.on_conflict)
     except svc.TargetConflictError as exc:
-        # 注意放 except ValueError 前（它是 ValueError 子类）
+        # Note: must come before except ValueError (it's a subclass of ValueError)
         raise ConflictError(
             "Target already contains a non-empty models directory",
             code="models_root.target_conflict",

@@ -1,18 +1,20 @@
-"""TraceIdMiddleware（ADR-0009 §3.2，PR-1 C5）。
+"""TraceIdMiddleware (ADR-0009 §3.2, PR-1 C5).
 
-Pure ASGI middleware（不继承 BaseHTTPMiddleware），原因：
-  - BaseHTTPMiddleware 用 starlette 内置的 anyio.Stream wrapping，ContextVar
-    跨 thread 跳跃在 starlette 0.36+ 有已知问题
-  - Pure ASGI 直接拿 receive/send，ContextVar 在请求生命周期内稳定
+Pure ASGI middleware (doesn't inherit from BaseHTTPMiddleware), because:
+  - BaseHTTPMiddleware uses starlette's built-in anyio.Stream wrapping, and
+    ContextVar hopping across threads has known issues in starlette 0.36+
+  - Pure ASGI grabs receive/send directly, so the ContextVar stays stable for
+    the lifetime of the request
 
-每个 HTTP 请求开头：
-  1. 读 X-Trace-Id header，无则 new_trace_id()
-  2. bind_trace_id → 整个 request scope 的 logger.x 自动带
-  3. response.headers 写回 X-Trace-Id（前端 client.ts 拿到能存 atom）
-  4. 请求结束 reset_trace_id
+At the start of every HTTP request:
+  1. Read the X-Trace-Id header; if absent, call new_trace_id()
+  2. bind_trace_id -> every logger.x call within the request scope picks it up automatically
+  3. Write X-Trace-Id back into response.headers (so the frontend's client.ts can store it in an atom)
+  4. reset_trace_id when the request ends
 
-为什么 middleware 不 router：router scope 是 path-after-match；404 / 异常
-路径前的请求拿不到 trace_id。Middleware 是 ASGI 最外层，所有响应都过。
+Why middleware and not a router: a router's scope is path-after-match; a
+request that hits 404 or fails before that point never gets a trace_id.
+Middleware is the outermost ASGI layer, so every response passes through it.
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ _TRACE_HEADER_LOWER = TRACE_HEADER.lower().encode("ascii")
 
 
 class TraceIdMiddleware:
-    """ASGI middleware；只处理 http scope，websocket / lifespan 透传。"""
+    """ASGI middleware; only handles the http scope, websocket / lifespan pass through untouched."""
 
     def __init__(self, app: Callable[..., Awaitable[None]]) -> None:
         self.app = app
@@ -38,7 +40,7 @@ class TraceIdMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
 
-        # 读 header（scope["headers"] 是 List[(bytes, bytes)]）
+        # Read the header (scope["headers"] is List[(bytes, bytes)])
         trace_id: str | None = None
         for k, v in scope["headers"]:
             if k.lower() == _TRACE_HEADER_LOWER:
@@ -51,10 +53,12 @@ class TraceIdMiddleware:
         if not trace_id:
             trace_id = new_trace_id()
 
-        # 把 trace_id 写到 scope["state"]，让 ServerErrorMiddleware 外层的
-        # fallback Exception handler 能拿到（contextvar 在 finally 里 reset，
-        # 外层 handler 跑时 contextvar 已空）。DomainError handler 在 ExceptionMiddleware
-        # 内层，靠 contextvar 仍可用；fallback 必须靠 scope state。
+        # Write trace_id into scope["state"] so the fallback Exception handler
+        # at the outer ServerErrorMiddleware layer can pick it up (the
+        # contextvar is reset in the finally block, so by the time the outer
+        # handler runs, the contextvar is already empty). The DomainError
+        # handler sits inside ExceptionMiddleware, where the contextvar is
+        # still usable; the fallback handler must rely on scope state.
         if "state" not in scope:
             scope["state"] = {}
         scope["state"]["trace_id"] = trace_id
@@ -62,10 +66,11 @@ class TraceIdMiddleware:
         token = bind_trace_id(trace_id)
 
         async def send_wrapper(message):
-            # 给 response 写回 X-Trace-Id header
+            # Write the X-Trace-Id header back onto the response
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
-                # 防重复：先去掉已有同名 header（罕见但 starlette 可能加 trace_id_middleware 嵌套）
+                # Avoid duplicates: strip any existing header with the same
+                # name first (rare, but starlette may add trace_id_middleware nesting)
                 headers = [(k, v) for k, v in headers if k.lower() != _TRACE_HEADER_LOWER]
                 headers.append((_TRACE_HEADER_LOWER, trace_id.encode("ascii", "replace")))
                 message["headers"] = headers

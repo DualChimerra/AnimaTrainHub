@@ -1,10 +1,10 @@
-"""ADR 0006 Addendum 2 — save_training_state / write_config_snapshot 原子写盘。
+"""ADR 0006 Addendum 2 -- save_training_state / write_config_snapshot atomic disk writes.
 
-auto_epoch_state.pt 是覆盖式单文件恢复点；直接 torch.save 在断电 / 强杀砸中
-写盘窗口时会把唯一恢复点写成半截。改 tmp + os.replace 后的不变式：
+auto_epoch_state.pt is an overwrite-in-place single-file recovery checkpoint; a direct torch.save hit by
+a power loss / hard kill during the write window turns the only recovery point into a half-written file. Invariants after switching to tmp + os.replace:
 
-1. 成功路径：目标文件完整可 load，目录里不残留 .tmp。
-2. 写盘中途失败：旧文件原样保留（不被半截新文件污染），tmp 清掉。
+1. Success path: the target file loads cleanly and no .tmp file is left in the directory.
+2. Failure mid-write: the old file is preserved untouched (not corrupted by a half-written new file), and the tmp file is cleaned up.
 """
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def test_save_overwrites_previous_atomically(tmp_path: Path) -> None:
 
 
 def test_save_failure_keeps_old_file(tmp_path: Path, monkeypatch) -> None:
-    """torch.save 半途炸（模拟断电 / 磁盘满）→ 旧恢复点原样保留 + tmp 清掉。"""
+    """torch.save blows up mid-write (simulating power loss / disk full) -> old recovery point preserved as-is + tmp cleaned up."""
     pt = tmp_path / "auto_epoch_state.pt"
     _save(pt)
     before = pt.read_bytes()
@@ -78,8 +78,8 @@ def test_save_failure_keeps_old_file(tmp_path: Path, monkeypatch) -> None:
             pt, _FakeInjector(), _FakeOptimizer(), epoch=2, global_step=200,
         )
 
-    assert pt.read_bytes() == before  # 旧文件未被污染
-    assert list(tmp_path.glob("*.tmp")) == []  # tmp 清掉
+    assert pt.read_bytes() == before  # old file wasn't corrupted
+    assert list(tmp_path.glob("*.tmp")) == []  # tmp cleaned up
 
 
 # ---------------------------------------------------------------------------

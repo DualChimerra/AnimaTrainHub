@@ -1,165 +1,194 @@
 # Third-Party Notices
 
-本仓库包含/改写/派生了部分第三方代码与实现片段，以及若干基于公开论文/工程实现的算法移植。
-请在分发时遵守其许可并保留必要的版权与许可声明。
+This repository includes, adapts, or derives from third-party code and implementation
+snippets, as well as several algorithm ports based on public papers/engineering
+implementations. Please comply with the relevant licenses and retain the required
+copyright and license notices when distributing.
 
 ---
 
-## 仓库源头
+## Repository origin
 
 ### Moeblack / AnimaLoraToolkit
 
-- **来源**：[`Moeblack/AnimaLoraToolkit`](https://github.com/Moeblack/AnimaLoraToolkit)
-- **关系**：本仓库 fork 起点，核心训练脚本与早期 anima_train 入口派生自该项目，后续大幅
-  重构。CLAUDE.md / README "上游与致谢" 节作高层提示，工程内部不再保留逐文件标注。
+- **Source**: [`Moeblack/AnimaLoraToolkit`](https://github.com/Moeblack/AnimaLoraToolkit)
+- **Relationship**: this repo's fork origin — the core training scripts and the early
+  anima_train entry point are derived from this project, with substantial refactoring
+  since. The "Upstream & acknowledgments" section of CLAUDE.md / README gives a
+  high-level pointer; the codebase no longer keeps per-file attribution.
 
 ---
 
-## 模型与权重
+## Models and weights
 
 ### circlestone-labs / Anima
 
-- **来源**：[`circlestone-labs/Anima`](https://huggingface.co/circlestone-labs/Anima)
-- **关系**：主扩散模型 + VAE。**模型权重许可独立**（含 Non-Commercial 等限制），以
-  HuggingFace 模型卡协议为准；本仓库 NOTICES 不复述。
+- **Source**: [`circlestone-labs/Anima`](https://huggingface.co/circlestone-labs/Anima)
+- **Relationship**: the main diffusion model + VAE. **Model weight licensing is
+  separate** (includes Non-Commercial and other restrictions) — governed by the
+  HuggingFace model card terms; this repo's NOTICES does not restate them.
 
 ---
 
-## 代码移植 / 算法实现
+## Code ports / algorithm implementations
 
 ### ComfyUI (GPL-3.0)
 
-- **来源**：[`comfyanonymous/ComfyUI`](https://github.com/comfyanonymous/ComfyUI)（现由 Comfy-Org 维护）
-- **许可**：GPL-3.0
-- **涉及文件**：
-  - `models/anima_modeling.py` — 实现结构与 ComfyUI `comfy/ldm/anima/model.py` 高度相关
+- **Source**: [`comfyanonymous/ComfyUI`](https://github.com/comfyanonymous/ComfyUI) (now maintained by Comfy-Org)
+- **License**: GPL-3.0
+- **Files involved**:
+  - `models/anima_modeling.py` — implementation structure closely related to ComfyUI's `comfy/ldm/anima/model.py`
   - `runtime/training/inference_samplers/er_sde.py` — `sample_er_sde` + `default_noise_sampler`
-    参考 ComfyUI `k_diffusion_sampling`（删去 model_patcher 依赖）
+    reference ComfyUI's `k_diffusion_sampling` (with the model_patcher dependency removed)
   - `runtime/training/sampling.py` — `_time_snr_shift` / `_flow_sigmas_simple` /
-    sample helper 对齐 ComfyUI `ModelSamplingDiscreteFlow` + KSampler 行为
+    sample helpers align with ComfyUI's `ModelSamplingDiscreteFlow` + KSampler behavior
 
-> 由于包含/派生自 GPL-3.0 代码，本项目整体以 GPL-3.0 发布（见 `LICENSE`）。
+> Because it includes/derives from GPL-3.0 code, this project as a whole is released under GPL-3.0 (see `LICENSE`).
 
 ### NVIDIA Cosmos (Apache-2.0)
 
-- **来源**：NVIDIA 相关实现（文件内含 SPDX 头）
-- **许可**：Apache-2.0（见文件头 `SPDX-License-Identifier: Apache-2.0`）
-- **涉及文件**：
+- **Source**: NVIDIA-related implementations (files include an SPDX header)
+- **License**: Apache-2.0 (see the file header `SPDX-License-Identifier: Apache-2.0`)
+- **Files involved**:
   - `models/cosmos_predict2_modeling.py`
   - `models/anima_modeling_core.py`
 
-本仓库额外提供 `LICENSE-APACHE` 以便分发 Apache-2.0 许可文本。
+This repo additionally provides `LICENSE-APACHE` to distribute the Apache-2.0 license text.
 
-### Alibaba Wan2.1 VAE（请再次确认上游许可）
+### Alibaba Wan2.1 VAE (please re-verify the upstream license)
 
-- **来源**：[`Wan-Video/Wan2.1`](https://github.com/Wan-Video/Wan2.1) 的 VAE 实现（与
-  `wan/modules/vae.py` 对应）
-- **涉及文件**：
+- **Source**: the VAE implementation from [`Wan-Video/Wan2.1`](https://github.com/Wan-Video/Wan2.1)
+  (corresponds to `wan/modules/vae.py`)
+- **Files involved**:
   - `models/wan/vae2_1.py`
 
-该文件头目前仅包含版权声明（未显式 SPDX）。上游仓库通常宣称 Apache-2.0，但建议你在开源前
-**再次核对上游仓库的 LICENSE/NOTICE**，确保分发合规。
+This file's header currently only contains a copyright notice (no explicit SPDX). The
+upstream repo generally claims Apache-2.0, but we recommend you **re-check the upstream
+repo's LICENSE/NOTICE** before open-sourcing, to ensure distribution compliance.
 
-### ostris / ai-toolkit — Automagic optimizer 与 8-bit lr_mask (MIT)
+### ostris / ai-toolkit — Automagic optimizer and 8-bit lr_mask (MIT)
 
-- **来源**：[`ostris/ai-toolkit`](https://github.com/ostris/ai-toolkit) — Ostris (Jaret Burkett)
-- **许可**：MIT — Copyright (c) 2024 Ostris, LLC
-- **涉及文件**：
+- **Source**: [`ostris/ai-toolkit`](https://github.com/ostris/ai-toolkit) — Ostris (Jaret Burkett)
+- **License**: MIT — Copyright (c) 2024 Ostris, LLC
+- **Files involved**:
   - `utils/optimizer_utils.py`
-    - `class Auto8bitTensor` — 8-bit 量化张量包装（per-tensor int8 + scale）
-    - `class Automagic` — sign-agreement → `lr_bump` per-parameter 调度 + Adafactor
+    - `class Auto8bitTensor` — 8-bit quantized tensor wrapper (per-tensor int8 + scale)
+    - `class Automagic` — sign-agreement -> per-parameter `lr_bump` scheduling + Adafactor
       factored 2nd moment + RMS clip
     - `_copy_stochastic` / `_copy_stochastic_bf16` / `_stochastic_grad_accumulation`
-      — stochastic rounding 辅助函数（grad-accum hook 默认 disable，对齐上游已注释
-      行为；详见 `class Automagic.__init__` 上方 comment）
-- **修改点**：
-  - bf16 路径采用 Kahan compensated summation（state['shift']），借鉴自下游
-    `tdrussell/diffusion-pipe` 的同名移植，而非上游原版 stochastic rounding
-  - `paramiter_swapping` feature 未移植
+      — stochastic-rounding helper functions (the grad-accum hook is disabled by default,
+      matching upstream's already-commented-out behavior; see the comment above
+      `class Automagic.__init__` for details)
+- **Modifications**:
+  - the bf16 path uses Kahan compensated summation (`state['shift']`), borrowed from the
+    downstream `tdrussell/diffusion-pipe` port of the same name, rather than upstream's
+    original stochastic rounding
+  - the `paramiter_swapping` feature was not ported
 
-原文件头部 MIT license block 已贴在 `utils/optimizer_utils.py` `class Auto8bitTensor` /
-`class Automagic` 上方，请勿删除。
+The original MIT license block is included above `class Auto8bitTensor` / `class
+Automagic` in `utils/optimizer_utils.py` — do not remove it.
 
 ### tdrussell / diffusion-pipe — Automagic bf16 Kahan path
 
-- **来源**：[`tdrussell/diffusion-pipe`](https://github.com/tdrussell/diffusion-pipe)
-  `optimizers/automagic.py`（基于 ostris/ai-toolkit 的同名移植 + bf16 Kahan 改进）
-- **关系**：本仓库 Automagic 实现的 bf16 Kahan compensated summation 路径
-  （`state['shift']` 累加 + `p.add_(shift)` + `shift.add_(grad.sub_(p))` 经典 Kahan 序列）
-  与 diffusion-pipe 一致；其余算法核心来自上游 ai-toolkit。
+- **Source**: [`tdrussell/diffusion-pipe`](https://github.com/tdrussell/diffusion-pipe)
+  `optimizers/automagic.py` (a port of the same name from ostris/ai-toolkit, with a bf16
+  Kahan improvement)
+- **Relationship**: the bf16 Kahan compensated summation path of this repo's Automagic
+  implementation (`state['shift']` accumulation + `p.add_(shift)` +
+  `shift.add_(grad.sub_(p))`, the classic Kahan sequence) matches diffusion-pipe; the rest
+  of the algorithm core comes from upstream ai-toolkit.
 
-### Lion optimizer (research attribution — 自实现)
+### Lion optimizer (research attribution — self-implemented)
 
-- **论文**：Chen et al. 2023, *Symbolic Discovery of Optimization Algorithms*,
+- **Paper**: Chen et al. 2023, *Symbolic Discovery of Optimization Algorithms*,
   [arXiv:2302.06675](https://arxiv.org/abs/2302.06675) (Google Brain)
-- **Reference 实现对照**（仅用于校对，未直接复制代码）：
+- **Reference implementations consulted** (for cross-checking only, no code copied directly):
   - [`google/automl/lion`](https://github.com/google/automl/tree/master/lion) (Apache 2.0)
   - [`lucidrains/lion-pytorch`](https://github.com/lucidrains/lion-pytorch) (MIT)
-- **涉及文件**：
+- **Files involved**:
   - `utils/optimizer_utils.py` `class Lion` / `create_lion`
 
-`class Lion` 是自实现（~50 行），按论文 Algorithm 1 重写，不直接复制 reference 代码，
-故 license 不强制 attribution；论文引用 + reference URL 作为学术礼貌已在 docstring 标注。
+`class Lion` is a self-implementation (~50 lines), rewritten from the paper's Algorithm 1
+without directly copying reference code, so no license attribution is required; the paper
+citation + reference URLs are noted in the docstring as academic courtesy.
 
 ### nikhilvyas / SOAP — SOAP optimizer (MIT)
 
-- **来源**：[`nikhilvyas/SOAP`](https://github.com/nikhilvyas/SOAP) — Nikhil Vyas
-- **论文**：Vyas et al. 2024, *SOAP: Improving and Stabilizing Shampoo using Adam*,
+- **Source**: [`nikhilvyas/SOAP`](https://github.com/nikhilvyas/SOAP) — Nikhil Vyas
+- **Paper**: Vyas et al. 2024, *SOAP: Improving and Stabilizing Shampoo using Adam*,
   [arXiv:2409.11321](https://arxiv.org/abs/2409.11321)
-- **许可**：MIT — Copyright (c) 2024 Nikhil Vyas
-- **涉及文件**：
+- **License**: MIT — Copyright (c) 2024 Nikhil Vyas
+- **Files involved**:
   - `utils/soap_optimizer.py` `class SOAP` — Adam-in-Shampoo-eigenbasis update
-    （`_project` / `_project_back` / `_orthogonal_matrix(_qr)` / `_update_preconditioner`）
-    派生自官方参考实现
-  - `runtime/training/optimizers/soap.py` — registry 接线（本仓库代码）
-  - `utils/optimizer_utils.py` `create_soap` — 工厂壳（本仓库代码）
-- **修改点**：optimizer state 固定 fp32（bf16 LoRA/LoKr 训练数值稳定）；新增
-  `precond_in_state=False` 把可重算的 GG/Q 剔出 state_dict 保持 ckpt 小 + resume
-  冷重建。原文件头 MIT license block 已贴在 `utils/soap_optimizer.py` 顶部，请勿删除。
+    (`_project` / `_project_back` / `_orthogonal_matrix(_qr)` / `_update_preconditioner`)
+    derived from the official reference implementation
+  - `runtime/training/optimizers/soap.py` — registry wiring (this repo's code)
+  - `utils/optimizer_utils.py` `create_soap` — factory shim (this repo's code)
+- **Modifications**: optimizer state is fixed at fp32 (for numerical stability in bf16
+  LoRA/LoKr training); added `precond_in_state=False`, which excludes the recomputable
+  GG/Q from the state_dict to keep checkpoints small + allow a cold rebuild on resume.
+  The original MIT license block is included at the top of `utils/soap_optimizer.py` —
+  do not remove it.
 
-### facebookresearch / schedule-free — Schedule-Free 机制 (Apache-2.0, research attribution)
+### facebookresearch / schedule-free — Schedule-Free mechanism (Apache-2.0, research attribution)
 
-- **来源**：[`facebookresearch/schedule-free`](https://github.com/facebookresearch/schedule-free)
+- **Source**: [`facebookresearch/schedule-free`](https://github.com/facebookresearch/schedule-free)
   `AdamWScheduleFree`
-- **论文**：Defazio et al. 2024, *The Road Less Scheduled*,
+- **Paper**: Defazio et al. 2024, *The Road Less Scheduled*,
   [arXiv:2405.15682](https://arxiv.org/abs/2405.15682)
-- **许可**：Apache-2.0
-- **涉及文件**：
-  - `utils/soap_optimizer.py` `class SOAPScheduleFree` — 在 SOAP 预条件外套 Schedule-Free
-    轨迹（丢一阶动量、z/x Polyak 平均、`train()`/`eval()` 权重 swap）。SF 机制 base-optimizer
-    无关，按论文 + 参考 `AdamWScheduleFree` 的 in-place y/z 更新与 train/eval swap 自实现，
-    非直接复制代码；SOAP 预条件部分见上条 MIT 归属
-  - `runtime/training/optimizers/soap_sf.py` — registry 接线 + lr_scheduler=none 校验（本仓库代码）
-  - `utils/optimizer_utils.py` `create_soap_sf` — 工厂壳（本仓库代码）
+- **License**: Apache-2.0
+- **Files involved**:
+  - `utils/soap_optimizer.py` `class SOAPScheduleFree` — wraps a Schedule-Free trajectory
+    around the SOAP preconditioner (drops first-moment momentum, z/x Polyak averaging,
+    `train()`/`eval()` weight swap). The SF mechanism is base-optimizer agnostic;
+    self-implemented from the paper plus the in-place y/z update and train/eval swap of
+    the reference `AdamWScheduleFree`, not a direct code copy; the SOAP preconditioning
+    part has the MIT attribution noted above
+  - `runtime/training/optimizers/soap_sf.py` — registry wiring + lr_scheduler=none
+    validation (this repo's code)
+  - `utils/optimizer_utils.py` `create_soap_sf` — factory shim (this repo's code)
 
-### InfoNoise timestep sampler (research attribution — 自实现)
+### InfoNoise timestep sampler (research attribution — self-implemented)
 
-- **论文**：*Information-Guided Noise Allocation for Efficient Diffusion Training*,
+- **Paper**: *Information-Guided Noise Allocation for Efficient Diffusion Training*,
   [arXiv:2602.18647](https://arxiv.org/abs/2602.18647)
-- **涉及文件**：
+- **Files involved**:
   - `runtime/training/timestep_samplers/infonoise.py` `class InfoNoiseScheduler`
-- **关系**：基于论文 Algorithm 1（I-MMSE 恒等式 + log-σ bin EMA）自实现，未参考特定
-  reference 代码。Anima 在 Flow Matching `t ∈ (0,1)` 空间内做了 `σ = t/(1-t)` 适配，
-  与论文 σ-空间设计保持一致。
+- **Relationship**: self-implemented from the paper's Algorithm 1 (the I-MMSE identity +
+  log-sigma bin EMA), without consulting any specific reference code. Anima adapts this
+  with `sigma = t/(1-t)` within the Flow Matching `t in (0,1)` space, keeping it aligned
+  with the paper's sigma-space design.
 
 ---
 
-## Pip 依赖（许可随各自 wheel 分发）
+## Data downloaded at runtime
 
-下列依赖仅通过 `pip install` 引入，不在本仓库源码内 copy，本 NOTICES 不复述其 license。
-但提及关键算法出处方便审计：
+### DominikDoom / a1111-sd-webui-tagcomplete — tag list (MIT)
 
-| 包 | 许可（参考） | 用途 |
+- **Source**: [`tags/danbooru.csv`](https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/blob/main/tags/danbooru.csv)
+- **Relationship**: the default tag list for autocomplete. It is downloaded on first launch
+  into `studio_data/tag_dictionary/` and is not shipped in this repository.
+
+---
+
+## Pip dependencies (licensed as distributed with their respective wheels)
+
+The following dependencies are only pulled in via `pip install`, are not copied into this
+repo's source, and this NOTICES file does not restate their licenses. They're listed here
+to help with auditing the key algorithm sources:
+
+| Package | License (reference) | Purpose |
 |---|---|---|
-| `lycoris-lora` | Apache-2.0 | LoRA / LoKr / LoHa / DoRA / rs-LoRA 适配器后端（`utils/lycoris_adapter.py` 封装） |
-| `prodigyopt` | MIT | Prodigy 优化器（`utils/optimizer_utils.py` create_prodigy） |
-| `prodigy-plus-schedulefree` | MIT | PPSF 优化器（同上 create_prodigy_plus_schedulefree） |
-| `transformers` / `diffusers` | Apache-2.0 | 文本编码 / 推理 helper / scheduler 形式参考（cosine_with_warmup 与 transformers `get_cosine_with_min_lr_schedule_with_warmup` 数学等价） |
-| `optimum-quanto` | Apache-2.0 | Automagic `QBytesTensor` 量化基模兼容路径 |
-| `safetensors` / `bitsandbytes` / `wandb` 等 | 各自许可 | — |
+| `lycoris-lora` | Apache-2.0 | LoRA / LoKr / LoHa / DoRA / rs-LoRA adapter backend (wrapped by `utils/lycoris_adapter.py`) |
+| `prodigyopt` | MIT | Prodigy optimizer (`utils/optimizer_utils.py` create_prodigy) |
+| `prodigy-plus-schedulefree` | MIT | PPSF optimizer (same file, create_prodigy_plus_schedulefree) |
+| `transformers` / `diffusers` | Apache-2.0 | Text encoding / inference helpers / scheduler-form reference (cosine_with_warmup is mathematically equivalent to transformers' `get_cosine_with_min_lr_schedule_with_warmup`) |
+| `optimum-quanto` | Apache-2.0 | Automagic `QBytesTensor` quantized base-model compatibility path |
+| `safetensors` / `bitsandbytes` / `wandb` etc. | Their respective licenses | — |
 
 ---
 
-如你希望把项目改为更宽松的许可（例如 MIT），需要先移除/替换所有 GPL-3.0 派生部分
-（ComfyUI 相关），并重新梳理第三方依赖的许可兼容性。
+If you want to relicense this project under something more permissive (e.g. MIT), you'll
+need to first remove/replace all GPL-3.0-derived parts (the ComfyUI-related ones) and
+re-audit the license compatibility of the third-party dependencies.
 

@@ -1,21 +1,21 @@
 ---
 date: 2026-06-29
 tag: migration
-title: 从旧版本升级后，训练前请检查 T5 / 文本编码器文件
+title: After upgrading from an older version, check your T5 / text-encoder files before training
 version: "0.16.0"
 ---
-如果你是从 **0.15.0 之前**的版本自更新上来的，几个体积很小的模型文件（T5 tokenizer 的 `spiece.model` 和配置、文本编码器的 tokenizer / 配置）可能在更新过程中被删掉，导致升级后一开始训练就报「找不到文件」。训练前花十几秒检查一下即可。
+If you self-updated from a version **older than 0.15.0**, a few tiny model files (the T5 tokenizer's `spiece.model` and configs, and the text encoder's tokenizer / configs) may have been deleted during the update — so training can fail with a "file not found" error right after you upgrade. A quick check before training takes only a few seconds.
 
-### 为什么会这样
+### Why this happens
 
-- 这几个小文件早期随仓库一起进了 git 库；从 0.15.0 起 `models/` 整个目录改成纯数据目录、不再被 git 追踪。
-- 0.15.0 起的自更新已经会自动保住这几个文件；但这套保护跑的是你**当前版本**的更新代码——从 0.15.0 之前升级时用的还是没有保护的旧流程，所以这几个小文件可能被删。
+- These small files used to be committed into git along with the repo; since 0.15.0 the whole `models/` directory became a pure data folder that git no longer tracks.
+- Only these small files are affected; the **large weight files** for the base model / VAE / text encoder were never in git and won't be lost.
 
-### 需要做什么
+### What to do
 
-升级后、开始训练前，去 **设置 → 训练 → 基础模型**，看这两张卡是否标了缺失文件：
+After upgrading, and before you start training, go to **Settings → Training → Base model** and check whether either of these cards reports missing files:
 
-- **T5 tokenizer**（`spiece.model` 等 3 个文件）
-- **Qwen3 / 文本编码器**（`config.json` / `merges.txt` / `tokenizer_config.json`）
+- **T5 tokenizer** (`spiece.model` and 2 config files)
+- **Qwen3 / text encoder** (`config.json` / `merges.txt` / `tokenizer_config.json`)
 
-哪张缺就点下载补齐（只补这几个小文件，数十MB）。补好后再训练即可。
+If either is missing files, click download to fill them in (just these few small files — it's quick). Then train as usual.

@@ -93,15 +93,14 @@
     "exportBundleDownload": "Скачать к себе",
     "exportBundleDataExports": "В папку проекта",
     "exportSavedToDataExports": "Сохранено в data_exports: {{filename}} ({{path}})",
-    "exportBundleAtLeastOne": "Выберите хотя бы один пункт для экспорта"
+    "exportBundleAtLeastOne": "Выберите хотя бы один пункт для экспорта",
+    "versionName": "Название версии"
   },
   "sidebar": {
     "title": "Anima",
     "subtitle": "train hub",
     "newVersion": "Новая версия",
     "export": "Экспорт",
-    "exportTitle": "Экспортировать train-набор активной версии",
-    "deleteVersionTitle": "Удалить эту версию (в корзину)",
     "versionsLabel": "Версия",
     "switchVersion": "Сменить версию",
     "advanceToTitle": "Перейти к: {{label}}",
@@ -113,7 +112,14 @@
     "collapse": "Свернуть",
     "expand": "Развернуть",
     "collapseLabel": "Свернуть",
-    "exporting": "Упаковка…"
+    "exporting": "Упаковка…",
+    "switchProject": "Сменить проект",
+    "projectsHead": "Проекты",
+    "allProjects": "Все проекты",
+    "versionsHead_one": "{{count}} версия",
+    "versionsHead_few": "{{count}} версии",
+    "versionsHead_many": "{{count}} версий",
+    "versionsHead_other": "{{count}} версии"
   },
   "steps": {
     "download": {
@@ -140,7 +146,7 @@
       "title": "Тренировка",
       "subtitle": "Выбрать пресет → правка конфига → в очередь"
     },
-    "eyebrowStep": "ШАГ {{n}} · ВЕРСИЯ {{label}}",
+    "eyebrowStep": "Шаг {{n}} · версия {{label}}",
     "stepN": "ШАГ {{n}}"
   },
   "status": {
@@ -208,7 +214,11 @@
     "recommended": "Рекомендуется",
     "less": "Меньше",
     "more": "Больше",
-    "was": "было: {{value}}"
+    "was": "было: {{value}}",
+    "familyDesc": {
+      "anima": "Anima Base 2B · энкодер Qwen3-0.6B · теги Danbooru и обычный текст",
+      "krea2": "Krea 2 MMDiT · энкодер Qwen3-VL-4B · подписи обычным языком"
+    }
   },
   "versionPhase": {
     "curating": "Отбор",
@@ -320,7 +330,7 @@
     "deltaHint": "Чистый прирост относительно чистой базовой модели",
     "deltaHintShort": "Δ относительно чистой базовой модели",
     "waitingMetrics": "жду метрики",
-    "eyebrow": "ИНСТРУМЕНТЫ",
+    "eyebrow": "Инструменты",
     "title": "Монитор",
     "subtitle": "Метрики чекпоинтов против validation-набора. Δ — прирост к чистой базовой модели.",
     "pickCkptsBtn": "Выбрать чекпоинты",
@@ -467,8 +477,6 @@
     "noMatch": "Нет совпадений с «{{search}}»",
     "loadingConfig": "Загрузка конфига тренировки",
     "noConfigHint": "Нажмите «+ Новый пресет» слева — он соберётся из значений по умолчанию и путей к моделям проекта и применится. Либо выберите готовый пресет.",
-    "simpleMode": "Просто",
-    "advancedMode": "Подробно",
     "globalAutoHint": "Авто · из общих настроек",
     "globalAutoLockedPrefix": "Авто",
     "globalAutoLockedLink": "Общие настройки",
@@ -533,14 +541,6 @@
     "nParams_few": "{{count}} параметра",
     "nParams_many": "{{count}} параметров",
     "nParams_other": "{{count}} параметра",
-    "schemaGroups": "Группы схемы:",
-    "fieldModeLabel": "Набор полей",
-    "filterLabel": "Фильтр полей",
-    "filterAll": "Все поля · {{n}}",
-    "filterChanged": "Только изменённые · {{n}}",
-    "filterNonDefault": "Не дефолт · {{n}}",
-    "filterLocked": "Залоченные · {{n}}",
-    "filterEmpty": "Под этот фильтр в разделе ничего не попало",
     "resetTab": "Сбросить раздел к значениям по умолчанию",
     "resetTabConfirm_one": "Вернуть {{count}} поле раздела «{{tab}}» к значению по умолчанию? Пути и поля проекта не трогаются.",
     "resetTabConfirm_few": "Вернуть {{count}} поля раздела «{{tab}}» к значениям по умолчанию? Пути и поля проекта не трогаются.",
@@ -616,7 +616,8 @@
     "runStatus_failed": "ошибка",
     "runStatus_canceled": "отменено",
     "runStatus_paused": "на паузе",
-    "runStatus_scheduled": "запланировано"
+    "runStatus_scheduled": "запланировано",
+    "resetTabShort": "Сбросить вкладку"
   },
   "projects": {
     "noActiveVersion": "(нет активной версии)",
@@ -681,7 +682,7 @@
     "unarchived": "Возвращено: {{title}}",
     "editProject": "Изменить проект",
     "edited": "Сохранено «{{title}}»",
-    "eyebrow": "ПРОЕКТЫ",
+    "eyebrow": "Проекты",
     "subtitle": "Один проект — одна цель тренировки LoRA: персонаж, стиль или концепт.",
     "filterAll": "Все",
     "filterActive": "Активные",
@@ -887,7 +888,7 @@
     },
     "recentRunsCaption": "Последние прогоны",
     "noRuns": "Прогонов пока нет.",
-    "eyebrow": "ПРОЕКТ · {{slug}}",
+    "eyebrow": "Проект · {{slug}}",
     "downloads_one": "{{count}} загрузка",
     "downloads_few": "{{count}} загрузки",
     "downloads_many": "{{count}} загрузок",
@@ -964,7 +965,13 @@
     "unitB": "Б",
     "unitKB": "КБ",
     "unitMB": "МБ",
-    "unitGB": "ГБ"
+    "unitGB": "ГБ",
+    "verMenuOpen": "Открыть",
+    "verMenuActivate": "Сделать активной",
+    "verMenuCopy": "Новая версия на основе этой",
+    "verMenuExport": "Экспорт набора…",
+    "verMenuDelete": "Удалить версию",
+    "versionActions": "Действия с версией {{label}}"
   },
   "schema": {
     "enums": {
@@ -1483,7 +1490,7 @@
     }
   },
   "soup": {
-    "eyebrow": "SOUP",
+    "eyebrow": "Инструменты",
     "title": "Суп из чекпоинтов",
     "subtitle": "Усреднить несколько чекпоинтов в один файл: общее сохраняется, шум одиночного прогона гасится.",
     "upload": "Загрузить файл",
@@ -1628,7 +1635,7 @@
     "addYAxis": "+ Добавить ось Y",
     "addLora": "+ Добавить LoRA",
     "versionTraining": "{{label}} (тренируется)",
-    "eyebrow": "ИНСТРУМЕНТЫ",
+    "eyebrow": "Инструменты",
     "singleMode": "Одиночно",
     "xyMode": "XY-перебор",
     "xyAxis": "Ось {{label}}",
@@ -1875,11 +1882,11 @@
     "noteFailed": "Не удалось сохранить заметку: {{reason}}",
     "noteEmpty": "Заметки пока нет",
     "noteHint": "Правый клик по задаче в очереди — чтобы добавить заметку",
-    "samples": "Семплы",
+    "samples": "Сэмплы",
     "samplesCount": "{{n}} шт.",
-    "samplesShow": "Показать семплы",
-    "samplesHide": "Скрыть семплы",
-    "eyebrow": "ОЧЕРЕДЬ",
+    "samplesShow": "Показать сэмплы",
+    "samplesHide": "Скрыть сэмплы",
+    "eyebrow": "Очередь",
     "title": "Очередь",
     "description": "Задачи тренировки по всем проектам. Одна выполняется, остальные ждут слот GPU.",
     "summaryNow": "В очереди сейчас",
@@ -2107,10 +2114,12 @@
     },
     "resumeFailedMissing": "Файл точки восстановления не найден — продолжить нельзя. Запустите новую задачу с другого .pt через выбор чекпоинта.",
     "resumeFailed": "Не удалось продолжить: {{reason}}",
-    "pauseFailed": "Не удалось поставить на паузу: {{reason}}"
+    "pauseFailed": "Не удалось поставить на паузу: {{reason}}",
+    "stepOf": "шаг {{n}} / {{total}}",
+    "pausedWhen": "на паузе"
   },
   "dataset": {
-    "eyebrow": "ШАГ · ДАТАСЕТ ПРОЕКТА",
+    "eyebrow": "Шаг · датасет проекта",
     "subtitle": "Сбор с booru + загрузка своих файлов. Общий для всех версий проекта.",
     "nextCurate": "Дальше: отбор в train",
     "booruTitle": "Сбор с booru",
@@ -2280,7 +2289,7 @@
     "valEmpty": "Validation-изображений пока нет — добавьте их из датасета слева"
   },
   "ppFrame": {
-    "eyebrow": "ШАГ 2 · НЕОБЯЗАТЕЛЬНО",
+    "eyebrow": "Шаг 2 · необязательно",
     "title": "Инструменты препроцесса",
     "subtitle": "Апскейл / кроп / inpaint / дубликаты — работают по train-набору версии",
     "next": "Дальше: теги",
@@ -2663,7 +2672,7 @@
     "opLabelDedupe": "Убрать повторы"
   },
   "reg": {
-    "eyebrow": "ШАГ 4 · НЕОБЯЗАТЕЛЬНО",
+    "eyebrow": "Шаг 4 · необязательно",
     "skipStep": "Пропустить шаг",
     "moreActions": "Ещё: удалить набор",
     "next": "Дальше: тренировка",
@@ -2842,7 +2851,7 @@
     "copyFailed": "Не удалось скопировать",
     "defaultedFieldsBody": "Поля с недопустимыми значениями сброшены к значениям по умолчанию:",
     "droppedFieldsBody": "Поля, которых нет в этой версии, пропущены:",
-    "eyebrow": "ИНСТРУМЕНТЫ",
+    "eyebrow": "Инструменты",
     "title": "Пресеты",
     "subtitle": "Глобальные шаблоны конфига. Версия проекта берёт копию — правки в ней не меняют пресет.",
     "headMenu": "Ещё: импорт, экспорт YAML",
@@ -2988,7 +2997,7 @@
     "downloadFile": "Скачать",
     "folderOpened": "Открыто: {{path}}",
     "sourceLink": "Проект #{{projectId}} / v#{{versionId}}",
-    "eyebrow": "ЗАДАЧА · {{kind}}",
+    "eyebrow": "Задача · {{kind}}",
     "startedAtShort": "запущена {{time}}",
     "runningFor": "идёт {{time}}",
     "queuedAtShort": "в очереди с {{time}}",
@@ -3266,7 +3275,9 @@
     "modelNames": {
       "animaMain": "Anima — основная модель",
       "krea2Main": "Krea 2 — основная модель"
-    }
+    },
+    "sounds": "Звуки интерфейса",
+    "soundsDesc": "Мягкие щелчки на переключателях и вкладках, короткий сигнал по завершении, приглушённый — при ошибке."
   },
   "runtimeMode": {
     "current": "Режим рантайма",

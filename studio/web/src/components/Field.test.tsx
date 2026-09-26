@@ -40,9 +40,9 @@ describe('Field number input (PP10.3)', () => {
     const input = screen.getByRole('textbox') as HTMLInputElement
     await user.clear(input)
     await user.type(input, '0.05')
-    // 输入过程中父 onChange 不应被调用
+    // parent onChange should not fire while typing
     expect(onChange).not.toHaveBeenCalled()
-    // raw 缓冲保留完整输入
+    // raw buffer keeps the full input
     expect(input.value).toBe('0.05')
   })
 
@@ -54,7 +54,7 @@ describe('Field number input (PP10.3)', () => {
     const input = screen.getByRole('textbox') as HTMLInputElement
     await user.clear(input)
     await user.type(input, '0.05')
-    await user.tab() // 触发 blur
+    await user.tab() // trigger blur
     expect(onChange).toHaveBeenCalledWith(0.05)
   })
 
@@ -91,7 +91,7 @@ describe('Field number input (PP10.3)', () => {
     await user.type(input, 'abc')
     fireEvent.blur(input)
     expect(onChange).not.toHaveBeenCalled()
-    expect(input.value).toBe('0.5') // 回滚
+    expect(input.value).toBe('0.5') // rolled back
   })
 
   it('int field also uses raw buffer', async () => {
@@ -115,23 +115,23 @@ describe('Field number input (PP10.3)', () => {
     )
     const input = screen.getByRole('textbox') as HTMLInputElement
 
-    // 用户 focus 进去开始输入
+    // user focuses in and starts typing
     await user.click(input)
     await user.clear(input)
     await user.type(input, '0.0')
     expect(input.value).toBe('0.0')
 
-    // 此时外部 value 变化（如 SSE / 别的字段触发的 reset）—— 不应覆盖用户半截输入
+    // external value changes now (e.g. SSE / a reset triggered by another field) - must not overwrite the user's half-typed input
     rerender(<Field name="lr" prop={floatProp} value={0.999} onChange={onChange} />)
     expect(input.value).toBe('0.0')
 
-    // blur 后再改外部 value → 这次同步
+    // change the external value after blur -> this time it syncs
     await user.tab()
     rerender(<Field name="lr" prop={floatProp} value={0.123} onChange={onChange} />)
     expect(input.value).toBe('0.123')
   })
 
-  it('rolls back values below schema minimum (恢复 type=number min 校验)', async () => {
+  it('rolls back values below schema minimum (restores type=number min validation)', async () => {
     const onChange = vi.fn()
     const user = userEvent.setup()
     const propWithRange: SchemaProperty = {
@@ -218,7 +218,7 @@ const stringListProp: SchemaProperty = {
   description: '',
 }
 
-describe('Field string-list input (sample_prompts 换行)', () => {
+describe('Field string-list input (sample_prompts newlines)', () => {
   it('preserves the newline while typing a second line', async () => {
     const onChange = vi.fn()
     const user = userEvent.setup()
@@ -232,7 +232,7 @@ describe('Field string-list input (sample_prompts 换行)', () => {
     )
 
     const input = screen.getByRole('textbox') as HTMLTextAreaElement
-    // 敲回车的瞬间（尾部空行还没内容）换行不能被 split+filter 吃掉
+    // the instant Enter is pressed (trailing empty line has no content yet), the newline must not get eaten by split+filter
     await user.type(input, '{Enter}')
     expect(input.value).toBe('first prompt\n')
     await user.type(input, 'second prompt')
@@ -272,7 +272,7 @@ describe('Field string-list input (sample_prompts 换行)', () => {
     )
     const input = screen.getByRole('textbox') as HTMLTextAreaElement
 
-    // focus 中外部 value 变化不覆盖用户半截输入
+    // external value changes while focused must not overwrite the user's half-typed input
     await user.type(input, '{Enter}b')
     rerender(
       <Field
@@ -284,7 +284,7 @@ describe('Field string-list input (sample_prompts 换行)', () => {
     )
     expect(input.value).toBe('a\nb')
 
-    // blur 后外部变化才同步
+    // external changes only sync after blur
     await user.tab()
     rerender(
       <Field

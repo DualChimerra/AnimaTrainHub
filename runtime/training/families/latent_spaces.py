@@ -1,24 +1,29 @@
-"""族无关的 latent 空间常量（共享外部事实层）。
+"""Family-agnostic latent space constants (a shared external fact layer).
 
-latent 空间是 VAE 的属性，不是模型族的属性——多个族可以共用同一空间
-（D6：同指纹自动共享 npz 缓存）。空间的定义（归一化统计 / latent2rgb
-投影系数）来自上游单一事实源，在此定义一次，族 spec 直接引用同一实例，
-使「跨族共享」成为结构事实（同一性）而非各族副本 + 测试维持的相等性。
+The latent space is a property of the VAE, not of the model family -- multiple
+families can share the same space (D6: identical fingerprints auto-share the
+npz cache). The space's definition (normalization stats / latent2rgb
+projection coefficients) comes from a single upstream source of truth,
+defined once here; family specs reference the same instance, making
+"shared across families" a structural fact (identity) rather than
+per-family copies kept equal by tests.
 
-Wan2.1 空间：由 ComfyUI `comfy/latent_formats.py` 的 `Wan21` 定义；
-Qwen-Image VAE 复用它（`comfy/supported_models.py`
-`QwenImage.latent_format = Wan21`）。Anima 与 Krea 2 同用此空间（D6/D17）。
+Wan2.1 space: defined by ComfyUI's `comfy/latent_formats.py` `Wan21`. The
+Qwen-Image VAE reuses it (`comfy/supported_models.py`
+`QwenImage.latent_format = Wan21`). Anima and Krea 2 share this space (D6/D17).
 """
 
 from __future__ import annotations
 
-# 相对导入：studio server 经 `runtime.training.*` 命名间接 import 本模块（bucket
-# 分布预览），那边 sys.path 没有 runtime/，`training.*` 绝对导入会 ModuleNotFoundError。
+# Relative import: the studio server imports this module indirectly via the
+# `runtime.training.*` namespace (for bucket distribution previews), where
+# sys.path doesn't include runtime/, so an absolute `training.*` import would
+# raise ModuleNotFoundError.
 from .spec import LatentSpec
 
-# latent2rgb 快速预览的线性投影系数（"模糊但能看出图"）。取自 ComfyUI
-# comfy/latent_formats.py 的 `Wan21.latent_rgb_factors[_bias]`（GPL-3.0，
-# 见 THIRD_PARTY_NOTICES）。
+# Linear projection coefficients for the fast latent2rgb preview ("blurry but
+# recognizable"). Taken from ComfyUI's comfy/latent_formats.py
+# `Wan21.latent_rgb_factors[_bias]` (GPL-3.0, see THIRD_PARTY_NOTICES).
 _WAN21_RGB_FACTORS: tuple[tuple[float, float, float], ...] = (
     (-0.1299, -0.1692, 0.2932),
     (0.0671, 0.0406, 0.0442),
@@ -39,7 +44,7 @@ _WAN21_RGB_FACTORS: tuple[tuple[float, float, float], ...] = (
 )
 _WAN21_RGB_BIAS: tuple[float, float, float] = (-0.1835, -0.0868, -0.3360)
 
-#: Qwen-Image VAE = Wan2.1 latent 空间，f8、16ch。
+#: Qwen-Image VAE = Wan2.1 latent space, f8, 16ch.
 WAN21_F8C16 = LatentSpec(
     fingerprint="wan21-f8c16",
     channels=16,
