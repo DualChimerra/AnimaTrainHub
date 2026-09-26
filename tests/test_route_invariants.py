@@ -1,11 +1,11 @@
-"""PR-1 安全网 — route 数量与 decorator 计数的粗粒度不变量。
+"""PR-1 safety net -- coarse-grained invariants on route count and decorator count.
 
-snapshot 是精细网（任何字符变化都触发），本文件是粗粒度二道防线：
-- 数量落在合理区间
-- server.py + api/routers/*.py 的 @app.<verb> / @router.<verb> 装饰器总数 == APIRoute 数
+The snapshot is the fine-grained net (any character change triggers it); this file is the coarse-grained second line of defense:
+- the count falls within a sane range
+- the total number of @app.<verb> / @router.<verb> decorators across server.py + api/routers/*.py == the number of APIRoutes
 
-PR-5 起从 server.py 抽 router 到 api/routers/，本测试同步扫描两处装饰器
-之和。新加 router 文件（PR-6 继续抽）后扫描自动覆盖。
+Since PR-5 moved routers out of server.py into api/routers/, this test scans and sums the decorators
+in both places. New router files (as PR-6 continues extracting) are picked up automatically.
 """
 from __future__ import annotations
 
@@ -24,15 +24,15 @@ API_ROUTERS_DIR = STUDIO_DIR / "api" / "routers"
 
 
 def test_route_count_in_sane_range() -> None:
-    # FastAPI 0.137+ 把 include_router 包成 `_IncludedRouter` wrapper（详
-    # tests/_route_helpers.py），直接 len(app.routes) 在新版只数 wrapper 不数
-    # 内部 APIRoute；递归展开后才是真实路由数。
+    # FastAPI 0.137+ wraps include_router in an `_IncludedRouter` wrapper (see
+    # tests/_route_helpers.py) -- in the new version, plain len(app.routes) only counts the wrapper, not the
+    # inner APIRoute; recursively expanding it gives the real route count.
     n = sum(1 for _ in iter_leaf_routes(app.routes))
-    assert 100 <= n <= 250, f"app.routes 展开后 = {n}，超出合理区间 [100, 250]"
+    assert 100 <= n <= 250, f"app.routes expanded = {n}, outside the sane range [100, 250]"
 
 
 def test_decorator_count_matches_api_routes() -> None:
-    # server.py 里 `@app.<verb>(...)` 装饰器
+    # `@app.<verb>(...)` decorators in server.py
     src = SERVER_PY.read_text(encoding="utf-8")
     app_decorator_count = len(
         re.findall(
@@ -41,7 +41,7 @@ def test_decorator_count_matches_api_routes() -> None:
             flags=re.MULTILINE,
         )
     )
-    # api/routers/**/*.py 里 `@router.<verb>(...)` 装饰器（递归覆盖 queue/ 等子包）
+    # `@router.<verb>(...)` decorators under api/routers/**/*.py (recursively covers subpackages like queue/)
     router_decorator_count = 0
     if API_ROUTERS_DIR.is_dir():
         for py in sorted(API_ROUTERS_DIR.rglob("*.py")):
@@ -59,7 +59,7 @@ def test_decorator_count_matches_api_routes() -> None:
     decorator_total = app_decorator_count + router_decorator_count
     api_route_count = sum(1 for r in iter_leaf_routes(app.routes) if isinstance(r, APIRoute))
     assert decorator_total == api_route_count, (
-        f"装饰器总数 {decorator_total}（server.py {app_decorator_count} + "
-        f"api/routers/ {router_decorator_count}）≠ app.routes 里 APIRoute 实例 "
-        f"{api_route_count} —— 差额可能来自漏 include_router 或 router 注册时丢了一个"
+        f"total decorators {decorator_total} (server.py {app_decorator_count} + "
+        f"api/routers/ {router_decorator_count}) != APIRoute instances in app.routes "
+        f"{api_route_count} -- the discrepancy may be a missing include_router or a router that lost one at registration"
     )

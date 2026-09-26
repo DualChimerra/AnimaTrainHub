@@ -1,7 +1,9 @@
-"""compute_bucket_histogram：后端用真 BucketManager 算训练集桶分布（桶预览数据源）。
+"""compute_bucket_histogram: the backend uses a real BucketManager to compute the
+training set's bucket distribution (the data source for the bucket preview).
 
-复用 runtime 的 BucketManager + _parse_folder_meta，扫描规则镜像 ImageDataset._scan
-（递归 rglob + 根目录散图 + 只计有 caption 的图），保证与实际训练逐桶一致。
+Reuses runtime's BucketManager + _parse_folder_meta; the scan rules mirror
+ImageDataset._scan (recursive rglob + loose images at the root + only images that
+have a caption are counted), keeping this in lockstep with the actual training buckets.
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ def test_single_resolution_repeat_counts(tmp_path: Path) -> None:
     _sq(tmp_path / "5_data", ["a", "b"])
     out = compute_bucket_histogram(tmp_path, [1024], 2.0)
     assert len(out) == 1 and out[0]["reso"] == 1024
-    assert sum(b["count"] for b in out[0]["buckets"]) == 10  # 2 图 × repeat 5
+    assert sum(b["count"] for b in out[0]["buckets"]) == 10  # 2 images x repeat 5
     sq = next(b for b in out[0]["buckets"] if b["w"] == 1024 and b["h"] == 1024)
     assert sq["count"] == 10
 
@@ -37,8 +39,8 @@ def test_px_folder_override_resolution(tmp_path: Path) -> None:
     from studio.services.projects.versions import compute_bucket_histogram
     _sq(tmp_path / "512px_2_hi", ["a"])
     out = compute_bucket_histogram(tmp_path, [1024], 2.0)
-    assert [g["reso"] for g in out] == [512]  # px 覆盖 → 512 档，不在 1024
-    assert sum(b["count"] for b in out[0]["buckets"]) == 2  # 1 图 × repeat 2
+    assert [g["reso"] for g in out] == [512]  # px override -> lands in the 512 bucket group, not 1024
+    assert sum(b["count"] for b in out[0]["buckets"]) == 2  # 1 image x repeat 2
 
 
 def test_resolution_list_fans_out(tmp_path: Path) -> None:
@@ -48,7 +50,7 @@ def test_resolution_list_fans_out(tmp_path: Path) -> None:
     out = compute_bucket_histogram(tmp_path, [512, 768, 1024], 2.0)
     assert sorted(g["reso"] for g in out) == [512, 768, 1024]
     for g in out:
-        assert sum(b["count"] for b in g["buckets"]) == 1  # 每档各 1 张
+        assert sum(b["count"] for b in g["buckets"]) == 1  # 1 image per group
 
 
 def test_empty_train_dir(tmp_path: Path) -> None:
@@ -58,21 +60,22 @@ def test_empty_train_dir(tmp_path: Path) -> None:
 
 
 def test_only_captioned_images_counted(tmp_path: Path) -> None:
-    # 镜像 trainer：无 caption 的图被丢弃，不计入直方图（否则预览 ≠ 实际训练）。
+    # mirrors the trainer: images without a caption are discarded and not counted in the histogram (otherwise the preview != actual training)
     pytest.importorskip("torch")
     from studio.services.projects.versions import compute_bucket_histogram
-    _sq(tmp_path / "1_data", ["a", "b"])               # 有 caption
-    _sq(tmp_path / "1_data", ["c"], caption=False)     # 无 caption
+    _sq(tmp_path / "1_data", ["a", "b"])               # has a caption
+    _sq(tmp_path / "1_data", ["c"], caption=False)     # no caption
     out = compute_bucket_histogram(tmp_path, [1024], 2.0)
-    assert sum(b["count"] for b in out[0]["buckets"]) == 2  # c 不计
+    assert sum(b["count"] for b in out[0]["buckets"]) == 2  # c is not counted
 
 
 def test_dataset_importable_without_runtime_on_sys_path() -> None:
-    """studio server 的 sys.path 只有仓库根（没有 runtime/）——dataset.py 及其
-    导入链必须在 `runtime.training.*` 命名下可导入，否则 bucket-distribution
-    endpoint 500。conftest 会把 runtime/ 注入 sys.path，进程内测试测不出来，
-    必须开干净子进程。回归：多模型 PR-1 (#405) 引入的 `from training.*` 绝对
-    导入曾砸坏这条链（修复 = families 子树改相对导入）。"""
+    """studio server's sys.path only has the repo root (no runtime/) -- dataset.py
+    and its import chain must be importable under the `runtime.training.*` name,
+    otherwise the bucket-distribution endpoint 500s. conftest injects runtime/ into
+    sys.path, so an in-process test can't catch this; a clean subprocess is required.
+    Regression: the `from training.*` absolute import introduced by multi-model PR-1
+    (#405) once broke this chain (fix: the families subtree switched to relative imports)."""
     pytest.importorskip("torch")
     repo_root = Path(__file__).resolve().parent.parent
     code = (

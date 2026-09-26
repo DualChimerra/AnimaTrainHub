@@ -80,7 +80,8 @@ def create_project_endpoint(body: ProjectCreate) -> dict[str, Any]:
             conn, title=body.title, slug=body.slug, note=body.note
         )
         if body.initial_version_label:
-            # 项目已建好；版本失败时 VersionError 带 code 直接冒泡到全局 handler
+            # Project is already created; if version creation fails, VersionError
+            # carries a code and bubbles straight up to the global handler
             versions.create_version(
                 conn, project_id=p["id"], label=body.initial_version_label
             )
@@ -105,7 +106,7 @@ def get_project_endpoint(pid: int) -> dict[str, Any]:
 def patch_project_endpoint(pid: int, body: ProjectUpdate) -> dict[str, Any]:
     fields = body.model_dump(exclude_unset=True)
     with db.connection_for() as conn:
-        # ProjectError（含 _must_get 的 project.not_found）带 code 直接冒泡
+        # ProjectError (including _must_get's project.not_found) carries a code and bubbles straight up
         p = projects.update_project(conn, pid, **fields)
     _publish_project_state(p)
     return _project_payload(p)
@@ -113,7 +114,7 @@ def patch_project_endpoint(pid: int, body: ProjectUpdate) -> dict[str, Any]:
 
 @router.post("/api/projects/{pid}/archive")
 def archive_project_endpoint(pid: int) -> dict[str, Any]:
-    """归档：列表软隐藏，目录 / versions / 任务全部原样，可随时取消。"""
+    """Archive: soft-hidden from the list, directory / versions / tasks are left untouched, reversible any time."""
     with db.connection_for() as conn:
         p = projects.set_archived(conn, pid, True)
     _publish_project_state(p)
@@ -158,18 +159,19 @@ def list_versions_endpoint(pid: int) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/versions/{vid}/lora_ckpts")
 def list_version_lora_ckpts(pid: int, vid: int) -> dict[str, Any]:
-    """列出 version output/ 下所有 .safetensors（step / epoch / final），
-    用于 LoRA picker 第二层（XY ckpt 轴 + 单图模式切 ckpt）。"""
+    """List all .safetensors under version output/ (step / epoch / final), used for the
+    LoRA picker's second tier (XY ckpt axis + switching ckpt in single-image mode)."""
     p, v, vdir = _version_dir_or_404(pid, vid)
     return {"items": versions.list_lora_ckpts(vdir)}
 
 
 @router.get("/api/projects/{pid}/state_ckpts")
 def list_project_state_ckpts(pid: int) -> dict[str, Any]:
-    """列出项目所有 versions 的 training_state_step*.pt，按 version 分组。
+    """List training_state_step*.pt across all of a project's versions, grouped by version.
 
-    给 Train 页 resume_state 字段的「浏览本项目」picker 用：用户看 version
-    分组的语义化文件列表，选中后前端把绝对路径写入字段。
+    Used by the Train page's resume_state field "browse this project" picker: the user
+    sees a semantic file list grouped by version, and once one is picked the frontend
+    writes the absolute path into the field.
     """
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
@@ -183,9 +185,9 @@ def list_project_state_ckpts(pid: int) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/lora_ckpts")
 def list_project_lora_ckpts(pid: int) -> dict[str, Any]:
-    """列出项目所有 versions 的 LoRA ckpt（.safetensors），按 version 分组。
+    """List LoRA ckpts (.safetensors) across all of a project's versions, grouped by version.
 
-    给 Train 页 resume_lora 字段的「浏览本项目」picker 用。
+    Used by the Train page's resume_lora field "browse this project" picker.
     """
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
@@ -205,8 +207,8 @@ def create_version_endpoint(pid: int, body: VersionCreate) -> dict[str, Any]:
                 "Project not found", code="project.not_found",
                 details={"id": pid},
             )
-        # VersionError（label_invalid / label_exists / fork_source_invalid 等）
-        # 带 code 直接冒泡到全局 DomainError handler
+        # VersionError (label_invalid / label_exists / fork_source_invalid etc.)
+        # carries a code and bubbles straight up to the global DomainError handler
         v = versions.create_version(
             conn,
             project_id=pid,
@@ -243,7 +245,7 @@ def patch_version_endpoint(
                 "Version not found", code="version.not_found",
                 details={"id": vid},
             )
-        # VersionError（label_invalid / label_exists 等）带 code 直接冒泡
+        # VersionError (label_invalid / label_exists etc.) carries a code and bubbles straight up
         v = versions.update_version(conn, vid, **fields)
     _publish_version_state(v)
     return v
@@ -275,13 +277,14 @@ def activate_version_endpoint(pid: int, vid: int) -> dict[str, Any]:
         p = projects.get_project(conn, pid)
     assert p is not None
     _publish_project_state(p)
-    # 瘦响应：不回全量 _project_payload（逐版本文件系统 stats，多版本项目可达秒级）。
-    # 前端乐观更新已持有新值，全量数据由 project_state_changed → reload 收敛。
+    # Thin response: does not return the full _project_payload (per-version filesystem
+    # stats can take seconds on a multi-version project). The frontend's optimistic
+    # update already holds the new value; full data converges via project_state_changed -> reload.
     return {"active_version_id": vid}
 
 
 # ---------------------------------------------------------------------------
-# Phase cursor 推进 / 跳过 — ADR-0007 §11.5-A / §11.5-B
+# Phase cursor advance / skip -- ADR-0007 §11.5-A / §11.5-B
 # ---------------------------------------------------------------------------
 
 
@@ -300,10 +303,10 @@ def _phase_advance_payload(
 
 @router.post("/api/projects/{pid}/versions/{vid}/advance-phase")
 def advance_phase_endpoint(pid: int, vid: int) -> dict[str, Any]:
-    """phase cursor 推进 —— "下一步" 按钮调用（ADR-0007 §11.5-A）。
+    """Advance the phase cursor -- called by the "next step" button (ADR-0007 §11.5-A).
 
-    成功 → cursor++ + 返回新 phase + publish version_state_changed。
-    失败 → ok=False + reason（前端 toast），cursor 不动。
+    On success -> cursor++ + return the new phase + publish version_state_changed.
+    On failure -> ok=False + reason (frontend toast), cursor unchanged.
     """
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
@@ -321,7 +324,7 @@ def advance_phase_endpoint(pid: int, vid: int) -> dict[str, Any]:
 
 @router.post("/api/projects/{pid}/versions/{vid}/skip-phase")
 def skip_phase_endpoint(pid: int, vid: int) -> dict[str, Any]:
-    """跳过可跳过的 phase（当前仅 regularizing；ADR-0007 §11.5-A）。"""
+    """Skip a skippable phase (currently only regularizing; ADR-0007 §11.5-A)."""
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         if not v or v["project_id"] != pid:

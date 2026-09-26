@@ -1,15 +1,15 @@
-"""文件管理 + curation + 去重（PR-6.5 commit 4 从 server.py 抽出）。
+"""File management + curation + deduplication (PR-6.5 commit 4, extracted from server.py).
 
-routes：
-    POST /api/projects/{pid}/files/delete                                download/ 文件 + caption metadata
-    GET  /api/projects/{pid}/files                                       download/ 列表
-    GET  /api/projects/{pid}/thumb                                       缩略图（含 manifest resolve）
+routes:
+    POST /api/projects/{pid}/files/delete                                download/ file + caption metadata
+    GET  /api/projects/{pid}/files                                       download/ listing
+    GET  /api/projects/{pid}/thumb                                       thumbnail (includes manifest resolve)
     GET  /api/projects/{pid}/versions/{vid}/jobs/latest                  hydrate latest job + log
-    GET  /api/projects/{pid}/versions/{vid}/curation                     curation_view（train/ 内容 + download/ 剩余）
-    POST /api/projects/{pid}/versions/{vid}/preprocess/duplicates/scan   train scope 去重扫描 + SSE 进度
-    POST /api/projects/{pid}/versions/{vid}/preprocess/duplicates/apply  标记 manifest duplicate_removed
-    POST /api/projects/{pid}/versions/{vid}/curation/copy                download → train/{folder}
-    POST /api/projects/{pid}/versions/{vid}/curation/remove              train/{folder} → 删
+    GET  /api/projects/{pid}/versions/{vid}/curation                     curation_view (train/ content + download/ remainder)
+    POST /api/projects/{pid}/versions/{vid}/preprocess/duplicates/scan   train-scope dedup scan + SSE progress
+    POST /api/projects/{pid}/versions/{vid}/preprocess/duplicates/apply  mark manifest duplicate_removed
+    POST /api/projects/{pid}/versions/{vid}/curation/copy                download -> train/{folder}
+    POST /api/projects/{pid}/versions/{vid}/curation/remove              train/{folder} -> delete
     POST /api/projects/{pid}/versions/{vid}/curation/folder              create/rename/delete folder
 """
 from __future__ import annotations
@@ -50,12 +50,12 @@ logger = logging.getLogger(__name__)
 def delete_project_files(
     pid: int, body: DeleteFilesRequest,
 ) -> dict[str, Any]:
-    """从项目 `download/` 删除指定文件（含同名 caption metadata）。
+    """Delete the given files from a project's `download/` (including same-stem caption metadata).
 
-    metadata 命名约定：
-    - booru 下载会写 `{stem}.booru.txt`
-    - tag/caption 流程可能写 `{stem}.txt` 或 `{stem}.json`
-    都一并清理；不存在的扩展静默跳过。
+    Metadata naming convention:
+    - booru downloads write `{stem}.booru.txt`
+    - tag/caption flows may write `{stem}.txt` or `{stem}.json`
+    All of them are cleaned up together; extensions that don't exist are silently skipped.
     """
     if not body.names:
         return {"deleted": [], "missing": []}
@@ -86,7 +86,7 @@ def delete_project_files(
                 details={"name": name, "reason": str(exc)},
                 http_status=500,
             ) from exc
-        # 清理同 stem 的 metadata（best-effort，失败仅日志）
+        # Clean up same-stem metadata (best-effort, failures are just logged)
         stem = f.stem
         for ext in META_EXTS:
             m = pdir / f"{stem}{ext}"
@@ -94,7 +94,7 @@ def delete_project_files(
                 try:
                     m.unlink()
                 except OSError as exc:
-                    logger.warning("删 metadata 失败 %s: %s", m, exc)
+                    logger.warning("failed to delete metadata %s: %s", m, exc)
         deleted.append(name)
     return {"deleted": deleted, "missing": missing}
 
@@ -136,24 +136,26 @@ def project_thumb(
     size: int = 256,
     raw: int = 0,
 ) -> FileResponse:
-    """缩略图：默认 256px JPEG（缓存）；size=0 → 原图。
+    """Thumbnail: defaults to 256px JPEG (cached); size=0 -> original image.
 
-    两种 bucket：
-      - `bucket=download`（默认）：`name` 是 download/ 下的原始文件名。
-        后端通过 `preprocess_manifest.resolve_origin()` 决定实际字节路径：
-        未处理 → download/{name}，已处理 → preprocess/ 下第一个 origin 匹配
-        的派生。前端"按 download 名"调用时不需要感知预处理。
-      - `bucket=preprocess`：`name` 是 preprocess/ 下的**实际产物文件名**
-        （含 multi-crop 派生的 _c0 / _c1 后缀）。直接按文件名取，**不走**
-        resolve_origin —— multi-crop 后多个产物共享同一 origin，按 origin
-        永远落到 [0] 是 bug。裁剪 / 总览页应该走这条来精确寻址。
+    Two buckets:
+      - `bucket=download` (default): `name` is the original filename under download/.
+        The backend decides the actual byte path via
+        `preprocess_manifest.resolve_origin()`: unprocessed -> download/{name},
+        processed -> the first origin-matching derivative under preprocess/. The
+        frontend calling "by download name" doesn't need to be aware of preprocessing.
+      - `bucket=preprocess`: `name` is the **actual product filename** under preprocess/
+        (including the _c0 / _c1 suffix for multi-crop derivatives). Fetched directly by
+        filename, **does not** go through resolve_origin -- after multi-crop, multiple
+        products share the same origin, so always landing on [0] via origin would be a
+        bug. The crop / overview pages should use this path for precise addressing.
 
-    `raw=1`（仅 bucket=download）：跳过 resolve_origin，强制读 download/{name}
-    原始字节。给「对比预览」场景用：左 pane 永远要 download 原图，不能被
-    preprocess 派生 hijack。
+    `raw=1` (bucket=download only): skips resolve_origin, forces reading the raw
+    download/{name} bytes. Used by the "compare preview" scenario: the left pane must
+    always show the download original, never hijacked by a preprocess derivative.
 
-    缓存路径：`studio_data/thumb_cache/{sha1(src+mtime+size)}.jpg`。
-    源文件 mtime 变化会自动 invalidate（hash 变）。
+    Cache path: `studio_data/thumb_cache/{sha1(src+mtime+size)}.jpg`.
+    Automatically invalidated when the source file's mtime changes (hash changes).
     """
     if bucket not in ("download", "preprocess"):
         raise ValidationError(
@@ -185,8 +187,8 @@ def project_thumb(
         # resolve to first preprocess product if any (1:1 / multi-crop cases).
         # duplicate_removed origins: resolve_origin returns [] but the original
         # file in download/ still exists; the Download page must keep showing
-        # it (软删除 ≠ 不可见). Fall back to download/{name} like any other
-        # un-resolved origin.
+        # it (a soft delete is not the same as invisible). Fall back to
+        # download/{name} like any other un-resolved origin.
         _safe_join_or_400(pdir / "download", name)
         candidates = preprocess_manifest.resolve_origin(pdir, name)
         f = candidates[0] if candidates else (pdir / "download" / name)
@@ -200,7 +202,7 @@ def project_thumb(
             f = pdir / "preprocess" / name
 
     if not f.exists() or f.suffix.lower() not in datasets.IMAGE_EXTS:
-        logger.info("thumb 404: pid=%s bucket=%s name=%s -> %s", pid, bucket, name, f)
+        logger.info("thumb not found: pid=%s bucket=%s name=%s -> %s", pid, bucket, name, f)
         raise NotFoundError(
             "Thumbnail not found", code="dataset.thumbnail_not_found",
         )
@@ -208,9 +210,9 @@ def project_thumb(
 
 
 # ---------------------------------------------------------------------------
-# /api/projects/{pid}/versions/{vid}/jobs/latest（hydrate）
-# /api/jobs/{jid} / log / cancel 在 PR-6 commit 2 抽到 api/routers/jobs.py；
-# 本 endpoint 因为路径在 /api/projects/ 下，归 projects 子包。
+# /api/projects/{pid}/versions/{vid}/jobs/latest (hydrate)
+# /api/jobs/{jid} / log / cancel were moved to api/routers/jobs.py in PR-6 commit 2;
+# this endpoint stays in the projects subpackage because its path lives under /api/projects/.
 # ---------------------------------------------------------------------------
 
 _HYDRATABLE_JOB_KINDS = {
@@ -227,11 +229,14 @@ _HYDRATABLE_JOB_KINDS = {
 
 @router.get("/api/projects/{pid}/versions/{vid}/jobs/latest")
 def get_latest_version_job(pid: int, vid: int, kind: str) -> dict[str, Any]:
-    """页面刷新 hydrate 用：返回该 version 下指定 kind 的最近一条 job + 全量日志。
+    """Used to hydrate on page refresh: returns the most recent job of the given kind
+    for this version, plus its full log.
 
-    Tagging / Regularization 页之前只在本会话 startBuild 后才知道 jid，刷新一下
-    就丢了；这里给个起点让前端 mount 时锁回 jid + 回放历史日志，SSE 继续接力。
-    `job` 可能是 running / pending / 已完成；前端按 status 决定要不要继续等事件。
+    The Tagging / Regularization pages previously only knew the jid after startBuild in
+    the current session, and lost it on refresh; this gives the frontend a starting point
+    to re-lock onto the jid on mount + replay the historical log, with SSE taking over
+    from there. `job` may be running / pending / completed; the frontend decides whether
+    to keep waiting for events based on status.
     """
     if kind not in _HYDRATABLE_JOB_KINDS:
         raise HTTPException(400, f"unknown kind: {kind}")
@@ -263,7 +268,8 @@ def get_curation(pid: int, vid: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# held-out 验证集手动维护（与 train curation 对称，但右栏扁平、无文件夹）
+# Manual maintenance of the held-out validation set (symmetric with train curation, but
+# the right column is flat, no folders)
 # ---------------------------------------------------------------------------
 
 
@@ -277,8 +283,8 @@ def get_curation_validation(pid: int, vid: int) -> dict[str, Any]:
 def copy_to_validation(
     pid: int, vid: int, body: CopyValidationRequest,
 ) -> dict[str, Any]:
-    """download → validation/1_data/ 复制（连 caption）；已在 train/validation
-    的名字 skip 防泄漏。"""
+    """Copy download -> validation/1_data/ (caption included); names already present in
+    train/validation are skipped to prevent leakage."""
     with db.connection_for() as conn:
         return curation.copy_download_to_validation(conn, pid, vid, body.files)
 
@@ -294,10 +300,10 @@ def remove_from_validation(
 
 
 # ---------------------------------------------------------------------------
-# ADR 0010 — train-scope duplicates endpoint
+# ADR 0010 -- train-scope duplicates endpoint
 #
-# scope 收窄到 versions/{label}/train/，对应 scan_train_duplicates /
-# apply_train_duplicate_removals。
+# Scope narrowed to versions/{label}/train/, corresponding to scan_train_duplicates /
+# apply_train_duplicate_removals.
 # ---------------------------------------------------------------------------
 
 
@@ -322,9 +328,10 @@ def _resolve_pv_or_404_dup(
 def scan_preprocess_duplicates_train(
     pid: int, vid: int, body: DuplicateScanRequest,
 ) -> dict[str, Any]:
-    """ADR 0010 train scope 重复扫描。sources = versions/{label}/train/
-    （跳过 manifest 已标 duplicate_removed 的）；返回结构跟老 endpoint 一致，
-    `target` 字段从 `"preprocess"` 改成 `"train"`。"""
+    """ADR 0010 train-scope duplicate scan. sources = versions/{label}/train/ (skipping
+    entries already marked duplicate_removed in the manifest); the return structure
+    matches the old endpoint, with the `target` field changed from `"preprocess"` to
+    `"train"`."""
     _resolve_pv_or_404_dup(pid, vid)
     with db.connection_for() as conn:
         try:
@@ -397,8 +404,8 @@ def scan_preprocess_duplicates_train(
 def apply_preprocess_duplicates_train(
     pid: int, vid: int, body: DuplicateApplyRequest,
 ) -> dict[str, Any]:
-    """ADR 0010 train scope: 标记 per-version 审核状态到 train manifest。
-    `names` 是 train rel path（`"1_data/X.png"`）。物理文件不动。"""
+    """ADR 0010 train scope: marks per-version review status into the train manifest.
+    `names` are train-relative paths (`"1_data/X.png"`). Physical files are untouched."""
     _resolve_pv_or_404_dup(pid, vid)
     with db.connection_for() as conn:
         result = duplicate_finder.apply_train_duplicate_removals(
@@ -414,11 +421,12 @@ def apply_preprocess_duplicates_train(
 def copy_to_train(
     pid: int, vid: int, body: CopyRequest,
 ) -> dict[str, Any]:
-    """ADR 0010 fixup（2026-06-04）：endpoint 切到 `copy_download_to_train`
-    简化版——纯 download → train 复制 + 写 train manifest entry。不再走
-    "preprocess 派生 vs download 原图"双分支 / 不再 check 老
-    `duplicate_removed`（PR-4 决议 dedupe 下沉 train scope，老标记不影响
-    Curation 操作）。前端 Curation 选 download 原图加入 train 直接 work。
+    """ADR 0010 fixup (2026-06-04): endpoint switched to the simplified
+    `copy_download_to_train` -- a pure download -> train copy + writing a train manifest
+    entry. No longer branches on "preprocess derivative vs. download original", and no
+    longer checks the old `duplicate_removed` (PR-4 decided dedupe moves down to train
+    scope, so the old marker doesn't affect Curation operations). The frontend's Curation
+    picking a download original to add to train just works directly.
     """
     with db.connection_for() as conn:
         result = curation.copy_download_to_train(

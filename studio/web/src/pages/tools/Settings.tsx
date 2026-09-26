@@ -1362,8 +1362,9 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
 
   const sourceRows = (domain: string) => catalog?.model_sources?.[domain] ?? []
 
-  // 本地主模型改「工作模式」后，在新族里把它重新选中（LocalModelRows 只知道
-  // domain，写回选中值的入口按族分派）。
+  // After changing a local base model's "working mode", reselect it in the new
+  // family (LocalModelRows only knows about domain; the entry point that writes back
+  // the selection dispatches per family).
   const selectMainInDomain = async (domain: string, value: string) => {
     if (domain === 'krea2') await pickKrea2(value)
     else await pickAnima(value)
@@ -1436,7 +1437,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
         <p className="text-fg-tertiary text-xs">{t('settings.loadingModelCatalog')}</p>
       ) : (
         <div className="flex flex-col gap-2">
-          {/* Anima 主模型 */}
+          {/* Anima base model */}
           <ModelGroupCard
             title={translatedCatalogText(MODEL_NAME_KEYS, 'anima_main', catalog.anima_main.name, t)}
             helpTooltip={
@@ -1470,7 +1471,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                 )
               })}
             </ul>
-            {/* 自己的权重：注册本地 .safetensors，与官方 variant 同一组单选 */}
+            {/* Own weights: register a local .safetensors, in the same radio group as the official variants */}
             <LocalModelRows
               domain="anima"
               rows={sourceRows('anima')}
@@ -1488,7 +1489,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             />
           </ModelGroupCard>
 
-          {/* VAE（两族共用一份，可换成自己的本地权重） */}
+          {/* VAE (shared by both families, can be swapped for your own local weights) */}
           <ModelGroupCard
             title={catalog.anima_vae.name}
             helpTooltip={<p>{t('settings.vaeHelp')}</p>}
@@ -1521,7 +1522,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             />
           </ModelGroupCard>
 
-          {/* Krea 2 主模型（0.20 第二模型族；VAE 与 Anima 共享 qwen_image_vae） */}
+          {/* Krea 2 base model (0.20's second model family; shares qwen_image_vae with Anima for VAE) */}
           {catalog.krea2_main && (
             <ModelGroupCard
               title={translatedCatalogText(MODEL_NAME_KEYS, 'krea2_main', catalog.krea2_main.name, t)}
@@ -1572,7 +1573,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             </ModelGroupCard>
           )}
 
-          {/* Krea 2 文本编码器 Qwen3-VL：bf16 目录版 + 官方 fp8 单文件版（单选） */}
+          {/* Krea 2 text encoder Qwen3-VL: bf16 directory version + the official fp8 single-file version (radio) */}
           {catalog.krea2_text_encoder && (
             <ModelGroupCard title={catalog.krea2_text_encoder.name} helpTooltip={<p>{t('settings.krea2TeHelp')}</p>}>
               <ul className="list-none m-0 p-0 flex flex-col gap-1">
@@ -1600,7 +1601,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                   )
                 })}
               </ul>
-              {/* 自定义文本编码器：本地 transformers 目录（含 config.json） */}
+              {/* Custom text encoder: a local transformers directory (containing config.json) */}
               <LocalModelRows
                 domain="krea2_te"
                 rows={sourceRows('krea2_te')}
@@ -1617,7 +1618,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             </ModelGroupCard>
           )}
 
-          {/* Anima 文本编码器：官方 Qwen3 目录 + 用户注册的本地编码器（单选） */}
+          {/* Anima text encoder: the official Qwen3 directory + a user-registered local encoder (radio) */}
           <ModelGroupCard title={catalog.qwen3.name} helpTooltip={<p>{t('settings.animaTeHelp')}</p>}>
             <ul className="list-none m-0 p-0 flex flex-col gap-1">
               {(() => {
@@ -1655,7 +1656,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             />
           </ModelGroupCard>
 
-          {/* T5 tokenizer（Anima 专用，无自定义入口——只是 tokenizer 文件） */}
+          {/* T5 tokenizer (Anima-specific, no custom entry point -- it's just a tokenizer file) */}
           {(['t5_tokenizer'] as const).map((id) => {
             const m = catalog[id]
             const dl = catalog.downloads[id]
@@ -1673,7 +1674,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             )
           })}
 
-          {/* 下载日志 */}
+          {/* Download log */}
           {Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length > 0 && (
             <details className="text-xs">
               <summary className="cursor-pointer text-fg-tertiary">
@@ -1760,15 +1761,16 @@ function DownloadButton({ exists, status, busy, onClick }: {
   )
 }
 
-// ── PyTorch Section（训练 tab）──────────────────────────────────────────────
+// ── PyTorch Section (training tab) ─────────────────────────────────────────
 //
-// 已有 venv 用户的「一键修」入口。PR-4 启动期会 warn「检测到 GPU 但 torch 是
-// CPU 版」并给 pip 命令；这里把命令 UI 化，普通用户不用进终端。
+// The "one-click fix" entry point for users with an existing venv. On startup PR-4
+// warns "GPU detected but torch is the CPU build" and gives a pip command; this
+// turns that command into UI, so regular users don't need to open a terminal.
 //
-// 三种状态：
-// - cuda_available=True               → ✓ 一切 OK（折叠默认；提供「换 CUDA 版本」高级选项）
-// - is_cpu_with_gpu=True               → 红色误装提示 + 显著「重装为 CUDA」主按钮
-// - is_cuda_build_unavailable=True     → 黄色驱动警告（pip 修不了，给文档链接）
+// Three states:
+// - cuda_available=True               -> checkmark, everything OK (collapsed by default; offers a "switch CUDA version" advanced option)
+// - is_cpu_with_gpu=True               -> red mis-installed warning + a prominent "reinstall as CUDA" primary button
+// - is_cuda_build_unavailable=True     -> yellow driver warning (pip can't fix it, links to docs)
 
 function PyTorchSection() {
   const { t } = useTranslation()
@@ -1793,8 +1795,9 @@ function PyTorchSection() {
 
   const reinstall = async (target: 'auto' | TorchCuTag) => {
     const tag = target === 'auto' ? status?.recommended_cu_tag ?? '?' : target
-    // 注册 → 用户 Ctrl+C 重启 → launcher 进程跑 pip。Windows 上 torch.pyd 被
-    // 当前 server 进程锁住，没法直接 replace；只能 defer 到 launcher。
+    // Register -> user Ctrl+C restarts -> the launcher process runs pip. On Windows,
+    // torch.pyd is locked by the current server process, so it can't be replaced
+    // directly; it has to be deferred to the launcher.
     if (!(await dialog.confirm(
       t('settings.confirmRegisterTorch', { tag }),
       { tone: 'warn', okText: t('settings.registerRequest') },
@@ -1802,7 +1805,7 @@ function PyTorchSection() {
     setBusy(true)
     try {
       const result = await api.reinstallTorch(target)
-      // 后端已写 marker，server 进程没真装；提示用户去重启
+      // The backend already wrote the marker; the server process hasn't actually installed it, prompt the user to restart
       toast(result.message, 'success')
     } catch (e) {
       toast(t('settings.registerFailed', { error: String(e) }), 'error')
@@ -1843,7 +1846,7 @@ function PyTorchSection() {
         {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
 
         {status && (<>
-          {/* 当前状态卡 */}
+          {/* Current status card */}
           <div className="rounded-sm border border-subtle bg-sunken p-2 flex flex-col gap-1 text-xs">
             <div className="flex gap-4 flex-wrap">
               <span className="text-fg-tertiary">torch: <code className="text-fg-secondary font-mono">{status.version ?? t('settings.notInstalledParen')}</code></span>
@@ -1870,7 +1873,7 @@ function PyTorchSection() {
             </div>
           </div>
 
-          {/* 误装：CPU torch + 有 GPU */}
+          {/* Mis-installed: CPU torch + a GPU present */}
           {status.is_cpu_with_gpu && (
             <div className="rounded-sm border border-err bg-err-soft px-2 py-1.5 text-err text-xs">
               <Trans
@@ -1881,7 +1884,7 @@ function PyTorchSection() {
             </div>
           )}
 
-          {/* CUDA build 但运行时不可用：驱动 / WSL 问题 */}
+          {/* CUDA build present but unusable at runtime: driver / WSL issue */}
           {status.is_cuda_build_unavailable && (
             <div className="rounded-sm border border-warn bg-warn-soft px-2 py-1.5 text-warn text-xs">
               <Trans
@@ -1891,7 +1894,7 @@ function PyTorchSection() {
             </div>
           )}
 
-          {/* 操作按钮 */}
+          {/* Action buttons */}
           <div className="flex gap-1.5 items-center flex-wrap">
             <button
               onClick={() => void reinstall('auto')}
@@ -1913,7 +1916,7 @@ function PyTorchSection() {
             </button>
           </div>
 
-          {/* 手动选版本 */}
+          {/* Manually pick a version */}
           {advancedOpen && (
             <div className="flex flex-col gap-1.5 pt-2 border-t border-subtle text-xs">
               <p className="text-fg-tertiary m-0">
@@ -1946,16 +1949,17 @@ function PyTorchSection() {
   )
 }
 
-// ── Flash Attention Section（训练 tab）─────────────────────────────────────
+// ── Flash Attention Section (training tab) ─────────────────────────────────
 //
-// 训练加速的可选优化。装好 flash_attn 后启动期会自动 set_flash_attn_enabled(True)。
-// 本组件给 UI 一键装 wheel 的能力，复用 PR-7a 的 service：状态 + GitHub 候选 + 安装。
+// An optional training speed-up. Once flash_attn is installed, startup automatically
+// calls set_flash_attn_enabled(True). This component gives the UI a one-click way to
+// install a wheel, reusing PR-7a's service: status + GitHub candidates + install.
 //
-// 设计要点：
-// - install 是同步 pip（几分钟），用 confirm() + busy 状态防误触
-// - Python ABI 不一致的 wheel（usable=false）灰显，但保留「强制安装」按钮（
-//   极少数情况用户可能在 ABI 兼容子集里跑）
-// - GitHub API 限流时 candidates=[] + fetch_error，给手动 URL 输入兜底
+// Design notes:
+// - install is a synchronous pip call (a few minutes), guarded with confirm() + a busy state to prevent double-clicks
+// - A wheel with a mismatched Python ABI (usable=false) is grayed out, but keeps a
+//   "force install" button (in rare cases the user may be running within the ABI-compatible subset)
+// - When the GitHub API is rate-limited, candidates=[] + fetch_error, falling back to a manual URL input
 
 function FlashAttentionSection() {
   const { t } = useTranslation()
@@ -2025,7 +2029,7 @@ function FlashAttentionSection() {
         {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
 
         {status && env && (<>
-          {/* 环境信息 */}
+          {/* Environment info */}
           <div className="rounded-sm border border-subtle bg-sunken p-2 flex flex-col gap-1 text-xs">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-fg-tertiary shrink-0">flash_attn:</span>
@@ -2042,7 +2046,7 @@ function FlashAttentionSection() {
             </div>
           </div>
 
-          {/* GitHub API 失败 */}
+          {/* GitHub API failure */}
           {fetchError && (
             <div className="rounded-sm border border-err bg-err-soft px-2 py-1.5 text-err text-xs">
               {t('settings.githubApiFailed')}
@@ -2050,14 +2054,14 @@ function FlashAttentionSection() {
             </div>
           )}
 
-          {/* 没匹配 wheel */}
+          {/* No matching wheel */}
           {!canAutoInstall && !fetchError && env.platform && env.torch_tag && (
             <div className="rounded-sm border border-warn bg-warn-soft px-2 py-1.5 text-warn text-xs">
               {t('settings.noWheelForPython', { python: env.python_tag })}
             </div>
           )}
 
-          {/* 操作按钮 */}
+          {/* Action buttons */}
           <div className="flex gap-1.5 items-center flex-wrap">
             <button
               onClick={() => void install(null)}
@@ -2077,7 +2081,7 @@ function FlashAttentionSection() {
             </button>
           </div>
 
-          {/* 候选列表 + 手动 URL */}
+          {/* Candidate list + manual URL */}
           {candidatesOpen && (
             <div className="flex flex-col gap-2 pt-2 border-t border-subtle">
               {candidates.length === 0 ? (
@@ -2132,10 +2136,10 @@ function FlashAttentionSection() {
   )
 }
 
-// ── xformers Section（训练 tab）─────────────────────────────────────────────
+// ── xformers Section (training tab) ────────────────────────────────────────
 //
-// 简化版 attention 加速（替代 flash_attn 的另一选项）。xformers 走 PyPI 直装，
-// 不需要 flash_attn 那种 GitHub 候选 wheel 列表。失败时给 stderr 让用户排错。
+// A simplified attention speed-up (an alternative to flash_attn). xformers installs
+// directly from PyPI, no GitHub candidate wheel list like flash_attn needs. On failure, stderr is shown so the user can debug it.
 
 function XformersSection() {
   const { t } = useTranslation()

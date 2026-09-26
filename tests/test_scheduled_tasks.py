@@ -1,7 +1,7 @@
-"""0.17 P-B 计划任务：DB 层 promote + supervisor tick 提升 / 取消。
+"""0.17 P-B scheduled tasks: DB-layer promote + supervisor tick promotion / cancellation.
 
-端点层测试在 test_studio_queue_endpoints.py（enqueue scheduled_at / start_now /
-cancel）与 test_train_endpoints.py（训练入队定时 + active 检查）。
+Endpoint-layer tests live in test_studio_queue_endpoints.py (enqueue scheduled_at / start_now /
+cancel) and test_train_endpoints.py (scheduled training enqueue + active check).
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _task_status(db_path: Path, tid: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# DB 层
+# DB layer
 # ---------------------------------------------------------------------------
 
 
@@ -44,7 +44,7 @@ def dbfile(tmp_path: Path) -> Path:
 
 
 def test_create_task_with_scheduled_at(dbfile: Path) -> None:
-    """带 scheduled_at → scheduled；不带 → pending（原行为）。"""
+    """With scheduled_at -> scheduled; without -> pending (original behavior)."""
     with db.connection_for(dbfile) as conn:
         future = time.time() + 3600
         sid = db.create_task(conn, name="s", config_name="c", scheduled_at=future)
@@ -58,7 +58,7 @@ def test_create_task_with_scheduled_at(dbfile: Path) -> None:
 
 
 def test_promote_due_scheduled_only_promotes_due(dbfile: Path) -> None:
-    """只提升到点的；scheduled_at 保留；第二次调用无事发生。"""
+    """Only promotes ones whose time has come; scheduled_at is kept; a second call is a no-op."""
     with db.connection_for(dbfile) as conn:
         past = db.create_task(
             conn, name="due", config_name="c", scheduled_at=time.time() - 5
@@ -71,12 +71,12 @@ def test_promote_due_scheduled_only_promotes_due(dbfile: Path) -> None:
         assert db.get_task(conn, past)["status"] == "pending"
         assert db.get_task(conn, past)["scheduled_at"] is not None
         assert db.get_task(conn, future)["status"] == "scheduled"
-        # 幂等：已提升的不再出现
+        # idempotent: already-promoted ones don't show up again
         assert db.promote_due_scheduled(conn) == []
 
 
 def test_scheduled_invisible_to_next_pending(dbfile: Path) -> None:
-    """dispatcher 只看 pending —— scheduled 天然不被派活。"""
+    """The dispatcher only looks at pending -- scheduled ones are naturally never dispatched."""
     with db.connection_for(dbfile) as conn:
         db.create_task(
             conn, name="s", config_name="c", scheduled_at=time.time() + 3600
@@ -87,7 +87,7 @@ def test_scheduled_invisible_to_next_pending(dbfile: Path) -> None:
 
 
 def test_scheduled_in_live_statuses(dbfile: Path) -> None:
-    """live 组（队列页数据源）包含 scheduled。"""
+    """The live group (the queue page's data source) includes scheduled."""
     with db.connection_for(dbfile) as conn:
         sid = db.create_task(
             conn, name="s", config_name="c", scheduled_at=time.time() + 3600
@@ -97,7 +97,7 @@ def test_scheduled_in_live_statuses(dbfile: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Supervisor：tick 提升 + 取消
+# Supervisor: tick promotion + cancellation
 # ---------------------------------------------------------------------------
 
 
@@ -124,7 +124,7 @@ def _events_collector():
 
 
 def test_due_scheduled_task_promoted_and_runs(env) -> None:
-    """scheduled 到点 → tick 提升为 pending（带事件）→ 正常派活跑完。"""
+    """scheduled reaches its time -> tick promotes it to pending (with an event) -> dispatches and finishes normally."""
     events, on_event = _events_collector()
 
     def fast_cmd(task, cfg):
@@ -149,13 +149,13 @@ def test_due_scheduled_task_promoted_and_runs(env) -> None:
         sup.stop()
 
     statuses = [e["status"] for e in events if e.get("task_id") == tid]
-    # 提升事件（pending）在 running 之前
+    # the promotion event (pending) comes before running
     assert "pending" in statuses
     assert statuses.index("pending") < statuses.index("running")
 
 
 def test_future_scheduled_task_not_dispatched(env) -> None:
-    """还没到点的 scheduled 不被提升 / 派活。"""
+    """A scheduled task whose time hasn't come is neither promoted nor dispatched."""
     events, on_event = _events_collector()
 
     def fast_cmd(task, cfg):
@@ -173,7 +173,7 @@ def test_future_scheduled_task_not_dispatched(env) -> None:
 
     sup.start()
     try:
-        time.sleep(0.5)  # 若干个 tick
+        time.sleep(0.5)  # a few ticks
         assert _task_status(env["db"], tid) == "scheduled"
     finally:
         sup.stop()
@@ -181,7 +181,7 @@ def test_future_scheduled_task_not_dispatched(env) -> None:
 
 
 def test_cancel_scheduled_task(env) -> None:
-    """scheduled 可直接取消（同 pending 路径）。"""
+    """A scheduled task can be canceled directly (same path as pending)."""
     events, on_event = _events_collector()
     sup = Supervisor(
         on_event=on_event,

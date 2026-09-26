@@ -1,13 +1,16 @@
 /**
- * LLM tagger 配置工作区 — 按 "LLM Settings redesign.html" 设计稿实现。
+ * LLM tagger config workspace -- implemented per the "LLM Settings redesign.html" mockup.
  *
- * 布局：preset bar 顶部 + workspace 双栏 grid (360px 左 / 1fr 右) + savebar 底部。
- * 左栏: 连接 (01) / 采样参数 (03) / 图片预处理 (04) 三张独立 card 纵向堆叠
- * 右栏: Prompt 模板 (02) composer 大 card
+ * Layout: preset bar on top + a two-column workspace grid (360px left / 1fr
+ * right) + a savebar at the bottom.
+ * Left column: three independent cards stacked vertically -- Connection (01) /
+ * Sampling parameters (03) / Image preprocessing (04)
+ * Right column: the Prompt template (02) composer, a large card
  *
- * 设计决策：
- * - 不做"预览请求 JSON" / "试跑一张" / token 价格统计（按用户决定）
- * - savebar 只保留「放弃修改」按钮；保存依赖全局 Settings 顶部"保存"按钮
+ * Design decisions:
+ * - No "preview request JSON" / "test run one" / token price stats (per the user's decision)
+ * - The savebar only keeps a "discard changes" button; saving relies on the
+ *   global Settings page's top "Save" button
  */
 import type { TFunction } from 'i18next'
 import { Trans, useTranslation } from 'react-i18next'

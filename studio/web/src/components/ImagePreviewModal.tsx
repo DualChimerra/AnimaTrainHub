@@ -4,14 +4,15 @@ import ZoomableImage from './ZoomableImage'
 
 interface Props {
   src: string
-  /** 对比图：传了就改成左右 split 布局（左 src + 右 compareSrc）。窄屏时垂直堆叠。 */
+  /** Comparison image: if passed, switches to a left/right split layout (src on
+   *  the left, compareSrc on the right). Stacks vertically on narrow screens. */
   compareSrc?: string
-  /** Split 布局时左侧图顶部的小 label（如 "原图"）。 */
+  /** Small label above the left image in split layout (e.g. "original"). */
   srcLabel?: string
-  /** Split 布局时右侧图顶部的小 label（如 "处理后"）。 */
+  /** Small label above the right image in split layout (e.g. "processed"). */
   compareLabel?: string
   caption?: string
-  /** 列表中的 0-based 位置；与 total 同传时底部显示 "index+1 / total" 计数。 */
+  /** 0-based position in the list; when passed together with total, shows an "index+1 / total" counter at the bottom. */
   index?: number
   total?: number
   hasPrev?: boolean
@@ -107,15 +108,18 @@ export default function ImagePreviewModal({
           </button>
         )}
         {compareSrc ? (
-          // wrapper 不 stopPropagation — 让点击 pane 间 / pane 内空白透到 outer
-          // onClose；只 img 自己 stop（点图不关）。
+          // The wrapper doesn't stopPropagation -- so clicking between panes /
+          // on blank space inside a pane bubbles up to the outer onClose; only
+          // the img itself stops it (clicking the image doesn't close).
           <div className="w-full h-full flex flex-col md:flex-row items-stretch justify-center gap-2 md:gap-4">
             <SplitPane src={src} label={srcLabel} altFallback={caption} />
             <SplitPane src={compareSrc} label={compareLabel} altFallback={caption} />
           </div>
         ) : (
-          // 单图：可缩放视口（滚轮 / 拖拽 / 双击，useZoomPan）。点视口不关闭
-          // （拖拽平移与点击无法两全）—— × 按钮 / ESC / 边缘遮罩仍可关。
+          // Single image: a zoomable viewport (wheel / drag / double-click,
+          // useZoomPan). Clicking the viewport doesn't close it (drag-to-pan and
+          // click-to-close can't coexist) -- the × button / ESC / edge backdrop
+          // can still close it.
           <div className="w-full h-full" onClick={(e) => e.stopPropagation()}>
             <ZoomableImage src={src} alt={caption ?? 'preview'} />
           </div>

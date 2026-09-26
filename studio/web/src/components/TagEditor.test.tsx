@@ -10,11 +10,11 @@ describe('TagEditor (PP4 chip mode)', () => {
     expect(screen.getByText('b')).toBeInTheDocument()
   })
 
-  it('Enter adds a tag at the end (chip 拖拽心智 — 新东西落底部)', async () => {
+  it('Enter adds a tag at the end (chip drag mental model - new things land at the bottom)', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<TagEditor tags={['a']} onChange={onChange} />)
-    const input = screen.getByPlaceholderText(/添加标签/)
+    const input = screen.getByPlaceholderText(/\+ tag/)
     await user.type(input, 'new{Enter}')
     expect(onChange).toHaveBeenCalledWith(['a', 'new'])
   })
@@ -23,7 +23,7 @@ describe('TagEditor (PP4 chip mode)', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<TagEditor tags={[]} onChange={onChange} />)
-    await user.type(screen.getByPlaceholderText(/添加标签/), 'foo,')
+    await user.type(screen.getByPlaceholderText(/\+ tag/), 'foo,')
     expect(onChange).toHaveBeenCalledWith(['foo'])
   })
 
@@ -31,7 +31,7 @@ describe('TagEditor (PP4 chip mode)', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<TagEditor tags={['a', 'b']} onChange={onChange} />)
-    await user.click(screen.getByLabelText('删除 a'))
+    await user.click(screen.getByLabelText('Delete a'))
     expect(onChange).toHaveBeenCalledWith(['b'])
   })
 
@@ -39,14 +39,14 @@ describe('TagEditor (PP4 chip mode)', () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<TagEditor tags={['a']} onChange={onChange} />)
-    await user.type(screen.getByPlaceholderText(/添加标签/), 'a{Enter}')
+    await user.type(screen.getByPlaceholderText(/\+ tag/), 'a{Enter}')
     expect(onChange).not.toHaveBeenCalled()
   })
 
   it('natural mode renders textarea', () => {
     render(<TagEditor natural tags={['a long sentence']} onChange={() => {}} />)
     expect(
-      screen.getByPlaceholderText(/自然语言/)
+      screen.getByPlaceholderText(/Natural language/)
     ).toBeInTheDocument()
   })
 })

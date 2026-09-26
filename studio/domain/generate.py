@@ -133,7 +133,7 @@ class GenerateConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_xy(self) -> "GenerateConfig":
-        """XY 与 prompts/count 互斥；axis lora_index 必须指向已存在的 lora_configs。"""
+        """XY is mutually exclusive with prompts/count; axis lora_index must point to an existing lora_configs entry."""
         if self.xy_matrix is None:
             return self
         if len(self.prompts) > 1:

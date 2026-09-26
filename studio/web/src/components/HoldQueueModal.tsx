@@ -1,10 +1,11 @@
-// HoldQueueModal —— ADR 0006 PR-4 §4.4 挂起队列 confirmation modal。
+// HoldQueueModal -- confirmation modal for holding the queue, ADR 0006 PR-4 §4.4.
 //
-// 情形 A：没有 running task → 简单二选一确认
-// 情形 B：有 running task → 多 radio 让用户选 "让它跑完" 还是 "同时暂停"
-//   主按钮文案随 radio 联动，避免点完不知道自己确认了什么。
+// Case A: no running task -> simple yes/no confirmation
+// Case B: a running task exists -> radio options let the user choose "let it
+//   finish" vs "pause it too". The primary button's text updates with the
+//   radio choice, so clicking doesn't leave the user unsure what they just confirmed.
 //
-// 决策 → caller 通过 onConfirm 收到，自己去调 hold + 可选 pause API。
+// The decision is handed to the caller via onConfirm, which calls hold + an optional pause API itself.
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Task } from '../api/client'
@@ -14,7 +15,7 @@ export type HoldDecision =
   | { kind: 'hold-and-pause'; taskId: number }
 
 export interface HoldQueueModalProps {
-  /** 当前 running task；为 null = 情形 A。 */
+  /** The current running task; null = case A. */
   runningTask: Task | null
   onCancel: () => void
   onConfirm: (decision: HoldDecision) => void
@@ -22,7 +23,7 @@ export interface HoldQueueModalProps {
 
 export function HoldQueueModal({ runningTask, onCancel, onConfirm }: HoldQueueModalProps) {
   const { t } = useTranslation()
-  // 情形 B 才用：默认 "让它跑完"
+  // Only used in case B: defaults to "let it finish"
   const [pauseToo, setPauseToo] = useState(false)
   const hasRunning = runningTask !== null
   const runningName = runningTask?.name ?? ''
@@ -97,8 +98,9 @@ export function HoldQueueModal({ runningTask, onCancel, onConfirm }: HoldQueueMo
         )}
 
         <div className="flex justify-end gap-2 pt-1">
-          {/* 统一 modal footer 范式：btn-secondary / btn-primary（原裸 tailwind 类
-              和 .btn 体系尺寸/圆角不一致）。 */}
+          {/* Unified modal footer pattern: btn-secondary / btn-primary (the
+              previous bare tailwind classes had a different size/radius than
+              the .btn system). */}
           <button
             type="button"
             onClick={onCancel}

@@ -149,22 +149,27 @@ def iter_forbid_rules(model_cls: type[BaseModel]):
 def apply_pin_setdefaults(
     data: dict[str, Any], model_cls: type[BaseModel]
 ) -> dict[str, Any]:
-    """构造期 setdefault ——「缺省跟随钉值,显式违反才报错」。
+    """Construction-time setdefault -- "missing follows the pin, only an explicit violation errors".
 
-    pin 规则 when 为真且目标字段 **未显式提供** 时,落到钉值而非 schema 默认
-    (与前端 takeover / FAMILY_CONFIG_DEFAULTS overlay 的 setdefault 同构):
-    `TrainingConfig(navit_packing=True)` 的 attention_backend 应自动落 xformers,
-    而不是拿着 schema 默认 flash_attn 去撞 after 校验。显式提供且违反的值
-    不在此改写 —— 由 _enforce_disable_rules fail-fast,用户显式配置绝不静默改。
+    When a pin rule's when is true and the target field was **not explicitly
+    provided**, it falls back to the pinned value rather than the schema
+    default (matching the setdefault used by the frontend's takeover /
+    FAMILY_CONFIG_DEFAULTS overlay): `TrainingConfig(navit_packing=True)`
+    should automatically land attention_backend on xformers, instead of
+    hitting the after-validator with the schema default flash_attn. A value
+    that's explicitly provided and violates the rule is NOT rewritten here --
+    that's handled by _enforce_disable_rules failing fast, since an explicit
+    user config is never silently changed.
 
-    when 求值视图 = data 缺键补 schema default(条件字段缺失按默认求值)。
+    The view used for evaluating `when` = data with missing keys filled from
+    the schema default (a condition field that's missing is evaluated at its default).
     """
     view: dict[str, Any] | None = None
     out = data
     for name, expr, pin, _hint in iter_pin_rules(model_cls):
         if name in data:
             continue
-        if view is None:  # lazy:多数构造没有缺失的 pin 字段
+        if view is None:  # lazy: most constructions have no missing pin fields
             view = {
                 k: (data[k] if k in data else _schema_default(f))
                 for k, f in model_cls.model_fields.items()
@@ -180,11 +185,12 @@ def apply_pin_setdefaults(
 def disable_rule_violations(
     values: Mapping[str, Any], model_cls: type[BaseModel]
 ) -> list[dict[str, Any]]:
-    """返回违反清单,每项 {field, expected, actual, hint, kind}。
+    """Return the list of violations, each {field, expected, actual, hint, kind}.
 
-    kind = "pin"(须等于 expected)| "forbid"(不可等于 actual,expected 为
-    修复回退值 = schema default)。对完整 values 求值(与前端对完整表单 state
-    求值一致)。
+    kind = "pin" (must equal expected) | "forbid" (must not equal actual;
+    expected is the fix-back fallback = schema default). Evaluated against
+    the full `values` (matching the frontend evaluating against the whole
+    form state).
     """
     out: list[dict[str, Any]] = []
     for name, expr, pin, hint in iter_pin_rules(model_cls):
@@ -209,23 +215,30 @@ def disable_rule_violations(
 def apply_disable_rule_fixes(
     data: dict[str, Any], model_cls: type[BaseModel]
 ) -> tuple[dict[str, Any], list[str]]:
-    """tolerant 修复:按规则把违反字段修到合法值,返回 (新 dict, 修过的字段名)。
+    """Tolerant fixing: fix violating fields to legal values per the rules, return (new dict, list of fixed field names).
 
-    每轮只修一处然后重算 —— 双向对称锁下一个冲突会产生两条违反(A 的规则钉 A、
-    B 的规则按 gate 关 A),同轮全修会把两边都改掉、过度修复(如 huber+InfoNoise
-    冲突把 huber 也抹了);单步 + 重算后,关掉 gate 的那一步会让对侧违反自然消失。
+    Fixes only one spot per round, then recomputes -- a symmetric two-way
+    conflict produces two violations (A's rule pins A, B's rule gates A off),
+    and fixing both in the same round would over-fix both sides (e.g. a
+    huber+InfoNoise conflict would also wipe out huber); doing one step at a
+    time and recomputing lets turning off the gate make the other side's
+    violation disappear naturally.
 
-    选步策略:任何违反的 when 表达式含 TOLERANT_FIX_GATE_FIRST 开关且该开关
-    当前为真 → 先关开关(牺牲开关、保住用户在目标字段上的投入,历史 InfoNoise
-    垫片语义的泛化);否则钉第一条违反的目标字段(pin 写 disable_value /
-    forbid 写 schema default)。
+    Step-selection strategy: if any violation's `when` expression references a
+    switch in TOLERANT_FIX_GATE_FIRST that is currently true, turn that switch
+    off first (sacrificing the switch to preserve the user's investment in the
+    target field -- a generalization of the old InfoNoise shim's semantics);
+    otherwise pin the first violation's target field (pin writes
+    disable_value / forbid writes the schema default).
 
-    注意:对 **完整** dict 求值;缺键字段不参与判定(pydantic 构造时的族
-    overlay / schema 默认不会造出违反 —— 默认组合恒合法,由测试锁)。
+    Note: evaluated against the **full** dict; missing-key fields don't
+    participate in the check (the family overlay / schema defaults applied
+    during pydantic construction never produce a violation -- the default
+    combination is always legal, pinned by tests).
     """
     out = dict(data)
     fixed: list[str] = []
-    for _ in range(20):  # 上限 > 规则总数;正常几步内收敛
+    for _ in range(20):  # cap > total rule count; normally converges in a few steps
         violations = disable_rule_violations(out, model_cls)
         if not violations:
             break
@@ -248,7 +261,7 @@ def apply_disable_rule_fixes(
 
 
 def _expr_fields_of_violation(violation: dict[str, Any], model_cls: type[BaseModel]) -> list[str]:
-    """取该违反对应规则的 when 表达式字段(gate 候选)。"""
+    """Get the when-expression fields for this violation's rule (gate candidates)."""
     name = violation["field"]
     extra = model_cls.model_fields[name].json_schema_extra
     if not isinstance(extra, dict):

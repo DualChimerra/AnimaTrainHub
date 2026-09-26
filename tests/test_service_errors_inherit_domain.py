@@ -1,7 +1,7 @@
-"""PR-2 C3 — 验证 11 个 service error 全部继承 DomainError。
+"""PR-2 C3 -- verify that all 11 service errors inherit from DomainError.
 
-后续 C4/C5 删 router try/except 之后，service raise 直接被 handler 翻 envelope
-的前提就是 isinstance(exc, DomainError)。本测锁继承链不被未来 PR 破。
+Once C4/C5 remove the router try/except, the precondition for a service raise to be
+translated directly into an envelope by the handler is isinstance(exc, DomainError). This test locks the inheritance chain so future PRs can't break it.
 """
 from __future__ import annotations
 
@@ -36,16 +36,16 @@ from studio.services.version_config import VersionConfigError
 ])
 def test_service_error_inherits_domain_with_code(cls, expected_code) -> None:
     assert issubclass(cls, DomainError), (
-        f"{cls.__name__} 必须继承 DomainError 让 exception handler 自动 catch"
+        f"{cls.__name__} must inherit from DomainError so the exception handler catches it automatically"
     )
     e = cls("test message")
     assert isinstance(e, DomainError)
     assert e.code == expected_code
-    assert e.http_status == 400  # default; router 或 raise 时按情况覆盖
+    assert e.http_status == 400  # default; overridden case-by-case by the router or at raise time
 
 
 def test_raise_service_error_caught_by_handler_via_isinstance(tmp_path) -> None:
-    """端到端：raise PresetError 通过 webui app 被 DomainError handler 翻 envelope。"""
+    """End-to-end: raising PresetError gets translated into an envelope by the DomainError handler via the webui app."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from studio.api.exception_handlers import register_exception_handlers
@@ -63,21 +63,21 @@ def test_raise_service_error_caught_by_handler_via_isinstance(tmp_path) -> None:
     resp = c.get("/raise_preset_err")
     assert resp.status_code == 400
     body = resp.json()
-    assert "detail" not in body  # Phase 3：只发 error 信封
+    assert "detail" not in body  # Phase 3: only send the error envelope
     assert body["error"]["code"] == "preset.error"
     assert body["error"]["message"] == "preset 'x' missing"
     assert body["error"]["trace_id"] is not None
 
 
 def test_raise_with_override_http_status() -> None:
-    """service 仍可 raise PresetError("x", http_status=404) 让 handler 翻 404。
+    """A service can still raise PresetError("x", http_status=404) to have the handler translate it to 404.
 
-    C4/C5 router 迁移时常用这个 — 比如 read_preset 不存在时 raise
-    PresetError("...", http_status=404, code="preset.not_found")。
+    This is commonly used during C4/C5 router migration -- e.g. read_preset raises
+    PresetError("...", http_status=404, code="preset.not_found") when the preset doesn't exist.
     """
     e = PresetError("missing", http_status=404, code="preset.not_found")
     assert e.http_status == 404
     assert e.code == "preset.not_found"
-    # 但 isinstance 仍是 PresetError + DomainError
+    # but isinstance is still both PresetError and DomainError
     assert isinstance(e, PresetError)
     assert isinstance(e, DomainError)

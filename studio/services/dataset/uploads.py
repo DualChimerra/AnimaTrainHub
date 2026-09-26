@@ -324,12 +324,12 @@ def accept_one(
     convert_to_png: bool = False,
     remove_alpha_channel: bool = False,
 ) -> UploadResult:
-    """处理单个上传文件。
+    """Handle a single uploaded file.
 
-    - IMAGE_EXTS 内任一格式 → 落盘（按 convert_to_png 决定是否重编码 PNG）
-    - `.txt` → 当 caption；单独上传无对应图片时跳过
-    - zip → 解压所有图片 + .txt（拍平、按 stem 配对 caption）
-    - 其他 / 没扩展名 → 拒绝
+    - any format in IMAGE_EXTS -> saved (convert_to_png decides whether to re-encode as PNG)
+    - `.txt` -> treated as a caption; skipped if uploaded alone with no matching image
+    - zip -> unpack all images + .txt (flattened, captions paired by stem)
+    - anything else / no extension -> rejected
     """
     entries, skipped = _expand_input(src_name, src_stream)
     result = _accept_entries(
@@ -348,10 +348,10 @@ def accept_many(
     convert_to_png: bool = False,
     remove_alpha_channel: bool = False,
 ) -> UploadResult:
-    """批量处理；先把每个输入展开成叶子 entry 汇到一起，再统一落盘 + 配对。
+    """Batch handling: first expand every input into leaf entries and pool them, then save + pair them all at once.
 
-    汇总后再配对的好处：同批拖拽的 `1.png` + `1.txt`（不在同一个 zip 里）也能
-    按 stem 配上 caption，而不只是 zip 内部。
+    Pairing after pooling means a `1.png` + `1.txt` dragged in together (not
+    in the same zip) can still be paired by stem, not only within a zip.
     """
     all_entries: list[_Entry] = []
     pre_skipped: list[dict[str, str]] = []
@@ -372,7 +372,7 @@ def accept_many(
 def _collect_captions_from_zip(
     src: Path, cap_by_stem: dict[str, list[tuple[str, bytes]]]
 ) -> None:
-    """zip 内所有 .txt 读进 caption 表（caption 体积小，全量入内存无压力）。"""
+    """Read every .txt inside a zip into the caption table (captions are small, reading them all into memory is fine)."""
     try:
         with zipfile.ZipFile(src) as zf:
             for info in zf.infolist():
@@ -384,7 +384,7 @@ def _collect_captions_from_zip(
                         (f"{src.name}:{info.filename}", zf.read(info))
                     )
     except zipfile.BadZipFile:
-        pass  # 坏 zip 在 pass-2 落 skipped
+        pass  # a bad zip is recorded as skipped in pass 2
 
 
 def ingest_paths(
@@ -395,13 +395,15 @@ def ingest_paths(
     remove_alpha_channel: bool = False,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> UploadResult:
-    """从磁盘上的文件路径批量落盘（图片 / zip / .txt caption），按 stem 配对 caption。
+    """Batch-save from file paths on disk (images / zip / .txt caption), pairing captions by stem.
 
-    与 ``accept_many`` 同语义，但**流式**处理：图片逐张读（zip entry 逐个 open），
-    只有体积极小的 caption 全量入内存。适合后台 worker 处理大 zip——不会把整包
-    解压进 RAM（``accept_many`` 会），从而避免 OOM / 长时间卡顿。
+    Same semantics as ``accept_many``, but processed **as a stream**: images
+    are read one at a time (zip entries opened one by one), only the
+    small captions are read fully into memory. Suited to a background worker
+    handling large zips - it never decompresses the whole archive into RAM
+    (``accept_many`` does), avoiding OOM / long stalls.
 
-    `on_progress(line)` 可选：worker 把它接到 stdout，前端读 log_tail 看进度。
+    `on_progress(line)` is optional: the worker wires it to stdout, and the frontend reads log_tail to show progress.
     """
     result = UploadResult()
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -412,7 +414,7 @@ def ingest_paths(
 
     srcs = list(sources)
 
-    # pass 1：收集所有来源（散文件 + zip 内）的 caption，按 stem 入 FIFO 队列。
+    # pass 1: collect captions from every source (loose files + inside zips), queued FIFO by stem.
     cap_by_stem: dict[str, list[tuple[str, bytes]]] = {}
     for src in srcs:
         suffix = src.suffix.lower()
@@ -439,14 +441,14 @@ def ingest_paths(
             result.added.append(cap_path.name)
         log(f"[add] {final.name}")
 
-    # pass 2：图片流式落盘 + 配 caption；非图非 caption / 坏 zip 记 skipped。
+    # pass 2: stream images to disk + pair captions; anything that's neither image nor caption / a bad zip is recorded as skipped.
     for src in srcs:
         suffix = src.suffix.lower()
         if suffix in ALLOWED_IMAGE_EXTS:
             with src.open("rb") as fh:
                 place_image(src.name, fh, src.name)
         elif suffix == CAPTION_EXT:
-            continue  # 已在 pass-1 入表，由对应图片领取
+            continue  # already queued in pass 1, claimed by its matching image
         elif suffix == ZIP_EXT:
             try:
                 with zipfile.ZipFile(src) as zf:
@@ -465,21 +467,21 @@ def ingest_paths(
                             continue
                         else:
                             result.skipped.append(
-                                {"name": label, "reason": "格式不支持"}
+                                {"name": label, "reason": "unsupported format"}
                             )
             except zipfile.BadZipFile:
-                result.skipped.append({"name": src.name, "reason": "zip 损坏"})
+                result.skipped.append({"name": src.name, "reason": "corrupt zip"})
         else:
             allowed = ", ".join(sorted(ALLOWED_IMAGE_EXTS)) + ", .txt, .zip"
             result.skipped.append(
-                {"name": src.name, "reason": f"格式不支持（仅 {allowed}）"}
+                {"name": src.name, "reason": f"unsupported format (only {allowed})"}
             )
 
-    # 没配上图的 caption → 跳过并报告。
+    # captions with no matching image -> skipped and reported.
     for queue in cap_by_stem.values():
         for rep, _data in queue:
             result.skipped.append(
-                {"name": rep, "reason": "无对应图片，已忽略 caption"}
+                {"name": rep, "reason": "no matching image, caption ignored"}
             )
 
     log(f"[summary] added={len(result.added)} skipped={len(result.skipped)}")

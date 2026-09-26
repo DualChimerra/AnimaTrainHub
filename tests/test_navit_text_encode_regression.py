@@ -1,14 +1,14 @@
-"""NaViT 文本编码回归（0.20.0 t5_attn NameError）。
+"""NaViT text-encoding regression (0.20.0 t5_attn NameError).
 
-PR #407 把文本编码下沉 ``AnimaFamily.encode_text_for_batch``（只返回 opaque
-cross）后，loop.py 的 NaViT 分支仍引用旧局部变量 ``t5_attn`` → 所有
-``navit_packing=true`` 用户训练第一步 NameError 必崩。CI 无 GPU 跑不到该
-分支，故两层防线：
+After PR #407 pushed text encoding down into ``AnimaFamily.encode_text_for_batch`` (returning only
+an opaque cross), loop.py's NaViT branch still referenced the old local variable ``t5_attn`` -> every
+user training with ``navit_packing=true`` was guaranteed to crash with a NameError on the first step. CI has no GPU and
+never reaches that branch, hence two lines of defense:
 
-1. ``encode_text_for_batch(return_t5_attn=True)`` 的族私有契约单测；
-2. ``symtable`` 静态扫描 runtime/training/ 全部函数作用域——引用了但在任何
-   作用域链上都无绑定的名字（即 pyflakes F821 类错误）直接测试失败。分支
-   门控代码路径不需要执行也能被抓住。
+1. A family-private contract unit test for ``encode_text_for_batch(return_t5_attn=True)``;
+2. A ``symtable`` static scan of every function scope under runtime/training/ -- a name that is referenced but
+   unbound anywhere in the scope chain (i.e. a pyflakes-F821-style error) fails the test outright. A
+   branch-gated code path can be caught without ever being executed.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ torch = pytest.importorskip("torch")
 from training.families.anima.family import AnimaFamily
 
 
-# ── 1. return_t5_attn 契约 ──────────────────────────────────────────────
+# -- 1. return_t5_attn contract -------------------------------------------
 
 
 def _stub_text_encoding(monkeypatch, attn: "torch.Tensor") -> None:
@@ -80,7 +80,7 @@ def test_encode_text_for_batch_default_stays_bare_cross(monkeypatch) -> None:
     assert isinstance(cross, torch.Tensor)
 
 
-# ── 2. symtable 未定义名静态扫描 ────────────────────────────────────────
+# -- 2. symtable static scan for undefined names ---------------------------
 
 _TRAINING_ROOT = Path(__file__).resolve().parents[1] / "runtime" / "training"
 
@@ -112,7 +112,7 @@ def _walk_undefined(table: symtable.SymbolTable, module_names: set[str]) -> list
                 continue
             if hasattr(builtins, name):
                 continue
-            bad.append(f"{table.get_name()}:{table.get_lineno()} 引用未定义名 {name!r}")
+            bad.append(f"{table.get_name()}:{table.get_lineno()} references undefined name {name!r}")
     for child in table.get_children():
         bad.extend(_walk_undefined(child, module_names))
     return bad
@@ -124,10 +124,10 @@ def _walk_undefined(table: symtable.SymbolTable, module_names: set[str]) -> list
     ids=lambda p: str(p.relative_to(_TRAINING_ROOT)),
 )
 def test_training_package_has_no_undefined_names(py_file: Path) -> None:
-    """函数作用域里 LOAD_GLOBAL 的名字必须解析到模块级绑定或 builtin。
+    """A name loaded via LOAD_GLOBAL in a function scope must resolve to a module-level binding or a builtin.
 
-    抓的正是 0.20.0 ``t5_attn`` 这类"重构后残留引用、分支门控测试跑不到"
-    的 NameError。flow-insensitive（同 pyflakes）：模块级晚绑定不误报。
+    This is exactly the kind of "leftover reference after a refactor that a branch-gated test never
+    reaches" NameError that 0.20.0's ``t5_attn`` was. Flow-insensitive (like pyflakes): late module-level bindings are not false-flagged.
     """
     source = py_file.read_text(encoding="utf-8")
     table = symtable.symtable(source, str(py_file), "exec")

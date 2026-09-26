@@ -26,7 +26,7 @@ interface Props {
   disabled?: boolean
 }
 
-/** Role 着色（与 design tokens 对齐，参见 LLM Settings redesign.html 的 .msg-role.* 规则）。 */
+/** Role coloring (aligned with design tokens, see the .msg-role.* rules in LLM Settings redesign.html). */
 const roleStyles: Record<string, { bg: string; fg: string }> = {
   system:    { bg: 'var(--info-soft)',   fg: 'var(--info)' },
   user:      { bg: 'var(--accent-soft)', fg: 'var(--accent)' },
@@ -73,8 +73,9 @@ export default function LLMMessagesEditor({ messages, onChange, disabled }: Prop
     onChange(messages.map((m, idx) => {
       if (idx !== i) return m
       const updated = { ...m, ...patch }
-      // 不可变更新会换掉对象引用；把稳定 id 一并迁到新对象上，否则 idOf
-      // 会发新 id → key 变 → 整个 SortableMessage（含 textarea）重挂、输入失焦。
+      // An immutable update swaps the object reference; migrate the stable id
+      // onto the new object too, otherwise idOf would issue a new id -> the key
+      // changes -> the whole SortableMessage (including the textarea) remounts and the input loses focus.
       const id = idRefs.current.get(m)
       if (id) idRefs.current.set(updated, id)
       return updated
@@ -146,13 +147,15 @@ function SortableMessage({
   t: ReturnType<typeof useTranslation>['t']
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
-  // 本地缓冲：逐字只更新本地，失焦(onBlur)才把 content 上抛父（instant-apply 下避免逐字 PUT）。
-  // 外部 message.content（落盘后回流）变化时同步本地。role 切换仍即时，不走缓冲。
+  // Local buffer: keystrokes only update local state; content is only pushed
+  // up to the parent on blur (avoids a PUT on every keystroke under instant-apply).
+  // Syncs locally when the external message.content changes (flows back after
+  // being written to disk). Role changes are still instant, bypassing the buffer.
   const [draft, setDraft] = useState(message.content)
   useEffect(() => {
     setDraft(message.content)
   }, [message.content])
-  // 与测试页 prompt 同款：随内容自动撑高，rows 定最小高度
+  // Same as the test page prompt: grows with content, rows sets the minimum height
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   useAutoGrowTextarea(textareaRef, draft)
   const style: React.CSSProperties = {

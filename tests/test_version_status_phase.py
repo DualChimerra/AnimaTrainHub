@@ -1,9 +1,9 @@
-"""ADR-0007 §11.3-B: versions.status / phase 双字段 + enum / accessor 测试。
+"""ADR-0007 section 11.3-B: versions.status / phase dual-field + enum / accessor tests.
 
-注：原 v8 backfill 测试已在 PR-5 v9 destructive 后删除 —— 那些测试需要 stage
-列存在以塞入老数据，v9 已物理删除 projects.stage / versions.stage。
-v8 backfill 函数的逻辑覆盖移到了 PR-2 review + ADR §11.3-B 文档；这里仅留
-"v8 加列存在 + 默认值 + apply_all 幂等 + enum / accessor" 共 5 类测试。
+Note: the original v8 backfill tests were removed after the PR-5 v9 destructive migration --
+those tests needed the stage column to exist to seed old data, and v9 physically dropped projects.stage / versions.stage.
+Coverage of the v8 backfill function's logic moved to the PR-2 review + ADR section 11.3-B docs; only
+5 test categories remain here: "v8 column addition + defaults + apply_all idempotence + enum / accessor".
 """
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ def _open(path: Path) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-# schema 加列 + 默认值
+# schema column addition + defaults
 # ---------------------------------------------------------------------------
 
 
 def test_v8_adds_status_phase_columns(tmp_path: Path) -> None:
-    """新库 init 后 versions 含 status / phase / last_failure_reason 三列。"""
+    """After init on a fresh DB, versions has the status / phase / last_failure_reason columns."""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
@@ -37,7 +37,7 @@ def test_v8_adds_status_phase_columns(tmp_path: Path) -> None:
 
 
 def test_v9_drops_stage_column(tmp_path: Path) -> None:
-    """ADR-0007 PR-5 v9 destructive：projects.stage / versions.stage 已不存在。"""
+    """ADR-0007 PR-5 v9 destructive: projects.stage / versions.stage no longer exist."""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
@@ -48,7 +48,7 @@ def test_v9_drops_stage_column(tmp_path: Path) -> None:
 
 
 def test_default_values_for_new_versions(tmp_path: Path) -> None:
-    """新建 version 不显式指定 status/phase → DEFAULT 'preparing' / 'curating'。"""
+    """A newly created version without an explicit status/phase -> DEFAULTs to 'preparing' / 'curating'."""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     with _open(dbfile) as c:
@@ -74,7 +74,7 @@ def test_default_values_for_new_versions(tmp_path: Path) -> None:
 
 
 def test_apply_all_idempotent(tmp_path: Path) -> None:
-    """重复跑 init_db 不应破坏 schema。"""
+    """Running init_db repeatedly should not corrupt the schema."""
     dbfile = tmp_path / "fresh.db"
     db.init_db(dbfile)
     db.init_db(dbfile)
@@ -99,7 +99,7 @@ def test_version_status_enum_values() -> None:
 
 
 def test_version_phase_order_and_skippable() -> None:
-    # 自动打标 phase 已移除：curating → preprocessing → editing → regularizing → ready
+    # the auto-tagging phase has been removed: curating -> preprocessing -> editing -> regularizing -> ready
     assert versions.VersionPhase.ORDER == (
         "curating", "preprocessing", "editing", "regularizing", "ready",
     )

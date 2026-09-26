@@ -13,23 +13,27 @@ interface Props {
   prop: SchemaProperty
   value: unknown
   onChange: (v: unknown) => void
-  /** disabled 状态（自动控制字段灰显 readonly）。 */
+  /** disabled state (auto-controlled fields render grayed-out readonly). */
   disabled?: boolean
-  /** 字段标签后的小徽章（如「自动 · 全局设置」/「自动 · 项目设置」）。
-   * 与 disabled 解耦：可以让字段保持可编辑只挂个徽章作信息提示，也可以
-   * 配合 disabled 来表达「这字段被自动填且不让你改」。支持 ReactNode 以便
-   * 嵌入可点击链接（如跳转到 Settings 对应区段）。 */
+  /** Small badge after the field label (e.g. "auto · global setting" /
+   * "auto · project setting"). Decoupled from disabled: a field can stay
+   * editable with just an informational badge attached, or the badge can pair
+   * with disabled to say "this field is auto-filled and you can't change it".
+   * Supports ReactNode so it can embed a clickable link (e.g. jumping to the
+   * matching Settings section). */
   hint?: React.ReactNode
-  /** 覆盖 prop.description 的说明文字（用于条件上下文描述）。 */
+  /** Overrides prop.description's help text (used for conditional contextual descriptions). */
   descriptionOverride?: string
-  /** path 字段右侧额外按钮槽（如「↺ 重置为全局默认」）。仅对 string/path
-   * 字段渲染；其他类型字段忽略。 */
+  /** Extra button slot on the right of a path field (e.g. "reset to global
+   * default"). Only rendered for string/path fields; other field types ignore it. */
   suffix?: React.ReactNode
-  /** select 的可见选项覆盖（option_show_when 过滤后的 enum 子集，由
-   * SchemaForm 按当前 values 计算）。缺省渲染 prop.enum 全量。 */
+  /** Visible option override for select (the enum subset after option_show_when
+   * filtering, computed by SchemaForm from the current values). Defaults to
+   * rendering the full prop.enum. */
   enumOptions?: unknown[]
-  /** option_disable_when 命中的选项（D4：灰显不可选、不隐藏），由 SchemaForm
-   * 按当前 values 计算；title 显示 disabledOptionHint 解释为什么不可选。 */
+  /** Options matched by option_disable_when (D4: grayed out and unselectable,
+   * not hidden), computed by SchemaForm from the current values; title shows
+   * disabledOptionHint explaining why it can't be selected. */
   disabledEnumOptions?: string[]
   disabledOptionHint?: string
   /** Value the field had before this session's edits; set only when it
@@ -93,7 +97,7 @@ const LockIcon = (
   </svg>
 )
 
-/** 单个表单字段，按 control kind 分发渲染。 */
+/** A single form field, rendered by dispatching on the control kind. */
 export default function Field({
   name, prop, value, onChange, disabled = false, hint, descriptionOverride, suffix,
   enumOptions, disabledEnumOptions, disabledOptionHint, changedFrom,
@@ -217,8 +221,10 @@ export default function Field({
           aria-label={label}
         >
           {(enumOptions ?? prop.enum ?? []).map((opt) => {
-            // 当前已选中的值即使被禁也保持可选中状态渲染（表单如实反映
-            // config；非法组合由后端校验报错，不在 UI 里凭空清值）
+            // The currently selected value stays rendered as selectable even if
+            // disabled (the form should reflect the real config; illegal
+            // combinations are reported as backend validation errors, not
+            // silently cleared in the UI)
             const optDisabled =
               disabledEnumOptions?.includes(String(opt)) &&
               String(opt) !== String(value ?? '')
@@ -347,10 +353,13 @@ function TextareaField({ value, onChange, disabled = false, label }: TextareaFie
   )
 }
 
-/** 字符串列表输入（每行一条）。textarea 显示走本地 raw 缓冲：受控值若直接用
- *  join('\n') 回显，刚敲的换行（尾部空行）会被 split+filter 吃掉、光标换不了
- *  行。raw 保留用户原始输入，解析后的数组仍每次击键同步给父级，blur 时把
- *  raw 归一化（去空行 / 首尾空白）。 */
+/** String-list input (one entry per line). The textarea display goes through a
+ *  local raw buffer: if the controlled value echoed back straight from
+ *  join('\n'), a freshly typed newline (a trailing blank line) would get eaten
+ *  by split+filter and the cursor couldn't move to a new line. raw keeps the
+ *  user's original input; the parsed array is still synced to the parent on
+ *  every keystroke, and raw gets normalized (blank lines / leading-trailing
+ *  whitespace stripped) on blur. */
 function StringListField({ value, onChange, disabled = false, label }: TextareaFieldProps) {
   const joined = Array.isArray(value) ? (value as string[]).join('\n') : ''
   const [raw, setRaw] = useState<string>(joined)
@@ -450,14 +459,16 @@ interface ListFieldProps {
   label: string
 }
 
-/** 整数列表输入（如 resolution: [512, 768, 1024]）。逗号或空格分隔；后端 validator
- *  负责 snap/clamp，前端只收集数字。清空后回落到默认值（与 NumberField 一致）。 */
+/** Integer-list input (e.g. resolution: [512, 768, 1024]). Comma or
+ *  space-separated; the backend validator handles snap/clamp, the frontend
+ *  just collects numbers. Falls back to the default value when cleared
+ *  (consistent with NumberField). */
 function IntListField({ value, defaultValue, onChange, disabled = false, label }: ListFieldProps) {
   const fmt = (v: unknown) =>
     Array.isArray(v) ? (v as number[]).join(', ') : v === null || v === undefined ? '' : String(v)
   const [raw, setRaw] = useState<string>(() => fmt(value))
   const inputRef = useRef<HTMLInputElement | null>(null)
-  // placeholder 纯由该字段的 default 派生（通用组件，不写死任何字段专属值）
+  // placeholder is derived purely from this field's default (a generic component, no field-specific value hardcoded)
   const placeholder = fmt(defaultValue)
 
   useEffect(() => {
@@ -471,7 +482,7 @@ function IntListField({ value, defaultValue, onChange, disabled = false, label }
       .filter((s) => s.length > 0)
       .map((s) => parseInt(s, 10))
       .filter((n) => Number.isFinite(n))
-    // 清空 → 回落默认值（避免存空列表）
+    // Cleared -> fall back to the default value (avoids storing an empty list)
     if (nums.length === 0 && Array.isArray(defaultValue)) {
       onChange(defaultValue)
       setRaw(fmt(defaultValue))
@@ -655,13 +666,13 @@ interface PathFieldProps {
     helpNode: React.ReactNode
     changedFrom?: { value: unknown }
   }
-  /** schema 字段名，让 path 字段判定是否走专用 picker（resume_state / resume_lora）。 */
+  /** Schema field name, lets a path field decide whether to use a dedicated picker (resume_state / resume_lora). */
   name: string
   kind: 'path' | 'string'
   value: unknown
   onChange: (v: unknown) => void
   disabled?: boolean
-  /** 输入行右侧额外按钮槽（如重置按钮）。 */
+  /** Extra button slot on the right of the input row (e.g. a reset button). */
   suffix?: React.ReactNode
   label: string
 }
@@ -675,8 +686,9 @@ function PathStringField({
   const browseBtnRef = useRef<HTMLButtonElement | null>(null)
   const projectCtx = useProjectCtx()
 
-  // resume_state / resume_lora：走项目内语义 picker（dropdown），用户看不到深路径。
-  // 外部文件用户直接在 input 手填即可。
+  // resume_state / resume_lora: use the in-project semantic picker (dropdown),
+  // so the user never sees the deep path. For external files, the user just
+  // types the path into the input directly.
   const resumeKind: 'state' | 'lora' | null =
     name === 'resume_state' ? 'state' :
     name === 'resume_lora' ? 'lora' : null
@@ -689,7 +701,7 @@ function PathStringField({
       stack={kind === 'path'}
       below={
         <>
-          {/* resume_state / resume_lora：贴字段的 dropdown，按 version 分组列文件 */}
+          {/* resume_state / resume_lora: a dropdown anchored to the field, listing files grouped by version */}
           {useResumePicker && picking && !disabled && (
             <ResumeFieldPicker
               pid={projectCtx!.project.id}
@@ -700,7 +712,7 @@ function PathStringField({
               anchorRef={browseBtnRef}
             />
           )}
-          {/* 其它 path 字段：保留 PathPicker 模态框（外部模型路径等场景） */}
+          {/* Other path fields: keep the PathPicker modal (external model paths and similar cases) */}
           {!useResumePicker && picking && !disabled && (
             <PathPicker
               initialPath={text || undefined}

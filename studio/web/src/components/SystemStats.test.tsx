@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import SystemStats from './SystemStats'
 import { api, type SystemStats as Stats } from '../api/client'
 
-// useEventStream 在 jsdom 下不会真起 EventSource (源码有 typeof 守卫)，所以
-// 这里测的主要是：mount 时 GET 一次冷启动 + 各种 stats 形态下的渲染。SSE
-// delta 的合并行为另测（手动验证或 e2e）。
+// useEventStream never really starts an EventSource under jsdom (the source has a typeof
+// guard), so this mostly tests: one cold-start GET on mount + rendering for various stats
+// shapes. SSE delta merging is tested separately (manual verification or e2e).
 
 function makeStats(overrides: Partial<Stats> = {}): Stats {
   return {
@@ -78,11 +78,11 @@ describe('SystemStats', () => {
     expect(fill?.getAttribute('style')).toContain('width: 95%')
   })
 
-  it('only fetches once on mount (SSE 化后无轮询)', async () => {
+  it('only fetches once on mount (no polling now that it is SSE-driven)', async () => {
     const spy = vi.spyOn(api, 'systemStats').mockResolvedValue(makeStats())
     render(<SystemStats />)
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1))
-    // 等一段实际时间让任何潜在的轮询有机会触发
+    // wait a bit of real time to give any latent polling a chance to fire
     await new Promise((r) => setTimeout(r, 200))
     expect(spy).toHaveBeenCalledTimes(1)
   })
