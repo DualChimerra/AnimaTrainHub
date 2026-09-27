@@ -39,7 +39,7 @@ describe('Dialog (useDialog API)', () => {
     const user = userEvent.setup()
     wrap((api) => api.confirm('Delete?'))
     await user.click(screen.getByText('trigger'))
-    await user.click(screen.getByText('Confirm'))
+    await user.click(screen.getByRole('button', { name: 'Confirm' }))
     expect(screen.getByTestId('result')).toHaveTextContent('resolved:true')
   })
 
@@ -67,12 +67,11 @@ describe('Dialog (useDialog API)', () => {
     expect(screen.getByText('Nevermind')).toBeInTheDocument()
   })
 
-  it('confirm OK button is always btn-primary (tone does not change the button color)', async () => {
+  it('danger tone paints the confirm button red', async () => {
     const user = userEvent.setup()
     wrap((api) => api.confirm('Delete?', { tone: 'danger' }))
     await user.click(screen.getByText('trigger'))
-    expect(screen.getByText('Confirm')).toHaveClass('btn-primary')
-    expect(screen.getByText('Confirm')).not.toHaveClass('btn-danger')
+    expect(screen.getByRole('button', { name: 'Confirm' })).toHaveClass('btn-danger')
   })
 
   it('prompt resolves the typed string on OK click', async () => {

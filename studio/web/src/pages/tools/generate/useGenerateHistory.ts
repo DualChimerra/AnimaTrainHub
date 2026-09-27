@@ -1,16 +1,7 @@
-/** 测试出图历史栏。
+/** Test-image history rail.
  *
- * 两条 source 都从 server 拉（本地零持久化层）：
- * - DiskEntry：`/api/generate/disk/history` 扫 `studio_data/test/<date>/` 下
- *   落盘 PNG metadata（save_test_images=true 写的）
- * - CacheEntry：`/api/generate/cache/index` 当前 session 加密磁盘 cache
- *   (save_test_images=false 时；server 重启 / SSE 断连 30s + LRU 后丢)
  *
- * 之前的版本前端 useState 持 cacheEntries —— 切路由组件 unmount 就丢了；现在
- * cache 由 server 持，前端只 fetch 视图，切路由 mount 再拉。零持久化心智 +
- * 零脏数据（server 死了 cache index 也空了，不会指向不存在的图）。
  *
- * add() 被砍：server 端 image_done 自动入 cache，前端只 refresh 拉新视图。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, type CacheGenerateHistoryEntry } from '../../../api/client'
@@ -80,14 +71,14 @@ function diskEntryFromServer(d: DiskHistoryServerEntry): DiskEntry {
     folder: d.folder,
     imageUrl: d.image_url,
     thumbUrl: d.thumb_url,
-    createdAt: d.created_at * 1000,  // server 给秒；entry.createdAt 用 ms
+    createdAt: d.created_at * 1000,
     params: d.params as GenerateParamsSnapshot,
     xyMeta: d.xy_meta ? xyMetaFromServer(d.xy_meta) : undefined,
   }
 }
 
-/** server cache index → 前端 CacheEntry。XY 模式从 server samples 重建 xyMeta；
- *  axis 元数据从 params.xy_draft 派生（跟 entryBadge 同一套）。 */
+/** server cache index -> frontend CacheEntry. XY mode rebuilds xyMeta from server samples;
+ *  axis metadata comes from params.xy_draft (same scheme as entryBadge). */
 function cacheEntryFromServer(c: CacheGenerateHistoryEntry): CacheEntry {
   const params = c.params as unknown as GenerateParamsSnapshot
   let xyMeta: HistoryXYMeta | undefined
@@ -126,15 +117,10 @@ function cacheEntryFromServer(c: CacheGenerateHistoryEntry): CacheEntry {
 }
 
 export interface UseGenerateHistoryResult {
-  /** 所有 entry，按 createdAt desc 排 */
   entries: HistoryEntry[]
-  /** 任一 source 在拉取中 */
   loading: boolean
-  /** 删除 entry：DiskEntry 调 DELETE endpoint；CacheEntry 仅本地 splice */
   remove: (id: string) => Promise<void>
-  /** 手动重拉 disk-history（多 tab 同步 / 外部改 studio_data 后用户主动刷新） */
   refresh: () => Promise<void>
-  /** 重拉 cache index（image_done SSE 后 Generate.tsx 调） */
   refreshCache: () => Promise<void>
 }
 
@@ -151,7 +137,6 @@ export function useGenerateHistory(): UseGenerateHistoryResult {
       const data = (await r.json()) as DiskHistoryResponse
       setDiskEntries(data.entries.map(diskEntryFromServer))
     } catch {
-      // 拉取失败不挂前端 —— 历史栏只显示另一 source
     }
   }
 
@@ -160,7 +145,6 @@ export function useGenerateHistory(): UseGenerateHistoryResult {
       const data = await api.listCacheGenerateHistory()
       setCacheEntries(data.entries.map(cacheEntryFromServer))
     } catch {
-      // 同上
     }
   }
 
@@ -171,9 +155,6 @@ export function useGenerateHistory(): UseGenerateHistoryResult {
     void Promise.all([fetchDisk(), fetchCache()]).finally(() => setLoading(false))
   }, [])
 
-  // entries union 按 createdAt desc 排。两类 entry 自然独立 —— 同一 task
-  // 不会既走 disk 又走 cache（save_test_images 开关 dispatch 时冻结，task
-  // 只走单一路径）。
   const entries = useMemo<HistoryEntry[]>(
     () => [...diskEntries, ...cacheEntries].sort((a, b) => b.createdAt - a.createdAt),
     [diskEntries, cacheEntries],
@@ -186,12 +167,9 @@ export function useGenerateHistory(): UseGenerateHistoryResult {
       try {
         await entryDelete(target)
       } catch {
-        // server 失败仍本地剔（用户能看到列表里少了一条；下次 refresh 时
-        // 如果文件真在仍会回来 —— 是预期的"乐观删除"模式）
       }
       setDiskEntries((prev) => prev.filter((e) => e.id !== id))
     } else {
-      // CacheEntry：本地剔即可（server 端 LRU / shutdown 会清理）
       setCacheEntries((prev) => prev.filter((e) => e.id !== id))
     }
   }

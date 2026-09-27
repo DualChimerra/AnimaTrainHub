@@ -153,11 +153,8 @@ export function entryBadge(e: HistoryEntry): string | undefined {
   return 'XY'
 }
 
-/** 删除 entry：
- *  - DiskEntry single：单文件 DELETE `/api/generate/disk/<date>/single/<encoded>`
- *  - DiskEntry xy：整文件夹 DELETE `/api/generate/disk/<date>/xy/<encoded folder>`
- *  - CacheEntry：仅本地 splice（无 server 删）
- *  返回 server 端是否真删了（CacheEntry 永远 false）。 */
+/** Delete an entry:
+ *  returns whether the server actually deleted it (always false for CacheEntry). */
 export async function entryDelete(e: HistoryEntry): Promise<{ removed: boolean }> {
   if (e.source !== 'disk') return { removed: false }
   let url: string

@@ -18,7 +18,7 @@ describe('regularization exclusion chips', () => {
     )
 
     const text = screen.getByText(longTag)
-    const textContainer = text.parentElement
+    const textContainer = text
     const chip = text.closest('button')
 
     expect(chip).toHaveClass('ds-chip', 'max-w-full', 'overflow-hidden', 'whitespace-nowrap')

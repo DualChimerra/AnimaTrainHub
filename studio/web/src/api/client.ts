@@ -1963,6 +1963,7 @@ export interface ImportResult {
  * `body.error.trace_id` or the X-Trace-Id response header. Shown as a "trace ab12cd34"
  * suffix in the toast so the user can screenshot it for the dev; also attached when ErrorBoundary
  * reports, tying it to the frontend's last failure before the crash.
+ */
 export type ApiError = Error & {
   status?: number
   /** ADR-0009 Phase 2: the backend's body.error.code (a semantic error code); the frontend looks up errors.* i18n by it. */

@@ -27,6 +27,7 @@ export default function ProjectLayout() {
   projectRef.current = project
   // Version-switch request sequence number: on rapid successive switches only the result of the
   // last switch counts, so a late-arriving response/rollback can't overwrite the newer choice.
+  const switchSeqRef = useRef(0)
   // Version-switch guard: step pages with state that needs confirmation before discarding
   // (e.g. unsaved edits in TagEdit) register here. Returning false cancels the switch. Switching
   // versions remounts the step page without going through route navigation, so useBlocker can't

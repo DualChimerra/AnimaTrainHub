@@ -278,7 +278,7 @@ def _print_npm_install_hint() -> None:
             file=sys.stderr,
         )
         print(
-            "  Or use nvm (no sudo needed): "
+            "  Or use nvm (no root needed): "
             "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh "
             "| bash && nvm install --lts",
             file=sys.stderr,

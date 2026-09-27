@@ -83,6 +83,7 @@ export function LocalModelRows({
       // Unregistering the old candidate makes the server reset the old family's selected value to the official
       // variant (since these weights are no longer under that family) -- so "was it currently selected" must be
       // read before unregistering, and reselected after.
+      const wasCurrent = row.is_current
       await api.removeModelSource(domain, row.candidate)
       if (wasCurrent && selectInDomain) await selectInDomain(nextDomain, row.value)
       toast(t('settings.localModelFamilyChanged', {

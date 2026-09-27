@@ -88,7 +88,7 @@ class ValidationError(DomainError):
     """Request field / business rule validation failed -- 422.
 
     `details` usually holds `{"field": "...", "reason": "..."}` for
-    field-level hints in the frontend. Distinct from fastapi's
+    field-level hints in the frontend. Not the same as FastAPI's
     RequestValidationError: that one is a pydantic body-parsing failure; this
     class is a business-layer judgment (e.g. "epoch must be > 0").
     """

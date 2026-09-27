@@ -432,7 +432,7 @@ function AdvancedSection({ preset, onUpdate }: {
           <span>{t('llmWorkspace.advanced')}</span>
         </h3>
         {/* Summary value: shows the current key numbers when collapsed (compact form, so it fits the 360px left column).
-         * truncate + min-w-0 makes it ellipsize gracefully instead of forcing the title to wrap. */
+         * truncate + min-w-0 makes it ellipsize gracefully instead of forcing the title to wrap. */}
         <span
           className="group-open:hidden truncate min-w-0"
           style={{

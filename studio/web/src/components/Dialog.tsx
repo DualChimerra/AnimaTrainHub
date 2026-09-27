@@ -166,10 +166,7 @@ export function useDialog(): DialogApi {
 
 // ────────────────────────────────────────────────────────────────────────────
 
-/** The confirm button always uses the global accent primary color (btn-primary)
- *  -- tone only affects semantics/copy, not the button's fill color. It used to
- *  swap warn/danger to a solid orange/red fill, which stood out from the app's
- *  usual primary color. */
+/** The confirm button uses the primary color; the danger tone switches it to btn-danger. */
 function toneButtonClass(tone: DialogTone | undefined): string {
   return tone === 'danger' ? 'btn btn-danger' : 'btn btn-primary'
 }

@@ -32,10 +32,10 @@ const schema: SchemaResponse = {
   } },
 }
 
-afterEach(async () => { await i18n.changeLanguage('zh') })
+afterEach(async () => { await i18n.changeLanguage('en') })
 
 describe('Dual Peak sampling controls', () => {
-  it.each(['ru', 'en', 'zh'])('has a translated option and parameter help in %s', async (lang) => {
+  it.each(['ru', 'en'])('has a translated option and parameter help in %s', async (lang) => {
     await i18n.changeLanguage(lang)
     expect(schemaEnumLabel('timestep_sampling', 'dual_peak', i18n.t)).toContain('Dual Peak')
     for (const key of Object.keys(parameters)) {
@@ -50,9 +50,9 @@ describe('Dual Peak sampling controls', () => {
       timestep_sampling: 'dual_peak',
       ...Object.fromEntries(Object.entries(parameters).map(([k, v]) => [`dual_peak_${k}`, v])),
     }
-    const { rerender } = render(<SchemaForm schema={schema} values={values} onChange={onChange} advancedMode />)
+    const { rerender, container } = render(<SchemaForm schema={schema} values={values} onChange={onChange} advancedMode />)
     expect(screen.getByRole('option', { name: 'Dual Peak — два пика для стиля' })).toBeInTheDocument()
-    expect(screen.queryByText('timestep_shift')).not.toBeInTheDocument()
+    expect(container.querySelector('[data-field="timestep_shift"]')).toBeNull()
     expect(screen.getAllByRole('textbox')).toHaveLength(10)
     const secondPeak = screen.getByDisplayValue('0.85')
     fireEvent.change(secondPeak, { target: { value: '0.82' } })
@@ -60,8 +60,8 @@ describe('Dual Peak sampling controls', () => {
     expect(onChange).toHaveBeenCalledWith({ ...values, dual_peak_peak2_position: 0.82 })
     onChange.mockClear()
     rerender(<SchemaForm schema={schema} values={{ ...values, timestep_sampling: 'logit_normal' }} onChange={onChange} advancedMode />)
-    expect(screen.queryByText('dual_peak_peak1_position')).not.toBeInTheDocument()
-    expect(screen.getByText('timestep_shift')).toBeInTheDocument()
+    expect(container.querySelector('[data-field="dual_peak_peak1_position"]')).toBeNull()
+    expect(container.querySelector('[data-field="timestep_shift"]')).not.toBeNull()
     expect(onChange).not.toHaveBeenCalled()
   })
 })

@@ -182,6 +182,7 @@ const Cell = memo(function Cell({
   // starving the new page's /api fetches at the back of the queue. From the user's view it looks like
   // "the route is stuck behind images". A canceled image doesn't enter the HTTP cache, but the backend's
   // thumb_cache is already on disk + a fully-loaded one gets a 304, so re-entering the page is cheap.
+  useEffect(() => {
     // Grab the element on mount: by unmount React has already nulled the ref, so reading
     // imgRef.current in the cleanup wouldn't get the node. Changing src on a detached <img> still aborts the request.
     const img = imgRef.current
