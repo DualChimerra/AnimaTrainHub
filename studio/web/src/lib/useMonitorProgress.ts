@@ -15,9 +15,9 @@
  * cross-task views, which don't subscribe when nothing is running). Changing
  * taskId clears state and refetches the snapshot.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useSyncExternalStore } from 'react'
 import { api, type MonitorState } from '../api/client'
-import { useEventStream } from './useEventStream'
+import { subscribeEventStream } from './useEventStream'
 
 interface MonitorProgressDelta {
   step?: number
@@ -100,53 +100,93 @@ export interface MonitorProgress {
   refetch: () => Promise<void>
 }
 
-export function useMonitorProgress(taskId: number | null): MonitorProgress {
-  const [state, setState] = useState<MonitorState | null>(null)
-  const [connected, setConnected] = useState(false)
-  const lastUpdateRef = useRef(0)
-  // Store taskId in a ref for the event handler's closure, to avoid resubscribing SSE on every taskId change
-  const taskIdRef = useRef(taskId)
-  taskIdRef.current = taskId
+// ── shared per-task store ───────────────────────────────────────────────────
+// Topbar, Sidebar, the queue page, the task page and its dashboard all watch the
+// same running task at once. Each used to fetch its own full snapshot (tens of
+// thousands of loss points, several MB of JSON) and merge every delta into its own
+// copy; now there is one entry per task: one snapshot fetch, one merge per delta,
+// and every subscriber reads the same object. Topbar / Sidebar stay mounted across
+// pages, so the entry survives navigation while the task runs.
 
-  const refetch = useCallback(async () => {
-    const tid = taskIdRef.current
-    if (tid == null) return
+interface Snap { state: MonitorState | null; connected: boolean }
+interface Entry {
+  snap: Snap
+  lastUpdate: number
+  subs: Set<() => void>
+  inflight: Promise<void> | null
+  unsubscribe: () => void
+}
+
+const _entries = new Map<number, Entry>()
+const IDLE: Snap = { state: null, connected: false }
+
+function _set(e: Entry, next: Partial<Snap>): void {
+  e.snap = { ...e.snap, ...next }
+  for (const cb of e.subs) cb()
+}
+
+function _refetch(tid: number): Promise<void> {
+  const e = _entries.get(tid)
+  if (!e) return Promise.resolve()
+  if (e.inflight) return e.inflight
+  e.inflight = (async () => {
     try {
       const s = await api.getMonitorState(tid)
-      setState(s)
-      setConnected(true)
-      lastUpdateRef.current = Date.now()
+      e.lastUpdate = Date.now()
+      _set(e, { state: s, connected: true })
     } catch {
-      if (Date.now() - lastUpdateRef.current > 5000) setConnected(false)
+      if (Date.now() - e.lastUpdate > 5000) _set(e, { connected: false })
+    } finally {
+      e.inflight = null
     }
-  }, [])
+  })()
+  return e.inflight
+}
 
-  // taskId changes -> clear state + refetch
-  useEffect(() => {
-    setState(null)
-    if (taskId == null) {
-      setConnected(false)
-      return
+function _acquire(tid: number): Entry {
+  const existing = _entries.get(tid)
+  if (existing) return existing
+  const entry: Entry = { snap: IDLE, lastUpdate: 0, subs: new Set(), inflight: null, unsubscribe: () => {} }
+  _entries.set(tid, entry)
+  entry.unsubscribe = subscribeEventStream((evt) => {
+    if (evt.type !== 'monitor_progress') return
+    if (String(evt.task_id) !== String(tid)) return
+    const delta = evt.delta as MonitorProgressDelta | undefined
+    if (!delta) return
+    entry.lastUpdate = Date.now()
+    _set(entry, { state: mergeDelta(entry.snap.state, delta), connected: true })
+  }, () => { void _refetch(tid) })
+  void _refetch(tid)
+  return entry
+}
+
+function _release(tid: number): void {
+  const e = _entries.get(tid)
+  if (!e || e.subs.size > 0) return
+  e.unsubscribe()
+  _entries.delete(tid)
+}
+
+export function useMonitorProgress(taskId: number | null): MonitorProgress {
+  const subscribe = useCallback((cb: () => void) => {
+    if (taskId == null) return () => {}
+    const e = _acquire(taskId)
+    e.subs.add(cb)
+    return () => {
+      e.subs.delete(cb)
+      _release(taskId)
     }
-    void refetch()
-  }, [taskId, refetch])
-
-  useEventStream(
-    (evt) => {
-      const tid = taskIdRef.current
-      if (tid == null) return
-      if (evt.type !== 'monitor_progress') return
-      if (String(evt.task_id) !== String(tid)) return
-      const delta = evt.delta as MonitorProgressDelta | undefined
-      if (!delta) return
-      setState((prev) => mergeDelta(prev, delta))
-      setConnected(true)
-      lastUpdateRef.current = Date.now()
-    },
-    { onOpen: () => void refetch() },
+  }, [taskId])
+  const getSnap = useCallback(
+    () => (taskId == null ? IDLE : _entries.get(taskId)?.snap ?? IDLE),
+    [taskId],
   )
-
-  return { state, connected, refetch }
+  const snap = useSyncExternalStore(subscribe, getSnap, getSnap)
+  const refetch = useCallback(
+    () => (taskId == null ? Promise.resolve() : _refetch(taskId)),
+    [taskId],
+  )
+  return { state: snap.state, connected: snap.connected, refetch }
 }
 
 // exposed for tests

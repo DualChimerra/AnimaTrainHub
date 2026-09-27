@@ -665,7 +665,7 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
           <div className="ds-grid-thumbs" style={{ gridTemplateColumns: 'repeat(3,minmax(0,1fr))' }}>
             {shown.map((s, i) => (
               <button key={s.filename} type="button" className="ds-thumb" style={{ aspectRatio: '1' }} onClick={() => setZoom((items?.length ?? 0) - shown.length + i)}>
-                <img src={api.sampleImageUrl(s.filename, taskId, 240)} alt="" loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', inset: 0 }} />
+                <img src={api.sampleImageUrl(s.filename, taskId, 240)} alt="" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', inset: 0 }} />
                 <span className="ds-cap">{mark(s)}</span>
               </button>
             ))}
@@ -683,6 +683,9 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
           onClose={() => setZoom(null)}
           onPrev={() => setZoom((z) => (z != null && z > 0 ? z - 1 : z))}
           onNext={() => setZoom((z) => (z != null && z < items.length - 1 ? z + 1 : z))}
+          preload={[items[zoom - 1], items[zoom + 1]]
+            .filter((x): x is TaskSample => !!x)
+            .map((x) => api.sampleImageUrl(x.filename, taskId))}
         />
       )}
     </div>

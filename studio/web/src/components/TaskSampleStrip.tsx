@@ -15,7 +15,7 @@
  *   when the delta actually contains appended_samples (training emits an image every few dozen steps,
  *   no need to jitter on every single delta).
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { api, type TaskSample } from '../api/client'
@@ -40,7 +40,11 @@ function shortMarks(s: TaskSample): string {
   return parts.join(' · ')
 }
 
-export default function TaskSampleStrip({ taskId, live = false }: {
+// Memoized: the queue page re-renders on every monitor_progress delta of the running task;
+// the strip (and its open lightbox) only depends on taskId / live.
+export default memo(TaskSampleStrip)
+
+function TaskSampleStrip({ taskId, live = false }: {
   taskId: number
   /** running task -> subscribes to monitor_progress, auto-appends new images. */
   live?: boolean
@@ -159,6 +163,7 @@ export default function TaskSampleStrip({ taskId, live = false }: {
                     src={api.sampleImageUrl(s.filename, taskId, THUMB_REQ)}
                     alt=""
                     loading="lazy"
+                    decoding="async"
                   />
                 </span>
                 {caption && <span className="ds-sample-cap">{caption}</span>}
@@ -180,6 +185,9 @@ export default function TaskSampleStrip({ taskId, live = false }: {
           onClose={() => setZoomIdx(null)}
           onPrev={() => setZoomIdx((i) => Math.max(0, (i ?? 0) - 1))}
           onNext={() => setZoomIdx((i) => Math.min(items.length - 1, (i ?? 0) + 1))}
+          preload={[items[zoomIdx - 1], items[zoomIdx + 1]]
+            .filter((x): x is TaskSample => !!x)
+            .map((x) => api.sampleImageUrl(x.filename, taskId))}
         />
       )}
     </div>
