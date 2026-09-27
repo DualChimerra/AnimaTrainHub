@@ -28,7 +28,7 @@ import argparse
 import sys
 from pathlib import Path
 
-# Windows consoles using cp936/cp932 raise UnicodeEncodeError on non-ASCII / emoji; force UTF-8.
+# Windows consoles using a legacy ANSI codepage raise UnicodeEncodeError on non-ASCII / emoji; force UTF-8.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")

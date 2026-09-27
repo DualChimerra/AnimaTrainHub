@@ -893,5 +893,5 @@ moves from project level to version/train/. Module boundaries are unchanged.
 - `studio/api/routers/projects/curation.py:117-186,271,342` — thumb endpoint bucket=train + 2 duplicates endpoint URLs
 - `studio/web/src/components/Sidebar.tsx:11-29,266-274,472` — STEP order / phase mapping / project-scope regex
 - `studio/web/src/api/client.ts` — `VersionPhase` / `PHASE_ORDER` / `PHASE_SKIPPABLE`
-- `studio/web/src/i18n/locales/{zh,en}.json` — "(optional)" copy + idx numbering
+- `studio/web/src/i18n/locales/{ru,en}.json` — "(optional)" copy + idx numbering
 - `studio/web/src/pages/project/steps/Preprocess*.tsx` — data contract + 4 sub-pages

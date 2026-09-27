@@ -20,11 +20,11 @@ Message conventions (ADR-0009 §4.1 + the B-audit cross-D finding):
   - the `message` field is **English** -- the frontend looks up `code` in an
     i18n table to render a localized string; `message` is only the English
     fallback display. This avoids reviving the ADR-0008 §cross-D
-    Chinese-string-matching trap through DomainError.
+    localized-string-matching trap through DomainError.
   - the `code` field is named **domain.action** (`preset.not_found` /
     `curation.duplicate`).
   - short-term (0.12.0), existing service errors like PresetError still have
-    Chinese messages (C3 only adds the base class, doesn't touch messages),
+    legacy messages (C3 only adds the base class, doesn't touch messages),
     but **new code must** use an English message + i18n code.
 
 Usage:

@@ -2180,16 +2180,6 @@ export interface ModelsRootMigrateStatus {
   error: string
 }
 
-export interface AnnouncementPost {
-  id: string
-  date: string
-  tag: 'release' | 'notice' | 'migration'
-  title: { zh: string; en: string }
-  body: { zh: string; en: string }
-  pin: boolean
-  version: string | null
-}
-
 export const api = {
   health: () => req<HealthResponse>('/api/health'),
   systemStats: () => req<SystemStats>('/api/system/stats'),

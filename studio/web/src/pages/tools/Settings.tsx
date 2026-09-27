@@ -252,7 +252,7 @@ const MODEL_DESCRIPTION_KEYS: Record<string, string> = {
   cltagger: 'settings.modelDescriptions.cltagger',
 }
 
-// Catalog names come from the backend in Chinese for the main models.
+// The backend sends English catalog names; localize the main models on the frontend.
 const MODEL_NAME_KEYS: Record<string, string> = {
   anima_main: 'settings.modelNames.animaMain',
   krea2_main: 'settings.modelNames.krea2Main',

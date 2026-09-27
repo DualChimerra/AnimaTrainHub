@@ -13,7 +13,7 @@ export function parseTags(s: string): string[] {
  * - **Editing (focus)**: a plain-text `<input>`, commas / spaces typed freely. Controlled by the text, not the
  *   array, to avoid a "join-back on every keystroke" wiping out a comma / trailing space being typed. An autocomplete
  *   popover pops up below the input; keyboard up/down + Enter/Tab select.
- * - **Idle (blur)**: renders tags as chips, scannable at a glance; shows the Chinese translation when there's a match.
+ * - **Idle (blur)**: renders tags as chips, scannable at a glance.
  *
  * On blur the text is normalized to `tags.join(', ')`, so re-entering edit mode shows the canonical form.
  * Use this directly for cases that already have their own outer label (Settings' SettingsField); for a

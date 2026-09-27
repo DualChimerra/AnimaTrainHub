@@ -15,12 +15,12 @@ REM Note: PowerShell needs the `.\` prefix; cmd.exe accepts either.
 REM
 REM NOTE: This file MUST stay pure ASCII. cmd.exe parses .bat files with the
 REM system ANSI codepage BEFORE `chcp 65001` takes effect, so any non-ASCII
-REM byte breaks line parsing on Japanese (cp932), Chinese (cp936), etc. hosts.
+REM byte breaks line parsing on hosts with a non-UTF-8 ANSI codepage.
 
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-REM Force Python to UTF-8 stdout/stderr so prints with non-ASCII (Chinese)
+REM Force Python to UTF-8 stdout/stderr so prints with non-ASCII
 REM don't crash on non-UTF-8 system locales (e.g. cp932 Japanese).
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8

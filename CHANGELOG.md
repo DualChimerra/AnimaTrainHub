@@ -1613,7 +1613,7 @@ Test image generation + prior generation + Setup rewrite + Settings split + CLTa
   - Backend: `versions.list_project_state_ckpts()` / `list_project_lora_ckpts()` + `/api/projects/{pid}/state_ckpts` / `/lora_ckpts` endpoints
   - Fixes the root UX problem: previously you had to dig five levels deep from REPO_ROOT to `output/training_state_step*.pt` just to resume
 - **Setup rewrite: GPU-aware torch on first install + venv stale check + --reinstall as a lifeline**
-  - `studio.bat` is pure ASCII now (no more crashes under cp936 cmd.exe) + a test as backstop
+  - `studio.bat` is pure ASCII now (no more crashes under non-UTF-8 cmd.exe) + a test as backstop
   - bootstrap: prefers `py -3` on Windows, iterates version checks on Linux
   - venv stale check + `--reinstall` flag (environment lifeline)
   - GPU-aware torch on first install; big warning when a CPU-only build gets installed by mistake

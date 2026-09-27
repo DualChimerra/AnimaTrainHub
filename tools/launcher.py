@@ -62,8 +62,8 @@ MIN_PYTHON = (3, 10)
 # ---------------------------------------------------------------------------
 #
 # **Every string this file prints must be pure ASCII**, the same discipline as studio.bat.
-# The Windows console decodes using the system ANSI codepage (Russian cp866, Chinese cp936,
-# Japanese cp932); a frozen exe writing a single `->`-style arrow glyph is an instant
+# The Windows console decodes using the system ANSI codepage (e.g. Russian cp866,
+# Western cp1252); a frozen exe writing a single `->`-style arrow glyph is an instant
 # UnicodeEncodeError crash -- and the crash usually happens **in the error path itself**
 # (die()'s hint line), so the user doesn't see "Python isn't installed" but a PyInstaller
 # traceback instead. Comments and docstrings aren't bound by this rule (they're never

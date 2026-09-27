@@ -33,7 +33,7 @@ import argparse
 import sys
 from pathlib import Path
 
-# CJK output crashes under Windows console cp932; force utf-8
+# Non-ASCII output crashes under Windows console cp932; force utf-8
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
