@@ -4,7 +4,7 @@
  * Data source: GET /api/state?task_id=N fetches a downsampled snapshot + SSE monitor_progress
  * goes through the useMonitorProgress hook for delta merging (PR #37's incremental protocol).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, type EvalJobInfo, type EvalMetricResult, type EvalMetricState, type LoraCkpt, type MonitorState } from '../api/client'
 import { evalProgressFromResults } from '../lib/useEvalProgress'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
@@ -840,7 +840,7 @@ function sampleMarks(s: { path: string; step?: number }): { step: number | null;
   }
 }
 
-function SampleViewer({ samples, taskId }: {
+const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
   samples: Array<{ path: string; step?: number }>
   taskId: number
 }) {
@@ -956,7 +956,7 @@ function SampleViewer({ samples, taskId }: {
           key={fullUrl}
           src={fullUrl}
           alt="sample preview"
-          loading="lazy"
+          decoding="async"
           onClick={() => setZoomOpen(true)}
           className="absolute inset-0 w-full h-full object-contain cursor-zoom-in"
         />
@@ -985,11 +985,14 @@ function SampleViewer({ samples, taskId }: {
           onClose={() => setZoomOpen(false)}
           onPrev={() => setActive((i) => Math.max(0, i - 1))}
           onNext={() => setActive((i) => Math.min(list.length - 1, i + 1))}
+          preload={[list[active - 1], list[active + 1]]
+            .filter((x): x is { path: string; step?: number } => !!x)
+            .map((x) => api.sampleImageUrl(x.path.split(/[\\/]/).pop() ?? x.path, taskId))}
         />
       )}
     </div>
   )
-}
+})
 
 // ── Main Component ─────────────────────────────────────────────────────────
 
@@ -1056,6 +1059,15 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
   const vramTotal = state?.vram_total_gb
   const vramTone = vram && vramTotal ? (vram / vramTotal > 0.85 ? 'warn' : 'ok') as 'ok' | 'warn' : undefined
 
+  // Full raw series (no more slice(-60)) -- SeriesChart downsamples evenly to 600 points internally when rendering.
+  // Memoized: the arrays run up to 50k points and the dashboard re-renders on every SSE delta, so the
+  // charts only rebuild when their own series actually changed.
+  const lossSeries = useMemo(() => losses.map((l) => ({ step: l.step, value: l.loss })), [losses])
+  const lrSeries = useMemo(() => lrHistory.map((l) => ({ step: l.step, value: l.lr })), [lrHistory])
+  const dSeries = useMemo(() => optimizerMetricsHistory
+    .filter((m) => typeof m.d === 'number')
+    .map((m) => ({ step: m.step, value: m.d as number })), [optimizerMetricsHistory])
+
   if (!state && !connected) {
     return (
       <div className="grid place-items-center h-[200px] text-fg-tertiary text-sm">
@@ -1063,13 +1075,6 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
       </div>
     )
   }
-
-  // Full raw series (no more slice(-60)) -- SeriesChart downsamples evenly to 600 points internally when rendering
-  const lrSeries = lrHistory.map((l) => ({ step: l.step, value: l.lr }))
-  const dSeries = optimizerMetricsHistory
-    .map((m) => ({ step: m.step, d: m.d }))
-    .filter((m): m is { step: number; d: number } => typeof m.d === 'number')
-    .map((m) => ({ step: m.step, value: m.d }))
 
   return (
     <div className="flex flex-col gap-3.5 p-4 h-full overflow-y-auto m-page-scroll m-p-sm">
@@ -1165,7 +1170,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
               <SmoothControl alpha={emaAlpha} setAlpha={setEmaAlpha} min={0.001} max={0.3} step={0.001} />
             </div>
             <SeriesChart
-              data={losses.map((l) => ({ step: l.step, value: l.loss }))}
+              data={lossSeries}
               rawColor="color-mix(in srgb, var(--fg-secondary) 35%, transparent)"
               smoothColor="var(--accent)"
               fillColor="var(--accent-soft)"
@@ -1190,19 +1195,11 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
             />
           </div>
 
-              <div className="card p-4 flex-1 flex flex-col monitor-chart-card" style={{ minHeight: 140, maxHeight: 300 }}>
-                <div className="flex items-center justify-between mb-2 shrink-0">
-                  <span className="text-sm font-semibold">learning rate</span>
-                  <SmoothControl alpha={lrAlpha} setAlpha={setLrAlpha} min={0.005} max={1} step={0.005} />
-                </div>
-                <SeriesChart
-                  data={lrSeries}
-                  rawColor="rgba(224,162,58,0.35)"
-                  smoothColor="var(--warn)"
-                  emaAlpha={lrAlpha}
-                  yFormat={fmtLr}
-                  minHeight={60}
-                />
+          {/* d value (Prodigy / D-Adaptation etc.) -- only when the optimizer reports it. */}
+          {dSeries.length > 0 && (
+            <div className="card p-4 flex-1 flex flex-col monitor-chart-card" style={{ minHeight: 140, maxHeight: 300 }}>
+              <div className="flex items-center justify-between mb-2 shrink-0">
+                <span className="text-sm font-semibold">d</span>
               </div>
               <SeriesChart
                 data={dSeries}
@@ -1213,7 +1210,9 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
                 minHeight={60}
               />
             </div>
-          </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

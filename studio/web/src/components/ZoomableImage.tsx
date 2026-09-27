@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useZoomPan } from '../lib/useZoomPan'
 
@@ -36,13 +36,17 @@ export default function ZoomableImage({
   readout?: boolean
 }) {
   const { t } = useTranslation()
+  // Not reset when src changes: the browser keeps painting the current image until the
+  // next one has loaded and decoded, so flipping through a sequence never flashes an
+  // empty viewport. onLoad then stores the new size and we refit before the frame paints.
   const [nat, setNat] = useState<{ w: number; h: number } | null>(null)
-  useEffect(() => { setNat(null) }, [src])
   const zp = useZoomPan({
     contentW: nat?.w ?? 0,
     contentH: nat?.h ?? 0,
     primaryButtonPans: true,
   })
+  const { fit } = zp
+  useLayoutEffect(() => { if (nat) fit() }, [nat, fit])
 
   return (
     <div
@@ -61,6 +65,7 @@ export default function ZoomableImage({
           src={src}
           alt={alt}
           draggable={false}
+          decoding="async"
           onLoad={(e) => {
             const w = e.currentTarget.naturalWidth
             const h = e.currentTarget.naturalHeight
@@ -75,6 +80,7 @@ export default function ZoomableImage({
             transformOrigin: '0 0',
             maxWidth: 'none',
             maxHeight: 'none',
+            willChange: 'transform',
             visibility: nat ? 'visible' : 'hidden',
           }}
         />

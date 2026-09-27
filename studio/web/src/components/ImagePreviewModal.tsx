@@ -1,4 +1,5 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 
 import ZoomableImage from './ZoomableImage'
 
@@ -23,6 +24,9 @@ interface Props {
   onAccept?: () => void
   onDelete?: () => void
   shortcutHint?: string
+  /** URLs to warm up in the background (usually the prev/next image), so flipping
+   *  with the arrows shows an already-decoded image instead of loading from scratch. */
+  preload?: string[]
 }
 
 export default function ImagePreviewModal({
@@ -41,9 +45,15 @@ export default function ImagePreviewModal({
   onAccept,
   onDelete,
   shortcutHint,
+  preload,
 }: Props) {
+  // Handlers live in a ref so the keydown listener binds once: callers pass fresh
+  // inline closures on every render (and some re-render on every training tick).
+  const keysRef = useRef({ hasPrev, hasNext, onPrev, onNext, onClose, onAccept, onDelete })
+  keysRef.current = { hasPrev, hasNext, onPrev, onNext, onClose, onAccept, onDelete }
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      const { hasPrev, hasNext, onPrev, onNext, onClose, onAccept, onDelete } = keysRef.current
       if (e.key === 'Escape') {
         e.preventDefault()
         onClose()
@@ -63,11 +73,35 @@ export default function ImagePreviewModal({
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [hasPrev, hasNext, onPrev, onNext, onClose, onAccept, onDelete])
+  }, [])
+
+  // The page behind stays put while the lightbox is open (no scroll-through on wheel / touch).
+  useEffect(() => {
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [])
+
+  // Warm up the neighbours; keyed by the joined URLs so a re-render with the same list is a no-op.
+  const preloadKey = (preload ?? []).filter(Boolean).join('\n')
+  useEffect(() => {
+    if (!preloadKey) return
+    const t = window.setTimeout(() => {
+      for (const u of preloadKey.split('\n')) {
+        const img = new Image()
+        img.decoding = 'async'
+        img.src = u
+      }
+    }, 150)
+    return () => window.clearTimeout(t)
+  }, [preloadKey])
 
   const counter = index != null && total != null ? `${index + 1} / ${total}` : null
 
-  return (
+  // Portaled to <body>: callers mount this deep inside cards, and an ancestor with opacity /
+  // transform (e.g. a finished queue card at opacity .72) would otherwise make the fixed
+  // overlay translucent, trap it under later siblings and composite the page behind every frame.
+  return createPortal(
     <div
       className="fixed inset-0 z-50 bg-black flex flex-col"
       onClick={onClose}
@@ -132,7 +166,8 @@ export default function ImagePreviewModal({
           {shortcutHint && <div>{shortcutHint}</div>}
         </div>
       )}
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -152,6 +187,7 @@ function SplitPane({
         src={src}
         alt={label ?? altFallback ?? 'preview'}
         onClick={(e) => e.stopPropagation()}
+        decoding="async"
         className="max-w-full max-h-full object-contain"
       />
     </div>

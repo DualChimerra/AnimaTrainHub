@@ -59,6 +59,27 @@ function _maybeClose(): void {
 }
 
 /**
+ * Non-hook subscription to the same shared stream, for module-level stores that
+ * outlive any single component. onOpen fires on every (re)connect, and right away
+ * when the shared connection is already open. Returns the unsubscribe function.
+ */
+export function subscribeEventStream(onEvent: Listener, onOpen?: OpenListener): () => void {
+  if (typeof EventSource === 'undefined') return () => {}
+  const openHandler: OpenListener = () => onOpen?.()
+  _listeners.add(onEvent)
+  _openListeners.add(openHandler)
+  _ensureOpen()
+  if (_es && _es.readyState === EventSource.OPEN) {
+    try { onOpen?.() } catch { /* ignore */ }
+  }
+  return () => {
+    _listeners.delete(onEvent)
+    _openListeners.delete(openHandler)
+    _maybeClose()
+  }
+}
+
+/**
  * Subscribes to the /api/events SSE stream. The callback fires once per event.
  * Reconnects automatically on disconnect (this is just EventSource's built-in behavior).
  *

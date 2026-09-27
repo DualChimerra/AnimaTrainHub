@@ -28,7 +28,7 @@
  *   the pan/zoom hot path never goes through React rendering; only zoomPct
  *   (for the readout) goes through state
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 export interface ZoomPanView {
   scale: number
@@ -140,8 +140,9 @@ export function useZoomPan({
     }
   }, [])
 
-  // Auto-fit when switching images / on initial readiness
-  useEffect(() => {
+  // Auto-fit when switching images / on initial readiness. Layout effect: the new
+  // transform lands before the browser paints, so the image never shows a frame at the old scale.
+  useLayoutEffect(() => {
     fit()
   }, [fit])
 
