@@ -54,7 +54,7 @@ const initialServerState = {
     presets: [
       {
         id: 'style_json',
-        label: '画风 LoRA JSON',
+        label: 'Style LoRA JSON',
         builtin: true,
         base_url: '',
         api_key: '',
@@ -84,7 +84,7 @@ const initialServerState = {
       },
       {
         id: 'joycaption',
-        label: 'JoyCaption（vLLM 本地）',
+        label: 'JoyCaption (vLLM local)',
         builtin: true,
         base_url: 'http://localhost:8000/v1',
         api_key: '',
@@ -151,7 +151,7 @@ const emptyModelsCatalog = {
   models_root: '/tmp/anima',
   anima_main: {
     id: 'anima_main',
-    name: 'Anima 主模型',
+    name: 'Anima main model',
     description: 'test',
     repo: 'circlestone-labs/Anima',
     variants: [],
@@ -187,7 +187,7 @@ const emptyModelsCatalog = {
   },
   krea2_main: {
     id: 'krea2_main',
-    name: 'Krea 2 主模型',
+    name: 'Krea 2 main model',
     description: 'test',
     repo: 'krea/Krea-2-{Raw,Turbo}',
     variants: [
@@ -442,11 +442,11 @@ describe('SettingsPage (PP0)', () => {
   it('hydrates from /api/secrets and shows masked sensitive fields as placeholder', async () => {
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('button', { name: '密钥' }))
+    await user.click(await screen.findByRole('button', { name: 'Credentials' }))
     await waitFor(() =>
       expect(screen.getByDisplayValue('alice')).toBeInTheDocument()
     )
-    const placeholder = screen.getByPlaceholderText(/已保存/)
+    const placeholder = screen.getByPlaceholderText(/Saved/)
     expect(placeholder).toBeInTheDocument()
     expect((placeholder as HTMLInputElement).value).toBe('')
   })
@@ -454,7 +454,7 @@ describe('SettingsPage (PP0)', () => {
   it('PUT /api/secrets only sends the changed leaves', async () => {
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('button', { name: '密钥' }))
+    await user.click(await screen.findByRole('button', { name: 'Credentials' }))
     const userInput = await screen.findByDisplayValue('alice')
     await user.clear(userInput)
     await user.type(userInput, 'bob')
@@ -474,21 +474,21 @@ describe('SettingsPage (PP0)', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.click(await screen.findByRole('button', { name: '密钥' }))
+    await user.click(await screen.findByRole('button', { name: 'Credentials' }))
     for (const name of ['HuggingFace', 'ModelScope', 'Gelbooru', 'Danbooru']) {
       expect(screen.getByRole('heading', { name })).toBeInTheDocument()
     }
     expect(screen.queryByRole('heading', { name: 'Weights & Biases' })).not.toBeInTheDocument()
     expect(screen.getByDisplayValue('alice')).toBeInTheDocument()
 
-    await user.click(await screen.findByRole('button', { name: '数据集' }))
+    await user.click(await screen.findByRole('button', { name: 'Dataset' }))
     expect(screen.queryByDisplayValue('alice')).not.toBeInTheDocument()
   })
 
   it('per-item source dropdown writes download_sources immediately', async () => {
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('button', { name: '打标' }))
+    await user.click(await screen.findByRole('button', { name: 'Tagging' }))
     const msOption = await screen.findByRole('option', { name: /ModelScope/ })
     const select = msOption.closest('select') as HTMLSelectElement
     await user.selectOptions(select, 'modelscope')
@@ -508,11 +508,11 @@ describe('SettingsPage (PP0)', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.click(await screen.findByRole('link', { name: '训练' }))
-    expect(await screen.findByRole('heading', { name: 'Anima 模型' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Krea2 模型' })).toBeInTheDocument()
-    expect(await screen.findByRole('heading', { name: 'Krea 2 主模型' })).toBeInTheDocument()
-    expect(screen.getByText('Krea 2 · Qwen3-VL 文本编码器')).toBeInTheDocument()
+    await user.click(await screen.findByRole('link', { name: 'Training' }))
+    expect(await screen.findByRole('heading', { name: 'Anima models' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Krea2 models' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Krea 2 main model' })).toBeInTheDocument()
+    expect(screen.getByText('Krea 2 \u00b7 Qwen3-VL text encoder')).toBeInTheDocument()
     expect(screen.getByText('bf16')).toBeInTheDocument()
     expect(screen.getByText('fp8')).toBeInTheDocument()
     expect(screen.getByText('raw')).toBeInTheDocument()
@@ -520,23 +520,23 @@ describe('SettingsPage (PP0)', () => {
     expect(screen.getByText('my-krea2.safetensors')).toBeInTheDocument()
     const customRow = screen.getByText('my-krea2.safetensors').closest('li')
     expect(customRow).not.toBeNull()
-    expect(within(customRow!).getByText('本地')).toBeInTheDocument()
+    expect(within(customRow!).getByText('local')).toBeInTheDocument()
     expect(customRow!.querySelector('.bg-ok-soft')).not.toBeNull()
-    expect(within(customRow!).getByTitle('从列表移除（不删除文件）')).toBeInTheDocument()
+    expect(within(customRow!).getByTitle('Remove from list (keeps files)')).toBeInTheDocument()
     expect(within(customRow!).queryByText(/🗑/)).not.toBeInTheDocument()
     expect(screen.getAllByRole('radio')).toHaveLength(5)
-    expect(screen.queryByText(/推荐工作流/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Recommended workflow/)).not.toBeInTheDocument()
     const rawRow = screen.getByText('raw').closest('li')!
     const turboRow = screen.getByText('turbo').closest('li')!
-    expect(within(rawRow).getByText('训练')).toBeInTheDocument()
-    expect(within(turboRow).getByText('推理')).toBeInTheDocument()
+    expect(within(rawRow).getByText('training')).toBeInTheDocument()
+    expect(within(turboRow).getByText('inference')).toBeInTheDocument()
   })
 
-  it('picking a variant writes new-style selected.{family}（多模型 P4-5）', async () => {
+  it('picking a variant writes new-style selected.{family} (multi-model P4-5)', async () => {
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('link', { name: '训练' }))
-    await screen.findByRole('heading', { name: 'Krea 2 主模型' })
+    await user.click(await screen.findByRole('link', { name: 'Training' }))
+    await screen.findByRole('heading', { name: 'Krea 2 main model' })
     const customRow = screen.getByText('my-krea2.safetensors').closest('li')!
     await user.click(within(customRow).getByRole('radio'))
 
@@ -556,25 +556,25 @@ describe('SettingsPage (PP0)', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.click(await screen.findByRole('button', { name: '打标' }))
-    const defaultRow = screen.getByText('画风 LoRA JSON').closest('li')
+    await user.click(await screen.findByRole('button', { name: 'Tagging' }))
+    const defaultRow = screen.getByText('Style LoRA JSON').closest('li')
     expect(defaultRow).not.toBeNull()
     expect(within(defaultRow as HTMLElement).getByRole('radio')).toBeChecked()
-    await user.click(within(defaultRow as HTMLElement).getByRole('button', { name: /编辑/ }))
+    await user.click(within(defaultRow as HTMLElement).getByRole('button', { name: /Edit/ }))
 
     const modal = await screen.findByTestId('llm-preset-editor-modal')
-    expect(within(modal).getByText('预设名称')).toBeInTheDocument()
-    expect(within(modal).getByText('并发数')).toBeInTheDocument()
-    expect(within(modal).getByText('每秒请求数（0 = 不限）')).toBeInTheDocument()
-    expect(within(modal).getByText('每分钟最大请求数（0 = 不限）')).toBeInTheDocument()
+    expect(within(modal).getByText('Preset name')).toBeInTheDocument()
+    expect(within(modal).getByText('Concurrency')).toBeInTheDocument()
+    expect(within(modal).getByText('Requests per second (0 = no limit)')).toBeInTheDocument()
+    expect(within(modal).getByText('Max requests per minute (0 = no limit)')).toBeInTheDocument()
   })
 
   it('selecting another LLM preset as global default PUTs current_preset', async () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.click(await screen.findByRole('button', { name: '打标' }))
-    const joyRow = screen.getByText('JoyCaption（vLLM 本地）').closest('li')
+    await user.click(await screen.findByRole('button', { name: 'Tagging' }))
+    const joyRow = screen.getByText('JoyCaption (vLLM local)').closest('li')
     await user.click(within(joyRow as HTMLElement).getByRole('radio'))
 
     await waitFor(() => {
@@ -591,7 +591,7 @@ describe('SettingsPage (PP0)', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.click(await screen.findByRole('button', { name: '打标' }))
+    await user.click(await screen.findByRole('button', { name: 'Tagging' }))
     const v2Row = screen.getByText('cl_tagger_v2_v2_01a').closest('li')
     expect(v2Row).not.toBeNull()
     await user.click(within(v2Row as HTMLElement).getByRole('radio'))

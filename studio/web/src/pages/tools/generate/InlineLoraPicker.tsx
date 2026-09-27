@@ -7,7 +7,7 @@ function basenameOf(path: string): string {
   return path.split(/[\\/]/).pop() ?? path
 }
 
-/** 项目缩写图标（2 字符 uppercase）。SidebarLoras / 历史代码引用。 */
+/** Project abbreviation icon (2-char uppercase). Referenced by SidebarLoras / legacy code. */
 export function projectAbbr(title: string): string {
   const cleaned = title.replace(/[^a-zA-Z0-9]/g, '')
   return (cleaned.slice(0, 2) || '??').toUpperCase()
@@ -20,9 +20,9 @@ export interface PickedLora {
 }
 
 interface CommonProps {
-  /** 懒级联数据源：picker 自己按需拉 projects / versions / ckpts（见 useLoraCatalog） */
+  /** Lazy cascading data source: the picker fetches projects / versions / ckpts on demand (see useLoraCatalog) */
   catalog: LoraCatalog
-  /** × 按钮回调：单选模式 = 删整个槽；多选模式 = 关 inline 面板 */
+  /** × button callback: single mode = delete the whole slot; multi mode = close the inline panel */
   onClose: () => void
   onPickExternal?: () => void
   /** Rendered inside a LoRA slot card that already has its own name row, ×
@@ -32,43 +32,43 @@ interface CommonProps {
 
 interface SingleModeProps extends CommonProps {
   mode: 'single'
-  /** 当前槽绑的 ckpt（null = 槽空着）。受控。 */
+  /** The ckpt bound to this slot (null = empty slot). Controlled. */
   value: PickedLora | null
-  /** 当前权重。受控。 */
+  /** Current weight. Controlled. */
   weight: number
-  /** value/weight 任一变更都走这个回调。 */
+  /** Fires on any value/weight change. */
   onChange: (next: PickedLora | null, weight: number) => void
-  /** showWeight 强制为 true（单选模式 = 一个 LoRA 槽，必有权重）。 */
+  /** showWeight is forced to true (single mode = one LoRA slot, always has a weight). */
   showWeight?: never
   existingPaths?: never
 }
 
 interface MultiModeProps extends CommonProps {
   mode?: 'multi'
-  /** 已被 caller 选过的 path（其他 LoRA 槽 / 其他 axis 占用），在 list 标 ✓ 禁用 */
+  /** Paths already picked by the caller (other LoRA slots / other axes) — shown checked and disabled in the list */
   existingPaths?: Set<string>
-  /** chip 切换 / 权重 / pid-vid 变更回调。
+  /** Fires on chip toggle / weight / pid-vid change.
    *
-   * - 普通 multi 模式：用户点「添加 N 个」commit 时触发，picker 自动 onClose
-   * - live 模式：每次 chip toggle / 权重变 / pid-vid 切都立即触发（不依赖 commit 按钮）
+   * - Normal multi mode: fires when the user clicks "Add N" to commit; the picker then auto-closes.
+   * - live mode: fires immediately on every chip toggle / weight change / pid-vid switch (no commit button).
    */
   onPick: (picks: PickedLora[], weight: number) => void
-  /** XY 轴绑定下应 hide 权重（轴卡片自己有 lora_scale 控制） */
+  /** Hide the weight row for XY axis bindings (the axis card has its own lora_scale control) */
   showWeight?: boolean
   defaultWeight?: number
-  /** 即时生效：每次 chip toggle 都 onPick，不再渲染「添加 N 个」commit footer。
-   *  用于 XY 轴卡片这种「picker 常驻、用户期望所见即所得」的场景。 */
+  /** Live commit: every chip toggle calls onPick immediately instead of rendering an "Add N" commit footer.
+   *  Used by XY axis cards, where the picker stays mounted and the user expects what-you-see-is-what-you-get. */
   live?: boolean
-  /** 受控选中集合（仅 live 模式有意义）：picker 同步内部 picked 跟随这个数组。
+  /** Controlled selection set (only meaningful in live mode): the picker keeps its internal `picked` in sync with this array.
    *
-   * 元素可以是全 path 或 basename：raw 字符串 split 即可塞过来，picker 内会按
-   * basename 等价匹配 ckpts 后高亮全 path。命中 basename → path 时立即 onPick
-   * 回写全 path（修历史回填时 raw 是 basename 让 daemon "路径不存在"）。
+   * Elements can be a full path or a basename: a raw string can just be split and passed in, and the picker
+   * matches basenames against ckpts to highlight the full path. On a basename match it immediately calls onPick
+   * to write back the full path (fixes history backfill sending a basename, which the daemon reports as "path not found").
    *
-   * undefined = picker 用纯内部 picked state（active task / bulk-add 流程）。 */
+   * undefined = the picker uses its own internal picked state (active task / bulk-add flow). */
   selectedPaths?: string[]
-  /** 受控 pid/vid 初值（仅 live 模式）：与 selectedPaths 配套，让 picker mount
-   *  时锚到正确 project/version，否则会 fallback 到 projects[0]。 */
+  /** Controlled initial pid/vid (live mode only): paired with selectedPaths so the picker anchors to the
+   *  right project/version on mount, otherwise it falls back to projects[0]. */
   initialPid?: number | null
   initialVid?: number | null
   value?: never
@@ -78,33 +78,35 @@ interface MultiModeProps extends CommonProps {
 
 type Props = SingleModeProps | MultiModeProps
 
-/** 内嵌 LoRA 选择器：项目 + 版本下拉 → ckpt chip 列表 → 单选 / 多选 + 权重。
+/** Inline LoRA picker: project + version dropdowns -> ckpt chip list -> single/multi select + weight.
  *
- * **single 模式**（受控）：一个 picker = 一个 LoRA 槽。点 chip = 切换当前槽 ckpt；
- *   再点同 chip = 取消（槽空）。weight slider 改 = 立即 onChange。× = 删槽。
+ * **single mode** (controlled): one picker = one LoRA slot. Clicking a chip swaps the slot's ckpt;
+ *   clicking the same chip again clears it (empty slot). Changing the weight slider fires onChange
+ *   immediately. × deletes the slot.
  *
- * **multi 模式**（XY 轴 / bulk add）：toggle 多选 + 底部 weight + 「添加 N 个」按钮
- *   一次性 commit；commit 后 onClose 自动触发；× = 取消 inline 面板。XY 场景下
- *   传 `showWeight=false` 隐藏权重栏。
+ * **multi mode** (XY axis / bulk add): toggle multi-select + a weight footer + an "Add N" button that
+ *   commits once; onClose fires automatically after commit. × cancels the inline panel. XY usage passes
+ *   `showWeight=false` to hide the weight row.
  */
 export default function InlineLoraPicker(props: Props) {
   const { t } = useTranslation()
   const { catalog, onClose, onPickExternal, embedded = false } = props
-  // 解构出稳定的 loader（useCallback）+ 响应式数据，effect deps 用纯标识符。
+  // Destructure the stable loaders (useCallback) plus reactive data; effect deps use plain identifiers.
   const { projects, ensureProjects, ensureVersions, versionsOf, fetchCkpts } = catalog
   const isSingle = props.mode === 'single'
   const showWeight = isSingle ? true : (props.showWeight ?? true)
   const existingPaths = isSingle ? new Set<string>() : (props.existingPaths ?? new Set<string>())
 
-  // 项目下拉：picker mount 即懒拉项目列表（catalog 缓存 + 去重，不开 picker 不发）
+  // Project dropdown: fetch the project list lazily on mount (catalog caches + dedupes, so it's a no-op if the picker isn't open)
   useEffect(() => { ensureProjects() }, [ensureProjects])
 
-  // multi mode 受控锚定：caller 给 initialPid/Vid 时直接采纳（历史回填走这条）
+  // Multi mode controlled anchor: adopt caller-supplied initialPid/Vid directly (history backfill goes through here)
   const multiInitialPid = !isSingle ? (props as MultiModeProps).initialPid ?? null : null
   const multiInitialVid = !isSingle ? (props as MultiModeProps).initialVid ?? null : null
-  // 初始 pid/vid：single 用 value 的；multi 用 initialPid/Vid 兜底。
-  // 懒级联下项目列表 mount 时还没到 → 起步 null；projects 到了再由下方 effect
-  // 自动锚第一个项目（保留「打开 picker 即看到第一个项目 ckpts」的既有 UX）。
+  // Initial pid/vid: single mode uses `value`; multi mode falls back to initialPid/Vid.
+  // Under lazy cascading the project list isn't there yet on mount -> start at null;
+  // once projects arrive, the effect below auto-anchors to the first project (preserving
+  // the existing UX of "open the picker and immediately see the first project's ckpts").
   const initialPid = isSingle
     ? (props.value?.projectId ?? null)
     : (multiInitialPid ?? null)
@@ -114,16 +116,17 @@ export default function InlineLoraPicker(props: Props) {
 
   const [pid, setPid] = useState<number | null>(initialPid)
 
-  // pid 定下来（含 anchor 回填 / 用户选）→ 懒拉该项目的 versions
+  // Once pid settles (anchor backfill or user pick) -> lazily fetch that project's versions
   useEffect(() => {
     if (pid != null) ensureVersions(pid)
   }, [ensureVersions, pid])
 
-  // 决策 #8（plan §9.2）：single 模式是受控的，pid 必须跟 props.value.projectId
-  // 同步 —— 否则历史回填 / URL ?lora= 流回新 LoraEntry 时，下拉框还卡在
-  // 旧值（之前靠父级 bump urlConsumedKey 强制 remount 兜底，Step 6 砍掉）。
-  // setPid 函数式更新 + 值未变跳过自动免无限循环。
-  // value=null 时不 sync（保留 fallback：未选 LoRA 时给用户看 projects[0] ckpts）
+  // Decision #8 (plan §9.2): single mode is controlled, so pid must stay in sync with
+  // props.value.projectId — otherwise a history backfill / URL ?lora= flowing into a new
+  // LoraEntry would leave the dropdown stuck on the old value (previously papered over by
+  // the parent bumping urlConsumedKey to force a remount; removed in Step 6).
+  // Functional setPid update + skip when the value is unchanged, to avoid an infinite loop.
+  // Not synced when value=null (keeps the fallback of showing projects[0]'s ckpts when no LoRA is picked)
   const singleValue = isSingle ? props.value : null
   useEffect(() => {
     if (!isSingle || singleValue == null) return
@@ -131,15 +134,16 @@ export default function InlineLoraPicker(props: Props) {
     setPid((cur) => (cur === next ? cur : next))
   }, [isSingle, singleValue])
 
-  // multi mode：当 caller 给 initialPid（XY 历史回填），pid 跟着 prop 走
+  // Multi mode: when the caller supplies initialPid (XY history backfill), pid follows the prop
   useEffect(() => {
     if (isSingle || multiInitialPid == null) return
     setPid((cur) => (cur === multiInitialPid ? cur : multiInitialPid))
   }, [isSingle, multiInitialPid])
 
-  // 无 anchor（single value=null / multi 无 initialPid）时，projects 懒加载到位后
-  // 自动锚第一个项目 —— 保留既有 UX：打开 picker 即看到第一个项目的 ckpts（不必
-  // 先手选项目）。有 anchor 时上面两个 sync effect 接手，这里跳过。
+  // With no anchor (single value=null / multi with no initialPid), once projects lazily load,
+  // auto-anchor to the first project — preserves the existing UX of seeing the first project's
+  // ckpts as soon as the picker opens, without having to pick one first. Skipped when an anchor
+  // exists, since the two sync effects above already handle that case.
   const hasAnchor = isSingle ? singleValue != null : multiInitialPid != null
   useEffect(() => {
     if (hasAnchor) return
@@ -147,27 +151,27 @@ export default function InlineLoraPicker(props: Props) {
     setPid((cur) => (cur != null ? cur : projects[0].id))
   }, [hasAnchor, projects])
 
-  // 版本下拉：来自 catalog（pid 定后由上面 effect 懒拉）。还没到时为空数组。
+  // Version dropdown: sourced from the catalog (fetched lazily by the effect above once pid settles). Empty array until it arrives.
   const versions = useMemo(
     () => (pid != null ? versionsOf(pid) ?? [] : []),
     [versionsOf, pid],
   )
 
   const [vid, setVid] = useState<number | null>(initialVid)
-  // 同 pid：single 模式下 value 非 null 时 vid 跟 props.value.versionId 同步
+  // Same as pid: in single mode, when value is non-null, vid stays in sync with props.value.versionId
   useEffect(() => {
     if (!isSingle || singleValue == null) return
     const next = singleValue.versionId
     setVid((cur) => (cur === next ? cur : next))
   }, [isSingle, singleValue])
 
-  // multi mode：受控 vid（同 multiInitialPid 一对儿）
+  // Multi mode: controlled vid (pairs with multiInitialPid)
   useEffect(() => {
     if (isSingle || multiInitialVid == null) return
     setVid((cur) => (cur === multiInitialVid ? cur : multiInitialVid))
   }, [isSingle, multiInitialVid])
-  // versions 切换时如果当前 vid 不在新 versions 列表里，自动取第一个
-  // （用户切 project 下拉时触发）
+  // When versions change and the current vid isn't in the new list, auto-pick the first one
+  // (triggered when the user switches the project dropdown)
   useEffect(() => {
     if (versions.length === 0) {
       setVid((cur) => (cur === null ? cur : null))
@@ -176,21 +180,23 @@ export default function InlineLoraPicker(props: Props) {
     }
   }, [versions, vid])
 
-  // 拉 ckpt
+  // Fetch ckpts
   const [ckpts, setCkpts] = useState<LoraCkpt[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // vid 不变量：要么 null（解析中），要么属于当前 pid 的 versions（切 project 时
-  // 由下拉 onChange 同步清空、auto-vid effect 从 versions 选定）。所以这里只在
-  // vid 非 null 时拉 ckpt —— 不会出现 (newPid, oldVid) 这种触发 404 的组合。
+  // vid invariant: either null (still resolving) or belonging to the current pid's versions
+  // (the dropdown onChange clears it on project switch, and the auto-vid effect picks one from
+  // versions). So we only fetch ckpts once vid is non-null — the (newPid, oldVid) combo that
+  // would trigger a 404 can't happen.
   useEffect(() => {
     if (pid === null) {
-      setCkpts([])  // 没选项目 → 清空
+      setCkpts([])  // No project selected -> clear
       return
     }
-    // 切 project 的过渡帧（vid 暂为 null，等 auto-vid 选定）：保留旧 chips 不清，
-    // 由 settling 显加载态。否则会先闪一下「加载中/空」再出新 chips。
+    // Transition frame while switching projects (vid is momentarily null, waiting for auto-vid
+    // to settle): keep the old chips instead of clearing them, and let `settling` show the
+    // loading state. Otherwise there'd be a flash of "loading/empty" before the new chips appear.
     if (vid === null) return
     let cancelled = false
     setLoading(true)
@@ -210,15 +216,18 @@ export default function InlineLoraPicker(props: Props) {
     return () => { cancelled = true }
   }, [pid, vid, fetchCkpts])
 
-  // 切项目后、新项目 versions 还在网络加载（vid 尚未选定）的窄窗口 —— 显「加载中」
-  // 避免长时间空白。仅此一种；版本切换（vid 直接换值、不经 null）不触发，所以
-  // 同项目内换 checkpoint 不闪。已加载但确实无版本的项目（versionsOf 返 []）不算。
+  // Narrow window after switching projects while the new project's versions are still loading
+  // over the network (vid not yet settled) -> show "loading" instead of a long blank gap. This
+  // is the only case; switching versions directly (vid changes without going through null) does
+  // not trigger it, so swapping checkpoints within the same project doesn't flash. A project
+  // that's loaded but genuinely has no versions (versionsOf returns []) doesn't count either.
   const settling = pid !== null && vid === null && versionsOf(pid) === undefined
-  // 更新中：ckpt 请求在飞 或 切项目等新 versions。期间旧 chips 仍显示但禁止点击
-  // （避免点到上一次的 ckpt），并给个不占布局的小提示。
+  // Updating: a ckpt request is in flight, or we're waiting on new versions after a project switch.
+  // Old chips stay visible but clicks are disabled during this (to avoid picking the stale ckpt),
+  // with a small hint that doesn't shift the layout.
   const updating = loading || settling
 
-  // 搜索过滤
+  // Search filter
   const [search, setSearch] = useState('')
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -228,45 +237,47 @@ export default function InlineLoraPicker(props: Props) {
     )
   }, [ckpts, search])
 
-  // 权重：single 模式受控；multi 模式内部状态
+  // Weight: controlled in single mode; internal state in multi mode
   const [internalWeight, setInternalWeight] = useState<number>(
     isSingle ? props.weight : (props.mode === 'multi' ? props.defaultWeight ?? 1.0 : 1.0)
   )
-  // single 模式 weight 跟着 props 走；multi 模式 singleWeight 恒为 0，不会触发同步
+  // In single mode weight follows props; in multi mode singleWeight is always 0 and never triggers the sync
   const singleWeight = isSingle ? props.weight : 0
   useEffect(() => {
     if (isSingle) setInternalWeight(singleWeight)
   }, [isSingle, singleWeight])
 
-  // multi 模式的当前会话选中（single 模式不用，受控走 props.value）
+  // Multi mode's current session selection (unused in single mode, which is controlled via props.value)
   const [picked, setPicked] = useState<Set<string>>(new Set())
   const isLive = !isSingle && (props as MultiModeProps).live === true
-  // 受控选中（live 模式专用）：caller 给 selectedPaths 时 picker 以它为单一来源
+  // Controlled selection (live mode only): when the caller supplies selectedPaths, the picker treats it as the single source of truth
   const multiSelectedPaths = !isSingle ? (props as MultiModeProps).selectedPaths : undefined
   const isControlled = !isSingle && multiSelectedPaths !== undefined
-  // 区分"prop 同步导致的 pid/vid 变化"vs"用户手点下拉"—— 前者不应清 axis
+  // Distinguish "pid/vid changed because a prop synced" from "the user clicked the dropdown" — the former must not clear the axis
   const lastPropPidVid = useRef({ pid: multiInitialPid, vid: multiInitialVid })
   useEffect(() => {
     lastPropPidVid.current = { pid: multiInitialPid, vid: multiInitialVid }
   }, [multiInitialPid, multiInitialVid])
   useEffect(() => {
     if (isSingle) return
-    // controlled：prop 同步触发的 pid/vid 变化不清 picked（让 selectedPaths sync 接手）
+    // Controlled: a pid/vid change caused by a prop sync doesn't clear picked (let the selectedPaths sync handle it)
     if (isControlled && pid === lastPropPidVid.current.pid && vid === lastPropPidVid.current.vid) return
-    setPicked(new Set())  // pid/vid 切换时清空 UI 选中
-    // live 模式：pid/vid 切了把 axis 也清掉（新版本下旧 path 已无意义）；
-    // 初始 mount 也会跑一次，但此时 draft.raw 通常已是空，commit 空集合即 no-op。
+    setPicked(new Set())  // Clear the UI selection when pid/vid switches
+    // Live mode: clear the axis too when pid/vid switches (the old path is meaningless under the
+    // new version); this also runs once on initial mount, but draft.raw is usually already empty
+    // by then so committing an empty set is a no-op.
     if (isLive) {
       (props as MultiModeProps).onPick([], internalWeight)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid, vid, isSingle, isControlled])
 
-  // 受控同步：selectedPaths + ckpts 决定 picked。
-  //   - selectedPaths 元素是全 path → 直接 hit
-  //   - 是 basename（历史回填基础形态，避免快照泄露绝对路径） → 按 basename 在 ckpts 里找匹配
-  //     全 path，picked 用全 path；同时立刻 onPick 回写让 raw 升级成全 path，
-  //     修 daemon 拿到 basename 触发"LoRA 路径不存在"。
+  // Controlled sync: selectedPaths + ckpts determine picked.
+  //   - A selectedPaths element that's a full path hits directly.
+  //   - A basename (the form used by history backfill, to avoid leaking absolute paths into
+  //     snapshots) is matched against ckpts by basename; picked stores the full path, and we
+  //     immediately call onPick to write the full path back into raw — otherwise the daemon
+  //     receives a basename and reports "LoRA path not found".
   useEffect(() => {
     if (!isControlled || !multiSelectedPaths || loading) return
     if (pid === null || vid === null) return
@@ -284,12 +295,12 @@ export default function InlineLoraPicker(props: Props) {
       const ck = ckptByBasename.get(basenameOf(v))
       if (ck) {
         resolvedPaths.push(ck.path)
-        needUpgrade = true  // raw 里是 basename / 旧 path，要升级到当前机器上的全 path
+        needUpgrade = true  // raw holds a basename / stale path, needs upgrading to the full path on this machine
       }
-      // 找不到 → 当前 ckpts 没扫到，跳过（用户可能换了项目或文件被删）
+      // Not found -> not among the current ckpts, skip it (user may have switched projects or the file was deleted)
     }
     const resolvedSet = new Set(resolvedPaths)
-    // 避免无限循环：picked 实际不变时不 setState
+    // Avoid an infinite loop: skip setState when picked hasn't actually changed
     setPicked((prev) => {
       if (prev.size === resolvedSet.size && [...prev].every((p) => resolvedSet.has(p))) return prev
       return resolvedSet
@@ -305,23 +316,24 @@ export default function InlineLoraPicker(props: Props) {
 
   const currentVersion = versions.find((v) => v.id === vid)
 
-  // 选中集合 → picks：按 ckpts 展示顺序排（list_lora_ckpts 的 canonical sort：
-  // final → step↓ → epoch↓），而非用户点击顺序。XY ckpt 轴必须单调，否则
-  // 网格列/行随点击先后乱跳，读不出过拟合拐点（ep60 应恒在 ep80 / ep40 之间）。
+  // Selection set -> picks: ordered by how ckpts are displayed (list_lora_ckpts' canonical sort:
+  // final -> step desc -> epoch desc), not click order. The XY ckpt axis must be monotonic,
+  // otherwise grid columns/rows jump around based on click order and the overfitting inflection
+  // point becomes unreadable (ep60 should always sit between ep80 and ep40).
   const orderedPicks = (sel: Set<string>): PickedLora[] =>
     ckpts
       .filter((c) => sel.has(c.path))
       .map((c) => ({ path: c.path, projectId: pid, versionId: vid }))
 
-  // chip 点击
+  // Chip click
   const onChipClick = (c: LoraCkpt) => {
     if (existingPaths.has(c.path)) return
     if (isSingle) {
       const { value } = props
       const isCurrent = value && value.path === c.path
       if (isCurrent) {
-        // 反选：槽内 ckpt 清空（视觉等同初次打开的空槽）；SidebarLoras 收到
-        // null 不会删整个槽，只把 path 置空（× 才删槽）。
+        // Deselect: clear the slot's ckpt (visually identical to a freshly opened empty slot);
+        // SidebarLoras receiving null does not delete the whole slot, only clears the path (only × deletes the slot).
         props.onChange(null, internalWeight)
         return
       }
@@ -334,7 +346,7 @@ export default function InlineLoraPicker(props: Props) {
     setPicked((s) => {
       const next = new Set(s)
       if (next.has(c.path)) next.delete(c.path); else next.add(c.path)
-      // live 模式：每次 chip toggle 都即时 commit，不等用户点「添加 N 个」
+      // Live mode: commit immediately on every chip toggle, without waiting for "Add N"
       if (isLive && pid !== null && vid !== null) {
         ;(props as MultiModeProps).onPick(orderedPicks(next), internalWeight)
       }
@@ -360,7 +372,7 @@ export default function InlineLoraPicker(props: Props) {
     onClose()
   }
 
-  // single 模式：选中的 ckpt path（用于 chip 高亮）
+  // Single mode: the selected ckpt path (used for chip highlighting)
   const selectedPath = isSingle ? props.value?.path ?? null : null
 
   return (
@@ -371,7 +383,7 @@ export default function InlineLoraPicker(props: Props) {
       {/* header */}
       <div className="flex items-center gap-2">
         {!embedded && <span className="text-xs font-semibold text-fg-secondary shrink-0">{t('generate.pickLora')}</span>}
-        {/* 更新中（旧 chips 还在原地）时给个不占布局的小提示，不替换 grid 内容 */}
+        {/* While updating (old chips stay in place), show a small hint that doesn't shift the layout or replace the grid */}
         {updating && ckpts.length > 0 && (
           <span className="text-2xs text-fg-tertiary shrink-0">{t('common.loading')}</span>
         )}
@@ -396,15 +408,16 @@ export default function InlineLoraPicker(props: Props) {
         </button>}
       </div>
 
-      {/* project / version 下拉 */}
+      {/* project / version dropdowns */}
       <div className="flex gap-2">
         <select
           className="ds-inp"
           value={pid ?? ''}
           onChange={(e) => {
-            // 切项目：pid + vid 同批更新，立即把 vid 清成 null（与 setPid 一起
-            // 提交），避免出现 (newPid, oldVid) 一拍让 ckpt effect 拉错触发 404。
-            // 新 versions 懒加载到位后 auto-vid effect 再选定该项目的版本。
+            // Switching projects: update pid + vid in the same batch, clearing vid to null
+            // right away (committed together with setPid) to avoid a (newPid, oldVid) frame
+            // that would make the ckpt effect fetch the wrong thing and hit a 404. Once the
+            // new versions lazily load, the auto-vid effect picks that project's version.
             setPid(e.target.value ? Number(e.target.value) : null)
             setVid(null)
           }}
@@ -449,15 +462,17 @@ export default function InlineLoraPicker(props: Props) {
         </div>
       )}
 
-      {/* ckpt chip 列表 —— 等宽网格（auto-fill）：名字长短不一时也对齐成整齐的列，
-          长名在格内 truncate + title 看全名，避免散乱的 ragged 流式排布。 */}
+      {/* ckpt chip list -- an equal-width grid (auto-fill) keeps names of varying length
+          aligned into tidy columns; long names truncate in-cell with a title for the full text,
+          avoiding a ragged flowing layout. */}
       <div
         className="grid gap-1.5 overflow-y-auto"
         style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', maxHeight: 280, padding: 2 }}
       >
-        {/* 「加载中」只在真的没东西可显示时出现（首次拉取）。切换版本/项目时旧
-            chips 仍渲染（见下方 filtered.map 不再被 loading 门控），等新结果到位
-            原地替换，不闪空列表。 */}
+        {/* "Loading" only appears when there's really nothing to show (first fetch). When
+            switching version/project the old chips still render (filtered.map below is no
+            longer gated by loading), and get replaced in place once new results arrive —
+            no flash of an empty list. */}
         {updating && ckpts.length === 0 && <div className="text-2xs text-fg-tertiary px-1 py-2" style={{ gridColumn: '1 / -1' }}>{t('common.loading')}</div>}
         {!loading && projects.length === 0 && (
           <div className="text-fg-tertiary text-xs px-1 py-4 text-center" style={{ gridColumn: '1 / -1' }}>
@@ -507,7 +522,7 @@ export default function InlineLoraPicker(props: Props) {
         )}
       </div>
 
-      {/* 权重 slider —— single 模式恒显；multi 模式按 showWeight + 有选时显 */}
+      {/* Weight slider -- always shown in single mode; in multi mode shown when showWeight and something is picked */}
       {showWeight && !embedded && (isSingle || picked.size > 0) && (
         <div
           className="flex items-center gap-2 pt-1"
@@ -544,7 +559,7 @@ export default function InlineLoraPicker(props: Props) {
         </div>
       )}
 
-      {/* multi 模式：commit footer（live 模式下不渲染，chip 即所见即所得） */}
+      {/* Multi mode: commit footer (not rendered in live mode, where chips are already what-you-see-is-what-you-get) */}
       {!isSingle && !isLive && picked.size > 0 && (
         <div className="flex items-center gap-2 justify-end">
           <span className="text-2xs text-fg-tertiary mr-auto">{t('generate.pickedCount', { count: picked.size })}</span>

@@ -101,7 +101,7 @@ def test_raw_and_turbo_defaults_and_sampler_validation():
         sampler_name=None, scheduler=None,
     ) == (KREA2_TURBO_STEPS, KREA2_TURBO_GUIDANCE)
 
-    with pytest.raises(ValueError, match="仅支持"):
+    with pytest.raises(ValueError, match="only supports"):
         resolve_sampling_settings(
             distilled=False, steps=28, cfg_scale=4.5,
             sampler_name="er_sde", scheduler="simple",

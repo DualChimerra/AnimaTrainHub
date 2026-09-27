@@ -1035,7 +1035,7 @@ export function ExcludeTags({
     raw.trim().toLowerCase().replace(/\s+/g, '_')
   const addCustom = () => {
     const items = draft
-      .split(/[,，\n]+/)
+      .split(/[,\n]+/)
       .map(normalize)
       .filter(Boolean)
     if (items.length === 0) return

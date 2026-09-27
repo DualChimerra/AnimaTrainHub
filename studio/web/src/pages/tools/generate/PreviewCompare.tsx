@@ -15,10 +15,10 @@ function labelOf(s: Sample, xDraft: XYAxisDraft, yDraft: XYAxisDraft | null): st
   return x
 }
 
-/** XY mode 内部 sub-view：选 2 张 cell 并排对比。
+/** XY mode's internal sub-view: pick 2 cells and compare them side by side.
  *
- * - 顶部「← 返回网格」清掉 selectedIndices，回到 grid view
- * - 双击单张图全屏看大图（FullscreenViewer，ESC 关闭）
+ * - The "<- Back to grid" header clears selectedIndices and returns to the grid view
+ * - Double-clicking a single image opens it fullscreen (FullscreenViewer, closes on ESC)
  */
 export default function PreviewCompare({
   samples, taskId, selectedIndices, xDraft, yDraft, onBack,
@@ -34,7 +34,7 @@ export default function PreviewCompare({
   const [aIdx, bIdx] = selectedIndices
   const sampleA = samples[aIdx]
   const sampleB = samples[bIdx]
-  // P1-G：全屏时按 side 记，让 ←/→ 在 A 和 B 之间切换（不只是被动看一张）
+  // P1-G: track fullscreen by side so left/right arrows can switch between A and B (not just view one passively)
   const [fullscreenSide, setFullscreenSide] = useState<'A' | 'B' | null>(null)
 
   if (!sampleA || !sampleB) {
@@ -100,7 +100,7 @@ export default function PreviewCompare({
           src={fullscreenSide === 'A' ? urlA : urlB}
           caption={fullscreenSide === 'A' ? captionA : captionB}
           onClose={() => setFullscreenSide(null)}
-          // A 和 B 都存在（早退分支已保证）→ ←/→ 都可走
+          // Both A and B exist (guaranteed by the early-return branch) -> both arrow directions are valid
           hasPrev
           hasNext
           onPrev={() => setFullscreenSide((s) => (s === 'B' ? 'A' : 'B'))}

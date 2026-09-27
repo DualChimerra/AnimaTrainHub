@@ -236,7 +236,7 @@ def test_find_candidates_python_mismatch_marks_unusable(
     assert err is None
     assert len(candidates) == 1
     assert candidates[0]["usable"] is False
-    assert any("Python 不兼容" in n for n in candidates[0]["notes"])
+    assert any("Python incompatible" in n for n in candidates[0]["notes"])
     assert fa.find_best_wheel(env) is None
 
 
@@ -285,7 +285,7 @@ def test_find_candidates_cuda_major_diff_negative_score(
     assert err is None
     assert len(candidates) == 1
     assert candidates[0]["score"] == 15
-    assert any("CUDA 大版本不同" in n for n in candidates[0]["notes"])
+    assert any("CUDA major version differs" in n for n in candidates[0]["notes"])
 
 
 def test_find_candidates_prefers_newest_version_on_tie(

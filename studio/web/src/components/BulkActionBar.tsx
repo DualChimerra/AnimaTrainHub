@@ -57,7 +57,7 @@ export default function BulkActionBar({
   const [position, setPosition] = useState<Position>('front')
 
   const parseTags = (raw: string): string[] =>
-    raw.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean)
+    raw.split(/[,\n]/).map((s) => s.trim()).filter(Boolean)
 
   const computeUpdates = (op: Op): Map<string, string[]> => {
     const updates = new Map<string, string[]>()
@@ -488,7 +488,7 @@ function TagsField({ value, onChange, placeholder, suggestions, ariaLabel, class
   const ref = useRef<HTMLDivElement>(null)
 
   const tail = (() => {
-    const m = value.match(/([^,，\n]*)$/)
+    const m = value.match(/([^,\n]*)$/)
     return (m ? m[1] : value).trim().toLowerCase()
   })()
   const matches = tail
@@ -504,7 +504,7 @@ function TagsField({ value, onChange, placeholder, suggestions, ariaLabel, class
   }, [])
 
   const pick = (s: string) => {
-    const head = value.replace(/([^,，\n]*)$/, '')
+    const head = value.replace(/([^,\n]*)$/, '')
     onChange(head + s); setOpen(false)
   }
 

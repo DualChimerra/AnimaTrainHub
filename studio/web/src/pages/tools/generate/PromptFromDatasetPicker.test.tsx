@@ -32,7 +32,7 @@ function rowThumb() {
   return img as HTMLImageElement
 }
 
-describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
+describe('PromptFromDatasetPicker - thumbnail / pid-vid sync', () => {
   beforeEach(() => { localStorage.clear() })
   afterEach(() => { vi.restoreAllMocks(); localStorage.clear() })
 
@@ -40,12 +40,12 @@ describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
     const user = userEvent.setup()
     render(<PromptFromDatasetPicker value={null} onChange={vi.fn()} onClose={vi.fn()} />)
     await screen.findByRole('option', { name: 'projA' })
-    await user.selectOptions(screen.getByLabelText('选择项目'), '1')
+    await user.selectOptions(screen.getByLabelText('Select project'), '1')
     await waitFor(() => expect(api.listCaptionsFull).toHaveBeenCalledWith(1, 11))
     return user
   }
 
-  it('行缩略图 URL 锚定当前 (pid, vid) + 行文件名', async () => {
+  it('row thumbnail URL is anchored to the current (pid, vid) + row filename', async () => {
     vi.spyOn(api, 'listProjects').mockResolvedValue(projects)
     vi.spyOn(api, 'getProject').mockResolvedValue(projectDetail)
     vi.spyOn(api, 'listCaptionsFull').mockResolvedValue({ folder: null, items: [cap('only.png', 'x')] })
@@ -59,7 +59,7 @@ describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
     expect(src).toContain('folder=2_data')
   })
 
-  it('迟到的旧响应不覆盖当前 captions（regression：thumb 集体 404 黑图）', async () => {
+  it('a late stale response does not overwrite current captions (regression: thumbs mass-404 to black images)', async () => {
     vi.spyOn(api, 'listProjects').mockResolvedValue(projects)
     vi.spyOn(api, 'getProject').mockResolvedValue(projectDetail)
 
@@ -71,7 +71,7 @@ describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
 
     const user = await selectProjectAndV1()
 
-    await user.selectOptions(screen.getByLabelText('选择版本'), '12')
+    await user.selectOptions(screen.getByLabelText('Select version'), '12')
     await waitFor(() => expect(api.listCaptionsFull).toHaveBeenCalledWith(1, 12))
 
     await act(async () => { d12.resolve({ folder: null, items: [cap('b_v12.png', 'y')] }) })
@@ -87,7 +87,7 @@ describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
     expect(src).not.toContain('name=a_v11.png')
   })
 
-  it('新版本 captions 加载失败时旧行缩略图仍锚定旧 (pid,vid)（不套 live vid 出 404）', async () => {
+  it('when the new version captions fail to load, old row thumbnails stay anchored to the old (pid,vid) (not the live vid, which would 404)', async () => {
     vi.spyOn(api, 'listProjects').mockResolvedValue(projects)
     vi.spyOn(api, 'getProject').mockResolvedValue(projectDetail)
     vi.spyOn(api, 'listCaptionsFull').mockImplementation((_pid, vid) =>
@@ -99,7 +99,7 @@ describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
     const user = await selectProjectAndV1()
     await waitFor(() => expect(screen.getByText('only.png')).toBeInTheDocument())
 
-    await user.selectOptions(screen.getByLabelText('选择版本'), '12')
+    await user.selectOptions(screen.getByLabelText('Select version'), '12')
     await waitFor(() => expect(api.listCaptionsFull).toHaveBeenCalledWith(1, 12))
 
     expect(screen.getByText('only.png')).toBeInTheDocument()
@@ -108,7 +108,7 @@ describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
     expect(src).not.toContain('/versions/12/thumb')
   })
 
-  it('点击底部大图预览放大成全屏 modal（复用 ImagePreviewModal，请求 1600 大图）', async () => {
+  it('clicking the bottom large preview opens a fullscreen modal (reuses ImagePreviewModal, requests the 1600 image)', async () => {
     vi.spyOn(api, 'listProjects').mockResolvedValue(projects)
     vi.spyOn(api, 'getProject').mockResolvedValue(projectDetail)
     vi.spyOn(api, 'listCaptionsFull').mockResolvedValue({ folder: null, items: [cap('shot.png', 'x')] })
@@ -117,7 +117,7 @@ describe('PromptFromDatasetPicker — thumbnail / pid·vid 同步', () => {
     await waitFor(() => expect(screen.getByText('shot.png')).toBeInTheDocument())
 
     await user.hover(screen.getByText('shot.png'))
-    const zoomBtn = await screen.findByRole('button', { name: '点击放大' })
+    const zoomBtn = await screen.findByRole('button', { name: 'Click to enlarge' })
 
     fireEvent.click(zoomBtn)
     const modalImg = await screen.findByAltText('shot.png')

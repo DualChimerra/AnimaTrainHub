@@ -13,8 +13,8 @@ from studio.supervisor.cmd_builder import _EVENT_MARKER
 
 def test_event_marker_string_is_double_underscore_event_colon() -> None:
     assert _EVENT_MARKER == "__EVENT__:", (
-        f"_EVENT_MARKER 变了：{_EVENT_MARKER!r}。改这个值会让 worker IPC 全炸；"
-        "必须同步 runtime/training/snapshot.py:EVENT_MARKER + workers/preprocess_worker.py + api/routers/logs.py"
+        f"_EVENT_MARKER changed: {_EVENT_MARKER!r}. Changing this value breaks worker IPC entirely; "
+        "must be kept in sync with runtime/training/snapshot.py:EVENT_MARKER + workers/preprocess_worker.py + api/routers/logs.py"
     )
 
 
@@ -45,7 +45,7 @@ def test_logs_router_filters_event_lines(tmp_path: Path,
     assert "[start] tagging 100 images" in content
     assert "tagged 50/100" in content
     assert "[done] tagged 100 images" in content
-    assert "__EVENT__:" not in content, "logs router 必须过滤 EVENT 行；前端用户看到 IPC 协议字串就是 bug"
+    assert "__EVENT__:" not in content, "logs router must filter out EVENT lines; a user seeing the IPC protocol string is a bug"
     assert "pause_state" not in content
     assert "progress" not in content
 

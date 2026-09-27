@@ -73,7 +73,7 @@ def test_infonoise_state_dict_roundtrip_cold():
 def test_infonoise_state_dict_roundtrip_warm_cdf_ready():
     s1 = _new_info_sched()
     _drive_to_cdf_ready(s1, n_steps=80)
-    assert s1._cdf_values is not None, "测试 setup 没把 CDF 推 ready"
+    assert s1._cdf_values is not None, "test setup did not push the CDF to ready"
     assert s1._last_refresh_status == "ok"
 
     sd = s1.state_dict()
@@ -90,8 +90,8 @@ def test_infonoise_state_dict_roundtrip_warm_cdf_ready():
     np.testing.assert_allclose(s2._cdf_values, s1._cdf_values, rtol=1e-12, atol=1e-12)
 
     for i, (buf1, buf2) in enumerate(zip(s1._fifo, s2._fifo)):
-        assert list(buf1) == list(buf2), f"fifo[{i}] 内容不一致"
-        assert buf2.maxlen == s2.B, f"fifo[{i}] maxlen 不一致"
+        assert list(buf1) == list(buf2), f"fifo[{i}] content mismatch"
+        assert buf2.maxlen == s2.B, f"fifo[{i}] maxlen mismatch"
 
 
 def test_infonoise_sample_deterministic_after_resume():
@@ -109,7 +109,7 @@ def test_infonoise_sample_deterministic_after_resume():
     torch.manual_seed(7)
     actual = s2.sample(8, device="cpu")
     assert torch.allclose(actual, expected, atol=1e-6), (
-        f"resume 后采样分布漂移: expected={expected}, actual={actual}"
+        f"sampling distribution drifted after resume: expected={expected}, actual={actual}"
     )
 
 
@@ -127,7 +127,7 @@ def test_infonoise_sample_cold_vs_loaded_differs():
     cold = s2.sample(8, device="cpu")
 
     assert not torch.allclose(with_cdf, cold, atol=1e-3), (
-        "冷启动 sample 和 CDF-ready sample 输出意外相同 —— 测试 setup 没正确推 CDF？"
+        "cold-start sample and CDF-ready sample produced the same output unexpectedly -- did test setup fail to push the CDF?"
     )
 
 
@@ -183,7 +183,7 @@ def test_infonoise_fifo_maxlen_preserved_after_resume():
         mse = torch.tensor([0.1], dtype=torch.float32)
         s1.record(t, mse)
     full_bins = [i for i, buf in enumerate(s1._fifo) if len(buf) == 4]
-    assert full_bins, "测试 setup：没有 bin 被填满"
+    assert full_bins, "test setup: no bin got filled"
 
     sd = s1.state_dict()
     s2 = _new_info_sched(B=4)
@@ -239,7 +239,7 @@ def test_save_load_training_state_persists_timestep_sampler(tmp_path):
         state_path, injector2, opt2, timestep_sampler=sched2,
     )
     assert (epoch, step) == (1, 42)
-    assert sched2._cdf_values is not None, "InfoNoise CDF 没从 ckpt 恢复"
+    assert sched2._cdf_values is not None, "InfoNoise CDF was not restored from the checkpoint"
     np.testing.assert_allclose(sched2._cdf_values, sched._cdf_values, rtol=1e-12)
 
 
@@ -293,5 +293,5 @@ def test_load_corrupted_sampler_state_logs_and_continues(tmp_path, caplog):
     sched2 = _new_info_sched()
     with caplog.at_level("WARNING"):
         load_training_state(state_path, injector2, opt2, timestep_sampler=sched2)
-    assert any("timestep_sampler 状态恢复失败" in r.message for r in caplog.records)
+    assert any("timestep_sampler state restore failed" in r.message for r in caplog.records)
     assert sched2._cdf_values is None

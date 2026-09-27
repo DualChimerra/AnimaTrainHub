@@ -16,12 +16,13 @@ function placeholderFor(axis: XYAxisType): string {
   return '0.6, 0.8, 1.0'
 }
 
-/** lora_ckpt 轴的内嵌 picker：多选 ckpt + 自动 push / 更新 loras[] + 设 axis.raw + axis.loraIndex。
+/** Inline picker for the lora_ckpt axis: multi-select ckpts + auto push/update loras[] + set axis.raw + axis.loraIndex.
  *
- * 流程：用户点 picker chip 多选 → 确认 → 取所有 picks 的 (pid, vid) —— 多选始
- * 终在同一 (pid, vid) 下（picker 切 pid/vid 会清 picked）；在 loras[] 找匹配的
- * (project_id, version_id)；没有就 push 一条（path 用 picks[0]，scale=1.0）；
- * axis.loraIndex 指向那个槽；axis.raw 是 picks.map(path).join(', ')。
+ * Flow: the user multi-selects chips in the picker -> confirms -> we take all the picks'
+ * (pid, vid) -- multi-select always stays under one (pid, vid), since the picker clears picked
+ * when pid/vid switches. We look for a matching (project_id, version_id) in loras[]; if there's
+ * none, push a new entry (path from picks[0], scale=1.0). axis.loraIndex then points at that
+ * slot, and axis.raw is picks.map(path).join(', ').
  */
 function AxisLoraCkptPicker({
   draft, onDraftChange, loras, onLorasChange, catalog,
@@ -37,20 +38,21 @@ function AxisLoraCkptPicker({
 
   const commitPicks = (picks: { path: string; projectId: number | null; versionId: number | null }[]) => {
     if (picks.length === 0) {
-      // live 模式下，picker 把所有 chip 反选 / 切换 pid/vid 都会送空集合过来 →
-      // 清掉 axis 绑定。loras[] 里之前那条 entry 不动（picker 可能复用它）。
+      // In live mode, the picker sends an empty set whenever every chip is deselected or
+      // pid/vid switches -> clear the axis binding. The previous entry in loras[] is left
+      // untouched (the picker might reuse it).
       onDraftChange({ ...draft, loraIndex: null, raw: '' })
       return
     }
     const pid = picks[0].projectId
     const vid = picks[0].versionId
-    // 在 loras[] 里找已绑过这个 (pid, vid) 的槽
+    // Look for a slot in loras[] already bound to this (pid, vid)
     let idx = loras.findIndex(
       (l) => l.project_id === pid && l.version_id === vid && pid !== null && vid !== null
     )
     let nextLoras = loras
     if (idx < 0) {
-      // 没绑过 → push 一条作 anchor（path 用 picks[0]，cell 内 backend 会 mutate path）
+      // Not bound yet -> push a new entry as anchor (path from picks[0]; the backend mutates path per cell)
       const newEntry: LoraEntry = {
         path: picks[0].path,
         scale: 1.0,
@@ -68,9 +70,9 @@ function AxisLoraCkptPicker({
     })
   }
 
-  // 显示已绑的 LoRA 摘要（如果 raw 非空 + loraIndex 有效）。项目/版本名从 catalog
-  // 取（下面的 picker mount 会懒拉对应 project/versions）；还没加载时下面回退到
-  // ckptStemFromPath(bound.path)。
+  // Show a summary of the bound LoRA (when raw is non-empty + loraIndex is valid). The
+  // project/version name comes from the catalog (the picker mount below lazily fetches the
+  // matching project/versions); before that's loaded it falls back to ckptStemFromPath(bound.path).
   const bound = draft.loraIndex !== null && draft.loraIndex < loras.length
     ? loras[draft.loraIndex]
     : null
@@ -83,9 +85,9 @@ function AxisLoraCkptPicker({
     : null
   const pickedCount = draft.raw.trim() ? draft.raw.split(',').filter((s) => s.trim()).length : 0
 
-  // 受控同步给 InlineLoraPicker：raw 字符串当 path/basename 列表喂过去 + 锚定
-  // 到 bound LoRA 的 (pid, vid)，让历史回填 picker chip 高亮、basename → 全 path
-  // 自动 upgrade。
+  // Controlled sync into InlineLoraPicker: the raw string is fed in as a path/basename list,
+  // anchored to the bound LoRA's (pid, vid), so history backfill highlights the right picker
+  // chips and auto-upgrades any basename to a full path.
   const selectedPaths = useMemo(
     () => draft.raw.split(',').map((s) => s.trim()).filter(Boolean),
     [draft.raw],
@@ -120,7 +122,7 @@ function AxisLoraCkptPicker({
         initialPid={bound?.project_id ?? null}
         initialVid={bound?.version_id ?? null}
         onPick={commitPicks}
-        onClose={() => { /* 常驻在 axis card 里，nothing to close */ }}
+        onClose={() => { /* always present in the axis card, nothing to close */ }}
         onPickExternal={() => setExternalOpen(true)}
       />
       {externalOpen && (
@@ -154,8 +156,10 @@ function AxisCard({
   // Same frame as a LoRA slot card.
   return (
     <div className="ds-card ds-flat" style={{ padding: '10px 11px', border: '1px solid var(--line-2)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {/* 轴名单独成行作整张卡的标题（下面的轴类型 dropdown + 取值都隶属它）；× 放这行
-          最右端、跟轴名分处两端 —— 之前单字母 "X" 跟下拉同行、像个关闭按钮，易混淆。 */}
+      {/* The axis name gets its own row as the card's title (the axis-type dropdown and values
+          below both belong to it); x sits at the far right of this row, opposite the axis name
+          -- previously the single letter "X" shared a row with the dropdown and looked like a
+          close button, which was confusing. */}
       <div className="flex items-center justify-between gap-2">
         <span className="ds-badge ds-mute">
           {t('generate.xyAxis', { label })}
@@ -192,9 +196,10 @@ function AxisCard({
         ))}
       </select>
 
-      {/* 用细线把轴类型 dropdown 跟取值分隔（不靠缩进、不占横向空间）；取值隶属上面
-          选中的轴类型：lora_ckpt → 多选 chip picker（产出 raw + loraIndex）；
-          lora_scale → 纯数字 chip（不绑 LoRA）；steps/cfg → 文本。 */}
+      {/* A thin line separates the axis-type dropdown from the values (no indentation, no
+          horizontal space used); the values depend on the axis type selected above:
+          lora_ckpt -> a multi-select chip picker (produces raw + loraIndex);
+          lora_scale -> plain numeric chips (not bound to any LoRA); steps/cfg -> text. */}
       {isCkpt ? (
         <AxisLoraCkptPicker
           draft={draft}
@@ -222,12 +227,12 @@ function AxisCard({
   )
 }
 
-/** Sidebar 的 XY 轴配置区（仅 mode=xy 时渲染）。
+/** Sidebar's XY axis configuration area (rendered only when mode=xy).
  *
- * 4 个 axis 类型：
- *   - LoRA（lora_ckpt）：picker 多选 ckpt 作格点，cell 内 mutate path 重 inject
- *   - 权重（lora_scale）：纯数字轴，全局 cell 内覆盖所有 LoRA 的 multiplier
- *   - CFG / 步数：文本输入数字列表
+ * 4 axis types:
+ *   - LoRA (lora_ckpt): a picker multi-selects ckpts as grid points; each cell mutates path and re-injects it
+ *   - Weight (lora_scale): a plain numeric axis, overriding every LoRA's multiplier globally within a cell
+ *   - CFG / steps: a text field for a number list
  */
 export default function SidebarXYAxes({
   xDraft, yDraft, onXChange, onYChange,
@@ -243,7 +248,7 @@ export default function SidebarXYAxes({
 }) {
   const { t } = useTranslation()
   return (
-    // 外层不再套 .card —— 父级 sidebar 已是统一卡片，这里只做内容分组避免双重边框。
+    // No outer .card wrapper here -- the parent sidebar is already a unified card, so this only groups content to avoid a double border.
     <div>
       <div className="ds-cap" style={{ marginBottom: 8 }}>{t('generate.xyAxes')}</div>
       <div className="flex flex-col gap-2">
@@ -262,7 +267,7 @@ export default function SidebarXYAxes({
           <AddSlotButton
             onClick={() => onYChange({
               axis: 'lora_scale',
-              raw: '1',  // 一个值起步，用户自己 + 添加
+              raw: '1',  // Start with one value; the user adds more with +
               loraIndex: null,
             })}
           >

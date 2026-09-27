@@ -42,7 +42,7 @@ def _put_image(folder: Path, name: str, with_caption: bool = True) -> None:
 def test_check_curating_empty() -> None:
     result = versions_phase.check_curating({"train_image_count": 0})
     assert not result.ok
-    assert "训练集为空" in result.reason
+    assert "Training set is empty" in result.reason
 
 
 def test_check_curating_with_images() -> None:
@@ -62,13 +62,13 @@ def test_check_tagging_partial_coverage() -> None:
         "train_image_count": 10, "tagged_image_count": 7,
     })
     assert not result.ok
-    assert "3 张" in result.reason
+    assert "3 image" in result.reason
 
 
 def test_check_tagging_empty() -> None:
     result = versions_phase.check_tagging({"train_image_count": 0})
     assert not result.ok
-    assert "训练集为空" in result.reason
+    assert "Training set is empty" in result.reason
 
 
 def test_check_editing_same_as_tagging() -> None:
@@ -100,7 +100,7 @@ def test_check_regularizing_blocks_when_job_running(isolated) -> None:
         project_jobs.update_status(conn, _job["id"], "running")
         result = versions_phase.check_regularizing(conn, v["id"])
     assert not result.ok
-    assert "正则" in result.reason
+    assert "regularization" in result.reason
 
 
 def test_check_regularizing_blocks_when_job_pending(isolated) -> None:
@@ -136,7 +136,7 @@ def test_check_ready_no_config(isolated) -> None:
         p = projects.get_project(conn, v["project_id"])
         result = versions_phase.check_ready(p, v)
     assert not result.ok
-    assert "配置" in result.reason
+    assert "training config" in result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ def test_advance_phase_editing_blocked_by_missing_caption(isolated) -> None:
     with db.connection_for(isolated["db"]) as conn:
         advanced, result, _ = versions_phase.advance_phase(conn, v["id"])
     assert not advanced
-    assert "1 张" in result.reason
+    assert "1 image" in result.reason
 
 
 def test_skip_phase_only_works_for_skippable(isolated) -> None:
@@ -193,7 +193,7 @@ def test_skip_phase_only_works_for_skippable(isolated) -> None:
     with db.connection_for(isolated["db"]) as conn:
         advanced, result, _ = versions_phase.skip_phase(conn, v["id"])
     assert not advanced
-    assert "不可跳过" in result.reason
+    assert "cannot be skipped" in result.reason
 
 
 def test_skip_phase_preprocessing_jumps_to_editing(isolated) -> None:
@@ -217,7 +217,7 @@ def test_skip_phase_preprocessing_blocked_by_running_job(isolated) -> None:
         project_jobs.update_status(conn, _job["id"], "running")
         advanced, result, _ = versions_phase.skip_phase(conn, v["id"])
     assert not advanced
-    assert "预处理" in result.reason
+    assert "preprocessing" in result.reason
 
 
 def test_check_preprocessing_ok_without_running_job(isolated) -> None:
@@ -248,7 +248,7 @@ def test_skip_phase_regularizing_blocked_by_running_job(isolated) -> None:
         project_jobs.update_status(conn, _job["id"], "running")
         advanced, result, _ = versions_phase.skip_phase(conn, v["id"])
     assert not advanced
-    assert "正则" in result.reason
+    assert "regularization" in result.reason
 
 
 def test_advance_phase_at_ready_returns_check_result(isolated) -> None:

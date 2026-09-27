@@ -42,7 +42,7 @@ export function TagListInput({ value, onChange, placeholder, disabled, className
       const before = text.slice(0, range.start)
       const after = text.slice(range.end)
       // Replace the token range with `tag, `; whatever already follows is appended right after, with leading whitespace normalized once
-      const cleanAfter = after.replace(/^[,，]\s*/, '')
+      const cleanAfter = after.replace(/^[,]\s*/, '')
       const next = `${before}${suggestion.tag}, ${cleanAfter}`
       setText(next)
       if (!commitOnBlur) onChange(parseTags(next))

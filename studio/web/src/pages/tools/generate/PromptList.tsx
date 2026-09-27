@@ -6,22 +6,23 @@ import { useTagSuggest } from '../../../components/tagSuggest/useTagSuggest'
 import { useAutoGrowTextarea } from '../../../lib/useAutoGrowTextarea'
 import { useTokenCount } from '../../../lib/useTokenCount'
 
-/** 正向提示词输入。
+/** Positive prompt input.
  *
- * 之前支持多 prompt 轮换（"+ 添加 prompt"），用户决策"隐藏前端轮换功能"
- * → 简化成单 textarea。后端仍接 list[str]，发请求时仍然包成数组。
+ * Previously supported cycling through multiple prompts ("+ Add prompt"); per a product
+ * decision to hide that cycling feature from the frontend, this was simplified to a single
+ * textarea. The backend still takes list[str], so it's still wrapped into an array when the request is sent.
  *
- * 接入 tag autocomplete：cursor 所在 token 触发建议；↑↓/Tab/Enter 选中插入。
+ * Wired up with tag autocomplete: the token under the cursor triggers suggestions; up/down/Tab/Enter picks and inserts one.
  */
 export default function PromptList({ prompts, onChange, modelFamily = 'anima' }: {
   prompts: string[]
   onChange: (p: string[]) => void
-  /** token 计数用的族（选对应 tokenizer）；不传默认 anima。 */
+  /** The family used for token counting (selects the matching tokenizer); defaults to anima if omitted. */
   modelFamily?: string
 }) {
   const { t } = useTranslation()
   const taRef = useRef<HTMLTextAreaElement>(null)
-  // 当前只显示第一条 prompt；用户编辑时同步成 [value]
+  // Currently only the first prompt is shown; editing it syncs back as [value]
   const value = prompts[0] ?? ''
   const suggest = useTagSuggest({
     value,
@@ -29,7 +30,7 @@ export default function PromptList({ prompts, onChange, modelFamily = 'anima' }:
     onPick: ({ suggestion, range }) => {
       const before = value.slice(0, range.start)
       const after = value.slice(range.end)
-      const cleanAfter = after.replace(/^[,，]\s*/, '')
+      const cleanAfter = after.replace(/^[,]\s*/, '')
       const next = `${before}${suggestion.tag}, ${cleanAfter}`
       onChange([next])
       const newCursor = before.length + suggestion.tag.length + 2

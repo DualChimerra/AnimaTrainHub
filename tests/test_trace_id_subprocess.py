@@ -26,7 +26,7 @@ def test_migration_v10_adds_request_trace_id_column(tmp_path: Path) -> None:
     db.init_db(dbfile)
     with db.connection_for(dbfile) as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
-        assert "request_trace_id" in cols, "v10 必须加 request_trace_id 列"
+        assert "request_trace_id" in cols, "v10 must add the request_trace_id column"
 
 
 def test_migration_v10_is_idempotent(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_create_task_uses_bg_prefix_when_no_trace(tmp_path: Path) -> None:
             "SELECT request_trace_id FROM tasks WHERE id = ?", (tid,)
         ).fetchone()
         assert row["request_trace_id"].startswith("bg-"), (
-            f"无 contextvar 时应 bg- 前缀，实际 {row['request_trace_id']!r}"
+            f"should get a bg- prefix when there is no contextvar, actual {row['request_trace_id']!r}"
         )
 
 
@@ -186,7 +186,7 @@ def test_spawn_task_generates_bg_trace_when_task_has_none(
     sup._spawn_task(MagicMock(name="TRAIN"), task)
 
     assert captured_env[TRACE_ENV].startswith("bg-"), (
-        f"无 task.request_trace_id 应兜底 bg-，实际 {captured_env[TRACE_ENV]!r}"
+        f"should fall back to bg- when task.request_trace_id is missing, actual {captured_env[TRACE_ENV]!r}"
     )
     assert captured_env[PROCESS_ENV] == "worker:train/7"
 
@@ -218,7 +218,7 @@ def test_worker_main_binds_trace_id_from_env(monkeypatch: pytest.MonkeyPatch) ->
         _base.worker_main(fake_run)
     assert excinfo.value.code == 0
     assert captured["trace_in_run"] == "supervisor-injected-trace-xyz", (
-        "worker_main 必须 bind_trace_id from env，让 run() 内 logger.x 自动带"
+        "worker_main must bind_trace_id from env so logger.x calls inside run() carry it automatically"
     )
 
 
@@ -247,4 +247,4 @@ def test_worker_main_generates_trace_when_env_missing(
         _base.worker_main(fake_run)
 
     assert captured["trace"] is not None
-    assert len(captured["trace"]) == 24, "兜底应是 new_trace_id (24 字符 hex)"
+    assert len(captured["trace"]) == 24, "fallback should be new_trace_id (24-char hex)"

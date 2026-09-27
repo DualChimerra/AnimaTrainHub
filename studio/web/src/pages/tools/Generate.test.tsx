@@ -1,5 +1,5 @@
-/** GeneratePage 端到端 smoke：mock fetch，验证 single / xy / 多 prompt+xy
- *  三个关键路径的 enqueue payload 行为。 */
+/** GeneratePage end-to-end smoke: mocks fetch and verifies the enqueue payload
+ *  behavior for the single / xy / multi-prompt+xy code paths. */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -75,7 +75,7 @@ function setup() {
 }
 
 async function waitForInitialLorasLoad() {
-  await screen.findByRole('button', { name: /开始生成/ })
+  await screen.findByRole('button', { name: /Start generate/ })
 }
 
 // The settings column shows prompts, LoRA and parameters at once (no tabs any
@@ -84,12 +84,12 @@ async function openPromptsTab(_user: ReturnType<typeof userEvent.setup>) {
   await Promise.resolve()
 }
 
-describe('GeneratePage 端到端 smoke', () => {
-  it('mode=single：enqueue payload 含 xy_matrix=null + 完整字段', async () => {
+describe('GeneratePage end-to-end smoke', () => {
+  it('mode=single: enqueue payload has xy_matrix=null + full fields', async () => {
     const user = userEvent.setup()
     setup()
 
-    const btn = screen.getByRole('button', { name: /开始生成/ })
+    const btn = screen.getByRole('button', { name: /Start generate/ })
     await user.click(btn)
 
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
@@ -100,7 +100,7 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(body.attention_backend).toBeUndefined()
   })
 
-  it('多任务（P-I）：running + pending → 排队列表带取消，提交按钮不禁用', async () => {
+  it('multi-task (P-I): running + pending -> queue list has cancel, submit button stays enabled', async () => {
     const genTask = (id: number, status: string) => ({
       id, name: 'generate', config_name: 'generate', status, priority: 0,
       created_at: 0, started_at: status === 'running' ? 1 : null, finished_at: null,
@@ -125,20 +125,20 @@ describe('GeneratePage 端到端 smoke', () => {
     await waitFor(() => expect(screen.getByTestId('timeline-cancel-6')).toBeInTheDocument())
     expect(screen.getByTestId('timeline-cancel-7')).toBeInTheDocument()
     expect(screen.getByTestId('timeline-cancel-5')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /开始生成/ })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: /Start generate/ })).not.toBeDisabled()
   })
 
-  it('mode=xy 默认 X=steps 20,25,30：按钮显示「开始生成 · 3 张」并 enqueue 正确 xy_matrix', async () => {
+  it('mode=xy defaults to X=steps 20,25,30: button shows "Start generate . 3 images" and enqueues the correct xy_matrix', async () => {
     const user = userEvent.setup()
     setup()
 
-    await user.click(screen.getByRole('button', { name: 'XY 矩阵' }))
+    await user.click(screen.getByRole('button', { name: 'XY Matrix' }))
 
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /开始生成 · 3 张/ })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Start generate . 3 images/ })).toBeInTheDocument()
     )
 
-    await user.click(screen.getByRole('button', { name: /开始生成 · 3 张/ }))
+    await user.click(screen.getByRole('button', { name: /Start generate . 3 images/ }))
 
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
     const body = lastEnqueueBody!
@@ -150,32 +150,32 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(body.count).toBe(1)
   })
 
-  it('多 prompt 轮换功能已隐藏：只有一个 textarea，"添加 prompt"按钮不存在', async () => {
+  it('multi-prompt rotation is hidden: only one textarea, no "Add prompt" button', async () => {
     const user = userEvent.setup()
     setup()
     await waitForInitialLorasLoad()
     await openPromptsTab(user)
-    const promptInputs = screen.getAllByPlaceholderText('输入正向提示词…')
+    const promptInputs = screen.getAllByPlaceholderText('Enter positive prompt…')
     expect(promptInputs.length).toBe(1)
-    expect(screen.queryByRole('button', { name: /添加 prompt/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Add prompt/ })).toBeNull()
   })
 
-  it('切到 xy 再切回 single：sidebar 已填的 prompts/seed 等保留', async () => {
+  it('switching to xy and back to single: sidebar-filled prompts/seed etc. are kept', async () => {
     const user = userEvent.setup()
     setup()
     await openPromptsTab(user)
 
-    const promptArea = screen.getAllByPlaceholderText('输入正向提示词…')[0]
+    const promptArea = screen.getAllByPlaceholderText('Enter positive prompt…')[0]
     await user.clear(promptArea)
     await user.type(promptArea, 'my custom prompt')
 
-    await user.click(screen.getByRole('button', { name: 'XY 矩阵' }))
-    await user.click(screen.getByRole('button', { name: '单图' }))
+    await user.click(screen.getByRole('button', { name: 'XY Matrix' }))
+    await user.click(screen.getByRole('button', { name: 'Single' }))
 
     expect(promptArea).toHaveValue('my custom prompt')
   })
 
-  it('训练 / reg-ai 等任务在跑时，按钮可用（提交排队）+ tooltip 说明会排队', async () => {
+  it('while a training / reg-ai task etc. is running, the button stays enabled (submits to queue) + tooltip explains queueing', async () => {
     const previousImpl = fetchMock.getMockImplementation()
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (
@@ -202,14 +202,14 @@ describe('GeneratePage 端到端 smoke', () => {
 
     setup()
 
-    const btn = await screen.findByRole('button', { name: /开始生成/ })
+    const btn = await screen.findByRole('button', { name: /Start generate/ })
     await waitFor(() =>
       expect(btn).toHaveAttribute('title', expect.stringContaining('#42')),
     )
     expect(btn).not.toBeDisabled()
   })
 
-  it('URL ?lora= 进入时 replace 缓存 LoRA list + clamp xDraft.loraIndex', async () => {
+  it('entering via URL ?lora= replaces the cached LoRA list + clamps xDraft.loraIndex', async () => {
     window.localStorage.setItem(
       'studio:generate:params:v1',
       JSON.stringify({
@@ -236,7 +236,7 @@ describe('GeneratePage 端到端 smoke', () => {
     setup()
     await waitForInitialLorasLoad()
 
-    await user.click(await screen.findByRole('button', { name: /开始生成/ }))
+    await user.click(await screen.findByRole('button', { name: /Start generate/ }))
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
     const body = lastEnqueueBody!
     expect(body.lora_configs).toEqual([
@@ -249,25 +249,25 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(window.location.search).toBe('')
   })
 
-  it('刷新后恢复左侧生成参数，但不恢复当前生成结果', async () => {
+  it('after a refresh, the left-side generate params are restored, but the current generation result is not', async () => {
     const user = userEvent.setup()
     const first = setup()
     await waitForInitialLorasLoad()
     await openPromptsTab(user)
 
-    const promptArea = screen.getAllByPlaceholderText('输入正向提示词…')[0]
+    const promptArea = screen.getAllByPlaceholderText('Enter positive prompt…')[0]
     await user.clear(promptArea)
     await user.type(promptArea, 'persist me')
-    await user.click(screen.getByRole('button', { name: 'XY 矩阵' }))
+    await user.click(screen.getByRole('button', { name: 'XY Matrix' }))
 
     first.unmount()
     setup()
     await waitForInitialLorasLoad()
 
-    expect(screen.getAllByPlaceholderText('输入正向提示词…')[0]).toHaveValue('persist me')
-    expect(screen.getByRole('button', { name: /开始生成 · 3 张/ })).toBeInTheDocument()
+    expect(screen.getAllByPlaceholderText('Enter positive prompt…')[0]).toHaveValue('persist me')
+    expect(screen.getByRole('button', { name: /Start generate . 3 images/ })).toBeInTheDocument()
     expect(screen.queryByText('#1')).toBeNull()
-    expect(screen.getByText('填写参数后点击「开始生成」')).toBeInTheDocument()
+    expect(screen.getByText('Fill parameters, then click \u201cStart generate\u201d')).toBeInTheDocument()
   })
 
 
@@ -286,37 +286,37 @@ describe('GeneratePage 端到端 smoke', () => {
       })
     )
 
-  it('single 提交只用 singleLoras（不带 xyLoras）', async () => {
+  it('single submit uses only singleLoras (no xyLoras)', async () => {
     seedPrefs({ mode: 'single', singleLoras: [A], xyLoras: [B] })
     const user = userEvent.setup()
     setup()
     await waitForInitialLorasLoad()
 
-    await user.click(await screen.findByRole('button', { name: /开始生成/ }))
+    await user.click(await screen.findByRole('button', { name: /Start generate/ }))
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
     expect(lastEnqueueBody!.lora_configs).toEqual([A])
     expect(lastEnqueueBody!.xy_matrix).toBeNull()
   })
 
-  it('xy 提交不带 singleLoras，也不带未被轴引用的 xyLoras 孤儿', async () => {
+  it('xy submit has no singleLoras, and no orphan xyLoras unreferenced by any axis', async () => {
     seedPrefs({ mode: 'xy', singleLoras: [A], xyLoras: [B] })
     const user = userEvent.setup()
     setup()
     await waitForInitialLorasLoad()
 
-    await user.click(await screen.findByRole('button', { name: /开始生成/ }))
+    await user.click(await screen.findByRole('button', { name: /Start generate/ }))
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
     expect(lastEnqueueBody!.lora_configs).toEqual([])
     expect(lastEnqueueBody!.xy_matrix).not.toBeNull()
   })
 
-  it('老版本共享 loras 迁移：拆成 singleLoras/xyLoras 各一份，不丢已选 LoRA', async () => {
+  it('legacy shared-loras migration: splits into one copy each of singleLoras/xyLoras, keeping selected LoRAs', async () => {
     seedPrefs({ mode: 'single', loras: [A] })
     const user = userEvent.setup()
     setup()
     await waitForInitialLorasLoad()
 
-    await user.click(await screen.findByRole('button', { name: /开始生成/ }))
+    await user.click(await screen.findByRole('button', { name: /Start generate/ }))
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
     expect(lastEnqueueBody!.lora_configs).toEqual([A])
 
@@ -325,7 +325,7 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(stored.xyLoras).toEqual([A])
   })
 
-  it('点击 XY 落盘历史 → 左侧 XY 轴 dropdown 切到 LoRA + raw 写入', async () => {
+  it('clicking a persisted XY history entry -> the left XY axis dropdown switches to LoRA + writes raw', async () => {
     seedPrefs({ mode: 'xy' })
     const xySnapshotParams = {
       schema_version: 1,
@@ -394,7 +394,7 @@ describe('GeneratePage 端到端 smoke', () => {
     await user.click(thumb)
 
     await waitFor(() => {
-      const xLabel = screen.getAllByText('X 轴')[0]
+      const xLabel = screen.getAllByText('X axis')[0]
       // AxisCard uses the same frame as a LoRA slot card (.ds-card.ds-flat)
       const card = xLabel.closest('div.ds-card')!
       const axisSelect = card.querySelector('select') as HTMLSelectElement
@@ -403,7 +403,7 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(screen.queryByDisplayValue(/20, 25, 30/)).not.toBeInTheDocument()
   })
 
-  it('XY 开始后改 X 轴：sidebar 改了但右侧结果网格冻结（30 列仍在）', async () => {
+  it('changing the X axis after XY starts: sidebar updates but the right-side result grid stays frozen (30 columns remain)', async () => {
     vi.mocked(useMonitorProgress).mockReturnValue({
       state: {
         samples: [
@@ -413,12 +413,12 @@ describe('GeneratePage 端到端 smoke', () => {
         ],
       },
     } as never)
-    seedPrefs({ mode: 'xy' })  // 默认 X=steps raw "20, 25, 30"
+    seedPrefs({ mode: 'xy' })  // defaults to X=steps raw "20, 25, 30"
     const user = userEvent.setup()
     setup()
     await waitForInitialLorasLoad()
 
-    await user.click(await screen.findByRole('button', { name: /开始生成 · 3 张/ }))
+    await user.click(await screen.findByRole('button', { name: /Start generate . 3 images/ }))
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
 
     await waitFor(() => expect(screen.getByText('30')).toBeInTheDocument())
@@ -431,13 +431,13 @@ describe('GeneratePage 端到端 smoke', () => {
     expect(screen.getByText('30')).toBeInTheDocument()
   })
 
-  it('回看 XY 历史时点开始生成：清掉历史 override，结果区回到实时新任务', async () => {
+  it('clicking start generate while viewing XY history: clears the history override, result area returns to a live new task', async () => {
     vi.mocked(useMonitorProgress).mockReturnValue({
       state: {
         samples: [{ path: 'cell x0 y0.png', xy: { xi: 0, yi: 0, xv: 20, yv: null } }],
       },
     } as never)
-    seedPrefs({ mode: 'xy' })  // 默认 X=steps raw "20, 25, 30"
+    seedPrefs({ mode: 'xy' })  // defaults to X=steps raw "20, 25, 30"
     const xySnapshotParams = {
       schema_version: 1, mode: 'xy',
       prompts: ['recall'], negative_prompt: '',
@@ -482,7 +482,7 @@ describe('GeneratePage 端到端 smoke', () => {
     await user.click(thumb)
     await waitFor(() => expect(screen.getByText('xy plot 1')).toBeInTheDocument())
 
-    await user.click(screen.getByRole('button', { name: /开始生成 · 3 张/ }))
+    await user.click(screen.getByRole('button', { name: /Start generate . 3 images/ }))
     await waitFor(() => expect(lastEnqueueBody).not.toBeNull())
     await waitFor(() => expect(screen.queryByText('xy plot 1')).not.toBeInTheDocument())
   })

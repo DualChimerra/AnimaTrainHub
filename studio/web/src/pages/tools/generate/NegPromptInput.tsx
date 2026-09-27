@@ -21,7 +21,7 @@ export default function NegPromptInput({ value, onChange, modelFamily = 'anima' 
     onPick: ({ suggestion, range }) => {
       const before = value.slice(0, range.start)
       const after = value.slice(range.end)
-      const cleanAfter = after.replace(/^[,，]\s*/, '')
+      const cleanAfter = after.replace(/^[,]\s*/, '')
       const next = `${before}${suggestion.tag}, ${cleanAfter}`
       onChange(next)
       const newCursor = before.length + suggestion.tag.length + 2

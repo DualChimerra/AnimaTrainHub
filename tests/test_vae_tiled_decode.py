@@ -272,8 +272,8 @@ def test_log_once_same_key_logs_only_first(caplog) -> None:
     logger = logging.getLogger("training.vae")
     with caplog.at_level(logging.INFO, logger="training.vae"):
         for i in range(200):
-            wrapper._log_once("auto_encode", logger.info, "主动分块 #%d", i)
-    hits = [r for r in caplog.records if "主动分块" in r.getMessage()]
+            wrapper._log_once("auto_encode", logger.info, "proactive tiling #%d", i)
+    hits = [r for r in caplog.records if "proactive tiling" in r.getMessage()]
     assert len(hits) == 1
     assert "#0" in hits[0].getMessage()
 
@@ -282,8 +282,8 @@ def test_log_once_distinct_keys_each_logged_once(caplog) -> None:
     wrapper = _make_wrapper(_RecordingModel())
     logger = logging.getLogger("training.vae")
     with caplog.at_level(logging.WARNING, logger="training.vae"):
-        wrapper._log_once("auto_encode", logger.warning, "encode 分块")
-        wrapper._log_once("auto_decode", logger.warning, "decode 分块")
-        wrapper._log_once("auto_encode", logger.warning, "encode 分块")
+        wrapper._log_once("auto_encode", logger.warning, "encode tiling")
+        wrapper._log_once("auto_decode", logger.warning, "decode tiling")
+        wrapper._log_once("auto_encode", logger.warning, "encode tiling")
     msgs = [r.getMessage() for r in caplog.records]
-    assert msgs == ["encode 分块", "decode 分块"]
+    assert msgs == ["encode tiling", "decode tiling"]

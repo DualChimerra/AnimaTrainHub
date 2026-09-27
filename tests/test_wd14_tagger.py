@@ -321,7 +321,7 @@ def test_cpu_ep_path_does_not_spawn_pool(
 
     list(t.tag(paths))
     prep_threads = {n for n in seen_threads if n.startswith("wd14-prep")}
-    assert prep_threads == set(), f"CPU 路径不应开 pool，saw {seen_threads}"
+    assert prep_threads == set(), f"CPU path should not open a pool, saw {seen_threads}"
 
 
 def test_preprocess_concurrent_preserves_chunk_order(

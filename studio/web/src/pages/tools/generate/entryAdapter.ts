@@ -1,25 +1,24 @@
-/** 历史 entry source adapter（plan 决策 #12）。
+/** History entry source adapter (plan decision #12).
  *
- * 所有"按 entry.source 分支"的逻辑收敛到这一个文件 —— UI / handler / hook 全
- * 部走这里的 helper，**不直接 switch entry.source**。
+ * All logic that branches on entry.source is collected into this one file -- UI / handlers /
+ * hooks all go through the helpers here, and **never switch on entry.source directly**.
  *
- * 未来加第三种 source（'upload' / 'remote'）只改这个文件，消费端零改动。
+ * Adding a third source in the future ('upload' / 'remote') only touches this file; consumers need no changes.
  *
- * 为什么用 function helper 不用 object method（`entry.imageUrl()`）：
- * - entry 要序列化进 sessionStorage（撤销 snapshot）+ 跨 hook 传递；object method
- *   不能 serialize
- * - function helper 跟 React/TS 风格更一致
- * - 测试时 mock helper 比 mock class method 干净
+ * Why function helpers instead of object methods (`entry.imageUrl()`):
+ * - entries must be serializable into sessionStorage (undo snapshots) and passed across hooks; object methods can't be serialized
+ * - function helpers fit the React/TS style better
+ * - mocking a helper in tests is cleaner than mocking a class method
  */
 import { api } from '../../../api/client'
 import type { GenerateParamsSnapshot } from './paramsSnapshot'
 
-/** XY 历史回看的 axis 元数据（CacheEntry + DiskEntry 共用 —— PreviewXYGrid 重建用）。
+/** Axis metadata for XY history playback (shared by CacheEntry + DiskEntry -- used to rebuild PreviewXYGrid).
  *
- *  - CacheEntry: samples[].path 是 cache 文件名；imageUrl 留空，PreviewXYGrid
- *    fallback 走 `api.generateSampleUrl(taskId, filename)`
- *  - DiskEntry: server 已 encode 好 imageUrl（`/api/generate/disk/image/<date>/xy/<folder>/<cell>`），
- *    PreviewXYGrid 直接吃 */
+ *  - CacheEntry: samples[].path is a cache filename; imageUrl is left empty, and PreviewXYGrid
+ *    falls back to `api.generateSampleUrl(taskId, filename)`
+ *  - DiskEntry: the server already URL-encodes imageUrl
+ *    (`/api/generate/disk/image/<date>/xy/<folder>/<cell>`), and PreviewXYGrid uses it directly */
 export interface HistoryXYMeta {
   xAxis: string
   yAxis: string | null
@@ -28,68 +27,68 @@ export interface HistoryXYMeta {
   samples: Array<{
     path: string
     xy: { xi: number; yi: number; xv: string | number; yv: string | number | null }
-    /** disk-served 时 server 端已 URL-encode 好；cache 时 undefined → 回退 api.generateSampleUrl */
+    /** Already URL-encoded by the server for disk-served entries; undefined for cache -> falls back to api.generateSampleUrl */
     imageUrl?: string
   }>
 }
 
-/** 持久 entry：磁盘上的 PNG / 文件夹，server disk-history 接口返回的纯派生数据。
+/** Persistent entry: a PNG / folder on disk, pure derived data returned by the server's disk-history endpoint.
  *
- * single：一张 PNG（filename + imageUrl 指向它）
- * xy：一个 `xy plot N/` 文件夹（folder + imageUrl 指向 composite，
- *     xyMeta.samples 是每 cell 信息 + 直读 URL）。
+ * single: one PNG (filename + imageUrl pointing at it)
+ * xy: an `xy plot N/` folder (folder + imageUrl pointing at the composite,
+ *     xyMeta.samples holding each cell's info + a direct URL).
  */
 export interface DiskEntry {
   source: 'disk'
-  /** server 返回的稳定 id：'disk:<sha1-12>'（决策 #12，避免文件名带空格塞进 React key） */
+  /** Stable id returned by the server: 'disk:<sha1-12>' (decision #12, avoids stuffing a filename with spaces into a React key) */
   id: string
   mode: 'single' | 'xy'
-  /** YYYY-MM-DD，对应文件夹 */
+  /** YYYY-MM-DD, the corresponding folder */
   date: string
-  /** single：PNG 文件名（含扩展名）；xy：undefined（用 folder） */
+  /** single: the PNG filename (with extension); xy: undefined (use `folder` instead) */
   filename?: string
-  /** xy：文件夹名 `xy plot <N>`；single：undefined */
+  /** xy: the folder name `xy plot <N>`; single: undefined */
   folder?: string
-  /** 大图 URL，可直接 <img src=...> 用（server 端已 URL encode）。xy 模式指向 composite。 */
+  /** Large-image URL, usable directly with <img src=...> (already URL-encoded server-side). Points at the composite in xy mode. */
   imageUrl: string
-  /** 缩略图 URL，server 在线缩 + ETag */
+  /** Thumbnail URL, server-side resized + ETag */
   thumbUrl: string
   /** PNG / composite mtime */
   createdAt: number
-  /** 从 PNG anima_params 解出来的参数快照（xy 模式是 composite 的 XY snapshot） */
+  /** Parameter snapshot parsed out of the PNG's anima_params (in xy mode, the composite's XY snapshot) */
   params: GenerateParamsSnapshot
-  /** xy 模式 per-cell 元数据（PreviewXYGrid 重建用）；single 模式 undefined */
+  /** Per-cell metadata for xy mode (used to rebuild PreviewXYGrid); undefined in single mode */
   xyMeta?: HistoryXYMeta
 }
 
-/** 临时 entry：仅在 server 内存 cache 中存活，session 期间使用。
- *  关 tab / server 重启 / LRU 剔除即丢。 */
+/** Transient entry: lives only in the server's in-memory cache, for the current session.
+ *  Lost when the tab closes, the server restarts, or it's evicted by LRU. */
 export interface CacheEntry {
   source: 'cache'
   id: string  // uuid
   mode: 'single' | 'xy'
-  /** daemon task id，cache URL 构造用 */
+  /** daemon task id, used to build the cache URL */
   taskId: number
   createdAt: number
-  /** server cache 里的文件名列表（XY 是 per-cell N 张；single 是 1 张） */
+  /** Filenames in the server's cache (XY has N per-cell files; single has 1) */
   filenames: string[]
-  /** 出图当时构造的参数快照（不从 cache 读） */
+  /** Parameter snapshot built at generation time (not read back from the cache) */
   params: GenerateParamsSnapshot
-  /** XY 模式的 axis + per-cell 元数据，重建 PreviewXYGrid 用 */
+  /** XY mode's axis + per-cell metadata, used to rebuild PreviewXYGrid */
   xyMeta?: HistoryXYMeta
 }
 
 export type HistoryEntry = DiskEntry | CacheEntry
 
 // ---------------------------------------------------------------------------
-// 按 source 切的 helper —— **唯一**允许 switch entry.source 的地方
+// Helpers that branch on source -- the **only** place allowed to switch on entry.source
 // ---------------------------------------------------------------------------
 
-/** entry 对应位置 idx 的大图 URL。 */
+/** The large-image URL for the entry's cell at `idx`. */
 export function entryImageUrl(e: HistoryEntry, idx = 0): string {
   switch (e.source) {
     case 'disk':
-      return e.imageUrl  // server 已 encode
+      return e.imageUrl  // Already encoded by the server
     case 'cache': {
       const fn = e.filenames[idx] ?? e.filenames[0] ?? ''
       return api.generateSampleUrl(e.taskId, fn)
@@ -97,26 +96,26 @@ export function entryImageUrl(e: HistoryEntry, idx = 0): string {
   }
 }
 
-/** entry 缩略图 URL（小图栏用）。 */
+/** The entry's thumbnail URL (for the small-image rail). */
 export function entryThumbUrl(e: HistoryEntry): string {
   switch (e.source) {
     case 'disk':
       return e.thumbUrl
     case 'cache':
-      // CacheEntry 不做服务端缩略图 —— 直接用大图 URL + CSS 缩放
-      // (session 期间出图不多，浏览器加载几张原图可接受；不要为这种短期 entry
-      // 加 IDB / 服务端 thumb 复杂度)
+      // CacheEntry has no server-side thumbnail -- just use the full-image URL with CSS scaling
+      // (not many images are generated within a session, so a browser loading a few originals
+      // is acceptable; not worth adding IDB / server-side thumbnail complexity for such a short-lived entry)
       return entryImageUrl(e, 0)
   }
 }
 
-/** entry 携带的 params snapshot（用于历史点击回填）。 */
+/** The params snapshot carried by the entry (used to backfill on a history click). */
 export function entryParams(e: HistoryEntry): GenerateParamsSnapshot {
-  return e.params  // 两个 source 字段名一致
+  return e.params  // Field name is the same across both sources
 }
 
-/** entry 对应的 generate task id（0.17 P-H `?task=` 深链按此命中条目）。
- *  cache 顶层带 taskId；disk 藏在 server enrich 进 PNG anima_params 的 task_id。 */
+/** The generate task id for the entry (0.17 P-H's `?task=` deep link matches by this).
+ *  cache carries taskId at the top level; disk hides it in the task_id the server enriches into the PNG's anima_params. */
 export function entryTaskId(e: HistoryEntry): number | undefined {
   switch (e.source) {
     case 'cache':
@@ -126,11 +125,11 @@ export function entryTaskId(e: HistoryEntry): number | undefined {
   }
 }
 
-/** entry 显示标签（PreviewHistoryRail / badges 文案）。 */
+/** The entry's display label (for PreviewHistoryRail / badge text). */
 export function entryDisplayLabel(e: HistoryEntry): string {
   switch (e.source) {
     case 'disk':
-      // xy 用 folder ("xy plot 3")；single 用 filename 去 .png 后缀
+      // xy uses the folder name ("xy plot 3"); single uses the filename minus the .png extension
       if (e.mode === 'xy' && e.folder) return e.folder
       return (e.filename ?? '').replace(/\.png$/i, '')
     case 'cache':
@@ -138,7 +137,7 @@ export function entryDisplayLabel(e: HistoryEntry): string {
   }
 }
 
-/** XY 历史栏 entry 的 badge（"XY 5×3"）。 */
+/** The badge for an XY entry in the history rail ("XY 5x3"). */
 export function entryBadge(e: HistoryEntry): string | undefined {
   if (e.mode !== 'xy') return undefined
   if (e.source === 'cache' && e.xyMeta) {

@@ -30,7 +30,7 @@ def test_new_trace_id_is_24_hex_chars() -> None:
 
 def test_new_trace_id_is_unique() -> None:
     ids = {new_trace_id() for _ in range(100)}
-    assert len(ids) == 100, "uuid4-based id 应几乎不冲突"
+    assert len(ids) == 100, "uuid4-based ids should almost never collide"
 
 
 # ── bind / get / reset ───────────────────────────────────────────────────
@@ -48,7 +48,7 @@ def test_bind_and_get_trace_id() -> None:
         assert get_trace_id() == "test-trace-001"
     finally:
         reset_trace_id(token)
-    assert get_trace_id() is None, "reset 后应回到 None"
+    assert get_trace_id() is None, "should be back to None after reset"
 
 
 # ── ContextFilter ─────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ def test_middleware_adds_trace_id_header_to_response(client: TestClient) -> None
     resp = client.get("/api/health")
     assert resp.status_code == 200
     assert TRACE_HEADER in resp.headers, (
-        f"middleware 应给所有响应加 {TRACE_HEADER}；实际 headers: {dict(resp.headers)}"
+        f"middleware should add {TRACE_HEADER} to every response; actual headers: {dict(resp.headers)}"
     )
     tid = resp.headers[TRACE_HEADER]
     assert len(tid) == 24
@@ -149,7 +149,7 @@ def test_middleware_adds_trace_id_on_4xx_response(client: TestClient,
     monkeypatch.setattr(presets_io, "USER_PRESETS_DIR", tmp_path / "presets")
     resp = client.get("/api/presets/__nonexistent_for_trace_test__")
     assert resp.status_code == 404
-    assert TRACE_HEADER in resp.headers, "4xx 也必须带 trace_id 给用户截图"
+    assert TRACE_HEADER in resp.headers, "4xx responses must also carry trace_id for user screenshots"
     assert len(resp.headers[TRACE_HEADER]) == 24
 
 

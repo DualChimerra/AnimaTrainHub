@@ -1,28 +1,29 @@
 import { useTranslation } from 'react-i18next'
 
-/** 出图进度：覆盖**全流程**（不再只有采样 step）。
+/** Generation progress: covers the **whole pipeline** (not just the sample step).
  *
- * 来源：daemon 推 SSE
- *   - generate_phase          { name: 'load'|'clip'|'sample'|'vae' }  ← 覆盖非采样阶段
+ * Source: daemon-pushed SSE events
+ *   - generate_phase          { name: 'load'|'clip'|'sample'|'vae' }  <- non-sample phases
  *   - generate_image_started  { batch_idx, batch_total, total_steps }
  *   - generate_preview_step   { step, total, image_b64? }
  *
- * Generate.tsx 聚合成 progress prop；渲染在「结果」卡片底栏（mockup：meter + 状态 + 参数）。
+ * Generate.tsx aggregates these into a `progress` prop, rendered in the
+ * result card's footer (meter + status + params).
  */
 export type GeneratePhase = 'load' | 'clip' | 'sample' | 'vae'
 
 export interface GenerateProgress {
-  /** 当前阶段（load/clip/sample/vae）；null = 未知（退回按 step 估算） */
+  /** Current phase (load/clip/sample/vae); null = unknown (fall back to step estimate) */
   phase: GeneratePhase | null
-  /** 当前在跑哪一张（多张图 / XY 时；单图 batchTotal=1） */
+  /** Which image is running (multi-image / XY runs; single image has batchTotal=1) */
   batchIdx: number | null
   batchTotal: number | null
-  /** 当前图采样到第几步 */
+  /** Current sample step for this image */
   currentStep: number | null
   totalSteps: number | null
 }
 
-// 各阶段在「单张图」里占的总进度基点（sample 段按 step 线性铺开 0.20→0.92）
+// Base progress fraction each phase occupies within a single image (sample spans 0.20-0.92 linearly by step)
 const PHASE_BASE: Record<GeneratePhase, number> = {
   load: 0.03,
   clip: 0.12,
@@ -49,13 +50,14 @@ export default function GenerateProgressBar({
       ? Math.min(1, progress.currentStep / progress.totalSteps)
       : 0
 
-  // 单张图的进度：sample 段按 step 铺 0.20→0.92，其余阶段用基点；无 phase 时退回 step。
+  // Single-image progress: sample phase spans 0.20-0.92 by step, other phases use their base;
+  // fall back to the step fraction when phase is unknown.
   let frac: number
   if (progress.phase === 'sample') frac = PHASE_BASE.sample + stepFrac * 0.72
   else if (progress.phase) frac = PHASE_BASE[progress.phase]
   else frac = stepFrac > 0 ? PHASE_BASE.sample + stepFrac * 0.72 : 0
 
-  // 多图（batch / XY）：把当前图的 frac 摊进整体
+  // Multi-image (batch / XY): fold this image's fraction into the overall progress
   const bt = progress.batchTotal
   const bi = progress.batchIdx
   const overall = bt && bt > 1 && bi != null ? Math.min(1, (bi + frac) / bt) : frac

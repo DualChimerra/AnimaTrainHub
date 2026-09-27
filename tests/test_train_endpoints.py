@@ -68,14 +68,14 @@ def test_get_config_no_config_returns_project_specific_defaults(
     body = r.json()
     assert body["has_config"] is False
     defaults = body.get("project_specific_defaults")
-    assert defaults is not None, "缺 project_specific_defaults"
+    assert defaults is not None, "missing project_specific_defaults"
     assert defaults["data_dir"].endswith("train")
     assert defaults["output_dir"].endswith("output")
-    assert defaults["output_name"], "output_name 不能为空"
+    assert defaults["output_name"], "output_name must not be empty"
     assert defaults["reg_data_dir"] is None
     assert defaults["resume_lora"] is None
-    assert defaults["transformer_path"], "transformer_path 应填默认模型路径"
-    assert defaults["vae_path"], "vae_path 应填"
+    assert defaults["transformer_path"], "transformer_path should be filled with the default model path"
+    assert defaults["vae_path"], "vae_path should be filled"
     assert defaults["text_encoder_path"]
     assert defaults["t5_tokenizer_path"]
 
@@ -117,7 +117,7 @@ def test_get_config_returns_defaults_when_has_config(
     body = r.json()
     assert body["has_config"] is True
     defaults = body.get("project_specific_defaults")
-    assert defaults is not None, "has_config=True 时也应返回 project_specific_defaults"
+    assert defaults is not None, "project_specific_defaults should also be returned when has_config=True"
     assert defaults["reg_data_dir"] == str(vdir / "reg")
     assert defaults["transformer_path"]
 

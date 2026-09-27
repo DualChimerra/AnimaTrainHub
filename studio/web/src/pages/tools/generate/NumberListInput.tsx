@@ -1,15 +1,16 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-/** 数值列表输入：[输入框] [+ 添加] + 已加 chips（× 删除）。
+/** Number list input: [text field] [+ Add] + added chips (× to delete).
  *
- * 用 chips 直观看到已加的每个值，避免裸 "0.6, 0.8, 1.0" text input 打错难发现。
- * 但输入框本身支持一次性粘贴 / 输入逗号（中英文）或空格分隔的多个值 ——
- * 不在 onChange 拦截，点「+ 添加」/ Enter 时才拆分 + 逐个 Number() 校验，
- * 有限数才入列（无效 token 直接忽略）。
+ * Chips let you see each added value at a glance, unlike a bare "0.6, 0.8, 1.0" text input
+ * where a typo is easy to miss. The field itself still accepts pasting/typing several
+ * comma- or whitespace-separated values at once -- it's not intercepted on onChange; only
+ * clicking "+ Add" / pressing Enter splits it and validates each token with Number(),
+ * keeping only finite numbers (invalid tokens are simply ignored).
  *
- * 内部仍把 chips 序列化成 ", " 分隔的 raw 字符串往外抛，与 schema
- * parseAxisValues 兼容（不改 backend）。
+ * Internally the chips are still serialized back out as a ", "-separated raw string, to stay
+ * compatible with the schema's parseAxisValues (no backend changes).
  */
 export default function NumberListInput({
   raw, onChange,
@@ -24,10 +25,11 @@ export default function NumberListInput({
 
   const values = raw.split(',').map((s) => s.trim()).filter(Boolean)
 
-  // 转化时校验：按中英文逗号 / 空白拆 token，逐个 Number() 留有限数（保留原文本，
-  // 不强转规范化，"0.50" 仍显示 "0.50"）。一次性输入 "0.2, 0.3 0.4" → [0.2,0.3,0.4]。
+  // Validate on conversion: split tokens on comma/whitespace, keep each one that Number()
+  // parses to a finite value (the original text is preserved, not normalized -- "0.50" still
+  // displays as "0.50"). A single paste like "0.2, 0.3 0.4" becomes [0.2,0.3,0.4].
   const parseDraft = (s: string): string[] =>
-    s.split(/[,，\s]+/).map((x) => x.trim()).filter((x) => x && Number.isFinite(Number(x)))
+    s.split(/[,\s]+/).map((x) => x.trim()).filter((x) => x && Number.isFinite(Number(x)))
 
   const addValue = () => {
     const parsed = parseDraft(draft)

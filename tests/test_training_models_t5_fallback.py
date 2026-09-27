@@ -59,7 +59,7 @@ def tm():
 def test_missing_t5_dir_download_error_is_wrapped(tm, monkeypatch, tmp_path, caplog):
 
     def _boom(path):
-        raise ConnectionError("[WinError 10060] 由于连接方在一段时间后没有正确答复")
+        raise ConnectionError("[WinError 10060] the connected party did not properly respond after a period of time")
 
     fake, t5_calls = _make_fake_transformers(_boom)
     monkeypatch.setitem(sys.modules, "transformers", fake)
@@ -70,13 +70,13 @@ def test_missing_t5_dir_download_error_is_wrapped(tm, monkeypatch, tmp_path, cap
             tm.load_text_encoders(str(tmp_path), str(missing), "cpu", None)
 
     msg = str(excinfo.value)
-    assert "T5 tokenizer 下载失败" in msg
+    assert "Failed to download the T5 tokenizer" in msg
     assert "google/t5-v1_1-xxl" in msg
     assert "10060" in msg
     assert "t5_tokenizer_path" in msg
     assert isinstance(excinfo.value.__cause__, ConnectionError)
     assert t5_calls == ["google/t5-v1_1-xxl"]
-    assert any("本地目录缺失" in r.getMessage() for r in caplog.records)
+    assert any("local directory missing" in r.getMessage() for r in caplog.records)
 
 
 def test_missing_t5_dir_fallback_success_logs_warning(tm, monkeypatch, tmp_path, caplog):
@@ -91,7 +91,7 @@ def test_missing_t5_dir_fallback_success_logs_warning(tm, monkeypatch, tmp_path,
     assert t5_tokenizer == "tok"
     assert t5_calls == ["google/t5-v1_1-xxl"]
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("本地目录缺失" in m and "google/t5-v1_1-xxl" in m for m in warnings)
+    assert any("local directory missing" in m and "google/t5-v1_1-xxl" in m for m in warnings)
 
 
 def test_local_t5_dir_never_falls_back(tm, monkeypatch, tmp_path, caplog):
@@ -105,4 +105,4 @@ def test_local_t5_dir_never_falls_back(tm, monkeypatch, tmp_path, caplog):
 
     assert t5_tokenizer == "tok"
     assert t5_calls == [str(local)]
-    assert not any("本地目录缺失" in r.getMessage() for r in caplog.records)
+    assert not any("local directory missing" in r.getMessage() for r in caplog.records)

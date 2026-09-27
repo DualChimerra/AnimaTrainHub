@@ -113,7 +113,7 @@ def test_create_session_records_error_on_silent_cuda_downgrade(
         # but onnxruntime silently downgraded to CPU internally -> cuda_load_error must be set so the UI can show it
         err = onnx_tagger_base.onnxruntime_setup.get_cuda_load_error()
         assert err is not None
-        assert "静默降级" in err or "silently" in err.lower()
+        assert "silently" in err.lower()
     finally:
         onnx_tagger_base.onnxruntime_setup.record_cuda_load_error(None)
 

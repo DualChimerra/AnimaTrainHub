@@ -33,7 +33,7 @@ interface Props {
 type Mode = 'chip' | 'text'
 
 const parseLine = (raw: string): string[] =>
-  raw.split(/[,，\n]/).map((t) => t.trim()).filter(Boolean)
+  raw.split(/[,\n]/).map((t) => t.trim()).filter(Boolean)
 
 export default function TagEditor({
   tags, natural, onChange, onSave, saving, dirty, triggerWord,
@@ -64,7 +64,7 @@ export default function TagEditor({
   }, [tagsJoined, mode])
 
   const addTag = (raw: string) => {
-    const t = raw.trim().replace(/^[,，]+|[,，]+$/g, '')
+    const t = raw.trim().replace(/^[,]+|[,]+$/g, '')
     if (!t) return
     if (tags.includes(t)) { setDraft(''); return }
     // Add to the end: matches chip drag-reorder's mental model (new items land at the bottom, user drags to the desired position)
@@ -87,7 +87,7 @@ export default function TagEditor({
     onPick: ({ suggestion, range }) => {
       const before = textBuf.slice(0, range.start)
       const after = textBuf.slice(range.end)
-      const cleanAfter = after.replace(/^[,，]\s*/, '')
+      const cleanAfter = after.replace(/^[,]\s*/, '')
       const next = `${before}${suggestion.tag}, ${cleanAfter}`
       setTextBuf(next)
       const newCursor = before.length + suggestion.tag.length + 2
@@ -187,7 +187,7 @@ export default function TagEditor({
                     onChange={(e) => { setDraft(e.target.value); draftSuggest.notifyChange() }}
                     onKeyDown={(e) => {
                       if (draftSuggest.handleKeyDown(e)) return
-                      if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+                      if (e.key === 'Enter' || e.key === ',') {
                         e.preventDefault(); addTag(draft)
                       }
                     }}
