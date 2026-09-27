@@ -1,17 +1,17 @@
-/** Autocomplete 行为 hook —— 给 input / textarea 复用。
+/** Autocomplete behavior hook -- shared by input / textarea.
  *
- * 设计原则：hook 不修改用户的 value，仅在用户选中候选时回调 `onPick`。
- * caller 决定怎么落进数据（替换 token range / 推到 tags 数组 / append）。
+ * Design principle: the hook never mutates the user's value, it only calls back `onPick` when the user selects a
+ * candidate. The caller decides how it lands in the data (replace the token range / push to a tags array / append).
  *
- * 弹出规则：候选只在输入变化（notifyChange）后弹出；聚焦 / 鼠标点击移动光标
- * 不弹，点击还会关掉已弹出的候选。全局开关（Settings「Tag 翻译词典」区）关掉
- * 后所有入口都不弹。
+ * Popup rule: candidates only pop up after the input changes (notifyChange); focusing / clicking to move the cursor
+ * never pops one, and clicking also closes an already-open popup. The global toggle (Settings' "Tag translation
+ * dictionary" section) disables popups from every entry point when off.
  *
- * 两种 token 模式：
- *   - `wholeAsToken: false`（默认）：根据 cursor + 逗号边界算当前 token，commit
- *     时给 caller `range` 以便切片替换。
- *   - `wholeAsToken: true`：整个 value 作为单 token。给 TagEditor chip 模式 input
- *     用（input 是 draft，本来就一段，commit 时直接 addTag(s.tag)）。
+ * Two token modes:
+ *   - `wholeAsToken: false` (default): computes the current token from the cursor + comma boundaries, and gives
+ *     the caller a `range` on commit for slice-and-replace.
+ *   - `wholeAsToken: true`: the whole value is treated as a single token. Used by TagEditor's chip-mode input
+ *     (the input is a draft, already a single segment; commit calls addTag(s.tag) directly).
  */
 import { useEffect, useMemo, useState } from 'react'
 import type React from 'react'
@@ -22,9 +22,9 @@ import { extractCurrentToken, findSuggestions } from '../../tagDict/suggest'
 import type { TagSuggestion } from '../../tagDict/types'
 
 export interface TagSuggestPick {
-  /** 选中的候选。 */
+  /** The selected candidate. */
   suggestion: TagSuggestion
-  /** 当前 token 在原 value 里的范围；wholeAsToken 时是 [0, value.length]。 */
+  /** Range of the current token within the original value; [0, value.length] when wholeAsToken. */
   range: { start: number; end: number }
 }
 
@@ -33,7 +33,7 @@ interface Args {
   inputRef: React.RefObject<HTMLInputElement | HTMLTextAreaElement | null>
   onPick: (pick: TagSuggestPick) => void
   wholeAsToken?: boolean
-  /** 关掉 autocomplete（dict 未加载、字段 disabled 等场景）。 */
+  /** Disables autocomplete (dict not loaded, field disabled, etc.). */
   disabled?: boolean
 }
 
@@ -43,21 +43,21 @@ export interface TagSuggestApi {
   activeIdx: number
   setActiveIdx: (i: number) => void
   setOpen: (open: boolean) => void
-  /** 当前 caret 位置（state）；传给 TagSuggestList 让它做 positionDep。 */
+  /** Current caret position (state); passed to TagSuggestList as its positionDep. */
   cursor: number
-  /** 在 input 的 onKeyDown 里第一句调；返回 true 表示已处理（caller 应 return）。 */
+  /** Call as the first statement in the input's onKeyDown; returns true if handled (the caller should return). */
   handleKeyDown: (e: React.KeyboardEvent) => boolean
-  /** 在 input 的 onChange 里调（cursor 跟踪 + 自动 open）。唯一的弹出入口。 */
+  /** Call in the input's onChange (tracks cursor + auto-opens). The only entry point that opens the popup. */
   notifyChange: () => void
-  /** 在 input 的 onFocus 里调（只跟踪 cursor，不弹候选）。 */
+  /** Call in the input's onFocus (only tracks the cursor, doesn't open the popup). */
   notifyFocus: () => void
-  /** 在 input 的 onBlur 里调（延迟关闭，给点击留时间）。 */
+  /** Call in the input's onBlur (closes with a delay, to give a click time to land). */
   notifyBlur: () => void
-  /** 在 input 的 onClick 里调：鼠标点击移动光标 → 关掉已弹出的候选。 */
+  /** Call in the input's onClick: a mouse click moving the cursor -> closes an already-open popup. */
   notifyClick: () => void
-  /** 在 input 的 onKeyUp 里调（键盘移动光标时跟踪 cursor）。 */
+  /** Call in the input's onKeyUp (tracks the cursor when the keyboard moves it). */
   notifySelect: () => void
-  /** 鼠标点选 / 程序触发用。 */
+  /** For mouse pick / programmatic triggering. */
   pickAt: (i: number) => void
 }
 
@@ -79,17 +79,12 @@ export function useTagSuggest({
   const suggestions = useMemo(() => {
     if (off || !open || dict.status !== 'ready' || !tokenInfo.token) return []
     return findSuggestions(tokenInfo.token, {
-      entries: dict.entries,
       tagKeys: dict.tagKeys,
       compactedKeys: dict.compactedKeys,
-      reverse: dict.reverse,
     })
-  }, [
-    off, open, tokenInfo.token,
-    dict.status, dict.entries, dict.tagKeys, dict.compactedKeys, dict.reverse,
-  ])
+  }, [off, open, tokenInfo.token, dict.status, dict.tagKeys, dict.compactedKeys])
 
-  // suggestions 列表变化时重置 active
+  // Resets active when the suggestions list changes
   const sugKey = suggestions.map((s) => s.tag).join('|')
   useEffect(() => { setActiveIdx(0) }, [sugKey])
 
@@ -130,11 +125,11 @@ export function useTagSuggest({
     cursor,
     handleKeyDown,
     notifyChange: () => { syncCursor(); if (!off) setOpen(true) },
-    // focus 只跟踪 cursor：候选只在输入变化后弹出，点进 prompt 中间不该弹
+    // focus only tracks the cursor: candidates only pop up after an input change, not just from clicking into the middle of a prompt
     notifyFocus: () => { syncCursor() },
-    // 100ms 延迟：给 onMouseDown(pick) 时间完成；用户切到别处不会卡 popover
+    // 100ms delay: gives onMouseDown(pick) time to complete; the popover won't get stuck if the user switches elsewhere
     notifyBlur: () => { setTimeout(() => setOpen(false), 120) },
-    // 鼠标点击 = 用户在挪光标，不是在补全 → 关掉候选
+    // A mouse click = the user is moving the cursor, not completing -> close the candidates
     notifyClick: () => { syncCursor(); setOpen(false) },
     notifySelect: () => { syncCursor() },
     pickAt,

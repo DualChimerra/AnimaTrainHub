@@ -1,23 +1,28 @@
-"""Supervisor 主类 — PR-4 从 supervisor.py 抽出（行为零变更）。
+"""Supervisor main class -- PR-4 extracted from supervisor.py (zero behavior change).
 
-设计要点：
-    - 单进程串行（一次最多一个 worker，避开多任务抢 GPU 的复杂度）
-    - 调度优先级：project_jobs (download/tag/reg_build) > training tasks
-      —— 让数据准备类工作不被训练堵住
-    - 每个任务一份独立日志：
+Design highlights:
+    - Single process, serial execution (at most one worker at a time, avoiding the
+      complexity of multiple tasks fighting over the GPU)
+    - Scheduling priority: project_jobs (download/tag/reg_build) > training tasks
+      -- so data-prep work never gets stuck behind training
+    - Each task gets its own log file:
         * task: studio_data/logs/{task_id}.log
         * job:  studio_data/jobs/{job_id}.log
-      job 跑的时候开 LogTailer 把日志增量 publish 成 job_log_appended SSE
-    - 取消用 SIGTERM (Unix) / CTRL_BREAK_EVENT (Windows)，30 秒超时再 kill
-    - 启动恢复：重启时把 status='running' 的孤儿 task / job 标 failed
-    - 测试可注入 cmd_builder 替代真实 worker 调用
+      while a job runs, a LogTailer publishes log deltas as job_log_appended SSE
+    - Cancellation uses SIGTERM (Unix) / CTRL_BREAK_EVENT (Windows), then kill after
+      a 30-second timeout
+    - Startup recovery: on restart, any orphaned task/job left with status='running'
+      is marked failed
+    - Tests can inject a cmd_builder in place of the real worker invocation
 
-主类**不拆**（保 1100 行单类）：37 个 method 全部 read/write 共享 self
-字段（`_slots / _daemon_* / _stop / _thread / _db_path`），状态耦合极高
-且缺乏清晰子域边界 — 拆 Mixin/helper class 反而增加未来扩展成本（详
-tmp/0.11.0_planning.md PR-4 决策日志）。叶子 helper（_Slot / 默认 cmd
-builder / _maybe_finalize_version / _kill_process_tree）已搬到 sibling
-模块，本文件仅保 Supervisor class 主体。
+The main class is **not split up** (kept as a single ~1100-line class): all 37
+methods read/write shared self fields (`_slots / _daemon_* / _stop / _thread /
+_db_path`), so state coupling is very high and there's no clean sub-domain
+boundary -- splitting into Mixins/helper classes would actually increase future
+maintenance cost (see the decision log in tmp/0.11.0_planning.md PR-4). Leaf
+helpers (_Slot / default cmd builder / _maybe_finalize_version /
+_kill_process_tree) have been moved to sibling modules; this file only keeps the
+Supervisor class body.
 """
 from __future__ import annotations
 
@@ -72,12 +77,13 @@ logger = logging.getLogger(__name__)
 
 
 def _tail_log_for_error_msg(log_path: Path, max_lines: int = 12, max_chars: int = 800) -> str:
-    """B-1.6: 失败 task 的 db.error_msg 从 "exit code 1" 升级为 traceback 摘要。
+    """B-1.6: upgrade a failed task's db.error_msg from "exit code 1" to a traceback excerpt.
 
-    策略：读 jobs/<id>.log 末 N 行；找到最后一处 'Traceback' 截取那一段；
-    没有则取末 N 行。截断到 max_chars 适配 UI 显示宽度。
+    Strategy: read the last N lines of jobs/<id>.log; find the last occurrence of
+    'Traceback' and cut from there; otherwise fall back to the last N lines. Truncate
+    to max_chars to fit the UI display width.
 
-    失败兜底返 ""（caller 用 "exit code N" 默认值）。
+    On failure, returns "" (caller falls back to the "exit code N" default).
     """
     try:
         if not log_path.exists():
@@ -130,28 +136,32 @@ class Supervisor:
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # PP10.2.b：双槽位。TRAIN 槽只跑 tasks，DATA 槽只跑 project_jobs。
-        # download 永远跟训练并行；tag / reg_build 默认在训练时推迟。
+        # PP10.2.b: two slots. TRAIN slot only runs tasks, DATA slot only runs project_jobs.
+        # download always runs in parallel with training; tag / reg_build are deferred
+        # by default while training is active.
         self._slots: list[_Slot] = [
             _Slot(name=SLOT_TRAIN),
             _Slot(name=SLOT_DATA),
         ]
         self._log_seq = itertools.count()
 
-        # commit 9：generate task 走 daemon，不占任何 _Slot；用单独字段跟踪。
-        # daemon 一次只跑一个 task；模型 lazy load + 跨 task 复用。
+        # commit 9: generate tasks go through the daemon and don't occupy a _Slot;
+        # tracked via separate fields instead. The daemon runs one task at a time;
+        # the model is lazily loaded and reused across tasks.
         self._daemon_lock = threading.Lock()
         self._daemon_active_task_id: Optional[int] = None
         self._daemon_state_poller: Optional[MonitorStatePoller] = None
         self._daemon_cancel_pending: bool = False
         self._daemon_listener_registered = False
-        # 0.17 item1：generate task 走 daemon 无 run.log → LogTab 空。派活时开该 task
-        # 的 run.log，把 daemon 在其运行期间的日志落盘 + emit task_log_appended（daemon
-        # 串行跑一个，归属清晰）；finalize 时关。log 线程与 supervisor 线程都碰它，
-        # 一律在 _daemon_lock 下访问。
+        # 0.17 item1: generate tasks run through the daemon with no run.log, so LogTab
+        # is empty. When dispatching, we open that task's run.log and persist the
+        # daemon's log output for the duration of the run + emit task_log_appended
+        # (the daemon runs serially, one at a time, so ownership is unambiguous);
+        # closed at finalize. Both the log thread and the supervisor thread touch it,
+        # so it is always accessed under _daemon_lock.
         self._daemon_log_fp: Optional[Any] = None
 
-    # ------------------------------------------------------------------ 控制
+    # ------------------------------------------------------------------ Control
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -166,7 +176,8 @@ class Supervisor:
         for slot in self._slots:
             if slot.busy:
                 self._terminate_slot(slot)
-        # 关 inference daemon（如果起着）。失败不影响 supervisor 本身退出。
+        # Stop the inference daemon (if running). Failure here doesn't block
+        # supervisor shutdown.
         try:
             get_daemon().stop(timeout=timeout)
         except Exception:
@@ -181,15 +192,19 @@ class Supervisor:
         return None
 
     def cancel(self, task_id: int) -> bool:
-        """取消 task：pending/scheduled → status=canceled；running → 异步发信号立即返回。
+        """Cancel a task: pending/scheduled -> status=canceled immediately; running ->
+        signal asynchronously and return right away.
 
-        ADR 0006 PR-2：paused task 也可被取消，状态从 paused 直接改 canceled。
-        ADR Addendum 2：恢复点文件保留（canceled 之后仍可 resume），只清
-        paused_* 字段。
+        ADR 0006 PR-2: a paused task can also be canceled, moving status directly from
+        paused to canceled.
+        ADR Addendum 2: the resume checkpoint file is kept (still resumable after
+        cancellation); only the paused_* fields are cleared.
 
-        异步路径关键：**不阻塞 web 请求线程**。supervisor 主循环会自然 poll
-        proc.poll() 拿到退出码并走 `_finish_slot` 流程，把 status 写为
-        canceled。后台 grace timer 在 30s 后还没退就强杀整棵进程树。
+        The key point of the async path: **it must not block the web request thread**.
+        The supervisor main loop naturally polls proc.poll(), picks up the exit code,
+        and goes through `_finish_slot`, which writes status=canceled. If the process
+        hasn't exited after the 30s background grace timer, it force-kills the whole
+        process tree.
         """
         with db.connection_for(self._db_path) as conn:
             task = db.get_task(conn, task_id)
@@ -204,10 +219,12 @@ class Supervisor:
                 )
                 return True
         if task["status"] == "paused":
-            # 进程已退出，无需发信号 — 清 paused_* 字段再单独写 status=canceled
-            # + finished_at。ADR Addendum 2：恢复点文件保留，canceled 后仍可
-            # resume（last_state_* 字段还在）。
-            # 故意走 with 块外：_clear_pause_fields 内部开自己 conn，避免嵌套。
+            # The process has already exited, so no signal is needed -- clear the
+            # paused_* fields, then separately write status=canceled + finished_at.
+            # ADR Addendum 2: the resume checkpoint file is kept, so it's still
+            # resumable after cancellation (the last_state_* fields remain).
+            # Deliberately done outside the `with` block: _clear_pause_fields opens
+            # its own connection internally, to avoid nesting.
             self._clear_pause_fields(task_id)
             with db.connection_for(self._db_path) as conn:
                 db.update_task(
@@ -220,8 +237,9 @@ class Supervisor:
             )
             return True
         if task["status"] == "running":
-            # R-5：台账合并后 running 的可能是数据作业（DATA 槽 kind="job"）——
-            # 统一从这个入口取消，SIGTERM 语义同 cancel_job。
+            # R-5: after the ledger merge, a "running" entry may actually be a data
+            # job (DATA slot, kind="job") -- cancellation is unified through this
+            # entry point, with the same SIGTERM semantics as cancel_job.
             slot = (
                 self._find_slot(kind="task", id=task_id)
                 or self._find_slot(kind="job", id=task_id)
@@ -241,15 +259,17 @@ class Supervisor:
         return False
 
     def is_task_pausable(self, task_id: int) -> bool:
-        """ADR §8.1 + Addendum 1: UI is_pausable 信号。
+        """ADR Section 8.1 + Addendum 1: the UI's is_pausable signal.
 
-        条件：task 在 slot 上 running、`train_loop_started` 事件已收到、
-        **`last_auto_epoch_state_path` 已设置**（即首个 epoch 已写完 auto backup）、
-        没有 pause / cancel pending。任一不满足 → UI 应隐藏暂停按钮。
+        Conditions: the task is running on a slot, the `train_loop_started` event has
+        been received, **`last_auto_epoch_state_path` has been set** (i.e. the first
+        epoch's auto backup has been written), and there is no pause/cancel pending.
+        If any condition fails, the UI should hide the pause button.
 
-        ADR 0006 Addendum 1：首 epoch 未结束时禁用 pause 是关键防护 —— 没有
-        auto_epoch_state.pt 时按 pause 会让 supervisor 走 cancel 兜底，无可恢复进度，
-        UI 端直接隐藏按钮避免误操作。
+        ADR 0006 Addendum 1: disabling pause before the first epoch finishes is a key
+        safeguard -- without an auto_epoch_state.pt yet, pressing pause would make the
+        supervisor fall back to canceling with no recoverable progress, so the UI
+        hides the button outright to prevent misclicks.
         """
         slot = self._find_slot(kind="task", id=task_id)
         if slot is None:
@@ -263,17 +283,20 @@ class Supervisor:
         )
 
     def pause(self, task_id: int) -> tuple[bool, str]:
-        """暂停 running task：发软信号让 handle_interrupt 保 state 后退出。
+        """Pause a running task: send a soft signal so handle_interrupt can save state
+        before exiting.
 
-        返回 (success, reason_if_failed)。
+        Returns (success, reason_if_failed).
 
-        ADR §8.1 defense-in-depth：API 端调本方法时，UI 应已用 SSE
-        `is_pausable` 字段隐藏暂停按钮；本方法服务端再校验 train_loop_started
-        信号，未就绪 / 状态非 running / task 不存在 → 拒绝。
+        ADR Section 8.1 defense-in-depth: by the time the API calls this method, the UI
+        should already have hidden the pause button based on the SSE `is_pausable`
+        field; this method re-validates the train_loop_started signal server-side and
+        rejects if it's not ready / status isn't running / the task doesn't exist.
 
-        非阻塞：调 `_signal_pause_async` 立刻返回。子进程 emit 事件 →
-        `_on_task_log` 更新 slot → 子进程退出 → `_finish_slot` 标 paused。
-        UI 端 modal 订阅 SSE 看进度（ADR §4.3）。
+        Non-blocking: calling `_signal_pause_async` returns immediately. The child
+        process emits an event -> `_on_task_log` updates the slot -> the child process
+        exits -> `_finish_slot` marks it paused. The UI's modal subscribes to SSE to
+        watch progress (ADR Section 4.3).
         """
         with db.connection_for(self._db_path) as conn:
             task = db.get_task(conn, task_id)
@@ -307,7 +330,7 @@ class Supervisor:
                 return slot.id
         return None
 
-    # -------------------------------------------------------------- 主循环
+    # -------------------------------------------------------------- Main loop
     def _loop(self) -> None:
         try:
             self._reconcile_orphans()
@@ -321,12 +344,13 @@ class Supervisor:
             self._stop.wait(self._poll)
 
     def _reconcile_orphans(self) -> None:
-        # ADR 0006 PR-2 兼容性 note：此处 list_tasks(status="running") 精确按
-        # status 过滤，paused task（status='paused'）天然不进 this loop —
-        # 跨 supervisor 重启的 paused task 保持状态不变（ADR §8.4）。
+        # ADR 0006 PR-2 compatibility note: list_tasks(status="running") filters
+        # strictly by status, so paused tasks (status='paused') never end up in this
+        # loop by construction -- a paused task survives a supervisor restart with its
+        # state unchanged (ADR Section 8.4).
         with db.connection_for(self._db_path) as conn:
             for t in db.list_tasks(conn, status="running"):
-                logger.info("orphan running task %d → failed", t["id"])
+                logger.info("orphan running task %d -> failed", t["id"])
                 db.update_task(
                     conn,
                     t["id"],
@@ -344,15 +368,17 @@ class Supervisor:
                 )
             n = project_jobs.cleanup_orphan_running(conn)
             if n:
-                logger.info("orphan running jobs → failed: %d", n)
+                logger.info("orphan running jobs -> failed: %d", n)
 
     def _tick(self) -> None:
-        # 0) 0.17 P-B：到点的 scheduled task 提升为 pending，让下面的 dispatch
-        #    看得见。不看 queue_held —— hold 语义是"停派活"，提升只是状态澄清，
-        #    提升后的 pending 照样被 hold 拦住。
+        # 0) 0.17 P-B: promote due scheduled tasks to pending so the dispatch step
+        #    below can see them. We ignore queue_held here -- hold semantics mean
+        #    "stop dispatching new work", not "stop clarifying status"; a promoted
+        #    task that becomes pending is still blocked by hold just the same.
         self._promote_due_scheduled()
 
-        # 1) 先收尸：所有 busy 槽位 poll 一遍，退出的走 _finish_slot
+        # 1) Reap first: poll every busy slot once, and run _finish_slot for any that
+        #    exited.
         for slot in self._slots:
             if not slot.busy:
                 continue
@@ -361,8 +387,9 @@ class Supervisor:
             if rc is not None:
                 self._finish_slot(slot, rc)
 
-        # 2) 给空闲槽位派活（按槽位职责分工）。R-1：generate 并入 exclusive
-        #    统一派发（同表 FIFO + 集中准入），不再有独立的第 3 步。
+        # 2) Dispatch work to idle slots (by slot responsibility). R-1: generate is now
+        #    folded into the exclusive dispatch path (unified FIFO + centralized
+        #    admission), so there's no longer a separate step 3.
         for slot in self._slots:
             if slot.busy:
                 continue
@@ -372,7 +399,8 @@ class Supervisor:
                 self._dispatch_data(slot)
 
     def _promote_due_scheduled(self) -> None:
-        """0.17 P-B：scheduled_at 到点的 task → pending + publish 状态事件。"""
+        """0.17 P-B: promote a task whose scheduled_at is due -> pending + publish a
+        state event."""
         try:
             with db.connection_for(self._db_path) as conn:
                 promoted = db.promote_due_scheduled(conn)
@@ -380,14 +408,14 @@ class Supervisor:
             logger.exception("promote_due_scheduled failed")
             return
         for tid in promoted:
-            logger.info("scheduled task %d due → pending", tid)
+            logger.info("scheduled task %d due -> pending", tid)
             self._on_event(
                 {"type": "task_state_changed", "task_id": tid, "status": "pending"}
             )
 
-    # ---- pending task 选择 ----------------------------------------------------
+    # ---- Pending task selection -----------------------------------------------
     def _next_pending_task_in(self, types: tuple[str, ...]) -> Optional[dict[str, Any]]:
-        """从 pending 队列里找第一条匹配 task_type 的任务。"""
+        """Find the first task in the pending queue matching one of the given task_types."""
         with db.connection_for(self._db_path) as conn:
             pending = db.list_tasks(conn, status="pending")
         for t in pending:
@@ -396,15 +424,16 @@ class Supervisor:
                 return t
         return None
 
-    # ---- R-1 资源档位准入（docs/design/queue-resource-model-0.17.md §3） ----
+    # ---- R-1 resource tier admission (docs/design/queue-resource-model-0.17.md Section 3) ----
 
     def _daemon_active(self) -> bool:
-        """daemon 是否有 active generate task（提交后到 finalize 前）。"""
+        """Whether the daemon has an active generate task (submitted but not yet finalized)."""
         with self._daemon_lock:
             return self._daemon_active_task_id is not None
 
     def _data_slot_exclusive_busy(self) -> bool:
-        """DATA 槽是否正在跑 exclusive 档 job（eval_samples，底模级显存）。"""
+        """Whether the DATA slot is currently running an exclusive-tier job
+        (eval_samples, base-model-level VRAM)."""
         for slot in self._slots:
             if (
                 slot.name == SLOT_DATA and slot.busy
@@ -415,11 +444,13 @@ class Supervisor:
         return False
 
     def _exclusive_busy(self) -> bool:
-        """全系统是否有 exclusive 档工作在跑（同时最多 1 个的准入前提）。
+        """Whether the system as a whole has any exclusive-tier work running (the
+        precondition for the "at most 1 concurrent" admission rule).
 
-        三个执行位逐一检查：TRAIN 槽（train/reg_ai）、daemon（active generate）、
-        DATA 槽（eval_samples）。修 L1（generate 与训练互斥缺后端守卫）/
-        L2（训练不躲正在跑的 eval_samples）的共同根。
+        Checks each of the three execution slots: the TRAIN slot (train/reg_ai), the
+        daemon (active generate), and the DATA slot (eval_samples). This is the shared
+        root fix for L1 (generate and training missing a mutual-exclusion backend
+        guard) and L2 (training not yielding to a running eval_samples job).
         """
         return (
             self._train_busy()
@@ -428,17 +459,21 @@ class Supervisor:
         )
 
     def _dispatch_exclusive_tasks(self, slot: _Slot) -> None:
-        """exclusive 档统一派发（tasks 表：train / reg_ai / generate 同表 FIFO）。
+        """Unified dispatch for exclusive-tier work (tasks table: train / reg_ai /
+        generate share one FIFO).
 
-        D-R3 平级 FIFO：三类之间无优先级，按 `priority DESC, created_at ASC`
-        取队首；running 永不被中断。路由：train/reg_ai → TRAIN 槽子进程；
-        generate → daemon（daemon 是 exclusive 档的执行器之一，不是独立车道）。
+        D-R3 equal-priority FIFO: there's no priority ordering among the three types;
+        the head of the queue is picked by `priority DESC, created_at ASC`, and a
+        running item is never preempted. Routing: train/reg_ai -> TRAIN slot child
+        process; generate -> daemon (the daemon is one of the executors for the
+        exclusive tier, not a separate lane).
 
-        eval_samples（project_jobs 表）在 R-3 台账合并前由 `_dispatch_data`
-        派发，但共享同一个 `_exclusive_busy` 准入 —— 过渡期跨表顺序为
-        tasks 侧优先抢空隙，R-3 后统一进同表 FIFO。
+        eval_samples (project_jobs table), before the R-3 ledger merge, is dispatched
+        by `_dispatch_data`, but shares the same `_exclusive_busy` admission gate --
+        during the transition period, the cross-table ordering favors the tasks side
+        grabbing any opening first; after R-3 everything moves into one shared FIFO.
 
-        ADR 0006 PR-2：queue_held=True 时跳过本次派发（ADR §3.2）。
+        ADR 0006 PR-2: skip this dispatch pass when queue_held=True (ADR Section 3.2).
         """
         if self._queue_held():
             return
@@ -451,18 +486,22 @@ class Supervisor:
             return
         ttype = task.get("task_type") or "train"
         if ttype == "generate":
-            # enqueue_generate 先 create_task(pending) 再写 config.json 落
-            # config_path —— 两步之间这条 task 已 pending 但 config_path 还是
-            # NULL。此时别提交（daemon 会报 "config not found"），等下个 tick。
-            # FIFO 语义：不越过它取后面的任务（窗口 <1s）。
+            # enqueue_generate first does create_task(pending), then writes
+            # config.json and sets config_path -- between those two steps, the task is
+            # already pending but config_path is still NULL. Don't submit it yet (the
+            # daemon would report "config not found"); wait for the next tick.
+            # FIFO semantics: we don't skip past it to grab a later task (the window
+            # is under 1s).
             if not task.get("config_path"):
                 return
             self._submit_to_daemon(task)
             return
         if ttype == "eval_samples":
-            # R-3：exclusive 档数据作业。排队语义与 train/generate 同一 FIFO
-            # （D-R3 跨类型平级），执行位在 DATA 槽（worker 子进程）。DATA 槽
-            # 被 light 作业占着时等它结束（light 都是短任务），不越队。
+            # R-3: an exclusive-tier data job. It queues under the same FIFO as
+            # train/generate (D-R3 cross-type equal priority), and executes on the
+            # DATA slot (a worker child process). If the DATA slot is occupied by a
+            # light job, wait for it to finish (light jobs are always short) rather
+            # than skipping ahead.
             data_slot = next(
                 (s for s in self._slots if s.name == SLOT_DATA), None
             )
@@ -472,40 +511,47 @@ class Supervisor:
                 return
             self._spawn_job(data_slot, project_jobs.as_job(dict(task)) or task)
             return
-        # train / reg_ai：daemon 常驻模型是 exclusive 租约，spawn 前必须吊销
-        # （unload 释放 VRAM）。daemon 在跑 generate 的情况已被 _exclusive_busy
-        # 拦下，这里只处理 idle-but-loaded 的租约。
+        # train / reg_ai: the daemon's resident model holds an exclusive lease, which
+        # must be revoked before spawning (unload frees VRAM). The case where the
+        # daemon is running a generate is already caught by _exclusive_busy; this only
+        # handles the idle-but-loaded lease.
         if self._maybe_yield_daemon():
-            return  # daemon 还占 VRAM，等下次 tick 派
+            return  # the daemon is still holding VRAM; wait for the next tick to dispatch
         self._spawn_task(slot, task)
 
     def _queue_held(self) -> bool:
-        """ADR §3.2 queue hold 开关，跨 supervisor 重启保留（db kv）。"""
+        """ADR Section 3.2 queue hold switch, persisted across supervisor restarts (db kv)."""
         try:
             with db.connection_for(self._db_path) as conn:
                 return db.get_queue_held(conn)
         except Exception:
             logger.exception("failed to read queue_held")
-            return False  # 读失败默认放行，安全降级
+            return False  # on read failure, default to allowing dispatch (fail open)
 
     def _maybe_yield_daemon(self) -> bool:
-        """daemon 占着 VRAM → 触发 unload，调用方应跳过这次派发。
+        """If the daemon is holding VRAM, trigger an unload; the caller should skip
+        this dispatch pass.
 
-        R-1：daemon 常驻模型 = exclusive 租约。要派 exclusive 档工作
-        （train / reg_ai / eval_samples）前必须吊销租约——**不再受任何开关
-        豁免**（老 allow_gpu_during_train 会放行「训练 + 常驻底模」并存，
-        是 L3 的一部分）。light 档开关关闭时的保守路径也复用本函数。
+        R-1: the daemon's resident model counts as an exclusive lease. Before
+        dispatching exclusive-tier work (train / reg_ai / eval_samples), that lease
+        must be revoked -- **no setting exempts this anymore** (the old
+        allow_gpu_during_train setting used to let "training + resident base model"
+        coexist, which was part of L3). The conservative path used when the light-tier
+        setting is off also reuses this function.
 
-        返回值：
-          - True：daemon 还占着 VRAM（在跑 generate 或刚发了 unload 请求），
-                  调用方不应该派，等下次 tick 重检
-          - False：daemon 没占 GPU（未起 / 已 unloaded），可立刻派
+        Return value:
+          - True: the daemon is still holding VRAM (running a generate, or an unload
+                  request was just sent); the caller should not dispatch and should
+                  recheck on the next tick
+          - False: the daemon isn't holding the GPU (not started, or already
+                  unloaded); safe to dispatch immediately
         """
         daemon = get_daemon()
         if not daemon.is_model_loaded:
             return False
         if daemon.is_busy:
-            # 用户主动触发的 generate 不强中断；等它跑完
+            # Don't force-interrupt a generate the user explicitly triggered; wait for
+            # it to finish
             return True
         try:
             daemon.request_unload()
@@ -515,18 +561,22 @@ class Supervisor:
         return True
 
     def _dispatch_data(self, slot: _Slot) -> None:
-        """DATA 槽：跑 project_jobs。R-1 按资源档位准入（修 L2/L3）：
+        """DATA slot: runs project_jobs. R-1 admission by resource tier (fixes L2/L3):
 
-        - io（download）：恒放行（仅受 queue_held 约束）
-        - light（tag / preprocess / reg_build / eval 指标）：无 exclusive 运行时
-          恒放行（daemon idle 常驻模型无碍——小模型体量）；有 exclusive 运行时看
-          `queue.light_tasks_during_train`（默认开）。开关**关闭**时保守等同
-          旧默认：额外要求 daemon 租约已释放
-        - exclusive（eval_samples，底模级）：与 train 同规格——无 exclusive
-          运行 + daemon 租约吊销后才派，**无视 light 开关**（修 L3）
+        - io (download): always allowed (only constrained by queue_held)
+        - light (tag / preprocess / reg_build / eval metrics): always allowed when no
+          exclusive work is running (an idle resident model on the daemon is harmless
+          -- it's small); when exclusive work is running, it depends on
+          `queue.light_tasks_during_train` (on by default). When that setting is
+          **off**, the conservative path matches the old default: it also requires
+          the daemon's lease to have been released
+        - exclusive (eval_samples, base-model-level): same rules as train -- only
+          dispatched once there's no exclusive work running and the daemon's lease has
+          been revoked, **ignoring the light-tier setting** (fixes L3)
 
-        ADR 0006 PR-2：queue_held=True 时跳过本次派发，包含 download。语义上
-        hold 是"全队列暂停新派活"，不区分档位。
+        ADR 0006 PR-2: skip this dispatch pass when queue_held=True, including
+        download. Semantically, hold means "pause the whole queue from dispatching new
+        work", regardless of tier.
         """
         if self._queue_held():
             return
@@ -537,14 +587,15 @@ class Supervisor:
         for job in pending:
             cls = job_resource_class(job["kind"])
             if cls == RESOURCE_EXCLUSIVE:
-                # eval_samples 走 exclusive 统一 FIFO（_dispatch_exclusive_tasks
-                # 与 train/generate 平级排队），本函数只管 light + io。
+                # eval_samples goes through the unified exclusive FIFO
+                # (_dispatch_exclusive_tasks queues it alongside train/generate at
+                # equal priority); this function only handles light + io.
                 continue
             if cls == RESOURCE_LIGHT:
                 if exclusive_busy and not light_parallel:
                     continue
                 if not light_parallel and self._maybe_yield_daemon():
-                    continue  # 保守模式：等 daemon 卸载
+                    continue  # conservative mode: wait for the daemon to unload
             self._spawn_job(slot, job)
             return
 
@@ -555,19 +606,24 @@ class Supervisor:
         return False
 
     def _light_tasks_during_train(self) -> bool:
-        """R-1：exclusive 运行时是否放行 light 档（默认开；读失败取 schema 默认）。"""
+        """R-1: whether light-tier jobs are allowed while exclusive work is running
+        (on by default; falls back to the schema default on read failure)."""
         try:
             return bool(_secrets.load().queue.light_tasks_during_train)
         except Exception:
             return False
 
-    # -------------------------------------------------------------- 子进程
+    # -------------------------------------------------------------- Child processes
     def _spawn_task(self, slot: _Slot, task: dict[str, Any]) -> None:
-        # ADR-0009 PR-1 C6 trace_id 跨进程贯穿：
-        #   1) task.request_trace_id 由 API endpoint 入 task 时存（HTTP 请求那一刻
-        #      TraceIdMiddleware bind 的 contextvar）；老 task / 没存的兜底 bg-{uuid}
-        #   2) bind 到 ContextVar 让 supervisor 整段 _spawn_task 内 logger.x 都带
-        #   3) 注入 ANIMA_TRACE_ID / ANIMA_PROCESS_NAME env 给 worker 子进程
+        # ADR-0009 PR-1 C6 trace_id propagation across processes:
+        #   1) task.request_trace_id is stored by the API endpoint when the task is
+        #      enqueued (the contextvar bound by TraceIdMiddleware at the moment of
+        #      the HTTP request); for old tasks / ones without it, fall back to
+        #      bg-{uuid}
+        #   2) bind it to a ContextVar so every logger.x call throughout
+        #      _spawn_task carries it
+        #   3) inject ANIMA_TRACE_ID / ANIMA_PROCESS_NAME env vars into the worker
+        #      child process
         from ..infrastructure.logging import (
             PROCESS_ENV, TRACE_ENV,
             bind_trace_id, new_trace_id, reset_trace_id,
@@ -584,31 +640,39 @@ class Supervisor:
 
             self._freeze_task_snapshot(int(task["id"]), cfg_path)
 
-            # task-scoped 档案：monitor state 一律落 tasks/<id>/monitor/state.json，
-            # 跟 version 解耦（之前在 versions/<label>/monitor/task_<id>/state.json，
-            # 删 version 会一并丢掉 task 历史）
+            # Task-scoped file layout: monitor state always lives at
+            # tasks/<id>/monitor/state.json, decoupled from the version (it used to
+            # live at versions/<label>/monitor/task_<id>/state.json, where deleting a
+            # version would also wipe out the task's history)
             monitor_state_path = _resolve_monitor_state_path(task)
-            # 提前注入到 task dict 供 cmd_builder 用，以及落库
+            # Inject it into the task dict up front for cmd_builder to use, and for
+            # persisting to the db
             task = dict(task)
             task["monitor_state_path"] = str(monitor_state_path)
 
-            # task-scoped 档案：日志落 tasks/<id>/run.log，跟 monitor / samples /
-            # snapshot 同根。老 task 跑过的 studio_data/logs/<id>.log 由 logs.py
-            # fallback 读，不再写新文件到那。
+            # Task-scoped file layout: logs live at tasks/<id>/run.log, alongside
+            # monitor / samples / snapshot. Old tasks that ran under
+            # studio_data/logs/<id>.log are still read via the fallback in logs.py;
+            # we no longer write new files there.
             log_path = task_log_path(task["id"])
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_fp = open(log_path, "wb")
 
-            # 训练前：若 task 启用了验证集指标且设了分隔比例，从 train/ 划 held-out
-            # 到 validation/（移动，不参与训练）。失败不阻断训练，只记日志。
+            # Before training: if the task has validation metrics enabled with a
+            # split ratio set, carve out a held-out set from train/ into validation/
+            # (moved, not used for training). Failure here doesn't block training,
+            # only gets logged.
             self._maybe_split_validation(task, cfg_path, log_fp)
 
             cmd = self._cmd_builder(task, cfg_path)
-            # ADR 0006 PR-1：LORA_TASK_ID 注入让训练子进程把用户周期 save 写到
-            # output_dir/state/task_<TID>/ 子目录，避免同 version 多 task 互覆盖。
-            # Addendum 2 起 auto_epoch_state.pt 改落 task 档案 tasks/<id>/state/
-            # —— 路径由子进程从 --monitor-state-file 推出（bootstrap，同 samples/）。
-            # ADR-0009 PR-1 C6：TRACE_ENV + PROCESS_ENV 让 worker bootstrap 拿到。
+            # ADR 0006 PR-1: injecting LORA_TASK_ID makes the training child process
+            # write user-cycle saves under output_dir/state/task_<TID>/, avoiding
+            # cross-task overwrites within the same version. As of Addendum 2,
+            # auto_epoch_state.pt is instead written under the task's own file tree
+            # at tasks/<id>/state/ -- the child process derives the path from
+            # --monitor-state-file (bootstrap, same as samples/).
+            # ADR-0009 PR-1 C6: TRACE_ENV + PROCESS_ENV let the worker bootstrap pick
+            # these up.
             proc = self._popen(cmd, log_fp, extra_env={
                 "LORA_TASK_ID": str(task["id"]),
                 TRACE_ENV: trace_id,
@@ -623,11 +687,11 @@ class Supervisor:
 
             tid = task["id"]
 
-            # PP6.4 — log tail → SSE（取代前端 2s 轮询 /api/logs/{id}）
+            # PP6.4 -- log tail -> SSE (replaces the frontend's old 2s log polling)
             slot.tailer = LogTailer(log_path, self._make_task_log_callback(slot, tid))
             slot.tailer.start()
 
-            # PP6.4 → PR #37: monitor_state.json 变化 → SSE monitor_progress (增量协议)
+            # PP6.4 -> PR #37: monitor_state.json changes -> SSE monitor_progress (delta protocol)
             slot.state_poller = MonitorStatePoller(
                 monitor_state_path, self._make_monitor_callback(tid)
             )
@@ -649,8 +713,8 @@ class Supervisor:
             reset_trace_id(_trace_token)
 
     def _resolve_task_config_path(self, task: dict[str, Any]) -> Path:
-        """PP6.3：优先用 task.config_path（version 私有 config 绝对路径）；
-        没有时降级到老路径 _configs_dir / {config_name}.yaml。
+        """PP6.3: prefer task.config_path (the version's own absolute config path);
+        fall back to the old path, _configs_dir / {config_name}.yaml, if unset.
         """
         explicit_cfg = task.get("config_path")
         if explicit_cfg:
@@ -660,10 +724,13 @@ class Supervisor:
     def _maybe_split_validation(
         self, task: dict[str, Any], cfg_path: Path, log_fp: Any
     ) -> None:
-        """训练前把 held-out 验证集从 train/ 划到 validation/（移动）。
+        """Before training, carve out a held-out validation set from train/ into
+        validation/ (moved).
 
-        仅当 task 启用 eval_validation 且 ratio>0 时生效；按比例补足、够了不动、
-        永不移回。失败只记日志，不阻断训练。
+        Only takes effect when the task has eval_validation enabled with ratio>0;
+        tops up proportionally, leaves things alone once enough images are present,
+        and never moves images back. Failure here only gets logged, never blocks
+        training.
         """
         try:
             with db.connection_for(self._db_path) as conn:
@@ -685,7 +752,7 @@ class Supervisor:
     def _fail_task_config_missing(
         self, task: dict[str, Any], cfg_path: Path
     ) -> None:
-        """config 不存在时把 task 标 failed 并 publish 事件。"""
+        """Mark the task failed and publish an event when its config file is missing."""
         explicit_cfg = task.get("config_path")
         with db.connection_for(self._db_path) as conn:
             now = time.time()
@@ -710,10 +777,12 @@ class Supervisor:
         )
 
     def _freeze_task_snapshot(self, task_id: int, cfg_path: Path) -> None:
-        """ADR-0007 §11.7：兼容老 task，启动时补冻结 config。
+        """ADR-0007 Section 11.7: for backward compatibility with old tasks, freeze the
+        config at startup if it wasn't frozen already.
 
-        新 task 在入队时已冻结，此处为同一文件的幂等调用。补冻结失败
-        不阻塞老 task 启动。
+        New tasks are already frozen at enqueue time; this call is an idempotent
+        no-op for those. A freeze failure here for an old task doesn't block it from
+        starting.
         """
         try:
             from ..services import task_snapshot
@@ -726,12 +795,13 @@ class Supervisor:
     def _make_task_log_callback(
         self, slot: _Slot, tid: int
     ) -> Callable[[str], None]:
-        """LogTailer 回调：识别 __EVENT__: 协议 → 镜像状态到 slot + publish SSE；
-        普通行 → task_log_appended。
+        """LogTailer callback: recognize the __EVENT__: protocol -> mirror state onto
+        the slot + publish SSE; plain lines -> task_log_appended.
 
-        ADR 0006 PR-2：训练 worker 通过 __EVENT__: 协议跟 supervisor 通信
-        （pause_state / train_loop_started / auto_epoch_backup_written /
-        resume_state_loaded）。跟 jobs 的 _on_line 路径对齐。
+        ADR 0006 PR-2: the training worker talks to the supervisor via the
+        __EVENT__: protocol (pause_state / train_loop_started /
+        auto_epoch_backup_written / resume_state_loaded). Mirrors the jobs side's
+        _on_line path.
         """
         def _on_task_log(line: str) -> None:
             if line.startswith(_EVENT_MARKER):
@@ -741,40 +811,51 @@ class Supervisor:
                     import json as _json
                     payload = _json.loads(payload_str) if payload_str else {}
                 except Exception:
-                    # B-4.4: malformed event 静默丢导致 UI pause_state 永远收不到
-                    # → 暂停按钮永远灰。logger.exception 进 studio.log；
-                    # SSE event_malformed 让前端可见（不阻断 task）。
+                    # B-4.4: silently dropping a malformed event means the UI's
+                    # pause_state never arrives -> the pause button stays grayed out
+                    # forever. logger.exception goes to studio.log; the
+                    # event_malformed SSE event lets the frontend surface it (without
+                    # blocking the task).
                     logger.exception("malformed event marker: %r", line[:200])
                     self._on_event({
                         "type": "event_malformed",
                         "task_id": tid,
                         "raw_preview": line[:200],
                     })
-                    return  # 不当 log 推
-                # 状态机镜像（ADR §8.1 / §`_on_line` / Addendum 1 §supervisor）
+                    return  # don't forward this as a log line
+                # State machine mirroring (see ADR Section 8.1 / _on_line / Addendum 1 Supervisor section)
                 if evt_type == "pause_state":
-                    # ADR Addendum 1 方案 Δ：state_path 为 None / 空 = 首 epoch 内暂停
-                    # → 走 _finish_slot 的 cancel 分支（pause_state_path 空 → 降级 canceled）。
+                    # ADR Addendum 1 plan Delta: state_path being None/empty means the
+                    # pause happened within the first epoch -> falls through
+                    # _finish_slot's cancel branch (empty pause_state_path downgrades
+                    # to canceled).
                     slot.pause_state_path = str(payload.get("state_path") or "")
                     slot.pause_config_path = str(payload.get("config_path") or "")
                     slot.pause_step = payload.get("step")
                 elif evt_type == "train_loop_started":
                     slot.train_loop_started = True
                 elif evt_type == "auto_epoch_backup_written":
-                    # ADR 0006 Addendum 1：每 epoch 末 loop.py emit 一次 → 标记 slot
-                    # 字段 → is_pausable 升级条件满足 → SSE 解锁 UI 暂停按钮。
+                    # ADR 0006 Addendum 1: loop.py emits this once at the end of each
+                    # epoch -> marks the slot field -> the is_pausable upgrade
+                    # condition is met -> SSE unlocks the UI's pause button.
                     slot.last_auto_epoch_state_path = str(payload.get("state_path") or "") or None
                     slot.last_auto_epoch_config_path = str(payload.get("config_path") or "") or None
-                    # ADR Addendum 2：同步落 DB。slot 字段是内存态，进程 / 机器
-                    # 一死即丢；落 DB 后 task 之后 failed（崩溃 / 关机）或
-                    # canceled 时恢复点路径仍可查，resume endpoint 据此放行。
+                    # ADR Addendum 2: also persist to the db. Slot fields are
+                    # in-memory state that's lost the moment the process or machine
+                    # dies; once persisted to the db, the resume checkpoint path can
+                    # still be looked up afterward whether the task later ends up
+                    # failed (crash/shutdown) or canceled, and the resume endpoint
+                    # uses that to allow resuming.
                     self._persist_last_state(tid, payload)
                 elif evt_type == "resume_state_loaded":
-                    # ADR §5.5 / PR-3：训练子进程 load_training_state 成功 →
-                    # paused_* 字段已被消费完，清 db 字段避免 stale。
-                    # ADR Addendum 2：**不再删文件** —— auto_epoch_state.pt 是
-                    # 覆盖式单文件不会堆积，删了反而造成「resume 后到下一
-                    # epoch 末之间无恢复点」的窗口。
+                    # ADR Section 5.5 / PR-3: once the training child process's
+                    # load_training_state succeeds, the paused_* fields have already
+                    # been consumed, so clear the db fields to avoid staleness.
+                    # ADR Addendum 2: **the file is no longer deleted** --
+                    # auto_epoch_state.pt is a single file that gets overwritten each
+                    # time rather than accumulating, so deleting it would instead
+                    # create a window with "no checkpoint between resume and the end
+                    # of the next epoch".
                     self._clear_pause_fields(tid)
                 elif evt_type == "eval_training_finished":
                     slot.eval_training_finished_payload = dict(payload)
@@ -825,11 +906,12 @@ class Supervisor:
     def _make_monitor_callback(
         self, tid: int
     ) -> Callable[[dict[str, Any]], None]:
-        """MonitorStatePoller 回调：把 monitor_state.json 的 delta publish 成
-        SSE monitor_progress（PR #37 增量协议）。
+        """MonitorStatePoller callback: publish deltas from monitor_state.json as
+        SSE monitor_progress (PR #37 delta protocol).
 
-        payload 是 delta（appended_losses/lr/samples + 最新 step/speed/...），
-        客户端首次 GET /api/state 拿快照后用这个增量持续 merge。
+        payload is a delta (appended_losses/lr/samples plus the latest
+        step/speed/...); the client fetches a snapshot once via GET /api/state on
+        first load, then continuously merges these deltas on top.
         """
         def _on_state_delta(delta: dict[str, Any]) -> None:
             self._on_event({
@@ -842,8 +924,8 @@ class Supervisor:
     def _write_task_running_to_db(
         self, task: dict[str, Any], pid: int, monitor_state_path: Path
     ) -> None:
-        """task spawn 后的 db 写入：task.status=running + version.status=training
-        （ADR-0007 §11.3-B 双写）。
+        """DB writes after a task spawns: task.status=running + version.status=training
+        (ADR-0007 Section 11.3-B dual write).
         """
         with db.connection_for(self._db_path) as conn:
             db.update_task(
@@ -871,7 +953,8 @@ class Supervisor:
     def _spawn_job(self, slot: _Slot, job: dict[str, Any]) -> None:
         log_path = Path(job.get("log_path") or project_jobs.log_path_for(job["id"]))
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        # worker 自己 append 模式开 log，supervisor 这里只挂个 stdout 转发到同一文件
+        # The worker itself opens the log in append mode; the supervisor just
+        # attaches stdout to the same file
         log_fp = open(log_path, "ab")
 
         cmd = self._job_cmd_builder(job)
@@ -883,7 +966,7 @@ class Supervisor:
         slot.proc = proc
         slot.kind = "job"
         slot.id = job["id"]
-        slot.job_kind = job["kind"]  # R-1：供 _exclusive_busy 判档位
+        slot.job_kind = job["kind"]  # R-1: used by _exclusive_busy to classify the tier
         slot.log_fp = log_fp
         slot.cancel_pending = False
 
@@ -917,12 +1000,14 @@ class Supervisor:
         vid: Optional[int],
         kind: str,
     ) -> Callable[[str], None]:
-        """LogTailer 回调：识别 __EVENT__: 协议 publish typed SSE；普通行
-        → job_log_appended。
+        """LogTailer callback: recognize the __EVENT__: protocol and publish typed
+        SSE; plain lines -> job_log_appended.
 
-        结构化事件标记：worker 写 `__EVENT__:type:json_payload` 让 supervisor
-        publish 成 typed SSE 事件（不进 job log）。比专门搭 IPC 通道轻，比
-        让前端按文本 grep 日志靠谱。job_id / project_id 由 supervisor 注入。
+        Structured event marker: the worker writes `__EVENT__:type:json_payload`,
+        which the supervisor turns into a typed SSE event (not added to the job log).
+        Lighter than building a dedicated IPC channel, and more reliable than having
+        the frontend grep the log text. job_id / project_id are injected by the
+        supervisor.
         """
         def _on_line(line: str) -> None:
             if line.startswith(_EVENT_MARKER):
@@ -941,7 +1026,7 @@ class Supervisor:
                     })
                 except Exception:
                     logger.exception("malformed event marker: %r", line[:200])
-                return  # 不当成日志推
+                return  # don't forward this as a log line
 
             self._on_event({
                 "type": "job_log_appended",
@@ -954,11 +1039,12 @@ class Supervisor:
             })
         return _on_line
 
-    # ----------------------------------------------- daemon 路径 (commit 9)
+    # ----------------------------------------------- Daemon path (commit 9)
     def _submit_to_daemon(self, task: dict[str, Any]) -> None:
-        """把一条 generate task 推给 inference daemon。
+        """Push a generate task to the inference daemon.
 
-        和 _spawn_task 平行的入口；没有 _Slot 概念，daemon 自己管 active task。
+        A parallel entry point to _spawn_task; there's no _Slot concept here -- the
+        daemon manages its own active task.
         """
         import json as _json
 
@@ -977,13 +1063,15 @@ class Supervisor:
             self._fail_daemon_task(task_id, f"failed to read config: {e}")
             return
 
-        # output_dir：cfg 里给的（enqueue_generate 写到 anima_gen_{tid}）兜底也行
+        # output_dir: taken from cfg if present (enqueue_generate writes it as
+        # anima_gen_{tid}); falling back here is also fine
         output_dir = (
             cfg.get("output_dir")
             or str(STUDIO_DATA / "monitors" / f"task_{task_id}")
         )
 
-        # monitor_state.json：让 daemon 写文件，supervisor 起 poller 推 SSE
+        # monitor_state.json: the daemon writes this file, and the supervisor starts
+        # a poller to push it over SSE
         monitor_state_path = _resolve_monitor_state_path(task)
         cfg["__monitor_state_file"] = str(monitor_state_path)
 
@@ -996,8 +1084,10 @@ class Supervisor:
                 self._fail_daemon_task(task_id, f"daemon start failed: {e}")
                 return
 
-        # spawn 后立刻把 idle timeout 从 secrets 同步进 daemon，避免首个 task 出图后
-        # 模型常驻；用户在 settings 改值后下一次 dispatch 也会重新读取。
+        # Sync the idle timeout from secrets into the daemon right after spawning, so
+        # the model doesn't stay resident after the first task finishes generating;
+        # if the user changes the value in settings, the next dispatch will re-read
+        # it too.
         daemon.sync_idle_timeout_from_secrets()
 
         if not self._daemon_listener_registered:
@@ -1008,8 +1098,9 @@ class Supervisor:
         with self._daemon_lock:
             self._daemon_active_task_id = task_id
             self._daemon_cancel_pending = False
-            # 0.17 item1：开该 generate task 的 run.log（LogTab 读 /api/logs →
-            # tasks/<id>/run.log）。daemon 串行跑一个，其间的日志都归这个 task。
+            # 0.17 item1: open this generate task's run.log (LogTab reads /api/logs ->
+            # tasks/<id>/run.log). The daemon runs serially, one at a time, so all of
+            # its log output during this run belongs to this task.
             try:
                 lp = task_log_path(task_id)
                 lp.parent.mkdir(parents=True, exist_ok=True)
@@ -1018,7 +1109,7 @@ class Supervisor:
                 logger.exception("open daemon task log failed")
                 self._daemon_log_fp = None
 
-        # poller：daemon 写 monitor_state.json → SSE monitor_progress (增量协议)
+        # poller: the daemon writes monitor_state.json -> SSE monitor_progress (delta protocol)
         def _on_state_delta(delta: dict[str, Any]) -> None:
             self._on_event({
                 "type": "monitor_progress",
@@ -1061,7 +1152,7 @@ class Supervisor:
             })
 
     def _on_daemon_task_event(self, event: dict[str, Any]) -> None:
-        """daemon 推回的 task 级事件（image_done / done / error / preview_step）。"""
+        """Task-level event pushed back by the daemon (image_done / done / error / preview_step)."""
         kind = event.get("kind")
         tid = int(event.get("task_id") or 0)
         if kind == "started":
@@ -1070,7 +1161,8 @@ class Supervisor:
         if kind in ("image_done", "image_error"):
             return
         if kind == "phase":
-            # 出图阶段（load/clip/sample/vae）→ 前端进度条覆盖非采样阶段（不再卡 0%/100%）
+            # Generation phase (load/clip/sample/vae) -> the frontend progress bar
+            # covers the non-sampling phases too (so it no longer sticks at 0%/100%)
             self._on_event({
                 "type": "generate_phase",
                 "task_id": tid,
@@ -1078,8 +1170,9 @@ class Supervisor:
             })
             return
         if kind == "preview_step":
-            # commit 14：中间步进度 + 可选预览。step/total 永远有，image_b64
-            # 取决于 settings.preview_every_n_steps + TAEFlux 是否可用
+            # commit 14: intermediate step progress + optional preview. step/total are
+            # always present; image_b64 depends on
+            # settings.preview_every_n_steps + whether TAEFlux is available
             self._on_event({
                 "type": "generate_preview_step",
                 "task_id": tid,
@@ -1089,7 +1182,8 @@ class Supervisor:
             })
             return
         if kind == "image_started":
-            # 多张图（XY 或 count>1）：当前进度到第几张
+            # Multiple images (XY grid or count>1): which image number is currently
+            # in progress
             self._on_event({
                 "type": "generate_image_started",
                 "task_id": tid,
@@ -1111,10 +1205,12 @@ class Supervisor:
             self._emit_daemon_state()
 
     def _on_daemon_log_line(self, entry: dict[str, Any]) -> None:
-        """daemon stderr 增量行 → SSE daemon_log_line（前端日志抽屉用）。
+        """Daemon stderr delta lines -> SSE daemon_log_line (used by the frontend log drawer).
 
-        0.17 item1：同时落当前 active generate task 的 run.log + emit task_log_appended
-        （LogTab 实时更新）。file 写在锁内避免与 finalize 的 close 竞态；SSE 在锁外发。
+        0.17 item1: also appends to the current active generate task's run.log +
+        emits task_log_appended (for live LogTab updates). The file write happens
+        under the lock to avoid a race with finalize's close; the SSE emit happens
+        outside the lock.
         """
         line = entry.get("line")
         self._on_event({
@@ -1138,7 +1234,7 @@ class Supervisor:
             self._on_event({"type": "task_log_appended", "task_id": tid, "text": line})
 
     def _on_daemon_global_event(self, event: dict[str, Any]) -> None:
-        """daemon 进程级事件（loaded / unloaded / stopped）。"""
+        """Process-level daemon event (loaded / unloaded / stopped)."""
         kind = event.get("kind")
         if kind in ("loaded", "unloaded"):
             self._emit_daemon_state()
@@ -1158,7 +1254,8 @@ class Supervisor:
             self._emit_daemon_state()
 
     def _emit_daemon_state(self) -> None:
-        """commit 13：广播 daemon 当前状态给 SSE 订阅者（前端 status pill）。"""
+        """commit 13: broadcast the daemon's current state to SSE subscribers (the
+        frontend status pill)."""
         daemon = get_daemon()
         with self._daemon_lock:
             active_tid = self._daemon_active_task_id
@@ -1180,13 +1277,15 @@ class Supervisor:
         status: str,
         error_msg: Optional[str] = None,
     ) -> None:
-        """daemon 上 task 终态收尾：标 db 状态 + 停 poller + 清 active 标记。
+        """Final cleanup for a task on the daemon: write db status + stop the poller +
+        clear the active-task marker.
 
-        commit 10 起：图本身在 server 内存 cache（非磁盘），不在这里清 ——
-        让客户端断连 / LRU / lifespan 决定（commit 11）。这里只清 task
-        在磁盘上的小附属物：
-          - anima_gen_{tid}/config.json + 空目录
-          - monitors/task_{tid}/state.json（如果 fallback 路径写过）
+        As of commit 10, the images themselves live in the server's in-memory cache
+        (not on disk), so they aren't cleaned up here -- that's left to client
+        disconnect / LRU / lifespan (commit 11). This only cleans up the task's small
+        on-disk leftovers:
+          - anima_gen_{tid}/config.json + the empty directory
+          - monitors/task_{tid}/state.json (if the fallback path was ever written to)
         """
         with self._daemon_lock:
             if self._daemon_active_task_id == task_id:
@@ -1201,7 +1300,7 @@ class Supervisor:
                 poller.stop()
             except Exception:
                 pass
-        if log_fp is not None:  # 0.17 item1：关该 task 的 run.log
+        if log_fp is not None:  # 0.17 item1: close this task's run.log
             try:
                 log_fp.close()
             except Exception:
@@ -1231,13 +1330,13 @@ class Supervisor:
         logger.info("daemon task %d finished: %s", task_id, status)
 
     def _fail_daemon_task(self, task_id: int, msg: str) -> None:
-        """generate task 在派给 daemon 之前的失败（config 缺失等）。"""
+        """A generate task failing before it was even handed to the daemon (e.g. missing config)."""
         with self._daemon_lock:
             if self._daemon_active_task_id == task_id:
                 self._daemon_active_task_id = None
             log_fp = self._daemon_log_fp
             self._daemon_log_fp = None
-        if log_fp is not None:  # 0.17 item1：兜底关 run.log（一般此路径未开）
+        if log_fp is not None:  # 0.17 item1: close run.log as a fallback (this path usually isn't hit)
             try:
                 log_fp.close()
             except Exception:
@@ -1256,7 +1355,7 @@ class Supervisor:
             "status": "failed",
         })
 
-    # ---- 子进程通用 -----------------------------------------------------------
+    # ---- Child process helpers -----------------------------------------------------------
     def _popen(
         self,
         cmd: list[str],
@@ -1266,27 +1365,33 @@ class Supervisor:
         creationflags = 0
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-        # Windows 默认 stdout 用 cp936；任何 worker 写中文 / emoji 会触发
-        # UnicodeEncodeError，logging 默认 backslashreplace 转成 \uXXXX，让
-        # task log 里全是乱码。这里给所有子进程兜底 UTF-8 + 不缓冲。
+        # Windows defaults stdout to cp936; any worker writing Chinese text / emoji
+        # would trigger a UnicodeEncodeError, and logging's default backslashreplace
+        # would turn it into \uXXXX, filling the task log with garbled text. Give
+        # every child process a UTF-8 + unbuffered fallback here.
         env = os.environ.copy()
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONUNBUFFERED", "1")
-        # 减少底层库的加载进度条（safetensors / transformers / accelerate 等
-        # 在 stdout=pipe 时会逐行打几百行 `Loading weights: NN%|...`，淹没用户
-        # 自己的训练日志）。仅静音「加载进度」，不影响 logger.error / 训练步进。
+        # Cut down on underlying libraries' loading progress bars (safetensors /
+        # transformers / accelerate, etc. print hundreds of lines like
+        # `Loading weights: NN%|...` when stdout is piped, drowning out the user's own
+        # training log). Only silences "loading progress" output, doesn't affect
+        # logger.error or training step logging.
         env.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         env.setdefault("TRANSFORMERS_VERBOSITY", "error")
         env.setdefault("DIFFUSERS_VERBOSITY", "error")
         env.setdefault("ACCELERATE_DISABLE_RICH", "1")
-        # xformers 的 triton 探测会把无害的 ImportError traceback 打进 task log
-        # （Windows 无官方 triton wheel），被失败摘要误当失败原因；本 app 的
-        # xformers 路径不用 triton kernel，无条件短路。
+        # xformers's triton probe would dump a harmless ImportError traceback into
+        # the task log (no official triton wheel on Windows), which the failure
+        # summary would mistake for the real failure reason; this app's xformers path
+        # doesn't use triton kernels, so short-circuit it unconditionally.
         _xformers_svc.disable_triton_probe(env)
-        # 训练侧内存/显存水位保护开关（Settings → 训练，默认关）。runtime 侧
-        # env 缺省 = 开（CLI 直跑的安全兜底），所以只有关闭时才需要显式传；
-        # 训练与正则 AI 子进程读它，出图 daemon 走自己的 cfg.ram_guard 不受影响。
+        # Training-side memory/VRAM watermark guard switch (Settings -> Training, off
+        # by default). The runtime-side env default is "on" (a safety fallback for
+        # running the CLI directly), so it only needs to be passed explicitly when
+        # turned off; read by the training and reg-AI child processes -- the
+        # generation daemon uses its own cfg.ram_guard and is unaffected.
         try:
             if not _secrets.load().training.ram_guard:
                 env.setdefault("LORA_RAM_GUARD", "0")
@@ -1295,7 +1400,8 @@ class Supervisor:
         try:
             wandb_cfg = _secrets.load().wandb
             if wandb_cfg.enabled:
-                # 0.18 预设化：enabled 是顶层总开关，其余字段读当前选中的 preset。
+                # 0.18 presets: enabled is the top-level master switch; the remaining
+                # fields are read from the currently selected preset.
                 wb = wandb_cfg.active
                 env.setdefault("WANDB_ENABLED", "1")
                 env.setdefault("WANDB_MODE", wb.mode)
@@ -1349,12 +1455,16 @@ class Supervisor:
             except Exception:
                 pass
 
-        # ADR 0006 PR-2 + Addendum 1 三元分流（原来二元 canceled vs done/failed）。
-        # paused 优先级最高 — pause_pending=True 且子进程 emit 了 pause_state
-        # （state_path / config_path 都到位）= 真正成功暂停。
-        # ADR Addendum 1 方案 Δ：pause_pending=True 但 pause_state_path 空 = 首 epoch
-        # 内暂停或子进程退出前没来得及 emit（IO 慢 / 异常 / 强 kill）→ 降级 canceled
-        # （ADR §4.3 modal "强制取消保存进度" 兜底）。
+        # ADR 0006 PR-2 + Addendum 1 three-way branch (originally a two-way branch:
+        # canceled vs done/failed).
+        # paused takes highest priority -- pause_pending=True and the child process
+        # emitted pause_state (with both state_path / config_path present) means the
+        # pause genuinely succeeded.
+        # ADR Addendum 1 plan Delta: pause_pending=True but pause_state_path empty
+        # means the pause happened within the first epoch, or the child process
+        # exited before it could emit (slow IO / exception / force kill) -> downgrade
+        # to canceled (the fallback behind the ADR Section 4.3 modal's "force cancel,
+        # discard progress").
         if slot.pause_pending and slot.pause_state_path:
             status = "paused"
         elif slot.pause_pending or slot.cancel_pending:
@@ -1373,9 +1483,12 @@ class Supervisor:
                     "pid": None,
                 }
                 if status == "failed":
-                    # B-1.6: tail task run.log 末 12 行（含 Traceback 优先）
-                    # 拼到 error_msg，UI Task 列表能直接看到根因，不必每次翻 trace。
-                    # 新 task 走 tasks/<id>/run.log；老 task fallback 到旧 logs/<id>.log。
+                    # B-1.6: tail the last 12 lines of the task's run.log
+                    # (prioritizing a Traceback if present) and append it to
+                    # error_msg, so the UI's task list can show the root cause
+                    # directly without digging through the trace every time. New
+                    # tasks use tasks/<id>/run.log; old tasks fall back to the legacy
+                    # logs/<id>.log.
                     new_log = task_log_path(cid)
                     tail_src = new_log if new_log.exists() else self._logs_dir / f"{cid}.log"
                     tail = _tail_log_for_error_msg(tail_src)
@@ -1388,13 +1501,15 @@ class Supervisor:
                     fields["paused_step"] = slot.pause_step
                     fields["paused_at"] = time.time()
                 db.update_task(conn, cid, **fields)
-                # ADR-0007 §11.3-B：task 终态（done/failed/canceled）独立映射到
-                # version.status。paused 不进（task 还能 resume，§11.3-A）。
+                # ADR-0007 Section 11.3-B: a task's terminal state (done/failed/canceled)
+                # maps independently onto version.status. paused doesn't map (the task
+                # can still be resumed, Section 11.3-A).
                 if status in ("done", "failed", "canceled"):
                     _maybe_finalize_version(conn, cid, status)
-            # commit 10 起：generate task 走 daemon 不进 SLOT_TRAIN，
-            # 这条 _finish_slot 路径只跑 train / reg_ai；不再需要 generate
-            # tempdir 清理（已搬到 _finalize_daemon_task）。
+            # As of commit 10, generate tasks go through the daemon rather than
+            # SLOT_TRAIN, so this _finish_slot path only ever handles train / reg_ai;
+            # generate tempdir cleanup is no longer needed here (moved to
+            # _finalize_daemon_task).
             self._on_event(
                 {"type": "task_state_changed", "task_id": cid, "status": status}
             )
@@ -1411,8 +1526,10 @@ class Supervisor:
                 elif status == "canceled":
                     project_jobs.mark_canceled(conn, cid)
                 else:
-                    # B-1.6: 同 task — tail 作业 log 拼 error_msg。
-                    # R-3：作业日志已随台账合并搬到 tasks/<id>/run.log。
+                    # B-1.6: same idea as for tasks -- tail the job log and append it
+                    # to error_msg.
+                    # R-3: job logs have already moved to tasks/<id>/run.log as part
+                    # of the ledger merge.
                     tail = _tail_log_for_error_msg(project_jobs.log_path_for(cid))
                     err_msg = f"exit code {rc}\n{tail}" if tail else f"exit code {rc}"
                     project_jobs.mark_failed(conn, cid, err_msg)
@@ -1430,10 +1547,11 @@ class Supervisor:
         slot.reset()
 
     def _terminate_slot(self, slot: _Slot) -> None:
-        """同步终止指定槽位的子进程（仅 supervisor.stop() 用）。
+        """Synchronously terminate the child process on a given slot (only used by
+        supervisor.stop()).
 
-        web 请求路径下的 cancel 请用 `_signal_terminate_async`，避免阻塞
-        请求线程 30 秒。
+        For cancellation on the web request path, use `_signal_terminate_async`
+        instead, to avoid blocking the request thread for 30 seconds.
         """
         if not slot.proc:
             return
@@ -1454,11 +1572,13 @@ class Supervisor:
                 pass
 
     def _signal_terminate_async(self, slot: _Slot) -> None:
-        """非阻塞：发软终止信号，启动后台 grace timer 强杀进程树。
+        """Non-blocking: send the soft termination signal and start a background grace
+        timer that force-kills the process tree.
 
-        web 请求线程立刻返回，让 reload() 不被取消请求阻塞 30 秒。supervisor
-        主循环每 POLL_INTERVAL 秒 poll proc.poll()，进程一旦退出就走
-        `_finish_slot` 把 status 改成 canceled 并 publish 事件。
+        The web request thread returns immediately, so reload() isn't blocked for 30
+        seconds by a cancel request. The supervisor main loop polls proc.poll() every
+        POLL_INTERVAL seconds, and as soon as the process exits, `_finish_slot` sets
+        status to canceled and publishes the event.
         """
         if not slot.proc:
             return
@@ -1469,7 +1589,8 @@ class Supervisor:
         grace = self._grace
 
         def _grace_then_kill_tree() -> None:
-            # 不能用 proc.wait() — 会跟 supervisor 主循环的 poll 抢；改成轮询
+            # Can't use proc.wait() here -- it would race with the supervisor main
+            # loop's poll; poll in a loop instead
             deadline = time.time() + grace
             while time.time() < deadline:
                 if proc.poll() is not None:
@@ -1490,14 +1611,16 @@ class Supervisor:
 
     @staticmethod
     def _send_terminate_signal(proc: subprocess.Popen) -> None:
-        """Cancel 软终止信号。
+        """The soft termination signal used by cancel.
 
-        ADR 0006 PR-2：Windows 不再发 CTRL_BREAK_EVENT — 跟 pause 信号撞
-        （pause 占用 CTRL_BREAK_EVENT），cancel 的语义本来就是硬中断，
-        直接走 taskkill /T /F。POSIX 没这个冲突，继续 SIGTERM。
+        ADR 0006 PR-2: on Windows we no longer send CTRL_BREAK_EVENT -- it collides
+        with the pause signal (pause occupies CTRL_BREAK_EVENT), and cancel is
+        inherently meant to be a hard interrupt anyway, so it goes straight to
+        taskkill /T /F. POSIX has no such conflict and keeps using SIGTERM.
 
-        `_signal_terminate_async` 后续仍有 grace timer，Windows 上 proc 早就
-        被 taskkill 杀掉了、grace 第一次 poll 就 return；不浪费时间。
+        `_signal_terminate_async` still runs a grace timer afterward, but on Windows
+        the process is already dead via taskkill by the time it fires, so the first
+        poll in the grace loop just returns -- no time wasted.
         """
         try:
             if os.name == "nt":
@@ -1509,13 +1632,16 @@ class Supervisor:
 
     @staticmethod
     def _send_pause_signal(proc: subprocess.Popen) -> None:
-        """Pause 软信号 — 子进程 handle_interrupt 接住保 state。
+        """The soft signal used by pause -- caught by the child process's
+        handle_interrupt, which saves state.
 
-        Windows：`CTRL_BREAK_EVENT` 送达 CREATE_NEW_PROCESS_GROUP 子进程组，
-        Python 端映射成 SIGBREAK（sig=21），由 resume phase 注册的 handler 捕获。
-        POSIX：`SIGINT` — 跟 SIGTERM 分流，cancel 走 SIGTERM 不撞。
+        Windows: `CTRL_BREAK_EVENT` is delivered to the CREATE_NEW_PROCESS_GROUP
+        child process group, and Python maps it to SIGBREAK (sig=21), caught by the
+        handler registered during the resume phase.
+        POSIX: `SIGINT` -- kept separate from SIGTERM so it doesn't collide with
+        cancel, which uses SIGTERM.
 
-        信号链路经 spike 验证（决策见 ADR 0006）。
+        This signal path was verified via a spike (decision recorded in ADR 0006).
         """
         try:
             if os.name == "nt":
@@ -1526,12 +1652,14 @@ class Supervisor:
             logger.exception("send pause signal failed")
 
     def _signal_pause_async(self, slot: _Slot) -> None:
-        """非阻塞：发暂停信号，不带 grace 强杀。
+        """Non-blocking: send the pause signal, with no grace-period force-kill.
 
-        跟 `_signal_terminate_async` 的关键差别：暂停**不超时降级**。
-        ADR §4.3：30s 阈值由 UI 端 modal 决定下一步（再等 30s / 强制取消
-        保存进度 / 终止任务），supervisor 不主动 kill 进程 — kill 决策由
-        cancel API（用户从 modal 上选择后再调）下达。
+        The key difference from `_signal_terminate_async`: pause **never times out
+        and downgrades**. Per ADR Section 4.3, the 30s threshold is handled by the
+        UI's modal deciding the next step (wait another 30s / force-cancel and
+        discard progress / terminate the task) -- the supervisor never proactively
+        kills the process; that kill decision comes from the cancel API (called after
+        the user picks an option in the modal).
         """
         if not slot.proc:
             return
@@ -1539,10 +1667,12 @@ class Supervisor:
         self._send_pause_signal(slot.proc)
 
     def _persist_last_state(self, task_id: int, payload: dict[str, Any]) -> None:
-        """把 auto_epoch_backup_written 的恢复点信息写进 tasks 行（ADR Addendum 2）。
+        """Write the checkpoint info from auto_epoch_backup_written into the tasks row
+        (ADR Addendum 2).
 
-        每 epoch 一次 UPDATE，开销可忽略；失败只 log 不抛 —— 训练不能因
-        DB 写入异常受影响，丢一拍下个 epoch 会再写。
+        One UPDATE per epoch, negligible overhead; failures here are only logged, not
+        raised -- training must not be affected by a DB write error, and if one epoch
+        is missed it'll just write again on the next one.
         """
         state_path = str(payload.get("state_path") or "") or None
         if not state_path:
@@ -1560,16 +1690,18 @@ class Supervisor:
             logger.exception("task %s last_state persist failed", task_id)
 
     def _clear_pause_fields(self, task_id: int) -> None:
-        """清 db `paused_*` 字段（ADR §5.5 / Addendum 2 修订）。
+        """Clear the db `paused_*` fields (ADR Section 5.5 / Addendum 2 revision).
 
-        调用点：
-          - resume_state_loaded 事件（cmd_builder 成功 load 后）
-          - cancel paused → canceled
+        Call sites:
+          - the resume_state_loaded event (after cmd_builder successfully loads state)
+          - cancel while paused -> canceled
 
-        Addendum 2 起 **不再删恢复点文件**：auto_epoch_state.pt 覆盖式单文件
-        不会堆积，保留它让 canceled task 可 resume、resume 后立刻仍有恢复点。
-        文件清理统一挪到 DELETE task（lifecycle.delete_queue_item）。
-        故意 **不改 status** — caller 决定要写什么状态。
+        As of Addendum 2, **the checkpoint file is no longer deleted here**:
+        auto_epoch_state.pt is a single file that gets overwritten rather than
+        accumulating, so keeping it means a canceled task can still be resumed, and
+        immediately still has a checkpoint again right after resuming. File cleanup
+        has been unified into DELETE task (lifecycle.delete_queue_item).
+        Deliberately **does not change status** -- the caller decides what status to write.
         """
         with db.connection_for(self._db_path) as conn:
             task = db.get_task(conn, task_id)

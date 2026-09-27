@@ -1,12 +1,14 @@
 /**
- * useLocalStorageState 单元测试。
+ * Unit tests for useLocalStorageState.
  *
- * 覆盖：
- *   - 初值：localStorage 没值用 default；有值用解析后的值
- *   - setter：写 localStorage 同步更新 state
- *   - 函数式 setter
- *   - 'storage' 事件跨 tab 同步：新值同步进 state、null（其他 tab 删除）回 default
- *   - parse 失败 fallback 到 default
+ * Covers:
+ *   - Initial value: falls back to default when localStorage is empty, otherwise
+ *     uses the parsed stored value
+ *   - setter: writing to localStorage synchronously updates state
+ *   - functional setter
+ *   - 'storage' event syncing across tabs: a new value syncs into state, and
+ *     null (deleted by another tab) reverts to default
+ *   - parse failure falls back to default
  */
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'

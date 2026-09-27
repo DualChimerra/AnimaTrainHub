@@ -1,9 +1,11 @@
-"""采样图代理（PR-6 commit 1 从 server.py 抽出）。
+"""Sample image proxy (extracted from server.py in PR-6 commit 1).
 
-2 routes：
-    GET /samples/{filename}        带 task_id 时按 monitor_state_path 多候选目录解析；
-                                   不给走全局 OUTPUT_DIR/samples/ 兜底；可选 ?w=N 缩略图
-    GET /api/queue/{task_id}/samples  某 task 的采样图清单（队列页内联采样条用）
+2 routes:
+    GET /samples/{filename}        with task_id, resolves against multiple candidate dirs
+                                   derived from monitor_state_path; without it, falls back
+                                   to the global OUTPUT_DIR/samples/; optional ?w=N thumbnail
+    GET /api/queue/{task_id}/samples  a task's sample image manifest (used by the queue
+                                      page's inline sample strip)
 """
 from __future__ import annotations
 
@@ -25,8 +27,9 @@ from ...services.dataset.scan import IMAGE_EXTS
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# 队列页每行内联的采样条上限。monitor state 自己 cap 50（train_monitor.py），
-# 这里扫盘能看到全部历史图，给同一个数量级的上限防超长训练一次吐几百条。
+# Cap on the queue page's per-row inline sample strip. The monitor state caps itself at
+# 50 (train_monitor.py); here, scanning disk can see the full image history, so this cap of
+# the same order of magnitude guards against an extra-long run dumping hundreds at once.
 _MAX_LIST = 200
 
 _EPOCH_RE = re.compile(r"^epoch_(\d+)", re.IGNORECASE)
@@ -34,14 +37,15 @@ _STEP_RE = re.compile(r"^step_(\d+)", re.IGNORECASE)
 
 
 def _sample_dirs(monitor_state_path: str, task_id: int) -> list[Path]:
-    """某 task 的采样图目录候选，按新→旧布局排序。
+    """Candidate sample directories for a task, ordered new -> old layout.
 
-    - **新（task-scoped）** `studio_data/tasks/<task_id>/samples/`
-    - `monitor_state.json` 同级 `samples/`（PP6.1 v0.5.0+ 老 task 兼容；
-      state file 在 versions/<v>/monitor/task_<id>/ 时，samples 也在那）
-    - `monitor_state.json` 同级 `output/samples/`（pre-PP6.1 老 task；
-      sample_dir = output_dir/samples，output_dir 通常是 versions/{label}/output）
-    - 同级 `output/<任意子目录>/samples/`（兜底防 anima_train 用别的 output 名）
+    - **New (task-scoped)** `studio_data/tasks/<task_id>/samples/`
+    - `samples/` alongside `monitor_state.json` (compatibility with pre-PP6.1 v0.5.0+ tasks;
+      when the state file lives at versions/<v>/monitor/task_<id>/, samples are there too)
+    - `output/samples/` alongside `monitor_state.json` (pre-PP6.1 legacy tasks;
+      sample_dir = output_dir/samples, and output_dir is usually versions/{label}/output)
+    - `output/<any subdirectory>/samples/` (fallback in case anima_train used a different
+      output name)
     """
     monitor_dir = Path(monitor_state_path).parent
     dirs = [
@@ -68,7 +72,7 @@ def _monitor_state_path(task_id: int) -> Optional[str]:
 
 
 def _marks(filename: str) -> tuple[Optional[int], Optional[int]]:
-    """从文件名解析 (epoch, step)。`epoch_3_xxx.png` / `step_1200_xxx.png`。"""
+    """Parse (epoch, step) from a filename. `epoch_3_xxx.png` / `step_1200_xxx.png`."""
     ep = _EPOCH_RE.match(filename)
     st = _STEP_RE.match(filename)
     return (
@@ -83,14 +87,16 @@ def get_sample(
     task_id: Optional[int] = None,
     w: Optional[int] = None,
 ) -> FileResponse:
-    """采样图代理。
+    """Sample image proxy.
 
-    `?task_id=N` 给了 → 按 `_sample_dirs()` 的候选目录逐个查找。
-    没给 task_id → 兜底全局 OUTPUT_DIR/samples/（旧训练直接命令行的兼容）。
+    With `?task_id=N` -> looks through `_sample_dirs()`'s candidate directories one by one.
+    Without task_id -> falls back to the global OUTPUT_DIR/samples/ (compatibility with old
+    training runs launched directly from the CLI).
 
-    `?w=N` 给了 → 走 thumb_cache 生成 N px 缩略图（用于监控页缩略图条）；
-    不给 → 返回原图。两种都走 _thumb_response 的弱 etag + no-cache，浏览器
-    304 命中即可，避免「重启窗口期失败响应被永久缓存」问题。
+    With `?w=N` -> goes through thumb_cache to generate an N px thumbnail (used by the
+    monitor page's thumbnail strip); without it -> returns the original image. Both paths go
+    through _thumb_response's weak etag + no-cache, so the browser can just hit a 304,
+    avoiding the "a failed response during a restart window gets cached forever" problem.
     """
     _errors._validate_component_or_400(filename)
 
@@ -116,11 +122,13 @@ def get_sample(
             raise NotFoundError("Sample image not found", code="sample.not_found")
         resolved = path
 
-    # w 给了走缩略图；w<=0 或没给 → 原图。复用 thumb_cache，盘上落 .jpg。
-    # task-scoped 采样图内容不可变（文件名带 epoch/step，重训得新 task_id），
-    # URL (`/samples/{file}?task_id=N&w=W`) 是稳定唯一 key → immutable 长缓存，
-    # 浏览器重开不再回源（云端隧道场景每张图省一次 304 RTT）。无 task_id 的
-    # 兜底（CLI OUTPUT_DIR/samples，同名可能被覆盖）保持 no-cache 重验。
+    # With w -> thumbnail; w<=0 or missing -> original image. Reuses thumb_cache, which
+    # writes .jpg to disk. Task-scoped sample image content is immutable (filenames carry
+    # epoch/step, and retraining gets a new task_id), so the URL
+    # (`/samples/{file}?task_id=N&w=W`) is a stable, unique key -> long immutable cache, and
+    # reopening the browser skips the round trip entirely (saves one 304 RTT per image in
+    # cloud-tunnel scenarios). The no-task_id fallback (CLI OUTPUT_DIR/samples, where
+    # same-named files may be overwritten) keeps no-cache revalidation.
     immutable = task_id is not None
     size = w if (w is not None and w > 0) else 0
     return _thumb_response(resolved, size, immutable=immutable)
@@ -128,15 +136,18 @@ def get_sample(
 
 @router.get("/api/queue/{task_id}/samples")
 def list_task_samples(task_id: int) -> dict[str, Any]:
-    """某 task 的采样图清单，按 mtime 升序（训练时间轴）。
+    """A task's sample image manifest, sorted by mtime ascending (training timeline).
 
-    队列页每行的内联采样条 + 灯箱用。刻意**扫盘**而不是读 monitor_state.json：
-    - 已结束的 task 也能看（state 里的 samples 数组还在，但读整个 state 文件
-      为了拿 50 条路径太重——10k 步训练的 losses 数组几 MB）；
-    - 扫盘能看到全部历史图，不受 monitor 那边 cap 50 的限制。
+    Used by the queue page's per-row inline sample strip + lightbox. Deliberately **scans
+    disk** instead of reading monitor_state.json:
+    - works for finished tasks too (the samples array is still in the state, but reading the
+      whole state file just to get 50 paths is too heavy -- the losses array for a 10k-step
+      run can be several MB);
+    - scanning disk sees the full image history, not limited by the monitor's cap of 50.
 
-    task 不存在 / 没 monitor_state_path / 目录还没建 → `{"items": []}`，不报错
-    （队列里一堆非训练任务，前端逐行请求，404 只会刷红控制台）。
+    Task doesn't exist / no monitor_state_path / directory not created yet -> `{"items": []}`,
+    no error (the queue has a bunch of non-training tasks, the frontend requests per row, and
+    a 404 would just spam red errors in the console).
     """
     state_path = _monitor_state_path(task_id)
     if not state_path:
@@ -151,7 +162,7 @@ def list_task_samples(task_id: int) -> dict[str, Any]:
             if not f.is_file() or f.suffix.lower() not in IMAGE_EXTS:
                 continue
             if f.name in seen:
-                continue  # 老/新布局同名文件：先命中的目录优先（同 get_sample 顺序）
+                continue  # same-name file in old/new layout: first-matched dir wins (same order as get_sample)
             seen.add(f.name)
             try:
                 stat = f.stat()
@@ -161,7 +172,7 @@ def list_task_samples(task_id: int) -> dict[str, Any]:
 
     found.sort(key=lambda r: (r[0], r[1]))
     total = len(found)
-    # 超上限时保留**最新**的一批（用户要看的是训练最近长什么样）。
+    # Over the cap, keep the **most recent** batch (the user wants to see what training looks like most recently).
     if total > _MAX_LIST:
         found = found[-_MAX_LIST:]
 

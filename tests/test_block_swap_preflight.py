@@ -1,11 +1,13 @@
-"""block swap 预检（training/block_swap_preflight.py）。
+"""Block swap preflight (training/block_swap_preflight.py).
 
-核心 ``evaluate`` 是纯算术：预算输入全部由参数传入，不查系统、不碰 CUDA、
-不读权重，所以可以直接拿数字断言。``run`` 的用例只覆盖「什么时候不下判断」
-这条防误拒的主线。
+The core ``evaluate`` is pure arithmetic: all budget inputs are passed in as
+parameters, it never queries the system, touches CUDA, or reads weights, so
+we can assert directly on numbers. ``run``'s test cases only cover the
+"when does it decline to judge" anti-false-rejection main line.
 
-场景数字取自真机目标配置：12GB 卡 + 32GB 内存 + Krea 2（fp8 13.1GB /
-bf16 26.3GB，28 层，主干占全模型参数 ≈94.5%）。
+Scenario numbers are taken from a real-machine target config: a 12GB card +
+32GB RAM + Krea 2 (fp8 13.1GB / bf16 26.3GB, 28 layers, the backbone is
+~94.5% of the full model's parameters).
 """
 
 from __future__ import annotations
@@ -27,19 +29,19 @@ from training import sysmem  # noqa: E402
 
 _GIB = 1024 ** 3
 _TOTAL_BLOCKS = 28
-#: Krea 2 的 28 层主干占全模型参数的比例（其余是嵌入 / 输出层，换不出去）
+#: Fraction of the full model's parameters held by Krea 2's 28-layer backbone (the rest is embedding / output layers, which can't be swapped out)
 _BLOCK_SHARE = 0.945
 
 _FP8_BYTES = int(13.1 * _GIB)
 _BF16_BYTES = int(26.3 * _GIB)
-#: 12GB 卡的实际空闲（驱动 + 桌面占掉一点）
+#: Actual free VRAM on a 12GB card (driver + desktop take a bit)
 _FREE_VRAM_12G = int(11.5 * _GIB)
-#: 32GB 机器上训练开始时的典型可用内存
+#: Typical available RAM on a 32GB machine when training starts
 _AVAIL_RAM_32G = int(24 * _GIB)
 
 
 def _ratio(blocks: int) -> float:
-    """换出 N 层占全模型参数的比例（各层等大，与 krea2 实际结构一致）。"""
+    """Fraction of the full model's parameters covered by swapping N layers (layers are equal-sized, matching krea2's real structure)."""
     return min(max(blocks, 0), _TOTAL_BLOCKS) / _TOTAL_BLOCKS * _BLOCK_SHARE
 
 
@@ -65,12 +67,12 @@ def _evaluate(
 
 
 # ---------------------------------------------------------------------------
-# 主线：默认 blocks_to_swap=0 在 12GB 上必须被拦下并给出建议
+# Main line: the default blocks_to_swap=0 must be blocked on 12GB, with a recommendation given
 # ---------------------------------------------------------------------------
 
 
 def test_default_zero_swap_is_rejected_with_recommendation() -> None:
-    """13.1GB fp8 底模不开 swap 装不进 12GB —— 这正是「选中就开跑」的坑。"""
+    """A 13.1GB fp8 base model without swap doesn't fit in 12GB -- exactly the "select and run" trap."""
     result = _evaluate(blocks_to_swap=0)
 
     assert result.checked and not result.ok
@@ -80,9 +82,10 @@ def test_default_zero_swap_is_rejected_with_recommendation() -> None:
 
 
 def test_recommendation_leaves_training_headroom() -> None:
-    """推荐值不能只够放权重：LoRA / 优化器状态 / 激活 / dequant 还要地方。
+    """The recommendation can't be just enough to fit the weights: LoRA / optimizer state / activations / dequant still need room.
 
-    否则用户照着推荐值改完，在第 3 分钟 OOM —— 比不给推荐更糟。
+    Otherwise the user follows the recommendation and OOMs 3 minutes in --
+    worse than not giving a recommendation at all.
     """
     result = _evaluate(blocks_to_swap=0)
     weights_only = int(_FP8_BYTES * (1.0 - _ratio(result.recommended)))
@@ -91,14 +94,14 @@ def test_recommendation_leaves_training_headroom() -> None:
 
 
 def test_recommended_value_itself_passes_preflight() -> None:
-    """推荐值必须自洽：照着改一遍就应当通过（不能推荐一个仍被拒的值）。"""
+    """The recommendation must be self-consistent: applying it as-is should pass (never recommend a value that's still rejected)."""
     recommended = _evaluate(blocks_to_swap=0).recommended
 
     assert _evaluate(blocks_to_swap=recommended).ok
 
 
 def test_configured_swap_that_fits_passes() -> None:
-    """fp8 + 换出 26 层是 12GB/32GB 的目标配置，必须直通。"""
+    """fp8 + swapping 26 layers is the 12GB/32GB target config; it must pass straight through."""
     result = _evaluate(blocks_to_swap=26)
 
     assert result.checked and result.ok
@@ -106,39 +109,41 @@ def test_configured_swap_that_fits_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# bf16 底模：12GB/32GB 上存在能跑的档位，但没有一个留得下训练余量
+# bf16 base model: a runnable setting exists on 12GB/32GB, but none of them leave training headroom
 # ---------------------------------------------------------------------------
 
 
 def test_bf16_on_32g_ram_rejects_26_blocks() -> None:
-    """换出 26 层时锁定内存超上限（24.8GB > 19.2GB）——正是 32GB 机器的边界。"""
+    """Swapping 26 layers puts pinned memory over the cap (24.8GB > 19.2GB) -- exactly the boundary for a 32GB machine."""
     result = _evaluate(file_bytes=_BF16_BYTES, blocks_to_swap=26)
 
     assert result.checked and not result.ok
-    assert "锁定" in result.message
+    assert "pinned" in result.message
 
 
 def test_bf16_on_32g_ram_recommends_a_tight_value_and_says_so() -> None:
-    """bf16 在 12GB/32GB 上不是完全不可能，但余量为零 —— 文案必须说明。
+    """bf16 on 12GB/32GB isn't entirely impossible, but headroom is zero -- the message must say so.
 
-    只给一个数字而不提「这只够放权重」，用户照做后中途 OOM 会以为预检骗了他。
+    Giving a bare number without mentioning "this only fits the weights"
+    would make the user OOM mid-run after following it, thinking preflight
+    lied to them.
     """
     result = _evaluate(file_bytes=_BF16_BYTES, blocks_to_swap=26)
 
     assert result.recommended is not None
-    assert "刚好装下权重" in result.message
+    assert "just barely fits the weights" in result.message
     assert "fp8" in result.message
 
 
 def test_fp8_recommendation_is_not_flagged_tight() -> None:
-    """对照组：fp8 底模有留够余量的档位，不该带「紧」的警告。"""
+    """Control: fp8 base model has a setting with enough headroom, and shouldn't carry a "tight" warning."""
     result = _evaluate(blocks_to_swap=0)
 
-    assert "刚好装下权重" not in result.message
+    assert "just barely fits the weights" not in result.message
 
 
 def test_no_workable_swap_count_when_ram_is_small() -> None:
-    """bf16 + 16GB 内存：锁定上限压到 8GB，任何档位都不成立。"""
+    """bf16 + 16GB RAM: the pinned cap is squeezed to 8GB, so no setting works."""
     result = _evaluate(
         file_bytes=_BF16_BYTES, blocks_to_swap=26, avail_ram=int(12 * _GIB),
     )
@@ -149,7 +154,7 @@ def test_no_workable_swap_count_when_ram_is_small() -> None:
 
 
 def test_bf16_fits_comfortably_when_ram_is_large_enough() -> None:
-    """同样的 bf16 底模，大内存机器上换出足够多的层就能跑。"""
+    """Same bf16 base model, but on a large-RAM machine swapping enough layers makes it runnable."""
     result = _evaluate(
         file_bytes=_BF16_BYTES, blocks_to_swap=28, avail_ram=int(56 * _GIB),
     )
@@ -158,7 +163,7 @@ def test_bf16_fits_comfortably_when_ram_is_large_enough() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 防误拒：信息不全时一律不下判断
+# Anti-false-rejection: never judge when information is incomplete
 # ---------------------------------------------------------------------------
 
 
@@ -175,14 +180,14 @@ def test_missing_checkpoint_size_skips_judgement() -> None:
 
 
 def test_unknown_ram_still_checks_vram_side() -> None:
-    """内存查不到不影响显存侧判断（各信号独立降级）。"""
+    """Being unable to query RAM doesn't affect the VRAM-side judgement (each signal degrades independently)."""
     result = _evaluate(blocks_to_swap=0, avail_ram=None)
 
     assert result.checked and not result.ok
 
 
 def test_unknown_ram_never_blames_pinned_memory() -> None:
-    """内存未知时不能因为「锁定内存超限」拒绝 —— 那是凭空捏造的判据。"""
+    """When RAM is unknown, it must not be rejected for "pinned memory over the cap" -- that would be a fabricated criterion."""
     result = _evaluate(
         file_bytes=_BF16_BYTES, blocks_to_swap=28, avail_ram=None,
     )
@@ -191,14 +196,14 @@ def test_unknown_ram_never_blames_pinned_memory() -> None:
 
 
 def test_blocks_to_swap_above_total_is_clamped() -> None:
-    """旧 yaml / 裸 CLI 可能写超过层数的值；按上限评估，不炸。"""
+    """An old yaml / bare CLI might write a value above the layer count; evaluate against the cap instead of blowing up."""
     result = _evaluate(blocks_to_swap=999)
 
     assert result.checked and result.ok
 
 
 # ---------------------------------------------------------------------------
-# 与 check_pinned_budget 共用同一条水位线（两处漂移 = 预检说行、护栏当场拒）
+# Shares the same watermark as check_pinned_budget (drift between the two = preflight says OK but the guard rejects on the spot)
 # ---------------------------------------------------------------------------
 
 
@@ -207,18 +212,20 @@ def test_pinned_limit_agrees_with_guard(monkeypatch) -> None:
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: avail)
     limit = sysmem.pinned_safe_limit(avail)
 
-    sysmem.check_pinned_budget(limit, blocks=26)  # 正好在线上：放行
+    sysmem.check_pinned_budget(limit, blocks=26)  # right on the line: passes
     with pytest.raises(RuntimeError):
         sysmem.check_pinned_budget(limit + 1, blocks=26)
 
 
 # ---------------------------------------------------------------------------
-# run(ctx)：跳过条件
+# run(ctx): skip conditions
 # ---------------------------------------------------------------------------
 
 
-#: 族协议：两个估算方法都收 ``checkpoint_path`` 关键字（anima 的层数与参数分布
-#: 只有权重文件知道；krea2 收下即忽略）。假族按同一形状接。
+#: Family protocol: both estimator methods accept a ``checkpoint_path``
+#: keyword (only the weight file knows anima's layer count and parameter
+#: distribution; krea2 accepts it but ignores it). The fake family follows
+#: the same shape.
 def _ctx(*, capabilities=frozenset({"block_swap"}), preflight_on=True):
     family = types.SimpleNamespace(
         spec=types.SimpleNamespace(capabilities=capabilities),
@@ -238,7 +245,7 @@ def test_run_is_noop_when_disabled(monkeypatch) -> None:
     monkeypatch.setattr(sysmem, "gpu_free_bytes_global", lambda: _FREE_VRAM_12G)
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: _AVAIL_RAM_32G)
 
-    preflight.run(_ctx(preflight_on=False))  # 关掉就不该抛
+    preflight.run(_ctx(preflight_on=False))  # turned off, so it shouldn't raise
 
 
 def test_run_is_noop_for_families_without_block_swap(monkeypatch) -> None:
@@ -254,18 +261,18 @@ def test_run_raises_with_recommendation(monkeypatch) -> None:
     monkeypatch.setattr(sysmem, "gpu_free_bytes_global", lambda: _FREE_VRAM_12G)
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: _AVAIL_RAM_32G)
 
-    with pytest.raises(RuntimeError, match="建议"):
+    with pytest.raises(RuntimeError, match="Suggestion"):
         preflight.run(_ctx())
 
 
 def test_run_survives_broken_family_estimate(monkeypatch) -> None:
-    """预检是辅助设施：自身出错要放行，不能挡住训练。"""
+    """Preflight is an auxiliary facility: if it errors internally it must let training through, not block it."""
     monkeypatch.setattr(sysmem, "_file_bytes", lambda _p: _FP8_BYTES)
     monkeypatch.setattr(sysmem, "gpu_free_bytes_global", lambda: _FREE_VRAM_12G)
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: _AVAIL_RAM_32G)
 
     def _boom(_blocks, *, checkpoint_path=None):
-        raise RuntimeError("meta 模型构造失败")
+        raise RuntimeError("failed to construct the meta model")
 
     ctx = _ctx()
     ctx.family.swapped_param_ratio = _boom
@@ -274,11 +281,12 @@ def test_run_survives_broken_family_estimate(monkeypatch) -> None:
 
 
 def test_run_forwards_checkpoint_path_to_family(monkeypatch) -> None:
-    """anima 的层数/比例只有 checkpoint 自己知道——不透传就会拒掉能跑的配置。
+    """Only the checkpoint itself knows anima's layer count/ratio -- failing to pass it through rejects a runnable config.
 
-    回归的是一个具体的失败形态：漏传 ``checkpoint_path`` 时 anima 的
-    ``swapped_param_ratio`` 返回 0，预检据此算出「换出多少层都省不下显存」，
-    于是把本来跑得动的 6GB 配置判为不通过。
+    This regression-tests a specific failure mode: when ``checkpoint_path``
+    isn't passed through, anima's ``swapped_param_ratio`` returns 0, from
+    which preflight computes "swapping any number of layers saves no VRAM",
+    judging an otherwise runnable 6GB config as failing.
     """
     monkeypatch.setattr(sysmem, "_file_bytes", lambda _p: _FP8_BYTES)
     monkeypatch.setattr(sysmem, "gpu_free_bytes_global", lambda: _FREE_VRAM_12G)
@@ -301,5 +309,5 @@ def test_run_forwards_checkpoint_path_to_family(monkeypatch) -> None:
     with pytest.raises(RuntimeError):
         preflight.run(ctx)
 
-    assert seen, "预检没有向族问过任何估算"
+    assert seen, "preflight never asked the family for any estimate"
     assert all(p == "/nonexistent/model.safetensors" for p in seen)

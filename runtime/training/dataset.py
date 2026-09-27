@@ -1,18 +1,18 @@
-"""数据集与 collate：ARB 分桶 + ImageDataset + 正则集 merge + cached latent。
+"""Dataset & collate: ARB bucketing + ImageDataset + regularization-set merge + cached latent.
 
-NaViT / Patch-n-Pack 块对角打包（Phase 2 数据层）：
-- 分块 VAE encode：委托 VAEWrapper._tiled_encode（cache_encode_tiled）
-- token 预算打包 NavitPackBatchSampler + pack_indices_by_budget / pack_indices_ffd_windowed
-- CachedLatentDataset 扩展：分块 encode、token_count_for_index
-- collate_fn_navit_pack —— 异构 latent 逐图列表 collate
+NaViT / Patch-n-Pack block-diagonal packing (Phase 2 data layer):
+- Tiled VAE encode: delegated to VAEWrapper._tiled_encode (cache_encode_tiled)
+- Token-budget packing NavitPackBatchSampler + pack_indices_by_budget / pack_indices_ffd_windowed
+- CachedLatentDataset extension: tiled encode, token_count_for_index
+- collate_fn_navit_pack -- heterogeneous-latent per-image list collate
 
-抽自原 runtime/anima_train.py L1144-1675 + L1939-1962（ADR 0003 PR-A）。
+Extracted from the original runtime/anima_train.py L1144-1675 + L1939-1962 (ADR 0003 PR-A).
 
-公开：
+Public API:
 - BucketManager / ImageDataset / RepeatDataset / MergedDataset
 - BucketBatchSampler / CachedLatentDataset
-- collate_fn / collate_fn_cached — DataLoader collate
-- NavitPackBatchSampler / collate_fn_navit_pack — 块对角打包
+- collate_fn / collate_fn_cached -- DataLoader collate
+- NavitPackBatchSampler / collate_fn_navit_pack -- block-diagonal packing
 """
 
 from __future__ import annotations
@@ -27,17 +27,22 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset
 
-# 相对导入：本模块被 studio server 以 `runtime.training.dataset` 复用（bucket
-# 分布预览），那边 sys.path 只有仓库根，`training.*` 绝对导入会 ModuleNotFoundError。
+# Relative import: this module is reused by the studio server as
+# `runtime.training.dataset` (bucket distribution preview); there sys.path only
+# has the repo root, so an absolute `training.*` import would raise
+# ModuleNotFoundError.
 from .families.anima import ANIMA_SPEC
 
-# ── latent 规格单一来源（多模型 PR-1）─────────────────────────────────────
-# 单一族时代的桥接常量；PR-2b 起由 ctx.family.spec 传入各调用点。
+# -- single source of truth for latent spec (multi-model PR-1) -----------------
+# Bridge constant from the single-family era; from PR-2b onward ctx.family.spec
+# is passed to each call site instead.
 _ANIMA_LATENT = ANIMA_SPEC.latent
-#: latent npz 缓存布局版本（键集 / 张量布局变更时 bump，失配 → 删除重 encode）
+#: latent npz cache layout version (bump when the key set / tensor layout
+#: changes; a mismatch triggers delete-and-re-encode)
 LATENT_CACHE_LAYOUT_VERSION = 1
-#: 无指纹键的存量缓存 grandfather 值：历史上只有 Wan21/Qwen-Image 这一个 VAE
-#: 产出过缓存（04-synthesis D12），避免升级即全量重 encode。
+#: Grandfather value for legacy caches with no fingerprint key: historically
+#: only Wan21/Qwen-Image ever produced this VAE's cache (04-synthesis D12),
+#: which avoids a full re-encode on upgrade.
 _LEGACY_CACHE_FINGERPRINT = "wan21-f8c16"
 
 
@@ -46,11 +51,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class NativeFitImagePlan:
-    """NaViT 原生定尺寸的规划结果（``navit_native_resolution``）。
+    """Planning result for NaViT's native fixed size (``navit_native_resolution``).
 
-    ``width``/``height`` 是最终喂给 VAE 的像素尺寸（``align`` 的整倍数）。像素路径
-    复用 ``ImageDataset`` 现有的 resize-cover + center-crop（零 padding），因此有效区
-    永远填满整张 latent（navit 缓存路径不携带 mask 的前提成立）。
+    ``width``/``height`` are the final pixel size fed to the VAE (a multiple of
+    ``align``). The pixel path reuses ``ImageDataset``'s existing resize-cover +
+    center-crop (zero padding), so the valid region always fills the entire
+    latent (which is the precondition for the navit cache path carrying no mask).
     """
     source_width: int
     source_height: int
@@ -71,23 +77,32 @@ def plan_native_fit_image(
     align: int = _ANIMA_LATENT.align_px,
     over_budget: str = "downscale",
 ) -> NativeFitImagePlan:
-    """规划单张图的原生定尺寸（floor 对齐到 ``align``，可选超预算 downscale）。
+    """Plan a single image's native fixed size (floor-aligned to ``align``, with
+    optional over-budget downscale).
 
-    移植自同族早期 fork ``anima-lora-train``（``trainer/data.py::plan_native_fit_image``
-    的 floor 分支 + ``plan_multiscale_copy`` 的等比缩数学；同 GPL-3.0 血缘，见 PR 说明）。
-    与上游早期版不同：本函数**真正实现** downscale（早期版对非 fail 策略是 NotImplementedError）。
+    Ported from an early fork of the same family, ``anima-lora-train``
+    (the floor branch of ``trainer/data.py::plan_native_fit_image`` plus the
+    proportional-scale math of ``plan_multiscale_copy``; same GPL-3.0 lineage,
+    see the PR notes). Unlike that earlier upstream version, this function
+    **actually implements** downscale (the earlier version raised
+    NotImplementedError for any non-fail strategy).
 
-    对齐单元 ``align = patch_spatial(2) × vae_downsample(8) = 16px``。
+    Alignment unit: ``align = patch_spatial(2) x vae_downsample(8) = 16px``.
 
-    - 普通情形（原生 token ≤ ``max_tokens`` 且各边 ≤ ``max_side_tokens``）：每边 floor 到
-      ``align`` 整倍数（丢 ≤align-1 px），不缩放、宽高比几乎不变。
-    - 超预算（token 数超 ``max_tokens`` 或单边超 ``max_side_tokens``）：
-        * ``over_budget="downscale"``（默认）：等比缩到同时满足两个上限，再各轴 floor 到
-          ``align``（``floor(a)·floor(b) ≤ a·b`` 保证不超预算）。调用方随后 resize-cover +
-          center-crop 削掉 floor 造成的 ≤align-1 px 溢出 → 精确对齐、零 padding。
-        * ``over_budget="fail"``：直接 ``raise ValueError``（要求调大预算 / 数据集端裁图）。
+    - Normal case (native tokens <= ``max_tokens`` and each side <=
+      ``max_side_tokens``): floor each side to a multiple of ``align`` (dropping
+      up to align-1 px), no scaling, aspect ratio barely changes.
+    - Over budget (token count exceeds ``max_tokens`` or a side exceeds
+      ``max_side_tokens``):
+        * ``over_budget="downscale"`` (default): scale proportionally to satisfy
+          both limits, then floor each axis to ``align``
+          (``floor(a)*floor(b) <= a*b`` guarantees staying within budget). The
+          caller then does resize-cover + center-crop to trim the <=align-1 px
+          overflow from flooring -> exact alignment, zero padding.
+        * ``over_budget="fail"``: raise ``ValueError`` directly (requires
+          raising the budget / cropping on the dataset side).
 
-    ``max_tokens`` / ``max_side_tokens`` 为 0 表示该维不设限。
+    ``max_tokens`` / ``max_side_tokens`` of 0 means that dimension is unbounded.
     """
     W, H = int(width), int(height)
     if W <= 0 or H <= 0:
@@ -96,7 +111,7 @@ def plan_native_fit_image(
     max_tokens = max(0, int(max_tokens or 0))
     max_side = max(0, int(max_side_tokens or 0))
 
-    # 原生 floor 网格（patch-token 单位）
+    # Native floor grid (in patch-token units)
     gw, gh = W // align, H // align
     if gw <= 0 or gh <= 0:
         raise ValueError(
@@ -121,20 +136,20 @@ def plan_native_fit_image(
             reasons.append(f"{gw * gh} tokens > navit_token_budget={max_tokens}")
         if over_side:
             reasons.append(
-                f"side {max(gw, gh)} tokens > RoPE 单边上限 {max_side}"
-                f"（≈{max_side * align}px）"
+                f"side {max(gw, gh)} tokens > RoPE per-side limit {max_side}"
+                f" (~{max_side * align}px)"
             )
         raise ValueError(
-            f"[navit-native] 图 {W}x{H} 原生尺寸超限（{'；'.join(reasons)}）。"
-            "调大 navit_token_budget / 提高 max_img_h·max_img_w，或把 "
-            "navit_native_over_budget 设为 downscale（默认，自动等比降采样）。"
+            f"[navit-native] image {W}x{H} exceeds native size limit ({'; '.join(reasons)})."
+            "Raise navit_token_budget / increase max_img_h*max_img_w, or set "
+            "navit_native_over_budget to downscale (default, auto proportional downscale)."
         )
     if strategy != "downscale":
         raise ValueError(
             f"unknown navit_native_over_budget={over_budget!r}; expected downscale or fail"
         )
 
-    # downscale：等比缩到同时满足单边上限与 token 预算
+    # downscale: scale proportionally to satisfy both the per-side limit and the token budget
     s = 1.0
     if over_side:
         s = min(s, max_side / float(max(gw, gh)))
@@ -142,7 +157,8 @@ def plan_native_fit_image(
         s = min(s, math.sqrt(max_tokens / float(gw * gh)))
     ngw = max(1, int(gw * s))
     ngh = max(1, int(gh * s))
-    # floor 后的舍入兜底：单边 / 预算仍可能被 max(1,·) 顶超，压回主轴
+    # Rounding fallback after flooring: a side / the budget can still be pushed
+    # over by max(1,.), clamp back to the primary axis
     if max_side:
         ngw, ngh = min(ngw, max_side), min(ngh, max_side)
     if max_tokens and ngw * ngh > max_tokens:
@@ -159,15 +175,15 @@ def plan_native_fit_image(
 
 
 class BucketManager:
-    """ARB 分桶管理.
+    """ARB bucket manager.
 
     SYNC WITH ``studio/web/src/lib/trainBuckets.ts``. The crop page on the web
     UI predicts trainer buckets to pre-align cluster crops so the trainer
-    doesn't re-resize them — that prediction depends on a TS port of this
+    doesn't re-resize them -- that prediction depends on a TS port of this
     class. Any change to the algorithm or to the default parameters
     (``base_reso``, ``step``, the 0.1 area tolerance, the
     ``aspect_ratio_limit`` R, the min/max derivation) MUST land in both files
-    in the same commit, or the frontend's predicted bucket ≠ trainer's actual
+    in the same commit, or the frontend's predicted bucket != trainer's actual
     bucket and crops will silently degrade.
 
     The bucket set is a pure function of ``(base_reso, aspect_ratio_limit,
@@ -176,17 +192,17 @@ class BucketManager:
     - ``aspect_ratio_limit`` (R, default 2.0) symmetrically caps the widest
       bucket at R:1 and the tallest at 1:R.
     - ``min_reso`` / ``max_reso`` are the edge-length search bounds. When not
-      given they are **derived** from ``(base_reso, R)`` — at constant area
-      base² the most extreme bucket has edges ``base·√R × base/√R``, so the
-      bounds round outward to ``≈ base/√R`` and ``≈ base·√R`` (one ``step`` of
+      given they are **derived** from ``(base_reso, R)`` -- at constant area
+      base^2 the most extreme bucket has edges ``base*sqrt(R) x base/sqrt(R)``, so the
+      bounds round outward to ``~ base/sqrt(R)`` and ``~ base*sqrt(R)`` (one ``step`` of
       margin so quantization never clips; the area band + AR cap do the real
       cut). Passing them explicitly (tests / special cases) overrides the
-      derivation. The old hard-wired 512/2048 degrade at small base — e.g.
-      base=512 left only the 512×512 square, killing all AR variety — which is
+      derivation. The old hard-wired 512/2048 degrade at small base -- e.g.
+      base=512 left only the 512x512 square, killing all AR variety -- which is
       why the bounds now scale with base.
 
-    See ``docs/design/preprocess-crop-design.md`` §7 for the crop UX policy and
-    ``docs/design/multi-resolution-training-design.md`` §6 for the derivation.
+    See ``docs/design/preprocess-crop-design.md`` SS7 for the crop UX policy and
+    ``docs/design/multi-resolution-training-design.md`` SS6 for the derivation.
     """
     def __init__(self, base_reso=1024, min_reso=None, max_reso=None, step=64,
                  aspect_ratio_limit=2.0):
@@ -208,10 +224,10 @@ class BucketManager:
     def _generate(self, min_r, max_r, step, base, ar_limit):
         # Keep algorithm identical to trainBuckets.generateBuckets() in TS:
         #   - double loop over (w, h) in [min_r, max_r] step `step`
-        #   - area within ±10% of base² (the 0.1 below)
-        #   - max AR ratio ≤ ar_limit (R)
+        #   - area within +-10% of base^2 (the 0.1 below)
+        #   - max AR ratio <= ar_limit (R)
         # Default-param consumers (base=1024, R=2.0) should see exactly the same
-        # 37 buckets on both sides — covered by
+        # 37 buckets on both sides -- covered by
         # `studio/web/src/lib/trainBuckets.test.ts` asserting count == 37.
         buckets = []
         base_area = base * base
@@ -225,11 +241,11 @@ class BucketManager:
         return buckets
 
     def get_bucket(self, w, h):
-        # Snap by ABSOLUTE AR distance — not relative. The TS port
+        # Snap by ABSOLUTE AR distance -- not relative. The TS port
         # `trainBuckets.snapToBucket()` mirrors this exactly. Multiple buckets
-        # may share the same aspect ratio under the ±10% area band (e.g.
-        # 1472²/1536²/1600² when base=1536); in that tie, prefer the bucket
-        # whose area is closest to base² so exact-square inputs land on the
+        # may share the same aspect ratio under the +-10% area band (e.g.
+        # 1472^2/1536^2/1600^2 when base=1536); in that tie, prefer the bucket
+        # whose area is closest to base^2 so exact-square inputs land on the
         # configured base square instead of the first smaller square.
         aspect = w / h
         base_area = self.base_reso * self.base_reso
@@ -245,14 +261,15 @@ class BucketManager:
 
 class ImageDataset(Dataset):
     """
-    图像数据集
-    
-    支持两种 caption 格式：
-    1. JSON 文件（优先）- 支持分类 shuffle
-    2. TXT 文件（回退）- 传统 shuffle
+    Image dataset.
+
+    Supports two caption formats:
+    1. JSON file (preferred) - supports categorized shuffle
+    2. TXT file (fallback) - classic shuffle
     """
-    # 保持与 studio/datasets.py:IMAGE_EXTS 同步（anima_train.py 是独立 CLI 脚本，
-    # 不强制 import studio package；改一处时另一处也要跟着改）。
+    # Keep in sync with studio/datasets.py:IMAGE_EXTS (anima_train.py is a
+    # standalone CLI script that does not import the studio package; when one
+    # changes, update the other too).
     EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 
     def __init__(self, data_dir, resolution=1024, bucket_mgr=None,
@@ -264,17 +281,22 @@ class ImageDataset(Dataset):
                  native_align=_ANIMA_LATENT.align_px, load_masks=False):
         self.data_dir = Path(data_dir)
         self.resolution = resolution
-        # 多分辨率：bucket_mgr 是 base 分辨率的 manager（向后兼容，单一 ARB 路径仍走它，
-        # 含 None→方桶语义）。非 base 分辨率（文件夹 px 覆盖 / config 列表的其它档）的
-        # manager 由 _bucket_mgr_for 按需建在 bucket_mgrs 里。每个样本带 target_reso
-        # 决定走哪套桶；不指定 target_reso（或 == base）时走 bucket_mgr。
+        # Multi-resolution: bucket_mgr is the manager for the base resolution
+        # (backward compatible -- the single-ARB path still uses it, including
+        # None -> square-bucket semantics). Managers for non-base resolutions
+        # (folder px overrides / other entries in the config list) are built
+        # on demand in bucket_mgrs by _bucket_mgr_for. Each sample's
+        # target_reso decides which bucket set it uses; when target_reso is
+        # unset (or == base) it goes through bucket_mgr.
         self.bucket_mgr = bucket_mgr
         self.aspect_ratio_limit = aspect_ratio_limit
         self.resolutions = [int(r) for r in resolutions] if resolutions else [resolution]
         self.bucket_mgrs = {}
-        # NaViT 原生定尺寸（navit_native_resolution，opt-in）：开启时单图按原生尺寸
-        # floor 对齐 16px 定尺寸（见 _target_size_for / plan_native_fit_image），
-        # 完全绕过 ARB 桶量化；关闭（默认）时下面这些为惰值、与桶路径逐字节等价。
+        # NaViT native fixed size (navit_native_resolution, opt-in): when
+        # enabled, each image is floor-aligned to a 16px native fixed size
+        # (see _target_size_for / plan_native_fit_image), completely bypassing
+        # ARB bucket quantization; when disabled (default) the fields below
+        # are inert and the code path is byte-identical to the bucket path.
         self.native_resolution = bool(native_resolution)
         self.native_token_budget = int(native_token_budget or 0)
         self.native_over_budget = str(native_over_budget or "downscale").lower()
@@ -282,85 +304,102 @@ class ImageDataset(Dataset):
         self.native_align = int(native_align or _ANIMA_LATENT.align_px)
         if self.native_resolution and len(self.resolutions) > 1:
             logger.warning(
-                "[navit-native] navit_native_resolution 下多分辨率 fan-out 无意义"
-                "（同图各档产同一原生尺寸）：已忽略额外分辨率档 %s，按原生单份处理。",
+                "[navit-native] multi-resolution fan-out is meaningless under "
+                "navit_native_resolution (every entry for the same image produces the same "
+                "native size): ignoring extra resolution entries %s, processing as a single "
+                "native copy.",
                 self.resolutions[1:],
             )
-            # 真正收拢 fan-out（_scan 之前）：不收的话同图仍按每档复制样本、每档各
-            # encode 一份内容相同的 npz（epoch 隐性 ×N + 缓存时间/磁盘 ×N）。
+            # Actually collapse the fan-out (before _scan): without this the
+            # same image would still be duplicated per entry, each encoding
+            # an npz with identical content (implicit epoch xN + cache
+            # time/disk xN).
             self.resolutions = self.resolutions[:1]
         self.shuffle_caption = shuffle_caption
         self.keep_tokens = keep_tokens
         self.flip_augment = flip_augment
         self.tag_dropout = tag_dropout
         self.prefer_json = prefer_json
-        self.caption_override = caption_override  # 正则集：统一 caption，如 "1girl, solo"
-        # masked loss（B2）：加载与图同目录的 {stem}.mask sidecar，随图走同一
-        # 几何变换后 area 下采样到 latent 分辨率，作为 loss 空间权重。
+        self.caption_override = caption_override  # regularization set: uniform caption, e.g. "1girl, solo"
+        # masked loss (B2): load the {stem}.mask sidecar next to the image,
+        # apply the same geometric transform as the image, then area-downsample
+        # to latent resolution as the loss spatial weight.
         self.load_masks = bool(load_masks)
         self._mask_warned: set = set()
-        
-        # 尝试导入 caption_utils（直接导入避开 __init__.py）
+
+        # Try to import caption_utils (direct import to bypass __init__.py)
         self.caption_utils = None
         if prefer_json:
             try:
                 import importlib.util
                 import sys
-                
-                # 直接加载 caption_utils.py（ADR 0003 PR-A 后 utils/ 在仓库根，
-                # 不在 runtime/utils/；__file__ 是 runtime/training/dataset.py，
-                # 因此要回溯三层 parent 到仓库根。）
+
+                # Load caption_utils.py directly (after ADR 0003 PR-A, utils/
+                # lives at the repo root, not runtime/utils/; __file__ is
+                # runtime/training/dataset.py, so we need to go up three
+                # parents to reach the repo root).
                 utils_path = Path(__file__).parent.parent.parent / "utils" / "caption_utils.py"
                 if utils_path.exists():
                     spec = importlib.util.spec_from_file_location("caption_utils", utils_path)
                     caption_module = importlib.util.module_from_spec(spec)
                     sys.modules["caption_utils"] = caption_module
                     spec.loader.exec_module(caption_module)
-                    
+
                     self.caption_utils = {
                         "load_and_build": caption_module.load_and_build_caption,
                         "load_json": caption_module.load_caption_json,
                         "normalize": caption_module.normalize_caption_json,
                         "build": caption_module.build_caption_from_json,
                     }
-                    logger.info("JSON caption 模式已启用（分类 shuffle）")
+                    logger.info("JSON caption mode enabled (categorized shuffle)")
                 else:
-                    logger.warning(f"caption_utils.py 未找到: {utils_path}")
+                    logger.warning(f"caption_utils.py not found: {utils_path}")
             except Exception as e:
-                logger.warning(f"caption_utils 加载失败: {e}，回退到 TXT 模式")
-        
+                logger.warning(f"failed to load caption_utils: {e}, falling back to TXT mode")
+
         self.samples = self._scan()
         json_count = sum(1 for s in self.samples if s.get("json_path"))
         txt_count = len(self.samples) - json_count
         unique_count = len(set(id(s) for s in self.samples))
-        logger.info(f"数据集: {unique_count} 张图 → {len(self.samples)} 样本（含 repeat）(JSON: {json_count}, TXT: {txt_count})")
+        logger.info(f"dataset: {unique_count} images -> {len(self.samples)} samples (including repeats) (JSON: {json_count}, TXT: {txt_count})")
         self._preflight_json_captions()
         self.bucket_for_index = self._build_bucket_for_index()
 
     def _build_bucket_for_index(self):
-        """预扫每张图尺寸，算出每个样本的桶 (tw, th)，供 BucketBatchSampler 按桶分批。
+        """Pre-scan each image's size and compute each sample's bucket (tw, th)
+        so BucketBatchSampler can batch by bucket.
 
-        非缓存路径必需：``collate_fn`` 用 ``torch.stack`` 拼一个 batch 的 pixel_values，
-        若 batch 混入不同桶尺寸会崩；``BucketBatchSampler`` 靠 ``dataset.bucket_for_index``
-        把同尺寸样本分进同一 batch。缓存路径不读这份（``CachedLatentDataset`` 从 npz
-        latent shape 自建一份并作为外层 wrapper 暴露），但这份也很便宜（只读图片 header）。
+        Required for the non-cached path: ``collate_fn`` uses ``torch.stack``
+        to stack a batch's pixel_values; mixing different bucket sizes in a
+        batch would crash. ``BucketBatchSampler`` relies on
+        ``dataset.bucket_for_index`` to group same-size samples into the same
+        batch. The cached path doesn't read this (``CachedLatentDataset``
+        builds its own from the npz latent shape and exposes it as the outer
+        wrapper), but this pre-scan is cheap too (only reads image headers).
 
-        多分辨率：每个样本按其 ``target_reso`` 走对应 manager（``_bucket_mgr_for``），同一
-        图在不同 reso 落不同桶，故按 ``(图, target_reso)`` 去重；图只 open 一次复用尺寸。
-        某档无 manager（base 档且 ``bucket_mgr=None`` 即不分桶）→ None → sampler 退回普通切批。
+        Multi-resolution: each sample goes through the manager for its
+        ``target_reso`` (``_bucket_mgr_for``); the same image lands in
+        different buckets at different resos, so we dedupe by
+        ``(image, target_reso)``; each image is opened only once and its size
+        reused. An entry with no manager (base entry with
+        ``bucket_mgr=None``, i.e. unbucketed) maps to None -> sampler falls
+        back to plain slicing.
         """
         from PIL import Image
-        dims: dict = {}     # 图路径 → (w, h)
-        by_key: dict = {}   # (图路径, target_reso) → 桶 (tw, th)
+        dims: dict = {}     # image path -> (w, h)
+        by_key: dict = {}   # (image path, target_reso) -> bucket (tw, th)
         out = []
         for s in self.samples:
             target_reso = s.get("target_reso")
-            # 非 native 且该档不分桶（base 方桶）→ None（sampler 退回普通切批），保持旧路径不变
+            # Not native and this entry is unbucketed (base square bucket) ->
+            # None (sampler falls back to plain slicing), keeping the old path
+            # unchanged
             if not self.native_resolution and self._bucket_mgr_for(target_reso) is None:
                 out.append(None)
                 continue
             path = str(s["image"])
-            # native 忽略 target_reso（原生尺寸只取决于源图）；桶路径仍按 target_reso 分键
+            # native ignores target_reso (native size depends only on the
+            # source image); the bucket path still keys by target_reso
             key = (path, None if self.native_resolution else target_reso)
             if key not in by_key:
                 if path not in dims:
@@ -375,13 +414,18 @@ class ImageDataset(Dataset):
         return out
 
     def _target_size_for(self, img_w, img_h, target_reso=None):
-        """单张图的目标像素尺寸 ``(tw, th)``（16 整倍数），供定尺寸/缓存校验共用一条口径。
+        """Target pixel size ``(tw, th)`` for one image (a multiple of 16),
+        shared by the fixed-size path and cache validation so they use one
+        common rule.
 
-        - ``native_resolution=False``（默认）：走 ARB 桶 ``_bucket_mgr_for(target_reso).get_bucket``；
-          该档不分桶（base 方桶，``bucket_mgr=None``）→ 返回 ``None``（调用方退回方桶语义）。
-          与改动前逐字节等价。
-        - ``native_resolution=True``：走 ``plan_native_fit_image``（原生 floor-16 + 超预算 downscale），
-          完全忽略 ``target_reso`` 与桶。
+        - ``native_resolution=False`` (default): goes through the ARB bucket
+          ``_bucket_mgr_for(target_reso).get_bucket``; when that entry is
+          unbucketed (base square bucket, ``bucket_mgr=None``) -> returns
+          ``None`` (caller falls back to square-bucket semantics). Byte-identical
+          to the pre-change behavior.
+        - ``native_resolution=True``: goes through ``plan_native_fit_image``
+          (native floor-16 + over-budget downscale), completely ignoring
+          ``target_reso`` and buckets.
         """
         if self.native_resolution:
             plan = plan_native_fit_image(
@@ -399,19 +443,23 @@ class ImageDataset(Dataset):
 
     @staticmethod
     def _parse_folder_meta(name: str) -> tuple[int | None, int, str]:
-        """解析文件夹名 ``[Npx_][R_]label`` → ``(reso_override, repeat, label)``。
+        """Parse a folder name ``[Npx_][R_]label`` -> ``(reso_override, repeat, label)``.
 
-        token 顺序（均可选）：``\\d+px`` 分辨率前缀 → ``\\d+`` repeat 前缀 → 其余为 label。
+        Token order (all optional): ``\\d+px`` resolution prefix -> ``\\d+``
+        repeat prefix -> the remainder is the label.
 
-        - ``1024px_2_data`` → ``(1024, 2, 'data')``
-        - ``768px_concept`` → ``(768, 1, 'concept')``
-        - ``1024px_data``   → ``(1024, 1, 'data')``
-        - ``5_concept``（Kohya 风格，向后兼容）→ ``(None, 5, 'concept')``
-        - ``concept``       → ``(None, 1, 'concept')``
+        - ``1024px_2_data`` -> ``(1024, 2, 'data')``
+        - ``768px_concept`` -> ``(768, 1, 'concept')``
+        - ``1024px_data``   -> ``(1024, 1, 'data')``
+        - ``5_concept`` (Kohya style, backward compatible) -> ``(None, 5, 'concept')``
+        - ``concept``       -> ``(None, 1, 'concept')``
 
-        分辨率值 snap 到最近的 64 倍数（half-up）并 clamp 到 ``[256, 4096]``（与 schema
-        validator 和前端 ``Math.round`` 一致，避免偏心桶 / 跨语言取整分歧）。
-        SYNC WITH ``studio/web/src/lib/folderMeta.ts`` 的 ``parseFolderMeta``——两处解析必须一致。
+        The resolution value snaps to the nearest multiple of 64 (half-up) and
+        clamps to ``[256, 4096]`` (matching the schema validator and the
+        frontend's ``Math.round``, to avoid off-center buckets / cross-language
+        rounding drift).
+        SYNC WITH ``parseFolderMeta`` in ``studio/web/src/lib/folderMeta.ts`` --
+        the two parsers must stay in sync.
         """
         reso: int | None = None
         repeat = 1
@@ -419,7 +467,7 @@ class ImageDataset(Dataset):
         m = re.match(r"^(\d+)px_(.*)$", rest)
         if m:
             raw = int(m.group(1))
-            reso = max(256, min(4096, (raw + 32) // 64 * 64))  # round-half-up，对齐 JS Math.round
+            reso = max(256, min(4096, (raw + 32) // 64 * 64))  # round-half-up, matches JS Math.round
             rest = m.group(2)
         m = re.match(r"^(\d+)_(.*)$", rest)
         if m:
@@ -429,15 +477,17 @@ class ImageDataset(Dataset):
 
     @staticmethod
     def _parse_repeats_from_dir(name: str) -> int:
-        """从文件夹名解析 Kohya 风格重复次数，如 '5_concept' → 5（兼容旧调用）。"""
+        """Parse a Kohya-style repeat count from a folder name, e.g.
+        '5_concept' -> 5 (kept for compatibility with old callers)."""
         return ImageDataset._parse_folder_meta(name)[1]
 
     def _bucket_mgr_for(self, reso):
-        """取 reso 对应的 BucketManager。
+        """Get the BucketManager for a given reso.
 
-        base 分辨率（reso 为 None 或 == self.resolution）走 self.bucket_mgr —— 保持
-        旧路径不变（含 bucket_mgr=None → 方桶）。其它分辨率按需建 manager 缓存进
-        bucket_mgrs。
+        The base resolution (reso is None or == self.resolution) goes through
+        self.bucket_mgr -- keeping the old path unchanged (including
+        bucket_mgr=None -> square bucket). Other resolutions get a manager
+        built on demand and cached in bucket_mgrs.
         """
         if reso is None or reso == self.resolution:
             return self.bucket_mgr
@@ -448,7 +498,7 @@ class ImageDataset(Dataset):
         return mgr
 
     def _make_sample(self, img_path):
-        """为单张图构建 sample dict，找不到 caption 返回 None"""
+        """Build a sample dict for one image; return None if no caption is found"""
         sample = {"image": img_path}
         json_path = img_path.with_suffix(".json")
         if self.prefer_json and json_path.exists():
@@ -465,24 +515,27 @@ class ImageDataset(Dataset):
         return sample
 
     def _scan(self):
-        """扫描数据集目录，支持 Kohya 风格 repeat + 多分辨率。
+        """Scan the dataset directory, supporting Kohya-style repeat + multi-resolution.
 
-        目录名 ``[Npx_][R_]label``::
+        Folder name ``[Npx_][R_]label``::
 
             dataset/
-            ├── 5_new/          ← repeat 5，用 config 的 resolutions
-            ├── 1024px_2_hires/ ← repeat 2，固定 1024（覆盖列表，不 fan-out）
-            └── old/            ← repeat 1，用 config 的 resolutions
+            |-- 5_new/          <- repeat 5, uses config's resolutions
+            |-- 1024px_2_hires/ <- repeat 2, fixed 1024 (overrides the list, no fan-out)
+            `-- old/            <- repeat 1, uses config's resolutions
 
-        - 带 ``Npx_`` 前缀 → 该文件夹固定用 N 分辨率，覆盖 config 列表、不 fan-out。
-        - 无 px 前缀 → 用 ``self.resolutions``；列表多于一档时每张图在每档各一份（fan-out）。
+        - With an ``Npx_`` prefix -> that folder fixes its resolution at N,
+          overriding the config list, no fan-out.
+        - Without a px prefix -> uses ``self.resolutions``; when the list has
+          more than one entry, each image gets one copy per entry (fan-out).
 
-        每张唯一图展开成 ``repeat × 该文件夹分辨率数`` 个样本，每个带 ``target_reso``。
+        Each unique image expands into ``repeat x that folder's resolution
+        count`` samples, each carrying a ``target_reso``.
         """
         unique = []  # (sample_dict, repeat, resos)
         folder_info = []  # (name, repeat, resos, count) for logging
 
-        # 根目录图片（repeat=1，无 px → 用 resolutions）
+        # Root-level images (repeat=1, no px -> uses resolutions)
         root_count = 0
         for p in sorted(self.data_dir.iterdir()):
             if p.is_file() and p.suffix.lower() in self.EXTS:
@@ -493,7 +546,7 @@ class ImageDataset(Dataset):
         if root_count:
             folder_info.append(("(root)", 1, self.resolutions, root_count))
 
-        # 子文件夹（解析 px 覆盖 + repeat）
+        # Subfolders (parse px override + repeat)
         for subdir in sorted(self.data_dir.iterdir()):
             if not subdir.is_dir():
                 continue
@@ -510,8 +563,9 @@ class ImageDataset(Dataset):
             if count:
                 folder_info.append((subdir.name, repeats, resos, count))
 
-        # 展开：repeat × 分辨率 fan-out；每个展开样本带 target_reso。
-        # 同一 (图, reso) 的 repeat 份共享一个 dict；不同 reso 各自 copy 以带各自 target_reso。
+        # Expand: repeat x resolution fan-out; each expanded sample carries a target_reso.
+        # The repeat copies for the same (image, reso) share one dict; different
+        # resos each get their own copy carrying their own target_reso.
         samples = []
         for s, repeat, resos in unique:
             for target_reso in resos:
@@ -520,26 +574,32 @@ class ImageDataset(Dataset):
                 for _ in range(repeat):
                     samples.append(item)
 
-        # 日志：每个文件夹的 repeat × 分辨率
+        # Log: repeat x resolution per folder
         for name, rep, resos, cnt in folder_info:
             reso_str = "/".join(str(r) for r in resos)
             logger.info(
-                f"  文件夹 {name}: {cnt} 张 × repeat {rep} × 分辨率[{reso_str}] "
-                f"= {cnt * rep * len(resos)} 样本"
+                f"  folder {name}: {cnt} images x repeat {rep} x resolution[{reso_str}] "
+                f"= {cnt * rep * len(resos)} samples"
             )
 
         return samples
 
     def _preflight_json_captions(self):
-        """开训前预检所有 JSON caption，构建失败直接拒绝开训（fail-fast）。
+        """Pre-check all JSON captions before training starts; reject training
+        outright on any build failure (fail-fast).
 
-        JSON 样本没有 .txt 兜底（``_make_sample`` 里 prefer_json 命中时
-        txt_path=None），caption 构建失败会在 ``__getitem__`` 静默退成空
-        caption——连触发词都不剩，整炉 LoRA 白炼且训练照常跑完（#345）。
-        与其训练中逐样本 warning 刷屏，不如开训前一次性报清楚并中止。
+        JSON samples have no .txt fallback (when prefer_json hits in
+        ``_make_sample``, txt_path=None), so a caption build failure would
+        silently degrade to an empty caption in ``__getitem__`` -- not even
+        the trigger word survives, and the whole LoRA trains blank while
+        training runs to completion as if nothing were wrong (#345).
+        Rather than flooding the training log with a per-sample warning,
+        report everything clearly once before training starts and abort.
 
-        shuffle=False + dropout=0 保证预检确定性且不消耗随机数状态。
-        caption_override 全局覆盖时不读 caption 文件，跳过。
+        shuffle=False + dropout=0 guarantees the pre-check is deterministic and
+        doesn't consume any random state.
+        When caption_override provides a global override, caption files aren't
+        read, so this check is skipped.
         """
         if self.caption_override is not None:
             return
@@ -554,8 +614,9 @@ class ImageDataset(Dataset):
             return
         if self.caption_utils is None:
             raise ValueError(
-                f"数据集含 {len(json_paths)} 个 JSON caption，但 caption_utils 加载失败"
-                f"（见上方 warning），这些图将以空 caption 训练，已拒绝开训。"
+                f"the dataset has {len(json_paths)} JSON captions, but caption_utils failed to "
+                f"load (see the warning above); these images would train with an empty caption, "
+                f"so training has been rejected."
             )
         bad = []
         for jp in json_paths:
@@ -569,19 +630,22 @@ class ImageDataset(Dataset):
                 bad.append(jp)
         if bad:
             preview = "\n".join(f"  - {p}" for p in bad[:5])
-            more = f"\n  ...等共 {len(bad)} 个" if len(bad) > 5 else ""
+            more = f"\n  ...and {len(bad)} more" if len(bad) > 5 else ""
             raise ValueError(
-                f"{len(bad)} 个 JSON caption 解析失败，对应图片将以空 caption"
-                f"（连触发词都没有）参与训练，已拒绝开训。"
-                f"请在打标页检查或重新打标这些文件：\n{preview}{more}"
+                f"{len(bad)} JSON captions failed to parse; the corresponding images would "
+                f"train with an empty caption (not even a trigger word), so training has been "
+                f"rejected. Please check or re-tag these files on the tagging page:\n{preview}{more}"
             )
 
     def _process_caption_txt(self, caption):
-        """处理 TXT caption：kohya 语义的 keep_tokens + shuffle + tag_dropout。
+        """Process a TXT caption: Kohya-semantics keep_tokens + shuffle + tag_dropout.
 
-        keep_tokens 前缀既不参与打乱也不参与 dropout（kohya 同款语义——dropout
-        可能丢掉触发词是生态已知行为，保护靠用户显式配 keep_tokens，不做隐式
-        按值保护）；其余 tag 先 shuffle 再逐个独立 dropout，无保底。
+        The keep_tokens prefix participates in neither shuffling nor dropout
+        (same semantics as Kohya -- dropout possibly discarding the trigger
+        word is a known ecosystem behavior; protection relies on the user
+        explicitly configuring keep_tokens, not implicit value-based
+        protection); the remaining tags are shuffled first, then each is
+        independently dropped out with no safety net.
         """
         if not caption:
             return ""
@@ -600,43 +664,53 @@ class ImageDataset(Dataset):
         return ", ".join(kept + rest)
 
     def _process_caption_json(self, json_path):
-        """处理 JSON caption: 分类 shuffle"""
+        """Process a JSON caption: categorized shuffle"""
         if self.caption_utils is None:
             return None
 
         try:
-            # 走 caption_utils 的权威编排（load → 判断标准格式 → normalize → build）。
-            # 早期这里 copy 了一份判断，用 `"tags" in raw_json` 只查 key 是否存在，会把
-            # Studio 打标写出的简化形式 {"tags": [list], "meta": {trigger}} 误判为标准
-            # 格式直接喂给 build，导致 build 对 list 调 .get() 崩（#345）。load_and_build
-            # 用 isinstance(tags, dict) 正确判断：list 形式走 normalize 搬到 tags.tags，
-            # 复用单一源避免逻辑再次漂移。
+            # Goes through caption_utils' authoritative pipeline (load ->
+            # detect standard format -> normalize -> build). Earlier this
+            # duplicated that check locally using `"tags" in raw_json`, which
+            # only checks whether the key exists -- that would misdetect the
+            # simplified form written by Studio tagging,
+            # {"tags": [list], "meta": {trigger}}, as the standard format and
+            # feed it straight to build, which crashes calling .get() on a
+            # list (#345). load_and_build correctly branches on
+            # isinstance(tags, dict): the list form goes through normalize to
+            # move it into tags.tags, reusing a single source to avoid this
+            # logic drifting apart again.
             return self.caption_utils["load_and_build"](
                 json_path,
                 shuffle=self.shuffle_caption,
                 tag_dropout=self.tag_dropout,
             )
         except Exception as e:
-            logger.warning(f"JSON 处理失败 {json_path}: {e}")
+            logger.warning(f"failed to process JSON {json_path}: {e}")
             return None
 
     def __len__(self):
         return len(self.samples)
 
     def _mask_path_for(self, img_path) -> Path:
-        """studio 训练 mask sidecar 路径：与图同目录同 stem 的 `{stem}.mask`。
+        """Studio training mask sidecar path: ``{stem}.mask`` next to the
+        image, same directory and stem.
 
-        与 studio/services/preprocess/masks.py 的落盘约定镜像（后缀恒 .mask，
-        内容灰度 PNG 字节）——stem 不含扩展名，X.jpg 与 X.png 共享同一 mask。
+        Mirrors the on-disk convention in
+        studio/services/preprocess/masks.py (extension is always .mask,
+        content is grayscale PNG bytes) -- the stem excludes the extension, so
+        X.jpg and X.png share the same mask.
         """
         img_path = Path(img_path)
         return img_path.parent / f"{img_path.stem}.mask"
 
     def _load_mask_image(self, img_path, size):
-        """加载并校验 mask（灰度 L，尺寸必须等于图片当前尺寸）。
+        """Load and validate a mask (grayscale L, size must equal the image's
+        current size).
 
-        fail-safe（设计 §2）：缺文件 → None（全图正常学习）；尺寸不匹配 /
-        不可读 → warning 一次 + None，**不 crash 训练**。
+        Fail-safe (design SS2): missing file -> None (learn the whole image
+        normally); size mismatch / unreadable -> warn once + None, **never
+        crash training**.
         """
         from PIL import Image
         mp = self._mask_path_for(img_path)
@@ -649,26 +723,29 @@ class ImageDataset(Dataset):
         except Exception as e:  # noqa: BLE001
             if str(mp) not in self._mask_warned:
                 self._mask_warned.add(str(mp))
-                logger.warning(f"[masked-loss] mask 不可读，按无 mask 处理: {mp} ({e})")
+                logger.warning(f"[masked-loss] mask unreadable, treating as no mask: {mp} ({e})")
             return None
         if mask.size != tuple(size):
             if str(mp) not in self._mask_warned:
                 self._mask_warned.add(str(mp))
                 logger.warning(
-                    "[masked-loss] mask 尺寸 %sx%s 与图片 %sx%s 不匹配，按无 mask 处理"
-                    "（外部改图后请重画 mask）: %s",
+                    "[masked-loss] mask size %sx%s does not match image %sx%s, treating as no "
+                    "mask (redraw the mask after editing the image externally): %s",
                     mask.size[0], mask.size[1], size[0], size[1], mp,
                 )
             return None
         return mask
 
     def caption_for_sample(self, sample) -> str:
-        """解析一个 sample 的最终 caption，不打开图片。
+        """Resolve a sample's final caption without opening the image.
 
-        训练 ``__getitem__``、latent cache wrapper 与 Phase 2 text-cache 预扫共用
-        同一事实源，避免三处 JSON/TXT/override 优先级漂移。caption shuffle/dropout
-        仍由既有处理函数决定；cached_varlen 族在 registry 层禁止这些随机操作，
-        因而预缓存与训练批次得到完全相同的确定文本。
+        Training's ``__getitem__``, the latent cache wrapper, and the Phase 2
+        text-cache pre-scan all share this single source of truth, avoiding
+        the JSON/TXT/override priority drifting apart across three places.
+        Caption shuffle/dropout is still decided by the existing processing
+        functions; the cached_varlen family forbids these random operations at
+        the registry layer, so the pre-cache and the training batch end up
+        with exactly the same deterministic text.
         """
         caption = None
         if self.caption_override is not None:
@@ -683,29 +760,34 @@ class ImageDataset(Dataset):
         return "" if caption is None else str(caption)
 
     def __getitem__(self, idx):
-        # 默认 path：DataLoader 不能传额外参数，所以由 flip_augment 决定是否随机翻转。
-        # CachedLatentDataset 想显式控制 flip 时直接调 get_with_flip(idx, flip=...)，
-        # 在 cache 阶段对每张图各 encode 一次 flip=False / flip=True，避免随机性 baked
-        # 进 npz（kohya 风格双份 latent）。
+        # Default path: DataLoader can't pass extra arguments, so flip_augment
+        # decides whether to flip randomly. When CachedLatentDataset wants
+        # explicit flip control it calls get_with_flip(idx, flip=...) directly,
+        # encoding each image once with flip=False and once with flip=True
+        # during the cache stage, to avoid baking randomness into the npz
+        # (Kohya-style dual-copy latent).
         flip = self.flip_augment and random.random() > 0.5
         return self.get_with_flip(idx, flip=flip)
 
     def get_with_flip(self, idx, *, flip: bool):
-        """带显式 flip 控制的 __getitem__。
+        """``__getitem__`` with explicit flip control.
 
-        flip=True/False：强制翻 / 不翻，调用方负责决策；用于 cache 双份编码。
-        flip 与 self.flip_augment 解耦，不读 self.flip_augment 也不掷随机数。
+        flip=True/False: force-flip / don't flip, the caller decides; used for
+        the dual-copy cache encode. flip is decoupled from self.flip_augment --
+        it doesn't read self.flip_augment or consume any random state.
         """
         import numpy as np
         from PIL import Image
         sample = self.samples[idx]
         img = Image.open(sample["image"]).convert("RGB")
 
-        # 获取 caption（正则集可用 caption_override 统一覆盖）
+        # Get the caption (a regularization set can uniformly override via caption_override)
         caption = self.caption_for_sample(sample)
 
-        # 目标尺寸：ARB 桶（native 关）或原生 floor-16 定尺寸（native 开）。统一走
-        # _target_size_for；返回 None（base 方桶不分桶档）时退回 target_reso 方桶。
+        # Target size: ARB bucket (native off) or native floor-16 fixed size
+        # (native on). Always goes through _target_size_for; when it returns
+        # None (base entry with no bucketing) falls back to a target_reso
+        # square bucket.
         target_reso = sample.get("target_reso")
         size = self._target_size_for(img.width, img.height, target_reso)
         if size is not None:
@@ -713,14 +795,16 @@ class ImageDataset(Dataset):
         else:
             tw = th = target_reso or self.resolution
 
-        # masked loss：mask 在原始尺寸加载（校验 == 图片尺寸），下面随图走
-        # 完全相同的几何变换（NEAREST 防灰度插值污染），最后 area 下采样到
-        # latent /8（BOX = 块均值，§9 决策 4）。
+        # masked loss: the mask is loaded at the original size (validated ==
+        # image size), then goes through exactly the same geometric transform
+        # as the image below (NEAREST to avoid grayscale interpolation
+        # contamination), and finally area-downsampled to latent /8
+        # (BOX = block mean, SS9 decision 4).
         mask_img = None
         if self.load_masks:
             mask_img = self._load_mask_image(sample["image"], (img.width, img.height))
 
-        # 缩放裁剪
+        # Resize and crop
         scale = max(tw / img.width, th / img.height)
         nw, nh = int(img.width * scale), int(img.height * scale)
         img = img.resize((nw, nh), Image.LANCZOS)
@@ -740,12 +824,12 @@ class ImageDataset(Dataset):
                 m = m.transpose(Image.FLIP_LEFT_RIGHT)
             _vs = _ANIMA_LATENT.spatial_stride
             m = m.resize((max(1, tw // _vs), max(1, th // _vs)), Image.BOX)
-            # 灰度 255=学 / 0=不学 → [0,1] loss 空间权重
+            # Grayscale 255=learn / 0=don't learn -> [0,1] loss spatial weight
             mask_tensor = torch.from_numpy(
                 np.array(m).astype(np.float32) / 255.0
             )
 
-        # 转 tensor [-1, 1]
+        # Convert to tensor [-1, 1]
         arr = np.array(img).astype(np.float32) / 127.5 - 1.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1)
 
@@ -753,7 +837,7 @@ class ImageDataset(Dataset):
 
 
 class RepeatDataset(Dataset):
-    """Kohya 风格数据集重复"""
+    """Kohya-style dataset repeat"""
     def __init__(self, dataset, repeats=1):
         self.dataset = dataset
         self.repeats = max(1, int(repeats))
@@ -766,7 +850,7 @@ class RepeatDataset(Dataset):
 
 
 class MergedDataset(Dataset):
-    """合并主数据集与正则数据集（Kohya 风格 reg）"""
+    """Merge the main dataset with a regularization dataset (Kohya-style reg)"""
     def __init__(self, main_dataset, reg_dataset, reg_weight: float = 1.0):
         self.main_dataset = main_dataset
         self.reg_dataset = reg_dataset
@@ -774,7 +858,7 @@ class MergedDataset(Dataset):
         self._main_len = len(main_dataset)
         self._reg_len = len(reg_dataset)
 
-        # 为 BucketBatchSampler 构建 bucket_for_index
+        # Build bucket_for_index for BucketBatchSampler
         self.bucket_for_index = self._build_bucket_for_index()
 
     def _get_cached_dataset(self, d):
@@ -842,8 +926,10 @@ class BucketBatchSampler:
         self.epoch = int(epoch)
 
     def __len__(self):
-        # ARB 下实际 batch 数 = Σ_bucket f(n_b, bs)；用全局 n 会偏（每桶各自有零头）。
-        # 没有桶信息时退回到全局公式（线性 DataLoader 行为）。
+        # Under ARB the actual batch count = sum_bucket f(n_b, bs); using the
+        # global n would be biased (each bucket has its own remainder).
+        # Without bucket info, fall back to the global formula (linear
+        # DataLoader behavior).
         if self._cached_dataset is None:
             n = len(self.dataset)
             if self.drop_last:
@@ -899,27 +985,34 @@ class BucketBatchSampler:
                 yield batch
 
 
-# ============================================================ 分块 VAE encode
-# cache_encode_tiled：把超大图按像素块切、逐块 encode 后在 latent 网格羽化拼接。
-# 峰值显存从 ∝ 整图像素降到 ∝ 单块像素。
+# ============================================================ Tiled VAE encode
+# cache_encode_tiled: slice oversized images into pixel tiles, encode each
+# tile, then feather-blend the results on the latent grid.
+# Peak VRAM drops from being proportional to the full image's pixel count to
+# being proportional to a single tile's pixel count.
 
 _CACHE_ENCODE_MAX_PIXELS = 4 * 1024 * 1024
 
 
 class CachedLatentDataset(Dataset):
-    """Kohya 风格 npz 文件缓存的数据集。
+    """Kohya-style npz-file-cached dataset.
 
-    flip_augment + cache_latents 同开时按 kohya 双份 latent 模式：
-      - cache 阶段对每张图 encode 两次（flip=False / flip=True），分别存到
-        npz 的 `latent` / `latent_flipped` 键
-      - 训练时 __getitem__ 50% 概率取 flipped 版本
-    旧版本静默把"cache 阶段那次随机翻转"baked 进 npz，导致 flip 永久失效 +
-    50% 数据被永久镜像污染；新版通过 _is_cache_valid 检测缺 latent_flipped
-    键，自动重 encode 修复。
+    When flip_augment + cache_latents are both on, uses Kohya's dual-copy
+    latent mode:
+      - During the cache stage, each image is encoded twice (flip=False /
+        flip=True), stored under the npz's `latent` / `latent_flipped` keys
+        respectively
+      - During training, __getitem__ picks the flipped version with 50%
+        probability
+    Older versions silently baked "the random flip from the cache stage" into
+    the npz, permanently disabling flip augmentation and permanently
+    mirror-contaminating 50% of the data; the current version detects a
+    missing latent_flipped key via _is_cache_valid and auto-re-encodes to fix it.
     """
 
-    #: latent 规格（指纹进缓存判据 / 写入）。类级默认 = Anima；__init__ 可覆盖，
-    #: PR-2b 起由 ctx.family.spec.latent 传入。
+    #: Latent spec (fingerprinted into the cache criteria / written to disk).
+    #: Class-level default = Anima; overridable via __init__.
+    #: From PR-2b onward it's passed in via ctx.family.spec.latent.
     latent_spec = _ANIMA_LATENT
 
     def __init__(self, base_dataset, vae, device, dtype, cache_dir=None, cache_batch_size=1,
@@ -928,36 +1021,44 @@ class CachedLatentDataset(Dataset):
         import numpy as np
         if latent_spec is not None:
             self.latent_spec = latent_spec
-        # 日志标注（如"训练集"/"正则集"）：主集与正则集各建一个实例，缓存日志
-        # 不标注会打出两段无法区分的"检查 VAE latent 缓存..."
+        # Log label (e.g. "training set"/"regularization set"): the main set
+        # and the regularization set each build one instance; without a label
+        # the cache log would print two indistinguishable "checking VAE
+        # latent cache..." lines.
         self.label = str(label or "")
         self.base_dataset = base_dataset
         self.base_image_dataset = self._get_base_image_dataset(base_dataset)
         self.np = np
-        # 获取原始数据集的 samples 列表
+        # Get the underlying dataset's samples list
         self.samples = self._get_base_samples(base_dataset)
-        # 同一张图 fan-out 到多个分辨率时 npz 必须分文件（否则不同分辨率 latent 互相
-        # 覆盖）。只有真出现在 >1 个 target_reso 的图走 r{reso} 命名；单分辨率图保持
-        # img.npz，不动现有缓存。
+        # When the same image fans out to multiple resolutions, the npz must
+        # be split per file (otherwise different-resolution latents would
+        # overwrite each other). Only images that genuinely appear under more
+        # than one target_reso use the r{reso} naming; single-resolution
+        # images keep img.npz, leaving existing caches untouched.
         _resos_per_img: dict[str, set] = {}
         for s in self.samples:
             _resos_per_img.setdefault(str(s["image"]), set()).add(s.get("target_reso"))
         self._multi_reso = {img for img, rs in _resos_per_img.items() if len(rs) > 1}
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.bucket_for_index = []
-        self.token_count_for_index = []  # NaViT 打包器读（默认空，由 _fill 填充）
+        self.token_count_for_index = []  # read by the NaViT packer (empty by default, filled by _fill)
         self.cache_batch_size = max(1, int(cache_batch_size or 1))
-        # cache 是否需要双份 latent —— 取决于底层 ImageDataset.flip_augment
+        # Whether the cache needs the dual-copy latent -- depends on the
+        # underlying ImageDataset.flip_augment
         self.flip_augment = bool(
             getattr(self.base_image_dataset, "flip_augment", False)
         )
-        # masked loss（B2）：底层 ImageDataset.load_masks 开启时，mask 随缓存
-        # 编码期一并下采样存进 npz（mask / mask_flipped 键，仿 latent_flipped）
+        # masked loss (B2): when the underlying ImageDataset.load_masks is
+        # enabled, the mask is downsampled during the cache encode stage and
+        # stored in the npz too (mask / mask_flipped keys, mirroring latent_flipped)
         self.load_masks = bool(
             getattr(self.base_image_dataset, "load_masks", False)
         )
-        # cache_encode_tiled（opt-in）：超大图改走分块 encode + latent 羽化拼接，
-        # 峰值显存 ∝ 单块像素。阈值内的图路径不变（逐字节等价）。
+        # cache_encode_tiled (opt-in): oversized images switch to tiled
+        # encode + latent feather-blend; peak VRAM proportional to a single
+        # tile's pixel count. Images within the threshold keep the old path
+        # (byte-identical).
         self.encode_tiled = bool(encode_tiled)
         self.encode_tile_px = int(encode_tile_px or 1024)
         self.encode_tile_overlap = int(encode_tile_overlap or 128)
@@ -968,7 +1069,7 @@ class CachedLatentDataset(Dataset):
         self._build_cache(vae, device, dtype)
 
     def _get_base_samples(self, dataset):
-        """获取原始 ImageDataset 的 samples"""
+        """Get the underlying ImageDataset's samples"""
         if hasattr(dataset, "samples"):
             return dataset.samples
         elif hasattr(dataset, "dataset"):
@@ -989,8 +1090,10 @@ class CachedLatentDataset(Dataset):
         try:
             from PIL import Image
             with Image.open(img_path) as img:
-                # 与 ImageDataset.get_with_flip 同一条定尺寸口径（桶 or 原生），保证缓存
-                # 校验尺寸 == 实际 encode 尺寸。native 下取原生 floor-16 尺寸。
+                # Uses the same fixed-size rule as ImageDataset.get_with_flip
+                # (bucket or native) so cache validation checks against the
+                # actual encode size. Under native this yields the native
+                # floor-16 size.
                 if hasattr(base, "_target_size_for"):
                     size = base._target_size_for(img.width, img.height, target_reso)
                     if size is not None:
@@ -1005,10 +1108,12 @@ class CachedLatentDataset(Dataset):
             return None
 
     def _get_npz_path(self, img_path, target_reso=None):
-        """图像对应的 npz 缓存路径。
+        """The npz cache path for an image.
 
-        单分辨率图 → ``img.npz``（不动现有缓存）；同图 fan-out 到多分辨率 →
-        ``img.r{reso}.npz``，避免不同分辨率 latent 互相覆盖。
+        Single-resolution image -> ``img.npz`` (leaves existing caches
+        untouched); an image fanned out to multiple resolutions ->
+        ``img.r{reso}.npz``, so different-resolution latents don't overwrite
+        each other.
         """
         img_path = Path(img_path)
         if target_reso is not None and str(img_path) in getattr(self, "_multi_reso", set()):
@@ -1016,21 +1121,31 @@ class CachedLatentDataset(Dataset):
         return img_path.with_suffix(".npz")
 
     def _is_cache_valid(self, img_path, npz_path, target_reso=None):
-        """检查缓存是否有效（图像未修改，且格式兼容当前 flip_augment 设置）。
+        """Check whether the cache is valid (the image hasn't been modified,
+        and the format is compatible with the current flip_augment setting).
 
-        - 缺 `latent` 键 / 其他模型的不兼容缓存 → 删除重 encode
-        - latent 指纹 / 布局版本失配（换 VAE latent 空间或缓存布局升级）→
-          删除重 encode；无指纹键的存量缓存 grandfather 为 wan21-f8c16
-          （历史唯一 VAE，避免升级即全量重 encode，04-synthesis D12）
-        - flip_augment=True 且 npz 缺 `latent_flipped` 键 → 失效重 encode（旧
-          单份 cache 即"flip 永久 baked"的污染状态，必须重 encode 修复）
-        - flip_augment=False 且 npz 有 `latent_flipped` → 仍视为有效（双份
-          cache 是 flip 模式的超集，关 flip 后只读 latent 不浪费）
-        - bucket 尺寸不匹配 → 失效
-        - masked loss 开启时 mask sidecar 与 npz 一致性三条（§9 决策 3，
-          漏一条就训到旧 mask）：mask 存在但 npz 无 `mask` 键（新画）；
-          mask mtime 新于 npz（重画）；mask 已删但 npz 有 `mask` 键（清除）。
-          load_masks 关闭时跳过这些校验（带 mask 键的缓存是超集，不浪费）。
+        - Missing `latent` key / an incompatible cache from another model ->
+          delete and re-encode
+        - latent fingerprint / layout version mismatch (VAE latent space
+          changed, or the cache layout was upgraded) -> delete and re-encode;
+          a legacy cache with no fingerprint key is grandfathered as
+          wan21-f8c16 (the only VAE that historically produced caches,
+          avoiding a full re-encode on upgrade, 04-synthesis D12)
+        - flip_augment=True and the npz is missing the `latent_flipped` key ->
+          invalid, re-encode (an old single-copy cache is exactly the
+          "flip permanently baked in" contaminated state, and must be
+          re-encoded to fix it)
+        - flip_augment=False and the npz has `latent_flipped` -> still
+          considered valid (the dual-copy cache is a superset of flip mode;
+          turning flip off just reads latent without wasting anything)
+        - bucket size mismatch -> invalid
+        - When masked loss is enabled, three mask-sidecar/npz consistency
+          checks (SS9 decision 3, missing any one means training on a stale
+          mask): mask exists but the npz has no `mask` key (newly drawn);
+          mask mtime newer than the npz (redrawn); mask deleted but the npz
+          still has a `mask` key (cleared).
+          These checks are skipped when load_masks is off (a cache with a
+          mask key is a superset, nothing wasted).
         """
         if not npz_path.exists():
             return False
@@ -1043,7 +1158,7 @@ class CachedLatentDataset(Dataset):
             with self.np.load(npz_path) as data:
                 if "latent" not in data.files:
                     npz_path.unlink()
-                    logger.debug(f"已删除不兼容缓存: {npz_path.name}")
+                    logger.debug(f"deleted incompatible cache: {npz_path.name}")
                     return False
                 cache_fp = (
                     str(data["latent_fingerprint"].item())
@@ -1059,7 +1174,7 @@ class CachedLatentDataset(Dataset):
                         or cache_ver != LATENT_CACHE_LAYOUT_VERSION):
                     npz_path.unlink()
                     logger.debug(
-                        f"已删除指纹失配缓存: {npz_path.name} "
+                        f"deleted cache with mismatched fingerprint: {npz_path.name} "
                         f"({cache_fp} v{cache_ver} != "
                         f"{self.latent_spec.fingerprint} v{LATENT_CACHE_LAYOUT_VERSION})"
                     )
@@ -1094,16 +1209,20 @@ class CachedLatentDataset(Dataset):
         return True
 
     def _build_cache(self, vae, device, dtype):
-        """构建/加载 npz 缓存。
+        """Build/load the npz cache.
 
-        per-folder repeat（5_concept 前缀）让 samples 里同一张图重复 N 次；多分辨率
-        fan-out 还让同一张图带不同 target_reso 出现多次。npz 落点由
-        `_get_npz_path(img, target_reso)` 决定 —— 单分辨率图用 `img.npz`，fan-out 到多
-        分辨率的图用 `img.r{reso}.npz` 分文件。按 npz_path 去重，每个 (图, reso) 最多
-        encode 一次；否则同 npz 会被反复覆盖写 N 次（flip_augment 模式下再乘 2）。
+        Per-folder repeat (the 5_concept prefix) makes the same image appear
+        repeated N times in samples; multi-resolution fan-out also makes the
+        same image appear multiple times under different target_reso values.
+        The npz destination is decided by `_get_npz_path(img, target_reso)` --
+        a single-resolution image uses `img.npz`, an image fanned out to
+        multiple resolutions uses `img.r{reso}.npz`, split per file. Dedupe by
+        npz_path so each (image, reso) is encoded at most once; otherwise the
+        same npz would be repeatedly overwritten N times (doubled again under
+        flip_augment).
         """
-        tag = f"（{self.label}）" if self.label else ""
-        logger.info(f"检查 VAE latent 缓存{tag}...")
+        tag = f" ({self.label})" if self.label else ""
+        logger.info(f"checking VAE latent cache{tag}...")
         to_encode = []
         seen_npz = set()
         unique_total = 0
@@ -1119,10 +1238,10 @@ class CachedLatentDataset(Dataset):
                 to_encode.append(i)
 
         if to_encode:
-            logger.info(f"需要编码 {len(to_encode)}/{unique_total} 张图像{tag}...")
+            logger.info(f"need to encode {len(to_encode)}/{unique_total} images{tag}...")
             self._encode_and_save(to_encode, vae, device, dtype)
         else:
-            logger.info(f"所有 {unique_total} 张图像已缓存{tag}")
+            logger.info(f"all {unique_total} images already cached{tag}")
 
         self._fill_bucket_for_index()
 
@@ -1150,14 +1269,17 @@ class CachedLatentDataset(Dataset):
             self.token_count_for_index[i] = (int(h) // patch_spatial) * (int(w) // patch_spatial)
 
     def _encode_and_save(self, indices, vae, device, dtype):
-        """编码图像并保存为 npz。
+        """Encode images and save as npz.
 
-        flip_augment=True 时对每张图编码两次（flip=False / flip=True）分别存到
-        `latent` / `latent_flipped` 键；训练时 __getitem__ 随机选其一。
-        flip_augment=False 时只编码一次，存 `latent`。
+        When flip_augment=True, each image is encoded twice (flip=False /
+        flip=True), stored under the `latent` / `latent_flipped` keys
+        respectively; during training __getitem__ picks one at random.
+        When flip_augment=False, only encodes once, storing `latent`.
 
-        按实际 bucket 尺寸分组并批量送入 VAE；不同尺寸不能 stack，分别攒批。
-        cache_encode_tiled=True 时，超像素预算的图改走分块 encode + latent 羽化拼接。
+        Groups by actual bucket size and batches into the VAE; different
+        sizes can't be stacked, so they're accumulated separately.
+        When cache_encode_tiled=True, images over the pixel budget switch to
+        tiled encode + latent feather-blend.
         """
         base_img = self.base_image_dataset
         want_flip = self.flip_augment and base_img is not None
@@ -1167,16 +1289,19 @@ class CachedLatentDataset(Dataset):
         def _encode_pixels(pixel_tensors):
             pixels = torch.stack(pixel_tensors, dim=0).to(device, dtype=dtype)
             with torch.inference_mode():
-                # 走 VAEWrapper.encode（含 auto/on 分块），大图/大 batch 不会撞 VRAM 崖
+                # Goes through VAEWrapper.encode (including auto/on tiling), so
+                # large images/large batches won't hit a VRAM cliff
                 latents = vae.encode(pixels.unsqueeze(2))
             return latents.detach().cpu().float()
 
         def _encode_tiled_single(pixel_tensor):
-            """分块 encode 单张图（cache_encode_tiled 超像素预算时）。"""
+            """Tiled encode for a single image (when cache_encode_tiled is over the pixel budget)."""
             pixels = pixel_tensor.unsqueeze(0).to(device, dtype=dtype).unsqueeze(2)  # [1,C,1,H,W]
             with torch.inference_mode():
-                # 直接用 VAEWrapper 的分块 encode（可配 tile 尺寸）：单层分块 + 统一
-                # cosine 羽化，避免外层再套一层 vae.encode 导致的双重分块。
+                # Uses VAEWrapper's tiled encode directly (tile size
+                # configurable): a single layer of tiling plus unified cosine
+                # feathering, avoiding double tiling from wrapping another
+                # vae.encode call around it.
                 lat = vae._tiled_encode(
                     pixels, self.encode_tile_px, self.encode_tile_overlap
                 )
@@ -1196,8 +1321,10 @@ class CachedLatentDataset(Dataset):
             )
 
             def _mask_kwargs(entry):
-                """masked loss：mask 已在 get_with_flip 内下采样到 latent 分辨率，
-                直接存 npz（无 mask 图不写键 —— 键的有无是缓存失效判据）。"""
+                """masked loss: the mask has already been downsampled to
+                latent resolution inside get_with_flip, so it's stored in the
+                npz as-is (an image with no mask writes no key -- the key's
+                presence is the cache-invalidation criterion)."""
                 out = {}
                 if entry.get("mask") is not None:
                     out["mask"] = entry["mask"].numpy()
@@ -1207,7 +1334,7 @@ class CachedLatentDataset(Dataset):
 
             if use_tiled:
                 logger.info(
-                    "[cache-tiled] %dx%d 超像素预算，分块 encode（tile=%d overlap=%d）",
+                    "[cache-tiled] %dx%d over the pixel budget, tiled encode (tile=%d overlap=%d)",
                     w, h, self.encode_tile_px, self.encode_tile_overlap,
                 )
                 for entry in batch:
@@ -1230,7 +1357,7 @@ class CachedLatentDataset(Dataset):
                     )
                     encoded_count += 1
                     if encoded_count % 10 == 0 or encoded_count == len(indices):
-                        logger.info(f"  编码进度: {encoded_count}/{len(indices)}")
+                        logger.info(f"  encoding progress: {encoded_count}/{len(indices)}")
                 return
 
             latents = _encode_pixels([entry["pixels"] for entry in batch])
@@ -1258,12 +1385,12 @@ class CachedLatentDataset(Dataset):
                 )
                 encoded_count += 1
                 if encoded_count % 10 == 0 or encoded_count == len(indices):
-                    logger.info(f"  编码进度: {encoded_count}/{len(indices)}")
+                    logger.info(f"  encoding progress: {encoded_count}/{len(indices)}")
 
         logger.info(f"VAE cache batch size: {self.cache_batch_size}")
         for i in indices:
             if base_img is not None:
-                # 显式控制 flip，避免随机性 baked 进 npz
+                # Explicit flip control, to avoid baking randomness into the npz
                 item = base_img.get_with_flip(i, flip=False)
             else:
                 item = self.base_dataset[i]
@@ -1302,9 +1429,11 @@ class CachedLatentDataset(Dataset):
         npz_path = self._get_npz_path(
             sample["image"], sample.get("target_reso"))
         data = self.np.load(npz_path)
-        # flip_augment=True 且 npz 有 latent_flipped 时 50% 概率取镜像版本，
-        # 跟非 cache 路径 ImageDataset.__getitem__ 的 flip 概率一致。
-        # 没有 latent_flipped 键（flip_augment=False 时的单份 cache）就只读 latent。
+        # When flip_augment=True and the npz has latent_flipped, picks the
+        # mirrored version with 50% probability, matching the flip
+        # probability of the non-cached path ImageDataset.__getitem__.
+        # Without a latent_flipped key (a single-copy cache when
+        # flip_augment=False) only latent is read.
         use_flip = (
             self.flip_augment
             and "latent_flipped" in data.files
@@ -1313,23 +1442,25 @@ class CachedLatentDataset(Dataset):
         latent_key = "latent_flipped" if use_flip else "latent"
         latent = torch.from_numpy(data[latent_key])
 
-        # masked loss：mask 与 latent 保持同一 flip 选择（错位会把权重贴到镜像
-        # 位置）。npz 无键 = 该图无 mask（collate 填全 1）。
+        # masked loss: the mask keeps the same flip choice as the latent
+        # (a mismatch would apply the weight to the mirrored position).
+        # No key in the npz = this image has no mask (collate fills all 1s).
         mask = None
         if getattr(self, "load_masks", False):
             mask_key = "mask_flipped" if use_flip and "mask_flipped" in data.files else "mask"
             if mask_key in data.files:
                 mask = torch.from_numpy(data[mask_key])
 
-        # 获取 base_dataset 的引用（处理可能的嵌套）
+        # Get a reference to base_dataset (handling possible nesting)
         base = self.base_dataset
         while hasattr(base, "dataset"):
             base = base.dataset
-        
-        # 处理 caption（与 ImageDataset / text-cache 预扫共用同一事实源）
+
+        # Process the caption (shares the same source of truth as
+        # ImageDataset / the text-cache pre-scan)
         if hasattr(base, "caption_for_sample"):
             caption = base.caption_for_sample(sample)
-        else:  # 非 ImageDataset 的第三方 wrapper：保留 Phase 2 前的 duck-type 行为
+        else:  # a third-party wrapper that isn't ImageDataset: keep the pre-Phase-2 duck-type behavior
             caption = None
             if getattr(base, "caption_override", None) is not None:
                 caption = base.caption_override
@@ -1343,20 +1474,22 @@ class CachedLatentDataset(Dataset):
 
             if caption is None:
                 caption = ""
-        
+
         return {
             "latent": latent,
             "caption": caption,
             "mask": mask,
-            # navit collate 需要逐图 image 路径
+            # navit collate needs the per-image image path
             "image": str(sample["image"]),
         }
 
 
 def _stack_masks(batch, h, w):
-    """masked loss：批内任一样本有 mask 才输出（无 mask 时零开销）。
+    """masked loss: only emit a mask batch when at least one sample has one
+    (zero overhead when none do).
 
-    无 mask 的样本填全 1（正常学习）；同桶保证 mask 空间尺寸一致。
+    Samples with no mask are filled with all 1s (learn normally); same-bucket
+    membership guarantees consistent mask spatial size.
     """
     if not any(b.get("mask") is not None for b in batch):
         return None
@@ -1398,16 +1531,20 @@ def collate_fn_cached(batch):
     return result
 
 
-# =================================================== NaViT / Patch-n-Pack 打包
-# token 预算打包器 + 块对角 collate：把不同 token 数的图拼进一个训练序列（零 padding）。
+# =================================================== NaViT / Patch-n-Pack packing
+# Token-budget packer + block-diagonal collate: pack images with different
+# token counts into one training sequence (zero padding).
 
 
 def pack_indices_by_budget(token_counts, token_budget, order, max_images_per_pack=0):
-    """贪心 next-fit 打包：把样本索引分进 token 总数 ≤ budget 的包。
+    """Greedy next-fit packing: place sample indices into packs whose total
+    token count is <= budget.
 
-    NaViT 块对角打包无 padding，一个包的代价 = 各图 token 数之和。``order`` 是
-    已打乱的索引序列；自身 token 数超 budget 的图单独成包（调用方 warn）。
-    结果覆盖 ``order`` 中每个索引恰好一次，保持顺序。
+    NaViT block-diagonal packing has no padding; a pack's cost = the sum of
+    its images' token counts. ``order`` is an already-shuffled index
+    sequence; an image whose own token count exceeds the budget gets its own
+    pack (caller warns).
+    The result covers each index in ``order`` exactly once, preserving order.
     """
     packs = []
     cur, cur_sum = [], 0
@@ -1429,19 +1566,26 @@ def pack_indices_by_budget(token_counts, token_budget, order, max_images_per_pac
 
 def pack_indices_ffd_windowed(token_counts, token_budget, order,
                               max_images_per_pack=0, window=0):
-    """First-Fit-Decreasing 窗口化打包：在（已打乱的）``order`` 的窗口内做 FFD。
+    """Windowed First-Fit-Decreasing packing: run FFD within windows of the
+    (already-shuffled) ``order``.
 
-    经典 FFD（按尺寸降序，逐个放入第一个能放下的桶）比 next-fit 打包更紧——更少、
-    更满的包 ⇒ 更少 optimizer step、更少浪费的 token 预算（见 NeMo sequence-packing /
-    ICLR'23 "Efficient Sequence Packing"）。代价：全局降序排序会让每 epoch 把相同图
-    分到一起（尺寸顺序固定），削弱小数据 SGD 的 batch 多样性。
+    Classic FFD (sort by size descending, place each item into the first bin
+    it fits) packs tighter than next-fit -- fewer, fuller packs => fewer
+    optimizer steps, less wasted token budget (see NeMo sequence-packing /
+    ICLR'23 "Efficient Sequence Packing"). Cost: a fully global descending
+    sort would group the same images together every epoch (size order is
+    fixed), weakening batch diversity for small-data SGD.
 
-    解决方案是 ``window``：``order`` 被分成 ``window`` 大小的连续窗口，FFD 在每个
-    窗口内运行。因 ``order`` 每 epoch 重新打乱，窗口成员（及分组）跨 epoch 变化，
-    而窗口内降序排序仍恢复大部分填充收益。``window<=0`` 表示一个全局窗口（最大填充，
-    但每 epoch 包固定——仅适合单 pass 数据）。
+    The fix is ``window``: ``order`` is split into contiguous windows of size
+    ``window``, and FFD runs within each window. Since ``order`` is reshuffled
+    every epoch, window membership (and thus grouping) varies across epochs,
+    while the within-window descending sort still recovers most of the
+    packing benefit. ``window<=0`` means a single global window (maximum
+    packing, but the packs are fixed every epoch -- suitable only for
+    single-pass data).
 
-    覆盖 ``order`` 中每个索引恰好一次。自身超 budget 的图单独成包（同 next-fit）。
+    Covers each index in ``order`` exactly once. An image over budget on its
+    own gets its own pack (same as next-fit).
     """
     budget = int(token_budget)
     cap = int(max_images_per_pack or 0)
@@ -1473,7 +1617,8 @@ def pack_indices_ffd_windowed(token_counts, token_budget, order,
 
 
 def _lookup_token_count_walk(d, idx):
-    """通过遍历数据集包装器解析样本的 token 数（NaViT 打包器的自由函数版本）。"""
+    """Resolve a sample's token count by walking the dataset wrapper (the
+    free-function version of the NaViT packer)."""
     main = getattr(d, "main_dataset", None)
     reg = getattr(d, "reg_dataset", None)
     if main is not None and reg is not None:
@@ -1494,9 +1639,11 @@ def _lookup_token_count_walk(d, idx):
 
 
 def _walk_attr_list(dataset, attr):
-    """在单链包装器（RepeatDataset/CachedLatentDataset）中查找叶数据集的
-    per-index 列表属性 ``attr``，通过 ``% len`` 映射到 ``len(dataset)``。
-    对 MergedDataset（两分支）或属性不存在时返回 None。"""
+    """Look up the leaf dataset's per-index list attribute ``attr`` through a
+    single-chain wrapper (RepeatDataset/CachedLatentDataset), mapping via
+    ``% len`` onto ``len(dataset)``.
+    Returns None for a MergedDataset (two branches) or when the attribute
+    doesn't exist."""
     cur = dataset
     for _ in range(12):
         if getattr(cur, "main_dataset", None) is not None and getattr(cur, "reg_dataset", None) is not None:
@@ -1515,12 +1662,15 @@ def _walk_attr_list(dataset, attr):
 
 
 def dataset_token_counts(dataset, patch_spatial=_ANIMA_LATENT.patch_spatial):
-    """NaViT 打包的逐索引 token 数。
+    """Per-index token counts for NaViT packing.
 
-    优先用已填充的 ``token_count_for_index``（CachedLatentDataset 填充）。若该字段
-    全 0 或不存在，则从缓存 latent 形状 ``bucket_for_index = (h, w)``（latent px）
-    推导为 ``(h // patch_spatial) * (w // patch_spatial)``——即 patchify 后的 token 数。
-    若两者都不可用，逐索引 walk 兜底（返回 0 → 打包器会 fail-fast）。
+    Prefers the already-filled ``token_count_for_index`` (filled by
+    CachedLatentDataset). If that field is all-zero or absent, derives it from
+    the cached latent shape ``bucket_for_index = (h, w)`` (latent px) as
+    ``(h // patch_spatial) * (w // patch_spatial)`` -- i.e. the post-patchify
+    token count.
+    If neither is available, falls back to a per-index walk (returning 0 ->
+    the packer will fail-fast).
     """
     counts = _walk_attr_list(dataset, "token_count_for_index")
     if counts is not None and any(int(c) > 0 for c in counts):
@@ -1543,11 +1693,14 @@ def dataset_token_counts(dataset, patch_spatial=_ANIMA_LATENT.patch_spatial):
 
 
 class NavitPackBatchSampler:
-    """为 NaViT/Patch-n-Pack 块对角训练产出数据集索引包。
+    """Produces dataset index packs for NaViT/Patch-n-Pack block-diagonal training.
 
-    每个产出的列表是一个打包训练序列：其各图 token 数之和 ≤ ``token_budget``，
-    整包作为一个零 padding 的块对角 forward。把"每步图片数"与单图形状解耦——
-    不同 token 数和长宽比的图可以共享一个包，小数据集也能填满大 effective batch。
+    Each produced list is one packed training sequence: the sum of its
+    images' token counts is <= ``token_budget``, and the whole pack becomes
+    one zero-padding block-diagonal forward pass. This decouples "images per
+    step" from any single image's shape -- images with different token counts
+    and aspect ratios can share a pack, and even a small dataset can fill a
+    large effective batch.
     """
 
     def __init__(self, dataset, token_budget, max_images_per_pack=0,
@@ -1562,40 +1715,45 @@ class NavitPackBatchSampler:
         self.strategy = str(strategy or "next_fit").lower()
         if self.strategy not in ("next_fit", "ffd"):
             raise ValueError(
-                f"navit pack strategy 必须是 'next_fit' 或 'ffd'，收到 {strategy!r}"
+                f"navit pack strategy must be 'next_fit' or 'ffd', got {strategy!r}"
             )
         self.ffd_window = int(ffd_window or 0)
         self.epoch = 0
         self.token_counts = dataset_token_counts(dataset)
         self._cached_packs = None
-        # Fail-fast：全 0 token 数意味着无法解析每图尺寸（token_count_for_index 与
-        # bucket_for_index 都不可用/全 0）。不检查的话 `cur_sum + 0 > budget` 永远
-        # 不触发 → 整个数据集打包成一个 ~500k-token 序列 → OOM。
+        # Fail-fast: an all-zero token count means no image's size could be
+        # resolved (neither token_count_for_index nor bucket_for_index is
+        # usable/all-zero). Without this check, `cur_sum + 0 > budget` would
+        # never trigger -> the whole dataset would pack into one
+        # ~500k-token sequence -> OOM.
         if not self.token_counts or not any(int(c) > 0 for c in self.token_counts):
             raise RuntimeError(
-                "[NavitPack] 无法解析任一样本的 token 数（token_count_for_index 与 "
-                "bucket_for_index 都不可用/全 0）。NaViT 打包需要缓存数据集 "
-                "（cache_latents=true）以拿到每图 latent 形状。"
+                "[NavitPack] could not resolve the token count for any sample "
+                "(neither token_count_for_index nor bucket_for_index is usable/all-zero). "
+                "NaViT packing requires a cached dataset (cache_latents=true) "
+                "to obtain each image's latent shape."
             )
         mx = max(self.token_counts) if self.token_counts else 0
         if self.token_counts and self.token_budget < mx:
             logger.warning(
-                "[NavitPack] token_budget=%d < 最大单图 token=%d：该图将单独成包，"
-                "可能超出预算并 OOM。建议 token_budget >= 最大单图 token。",
+                "[NavitPack] token_budget=%d < largest single-image token count=%d: that image "
+                "will get its own pack, possibly exceeding the budget and causing OOM. "
+                "Recommend token_budget >= the largest single-image token count.",
                 self.token_budget, mx,
             )
         logger.info(
             "[NavitPack] dataset_len=%d token_budget=%d max_images_per_pack=%s "
-            "strategy=%s ffd_window=%s (token 数范围 %d..%d)",
+            "strategy=%s ffd_window=%s (token count range %d..%d)",
             len(self.token_counts), self.token_budget,
-            self.max_images_per_pack or "∞", self.strategy,
-            (self.ffd_window or "全局") if self.strategy == "ffd" else "-",
+            self.max_images_per_pack or "unbounded", self.strategy,
+            (self.ffd_window or "global") if self.strategy == "ffd" else "-",
             min(self.token_counts) if self.token_counts else 0, mx,
         )
         if self.strategy == "ffd" and self.ffd_window <= 0:
             logger.warning(
-                "[NavitPack] strategy=ffd 且 ffd_window<=0（全局 FFD）：每 epoch 的包将完全相同"
-                "（按尺寸排序固定），削弱小数据 SGD 的 batch 多样性。多 epoch 训练建议设正窗口。"
+                "[NavitPack] strategy=ffd with ffd_window<=0 (global FFD): the packs will be "
+                "exactly the same every epoch (fixed size order), weakening batch diversity for "
+                "small datasets. For multi-epoch training, set a positive window."
             )
 
     def set_epoch(self, epoch):
@@ -1634,11 +1792,13 @@ class NavitPackBatchSampler:
 
 
 def collate_fn_navit_pack(batch):
-    """NaViT 打包 collate。
+    """NaViT pack collate.
 
-    一个包内的缓存 latent 有不同的空间形状，无法 stack；保留为列表。训练循环
-    将每张图 patchify 为 token，拼接 token 和 per-image RoPE grid，编码 caption 并
-    拼接对应的 ``text_seqlens``，然后调用 ``forward_packed_navit``。
+    The cached latents within one pack have different spatial shapes and
+    can't be stacked, so they're kept as a list. The training loop patchifies
+    each image into tokens, concatenates the tokens and the per-image RoPE
+    grid, encodes the captions, concatenates the corresponding
+    ``text_seqlens``, and then calls ``forward_packed_navit``.
     """
     latents = [b["latent"] for b in batch]        # each [C, T, h_i, w_i]
     captions = [b["caption"] for b in batch]
@@ -1648,8 +1808,9 @@ def collate_fn_navit_pack(batch):
         "captions": captions,
         "images": images,
     }
-    # 正则集降权：与 collate_fn_cached 对齐——透传 loss_weight / is_reg 供训练循环
-    # 在 per-image loss 上应用（navit 路径同样尊重 batch 的 loss_weight）。
+    # Regularization-set downweighting: aligned with collate_fn_cached --
+    # passes loss_weight / is_reg through for the training loop to apply on
+    # the per-image loss (the navit path also respects the batch's loss_weight).
     if "loss_weight" in batch[0]:
         result["loss_weight"] = torch.tensor(
             [b["loss_weight"] for b in batch], dtype=torch.float32

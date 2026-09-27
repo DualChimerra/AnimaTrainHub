@@ -1,4 +1,4 @@
-// schema.ts —— 把 FastAPI 返回的 JSON Schema 解释成前端表单需要的形态。
+// schema.ts -- interprets the JSON Schema returned by FastAPI into the shape the frontend form needs.
 import type { TFunction } from 'i18next'
 import type { SchemaProperty } from '../api/client'
 
@@ -17,8 +17,8 @@ export type ControlKind =
   | 'float-list'
 
 /**
- * 推断字段的控件类型。优先用 schema 里 control 自定义元字段，否则按
- * JSON Schema 的 type / enum / anyOf 推断。
+ * Infers a field's control type. Prefers the schema's custom `control` meta
+ * field when present, otherwise infers from JSON Schema's type / enum / anyOf.
  */
 export function controlKind(prop: SchemaProperty): ControlKind {
   if (prop.control && prop.control !== 'auto') {
@@ -34,7 +34,7 @@ export function controlKind(prop: SchemaProperty): ControlKind {
 
   if (prop.enum && prop.enum.length > 0) return 'select'
 
-  // 解开 anyOf: [X, null] 的可空类型
+  // Unwrap the nullable anyOf: [X, null] shape
   let type = prop.type
   if (!type && prop.anyOf) {
     const hasNull = prop.anyOf.some((a) => a.type === 'null')
@@ -56,7 +56,7 @@ export function controlKind(prop: SchemaProperty): ControlKind {
 }
 
 /**
- * show_when 简单解析器：支持 `key==value` / `key!=value`，以及 `||` 组合。
+ * Simple show_when parser: supports `key==value` / `key!=value`, plus `||` combinations.
  */
 export function evalShowWhen(
   expr: string | undefined,
@@ -82,12 +82,14 @@ export function evalShowWhen(
   return true
 }
 
-// pruneInactiveConfig（后端 config_prune 的前端镜像）已删除（刀 2 / R4，D3）：
-// YAML 预览改走 POST /api/schema/preview-yaml，与落盘同一条序列化路径。
-// evalShowWhen 仍是表单实时可见性的求值器，与后端 config_rules.eval_show_when
-// 保持逐字镜像（跨语言双实现的最后一处）。
+// pruneInactiveConfig (the frontend mirror of the backend's config_prune) has
+// been removed (polish pass 2 / R4, D3): the YAML preview now goes through
+// POST /api/schema/preview-yaml, the same serialization path used on disk.
+// evalShowWhen is still the evaluator for the form's live visibility, kept
+// as a word-for-word mirror of the backend's config_rules.eval_show_when
+// (the last remaining cross-language dual implementation).
 
-/** 字段的人类可读 label：首字母大写 + 下划线变空格。 */
+/** A field's human-readable label: capitalize first letters + turn underscores into spaces. */
 export function fieldLabel(name: string): string {
   return name
     .split('_')
@@ -187,7 +189,7 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
 }
 
 /** Human label of a schema field: schema.labels.<field> when the locale has
- *  one, else the key in title case ("lora_rank" → "Lora Rank"). */
+ *  one, else the key in title case ("lora_rank" -> "Lora Rank"). */
 export function schemaFieldLabel(name: string, t: TFunction): string {
   return t(`schema.labels.${name}`, { defaultValue: fieldLabel(name) })
 }

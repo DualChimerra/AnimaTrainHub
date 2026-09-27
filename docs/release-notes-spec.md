@@ -1,237 +1,268 @@
-# Release Notes 编写规范（AI agent 用）
+# Release Notes Writing Spec (for AI agents)
 
-本文是给写 release notes 的 agent 看的——人 / Claude / 任何 LLM。读完应当
-**不需要任何额外问问题**就能：(1) 知道改哪个文件、(2) 从哪儿拿内容、
-(3) 用什么结构 / 风格 / 语气写、(4) 跑哪个工具校验。
+This document is for whoever writes release notes — human, Claude, or any LLM.
+After reading it you should be able to, **without asking any follow-up
+questions**: (1) know which file to change, (2) know where to pull content from,
+(3) know what structure/style/tone to use, (4) know which tool to run to validate.
 
-> **核心原则 —— 三 surface 共享文本，全部 user-facing**
+> **Core principle — the three surfaces share the same text, all of it user-facing**
 >
-> `release_notes.yaml` 的 `summary` + `detail` 文本会被同时渲染到三个用户
-> 可见 surface：
+> The `summary` + `detail` text in `release_notes.yaml` is rendered to three
+> user-visible surfaces at once:
 >
-> 1. **Studio Web UI** Settings → 系统 → 版本卡片：summary 一行展示 + 点开
->    detail modal
-> 2. **`CHANGELOG.md`** 仓库根 + GitHub repo 主页可达；`render-changelog` 从
->    yaml 派生，summary + detail 都进
-> 3. **GitHub Release body**（`/releases` 每个 tag 一页）；maintainer 手动从
->    CHANGELOG 复制对应段
+> 1. **Studio Web UI** Settings → System → the version card: summary shown as one
+>    line, detail opens in a modal on click
+> 2. **`CHANGELOG.md`** reachable from the repo root and the GitHub repo homepage;
+>    `render-changelog` derives it from the yaml, both summary and detail go in
+> 3. **GitHub Release body** (one page per tag under `/releases`); the maintainer
+>    manually copies the matching section from CHANGELOG
 >
-> 三处共享同一份 yaml，**summary 和 detail 都得 user 视角写**。旧说法
-> 「summary 给用户，detail 给开发者技术词随便用」错了 —— detail 在 CHANGELOG
-> 和 Release body 两个用户表面同样可见。技术 ref（实现路径 / 内部符号名 /
-> 重构理由 / 设计权衡 / 替代方案对比）属于 **commit message + PR
-> description**，不进 yaml。
+> All three surfaces share the same yaml, so **both summary and detail must be
+> written from the user's point of view**. The old rule of thumb "summary is for
+> users, detail can use developer jargon freely" is wrong — detail is equally
+> visible on the two user-facing surfaces CHANGELOG and the Release body.
+> Technical references (implementation paths, internal symbol names, refactor
+> rationale, design trade-offs, alternatives considered) belong in the **commit
+> message + PR description**, not in the yaml.
 >
-> 4 层 archeology 分工：
+> A 4-layer division of "archaeology":
 >
-> | 层 | 受众 | 内容 |
+> | Layer | Audience | Content |
 > |---|---|---|
-> | Commit message | git blame / 工程师 | atomic 改动的根因 / 修法 |
-> | PR description | reviewer / 历史考古 | 设计权衡、替代方案、scope |
-> | CHANGELOG / Release body | 升级的用户 | 「升上去看到什么变化」 |
-> | ADR | 架构决策回溯 | 「为啥选这条路不选另一条」 |
+> | Commit message | git blame / engineers | root cause / fix for an atomic change |
+> | PR description | reviewers / historical digging | design trade-offs, alternatives, scope |
+> | CHANGELOG / Release body | users upgrading | "what changed when I upgrade" |
+> | ADR | architecture-decision archaeology | "why this path and not another" |
 
-## 1. 单一来源：`release_notes.yaml`
+## 1. Single source of truth: `release_notes.yaml`
 
-**永远改 `release_notes.yaml`；永远不要手改 `CHANGELOG.md`。**
+**Always edit `release_notes.yaml`; never hand-edit `CHANGELOG.md`.**
 
-`CHANGELOG.md` 由 `tools/bump_version.py render-changelog` 从 yaml **派生**，
-任何手改都会在下次 `render-changelog` 时被覆盖。GitHub release page 看的
-是 `CHANGELOG.md`，所以 yaml 才是 source of truth。
+`CHANGELOG.md` is **derived** from the yaml by
+`tools/bump_version.py render-changelog`; any manual edit to it gets overwritten
+on the next `render-changelog`. The GitHub release page reads `CHANGELOG.md`, so
+the yaml is the source of truth.
 
-`studio/__init__.py:__version__` 和 `studio/web/package.json:version` 也由
-`bump_version.py bump --version X.Y.Z` 统一改写，不要手动改。
+`studio/__init__.py:__version__` and `studio/web/package.json:version` are also
+rewritten together by `bump_version.py bump --version X.Y.Z` — don't edit them by
+hand.
 
-## 2. 数据模型（yaml schema）
+## 2. Data model (yaml schema)
 
 ```yaml
-- version: "0.6.1"              # str, semver；与 git tag / __version__ 对齐
+- version: "0.6.1"              # str, semver; aligned with the git tag / __version__
   date: "2026-05-13"            # str, ISO YYYY-MM-DD
-  summary: "..."                # str?, optional. 整版本一句话总览
-                                # （CHANGELOG 顶部段落用）；可省，agent 通常写
-  entries:                      # list, ≥ 1 条
-    - kind: added               # enum, 必填，见 §4
-      summary: "..."            # str, 必填, ≤ 80 字符, plain text, user-facing
-      pr_refs: [18, 34]         # list[int], optional; 关联的 PR 号
-      detail: |                 # str, optional; markdown 允许；多行
-        Detail block, 可多段。
+  summary: "..."                # str?, optional. One-sentence overview of the whole
+                                 # version (used in the CHANGELOG's top paragraph);
+                                 # can be omitted, but the agent usually writes one
+  entries:                      # list, >= 1 entry
+    - kind: added               # enum, required, see §4
+      summary: "..."            # str, required, <= 80 chars, plain text, user-facing
+      pr_refs: [18, 34]         # list[int], optional; associated PR numbers
+      detail: |                 # str, optional; markdown allowed; multi-line
+        Detail block, can span multiple paragraphs.
 ```
 
-**版本顺序**：yaml 是 list, **最新版本排第一**（top）。`bump_version.py bump`
-会自动 prepend 新 block 到列表头。
+**Version ordering**: the yaml is a list, with **the newest version first**
+(at the top). `bump_version.py bump` automatically prepends the new block to the
+head of the list.
 
-## 3. 工作流
+## 3. Workflow
 
-agent 被叫来做 release notes 时，按这个顺序：
+When an agent is asked to write release notes, follow this order:
 
-### Step 1: 找出 last release commit / tag
+### Step 1: Find the last release commit / tag
 
 ```bash
-# yaml 现有的最新版本（agent 之前的 release 标记点）
+# The newest version currently in the yaml (the agent's previous release marker)
 tail -n +1 release_notes.yaml | grep -m1 '^- version:'
 
-# 仓库里对应的 tag（如果有打 tag）
+# The matching tag in the repo (if one was cut)
 git describe --tags --abbrev=0 2>/dev/null
 ```
 
-如果 yaml 里写的是 `0.6.0` 但 repo 没 `v0.6.0` tag，以**当时记录的最后一个
-commit 作为分界点**（通常是 `chore(release): 0.6.0` 这个 commit；用 git
-log 找）：
+If the yaml says `0.6.0` but the repo has no `v0.6.0` tag, use **the last commit
+recorded at that time as the boundary** (usually the `chore(release): 0.6.0`
+commit; find it with git log):
 
 ```bash
 git log --oneline --grep='chore(release): 0.6.0' -1
 ```
 
-### Step 2: 拉取自上次 release 以来的所有合并 PR
+### Step 2: Pull all PRs merged since the last release
 
 ```bash
-# PR 列表（base 通常是 dev 或 master，按你们的 release flow 选）
+# PR list (base is usually dev or master, pick whichever matches your release flow)
 gh pr list --state merged --base dev --limit 100 \
   --search 'merged:>=2026-05-12' \
   --json number,title,body,labels,author,mergedAt
 ```
 
-`--search` 的日期 = 上次 release 的日期；`--base` 跟你们 release 拉的分支
-（默认 dev）。如果你们 release 是从 master 拉，base 就改成 master。
+The date in `--search` = the date of the last release; `--base` matches the
+branch your releases are cut from (default `dev`). If your releases are cut from
+`master`, change the base to `master`.
 
-补充材料（PR 描述有时太简单）：
+Supplementary material (PR descriptions are sometimes too sparse):
 
 ```bash
-# 该 PR 关联的所有 commits
+# All commits associated with that PR
 gh pr view <num> --json commits --jq '.commits[].messageHeadline'
 
-# 整个版本区间的 commit 全貌
+# The full commit picture across the whole version range
 git log <last_release_sha>..HEAD --pretty='%h %s'
 ```
 
-### Step 3: 按 PR 一条一条决定 kind + 写 summary + detail
+### Step 3: For each PR, decide the kind and write summary + detail
 
-**默认每个 PR 写一个 entry**。例外：
+**By default, write one entry per PR.** Exceptions:
 
-- **纯 chore PR**（依赖 bump / 格式化 / 内部 refactor，对用户行为零影响）：**不写 entry**
-- **纯 docs PR**（README / 注释）：**不写 entry**
-- **跨多个领域的大 PR**：可拆成多条 entry，每条对应 PR 一部分；`pr_refs` 都填同一个 PR 号
-- **同主题的多个 PR 串**（feature 主 PR + 后续 followup fix PR）：可合并成一个 entry，
-  `pr_refs` 列出所有相关 PR（agent 判断）。比如 `[18, 34, 35]`：主 feature + P0 修 + 重做
+- **Pure chore PRs** (dependency bumps / formatting / internal refactors with zero
+  effect on user-facing behavior): **skip, no entry**
+- **Pure docs PRs** (README / comments): **skip, no entry**
+- **Large PRs spanning multiple areas**: can be split into multiple entries, each
+  covering part of the PR; fill in the same PR number for all of them in `pr_refs`
+- **A chain of PRs on the same topic** (a main feature PR + follow-up fix PRs):
+  can be merged into one entry, with `pr_refs` listing all related PRs (agent's
+  judgment call). E.g. `[18, 34, 35]`: main feature + P0 fix + a redo
 
-### Step 4: 追加到 yaml
+### Step 4: Append to the yaml
 
-新版本 block prepend 到 list 顶；entries 内部按重要性排（user 最关心的在前），
-**不要**按 PR 时间顺序排。
+Prepend the new version block to the top of the list; order entries within it by
+importance (what users care about most first), **not** by PR chronology.
 
-### Step 5: 校验 + 派生
+### Step 5: Validate + derive
 
 ```bash
 python tools/bump_version.py validate
 python tools/bump_version.py bump --version 0.6.1 --date 2026-05-13
 ```
 
-`bump` 会：(1) 重跑 validate (2) 改 `studio/__init__.py:__version__` +
-`studio/web/package.json` (3) 调 `render-changelog` 重写 `CHANGELOG.md` (4)
-打印 commit 建议。**不会** 自动 commit / tag —— 那是人的活。
+`bump` will: (1) re-run validate, (2) update `studio/__init__.py:__version__` +
+`studio/web/package.json`, (3) call `render-changelog` to rewrite `CHANGELOG.md`,
+(4) print a suggested commit. It will **not** auto-commit or tag — that's a human
+task.
 
-## 4. `kind` 分类（标准 + 我们的扩展）
+## 4. `kind` categories (standard + our extension)
 
-参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，加 `improved`。
+Based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), plus `improved`.
 
-| `kind` | 含义 | 何时用 |
+| `kind` | Meaning | When to use |
 | --- | --- | --- |
-| `added` | 完全新的 feature / 端点 / UI / 文件 | 用户能"发现"一个新东西 |
-| `changed` | 行为 / 接口 / 默认值 / UI 流程**变了** | 用户原来这么用，现在那么用 |
-| `improved` | 现有功能性能 / UX / 文案 / 错误信息**优化** | 表面行为不变，体感更好 |
-| `fixed` | bug 修 | 之前坏的，现在好了 |
-| `removed` | 删了 feature / 端点 / 字段 / 文件 | 用户能"感觉到"少了东西 |
-| `deprecated` | 标记将删，但还能用 | 通常预告下下个版本会 `removed` |
-| `security` | CVE / auth / 凭证泄漏类修复 | **优先级最高**，单独写 |
+| `added` | A brand-new feature / endpoint / UI / file | The user can "discover" something new |
+| `changed` | Behavior / interface / default / UI flow **changed** | What used to work one way now works another way |
+| `improved` | An existing feature got **better** in performance / UX / copy / error messages | Surface behavior unchanged, but it feels better |
+| `fixed` | A bug fix | It used to be broken, now it's fixed |
+| `removed` | A feature / endpoint / field / file was removed | The user can "feel" something is missing |
+| `deprecated` | Marked for future removal, but still usable | Usually a heads-up that it will be `removed` in a version or two |
+| `security` | CVE / auth / credential-leak class fixes | **Highest priority**, always written up separately |
 
-**含糊判断**：
+**Judgment calls for ambiguous cases**:
 
-- "重写 UI 但用户操作流程没变" → `changed`（用户能感知 UI 变了）
-- "重写后端 service 内部，对前端 API 不变" → 通常**不写**（agent 跳过这条 PR）
-- "之前慢，优化后快 5x" → `improved`
-- "之前会偶尔报错，修了" → `fixed`
-- "新加配置项，default 同旧行为" → `added`（默认行为不变，但用户能发现）
-- "把 feature 默认关改成默认开" → `changed`（默认值变化是行为变化）
+- "Rewrote the UI but the user's workflow didn't change" → `changed` (the user can
+  perceive the UI changed)
+- "Rewrote the backend service internals, frontend API unchanged" → usually
+  **no entry** (agent skips this PR)
+- "Used to be slow, now 5x faster after optimization" → `improved`
+- "Used to error occasionally, now fixed" → `fixed`
+- "Added a new config option, default matches the old behavior" → `added` (default
+  behavior unchanged, but the user can discover it)
+- "Changed a feature's default from off to on" → `changed` (a default-value
+  change is a behavior change)
 
-## 5. `summary` 写作规范
+## 5. `summary` writing rules
 
-**目的**：UI release notes 面板一行展示。用户扫一眼就知道这版干了啥。
+**Purpose**: shown as one line in the UI's release notes panel. A user should
+know what this version did at a glance.
 
 ### Do
 
-- **≤ 80 字符**（中文每字算 1，含括号和 PR 号）。`bump_version.py validate` 会拒长的
-- **user-facing 语气**：从用户视角写，不是开发者视角
-- **现在时 / 命令式**：「修复 X」「新增 Y」「优化 Z」（不要"我们做了"「已经实现」）
-- **末尾带 `（#N）`**：链接 PR；多 PR 就 `（#N, #M）`，最多 3 个
-- **specific 而不是 generic**：「修复 Danbooru 403」比「修复一些 bug」好
-- **避开技术术语**（除非用户必须知道）：「训练监控加 GPU 占用」比「`_StatsThread` 推 SSE event」好
-- **三 surface 一致 user 视角**：写完想象这条 entry 同时出现在 Studio 版本
-  卡片、CHANGELOG、GitHub Release body —— 都是给升级用户看的，不是给
-  reviewer 或 git blame 来的人。技术 ref 进 commit / PR，不进这里
+- **<= 80 characters** (including parentheses and the PR number). `bump_version.py
+  validate` rejects longer ones
+- **User-facing tone**: written from the user's point of view, not the developer's
+- **Present tense / imperative**: "Fix X", "Add Y", "Improve Z" (not "We did X" or
+  "X has been implemented")
+- **End with `(#N)`**: link the PR; multiple PRs use `(#N, #M)`, up to 3
+- **Specific, not generic**: "Fix Danbooru 403" is better than "fix some bugs"
+- **Avoid technical jargon** (unless the user genuinely needs to know it): "Add GPU
+  usage to training monitor" is better than "`_StatsThread` pushes an SSE event"
+- **Consistent user-facing voice across all three surfaces**: after writing it,
+  imagine this entry appearing simultaneously on the Studio version card,
+  CHANGELOG, and the GitHub Release body — all read by users upgrading, not by
+  reviewers or people doing git blame. Technical references belong in the
+  commit/PR, not here
 
 ### Don't
 
-- ❌ Markdown 格式（`**bold**` / `code` / 链接）——summary 是 plain text
-- ❌ 引号包标题：`「LLM tagger」新增` 不要，直接 `新增 LLM tagger`
-- ❌ 不在末尾的 PR 号：`#18 LLM tagger` ❌，`LLM tagger（#18）` ✓
-- ❌ 多句话 / 句号串句：`新增 X。修复 Y。` ❌，拆两个 entry
-- ❌ 模糊词："优化体验" / "改进若干" / "杂项修复"——具体什么体验？
+- Markdown formatting (`**bold**` / `code` / links) — summary is plain text
+- Wrapping the title in quotes: not `Add "LLM tagger"`, just `Add LLM tagger`
+- A PR number that isn't at the end: not `#18 LLM tagger`, use `LLM tagger (#18)`
+- Multiple sentences / sentence chains: not `Add X. Fix Y.` — split into two
+  entries
+- Vague words: "improved experience" / "various improvements" / "misc fixes" —
+  what experience, specifically?
 
-### 例
+### Examples
 
-| ❌ Bad | ✓ Good |
+| Bad | Good |
 | --- | --- |
-| `**LLM tagger + WandB 监控**（#18）` | `LLM tagger 第二打标器 + WandB 训练监控（#18）` |
-| `修复一些 UI bug` | `修复 Settings 系统 tab 切换不刷新（#52）` |
-| `重构 services/booru_api` | （不写——纯内部） |
-| `优化体验（#33）` | `Queue 输出下载改直链 + 批量 + 排序（#33）` |
-| `**onnxruntime-gpu 静默降级 CPU**(#29 Windows / #30 Linux)` | `onnxruntime-gpu 在 Win/Linux 静默降级 CPU（#29, #30）` |
+| `**LLM tagger + WandB monitoring**(#18)` | `LLM tagger (second tagger backend) + WandB training monitoring (#18)` |
+| `Fixed some UI bugs` | `Fix Settings System tab not refreshing on switch (#52)` |
+| `Refactor services/booru_api` | (no entry — purely internal) |
+| `Improved experience (#33)` | `Queue output downloads use direct links + batch + sort (#33)` |
+| `**onnxruntime-gpu silently falls back to CPU**(#29 Windows / #30 Linux)` | `onnxruntime-gpu silently falls back to CPU on Win/Linux (#29, #30)` |
 
-## 6. `detail` 写作规范
+## 6. `detail` writing rules
 
-**目的**：用户点开 entry 想了解"具体怎么变的"时看；CHANGELOG.md
-派生时也用 detail 填二级信息。
+**Purpose**: shown when a user clicks into an entry wanting to know "specifically
+what changed"; also used to fill in the secondary information when CHANGELOG.md
+is derived from the yaml.
 
 ### Do
 
-- **Markdown 允许**：列表、代码 fence、行内 code、链接、粗体
-- **写 _why_ 不只 _what_**：summary 已经说了 what，detail 说为什么这么改 / 影响 / 边界
-- **包含具体路径 / 命令 / 配置 key**：让用户能定位
-- **多个 sub-point 用 bullet**：`-` 顶格
+- **Markdown allowed**: lists, code fences, inline code, links, bold
+- **Write the _why_, not just the _what_**: summary already covers what changed;
+  detail covers why it changed / its impact / its edge cases
+- **Include specific paths / commands / config keys**: so users can locate things
+- **Use bullets for multiple sub-points**: `-` at the top level
 
 ### Don't
 
-- ❌ 重复 summary 已经说的话
-- ❌ 把 commit message 原样 paste 进来 —— detail 也是 user-facing surface
-  （CHANGELOG / Release body 都展示它）
-- ❌ 写实现细节而不写用户能感知的部分（"`_StatsThread` 用 nvidia-ml-py 而不是 pynvml" → 用户不在乎，跳过）
-- ❌ 写「实现路径」/「内部类名」/「重构理由」/「替代方案对比」/「设计权衡」
-  —— 这些属于 commit message 或 PR description，不进 yaml。例如
-  「`useEffect` deps 用 `[task]` 对象引用，React 浅 clone 触发重拉」就是
-  典型踩线 —— 用户不知道 `useEffect` 是什么
-- ❌ 单行 detail（一行能写完的内容直接进 summary）
+- Repeat what the summary already said
+- Paste the commit message in verbatim — detail is also a user-facing surface
+  (shown on both CHANGELOG and the Release body)
+- Write implementation details instead of user-perceivable ones (e.g. "`_StatsThread`
+  uses nvidia-ml-py instead of pynvml" → the user doesn't care, skip it)
+- Write "implementation paths" / "internal class names" / "refactor rationale" /
+  "alternatives considered" / "design trade-offs" — these belong in the commit
+  message or PR description, not the yaml. For example, "`useEffect` deps use the
+  `[task]` object reference, so React's shallow clone triggers a re-fetch" is a
+  classic violation — users don't know what `useEffect` is
+- Single-line detail (if it fits on one line, put it in summary instead)
 
-### 例
+### Example
 
 ```yaml
 - kind: added
-  summary: "训练监控加 Topbar 系统资源 pill（CPU / GPU / MEM / VRAM）（#37, #42）"
+  summary: "Training monitor adds a Topbar system-resource pill (CPU / GPU / MEM / VRAM) (#37, #42)"
   pr_refs: [37, 42]
   detail: |
-    - Topbar 永远显示 4 个等宽 pill（min-w 96px）；从 `nvidia-ml-py` 拉，
-      老 `pynvml` 已停维护
-    - Backend `_StatsThread` 每 2.5s 通过 SSE `system_stats_updated` 推到前端
-    - Monitor 视图改增量协议（步进式 delta 取代每秒 snapshot），10k 步训练
-      payload 从 O(N) 降到 O(1)
-    - Cold-start 默认 `max_points=0` 不降采样，前端 cap 5000 → 50000 与
-      backend `train_monitor` 对齐
+    - The Topbar always shows 4 equal-width pills (min-w 96px); pulled from
+      `nvidia-ml-py`, replacing the unmaintained `pynvml`
+    - The backend `_StatsThread` pushes to the frontend every 2.5s via the SSE
+      `system_stats_updated` event
+    - The Monitor view switched to an incremental protocol (stepwise deltas
+      instead of a per-second snapshot); for a 10k-step training run, payload
+      size drops from O(N) to O(1)
+    - Cold start defaults to `max_points=0` (no downsampling); the frontend cap
+      went from 5000 to 50000 to match the backend's `train_monitor`
 ```
 
-## 7. End-to-end 完整例子
+## 7. Full end-to-end example
 
-**场景**：上次 release `0.6.0` 在 2026-05-12；现在准备发 `0.6.1`。
+**Scenario**: the last release, `0.6.0`, was on 2026-05-12; now preparing to ship
+`0.6.1`.
 
-### Step 1-2: gather
+### Steps 1-2: gather
 
 ```bash
 $ gh pr list --state merged --base dev \
@@ -239,53 +270,66 @@ $ gh pr list --state merged --base dev \
     --json number,title,body --limit 50
 
 [
-  {"number": 51, "title": "feat: webui 自更新（ADR 0002）", "body": "..."},
-  {"number": 52, "title": "feat(version-section): 双通道升级面板", "body": "..."},
+  {"number": 51, "title": "feat: webui self-update (ADR 0002)", "body": "..."},
+  {"number": 52, "title": "feat(version-section): dual-channel upgrade panel", "body": "..."},
   {"number": 53, "title": "chore: bump nvidia-ml-py to 12.0.3", "body": "..."}
 ]
 ```
 
-agent 思考：
-- #51 → 大 feature，对应 ADR 0002，应当写 entry（`added` 或 `changed`？webui 内可视化升级是新功能 → `added`）
-- #52 → UI 重设计，原版可点击但样式 / 状态机变了 → `changed`
-- #53 → 纯 chore dep bump，**跳过**
+The agent's reasoning:
+- #51 → a big feature, tied to ADR 0002, should get an entry (`added` or
+  `changed`? an in-webui visual upgrade is a new capability → `added`)
+- #52 → UI redesign, the old version was already clickable but the styling/state
+  machine changed → `changed`
+- #53 → pure chore dep bump, **skip**
 
 ### Step 3: write entries
 
 ```yaml
 - version: "0.6.1"
   date: "2026-05-13"
-  summary: "webui 内一键升级 + 系统设置版本面板重设计"
+  summary: "One-click in-webui upgrade + redesigned system settings version panel"
   entries:
     - kind: added
-      summary: "webui 内一键升级 + 重启 + 回滚（ADR 0002）（#51）"
+      summary: "One-click upgrade + restart + rollback inside the webui (ADR 0002) (#51)"
       pr_refs: [51]
       detail: |
-        Studio 不再需要 CLI `git pull` + 重启，直接在 Settings → 系统 →
-        版本卡片点更新即可：
+        Studio no longer needs a CLI `git pull` + restart — just click Update on
+        the Settings → System → version card:
 
-        - `git fetch` + `git reset --hard origin/master` 在 cli.py 启动期
-          完成（避开 server 进程持有 native module 锁的问题）
-        - `tmp/restart` flag + studio.sh/bat wrapper loop 触发重启
-        - 训练 / 打标任务在跑时拒绝 update（precondition 校验返 422）
-        - 失败自动留在原版本；`.last_version` 记录上一 commit 支持一键回滚
-        - PR-D 加 installer 自检（cli.py / studio.sh / studio.bat sha256
-          变化 → exit 42 → wrapper exec self）+ dev 通道 toggle
-        - 详见 [`docs/adr/0002-webui-self-update.md`](docs/adr/0002-webui-self-update.md)
+        - `git fetch` + `git reset --hard origin/master` happens during cli.py
+          startup (avoids the issue of the server process holding a lock on
+          native modules)
+        - A `tmp/restart` flag + the studio.sh/bat wrapper loop trigger the
+          restart
+        - Training/tagging jobs in progress reject the update (a precondition
+          check returns 422)
+        - On failure it automatically stays on the current version;
+          `.last_version` records the previous commit to support one-click
+          rollback
+        - PR-D adds installer self-check (cli.py / studio.sh / studio.bat sha256
+          changes → exit 42 → the wrapper re-execs itself) + a dev-channel
+          toggle
+        - See [`docs/adr/0002-webui-self-update.md`](docs/adr/0002-webui-self-update.md)
+          for details
     - kind: changed
-      summary: "Settings 系统 → 版本卡片改双通道布局 + inline preview（#52）"
+      summary: "Settings System → version card gets a dual-channel layout + inline preview (#52)"
       pr_refs: [52]
       detail: |
-        - master / dev 并排显示；当前 channel 高亮（"你在这里"）
-        - master 卡显示 release tag（v0.6.0）prominently，不再露 commit hash
-        - dev 卡显示 commit 时间线；任意 commit 可点击切换（不只是 HEAD）
-        - 操作不再走 dialog 模态：单击 → inline preview 面板（含 release
-          notes + pre-flight 检查 + 取消/确认）
-        - dev 通道 toggle 下移到卡片之后（demoted），当前在 dev 时强制
-          开 + 锁定
+        - master / dev shown side by side; the current channel is highlighted
+          ("you are here")
+        - The master card shows the release tag (v0.6.0) prominently, no longer
+          exposing the commit hash
+        - The dev card shows a commit timeline; any commit is clickable to
+          switch to (not just HEAD)
+        - Actions no longer go through a modal dialog: a single click opens an
+          inline preview panel (with release notes + pre-flight checks +
+          cancel/confirm)
+        - The dev-channel toggle moved below the card (demoted); it's forced on
+          and locked while already on the dev channel
 ```
 
-### Step 4-5: validate + bump
+### Steps 4-5: validate + bump
 
 ```bash
 $ python tools/bump_version.py validate
@@ -310,42 +354,46 @@ next: review changes, then:
    git push --tags
 ```
 
-## 8. 校验规则（`bump_version.py validate` 会跑）
+## 8. Validation rules (run by `bump_version.py validate`)
 
-会拒 yaml 上线的硬错误：
+Hard errors that block the yaml from going live:
 
-- `version` 不是合法 semver（`X.Y.Z` 或 `X.Y.Z-suffix`）
-- `version` 重复（同一版本号出现两次）
-- `version` 不单调递减（list 应当 latest 在 top）
-- `date` 不是 ISO `YYYY-MM-DD`
-- `entries` 为空 list
-- `kind` 不在白名单（added/changed/improved/fixed/removed/deprecated/security）
-- `summary` 缺失 / 空 / 长度 > 80 字符
-- `summary` 含 markdown 字符（`*`、`` ` ``、`[`）—— 提示用 detail 而不是 summary
-- `pr_refs` 不是 list[int]，或单个 int > 9999
+- `version` isn't a valid semver (`X.Y.Z` or `X.Y.Z-suffix`)
+- `version` is duplicated (the same version number appears twice)
+- `version` isn't monotonically decreasing (the list should have the newest on top)
+- `date` isn't ISO `YYYY-MM-DD`
+- `entries` is an empty list
+- `kind` isn't in the allowlist (added/changed/improved/fixed/removed/deprecated/security)
+- `summary` is missing / empty / longer than 80 characters
+- `summary` contains markdown characters (`*`, `` ` ``, `[`) — hints to use detail
+  instead of summary
+- `pr_refs` isn't a list[int], or a single int exceeds 9999
 
-只警告的 soft check（CI 不拒）：
+Soft checks that only warn (CI doesn't reject):
 
-- `summary` < 10 字符（可能写太简短）
-- `detail` < 20 字符（这种情况建议把 detail 内容合并到 summary）
-- 同 `version` 块里有 ≥ 10 个 entries（可能没好好分类整理）
-- 一个 PR 出现在多条 entry 的 `pr_refs` 里超过 3 次（可能拆得太细）
+- `summary` < 10 characters (possibly written too tersely)
+- `detail` < 20 characters (in this case, consider folding the detail content into
+  summary instead)
+- A single `version` block has >= 10 entries (possibly not well organized)
+- A single PR appears in `pr_refs` across more than 3 entries (possibly split too
+  finely)
 
-## 9. 常见 anti-pattern
+## 9. Common anti-patterns
 
-| ❌ | 为什么 | ✓ |
+| Bad | Why | Good |
 | --- | --- | --- |
-| `summary: "依赖"` | 一个标签词，用户看不懂改了啥 | `summary: "升级 nvidia-ml-py 0.6.0 → 12.0.3，替代已停维护的 pynvml"` |
-| `summary: "**bold**"` | summary 不允许 markdown | 把粗体去掉，强调放到 detail 里 |
-| `pr_refs: ["18", "34"]` | 必须是 int 不是 str | `pr_refs: [18, 34]` |
-| `kind: refactor` | 不在白名单；refactor 通常用户不感知 | 跳过这条 PR，或者用 `changed` / `improved` |
-| `summary: "新增 LLM tagger（#18）。修复 Danbooru 403（#41）。"` | 两个独立改动塞一行 | 拆成两条 entry |
-| `detail: "useEffect deps 用 [task] 对象引用，React 浅 clone 触发重拉..."` | detail 是用户 surface（CHANGELOG / Release body），不应露 React 内部实现 | `detail: "关联配置 tab 训练运行期间每 2 秒重拉，浏览器卡顿..."` |
-| `detail: "ADR 0003 PR-A 把 utils/ 搬到根后 Path(__file__).parent.parent 少回溯一层..."` | 实现路径细节属于 commit message / PR | `detail: "v0.10.0 引入的路径错算让训练找不到 JSON caption 工具文件..."` |
-| 写完 yaml 后直接 commit | 没跑 `bump_version.py validate` | 先校验，错了 CI 也会拒 |
+| `summary: "deps"` | A single label word — the user can't tell what changed | `summary: "Upgrade nvidia-ml-py 0.6.0 → 12.0.3, replacing the unmaintained pynvml"` |
+| `summary: "**bold**"` | summary doesn't allow markdown | Remove the bold; put emphasis in detail instead |
+| `pr_refs: ["18", "34"]` | Must be int, not str | `pr_refs: [18, 34]` |
+| `kind: refactor` | Not in the allowlist; refactors are usually imperceptible to users | Skip this PR, or use `changed` / `improved` |
+| `summary: "Add LLM tagger (#18). Fix Danbooru 403 (#41)."` | Two independent changes crammed into one line | Split into two entries |
+| `detail: "useEffect deps use the [task] object reference, React's shallow clone triggers a re-fetch..."` | detail is a user-facing surface (CHANGELOG / Release body) — it shouldn't expose React internals | `detail: "The linked config tab was re-fetching every 2 seconds during a training run, causing browser lag..."` |
+| `detail: "ADR 0003 PR-A moved utils/ to the root, so Path(__file__).parent.parent resolves one level too few..."` | Implementation-path detail belongs in the commit message / PR | `detail: "A path-resolution bug introduced in v0.10.0 caused training to fail to find the JSON caption tool file..."` |
+| Committing the yaml right after writing it | Didn't run `bump_version.py validate` first | Validate first — CI will reject errors anyway |
 
-## 10. 维护这份文档
+## 10. Maintaining this document
 
-如果某个规则不合理 / 实际跑下来 agent 老写错 / 团队约定变了 → 改这份
-文档而不是绕开它。改完同步更新 `bump_version.py` 的 validate 逻辑保持
-"文档说啥，工具拒啥"一致。
+If a rule stops making sense, or the agent keeps getting something wrong in
+practice, or team conventions change → update this document instead of working
+around it. After updating, keep `bump_version.py`'s validate logic in sync so
+"what the doc says" and "what the tool rejects" stay consistent.

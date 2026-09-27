@@ -1,22 +1,26 @@
-"""任务调度守护线程 — PR-4 拆分。
+"""Task-scheduling daemon thread -- split apart in PR-4.
 
-`studio.supervisor` 1431 行原单文件按职责切到本子包：
+The original 1431-line `studio.supervisor` single file was split into this
+subpackage by responsibility:
 
-    slot.py         _Slot dataclass + SLOT_TRAIN/DATA 常量
-    cmd_builder.py  默认 cmd builder + monitor_state_path + worker EVENT 协议常量
-    finalizer.py    task 终态 → version.status 映射（ADR-0007 §11.3-B）
-    process.py      _kill_process_tree（跨平台杀进程树）
-    core.py         Supervisor 主类（保单类不拆，状态耦合高 — 详 PR-4 决策日志）
+    slot.py         _Slot dataclass + SLOT_TRAIN/DATA constants
+    cmd_builder.py  the default cmd builder + monitor_state_path + worker EVENT protocol constants
+    finalizer.py    task terminal state -> version.status mapping (ADR-0007 §11.3-B)
+    process.py      _kill_process_tree (cross-platform process-tree kill)
+    core.py         the Supervisor main class (kept as one class, not split further -- state is tightly coupled, see the PR-4 decision log)
 
-本 `__init__.py` 兼容 shim：把全部 public name re-export 到包顶层，旧
+This `__init__.py` is a compat shim: it re-exports every public name at the
+package top level, so old import paths like
 `from studio.supervisor import Supervisor / _Slot / _default_cmd_builder
-/ _maybe_finalize_version` 等 import 路径透明工作。
+/ _maybe_finalize_version` keep working transparently.
 
-monkeypatch path 兼容：tests 用 `monkeypatch.setattr("studio.supervisor._secrets.load", X)`
-和 `monkeypatch.setattr("studio.supervisor.subprocess.Popen", X)`，依赖
-`studio.supervisor` 模块对象上的 `_secrets` / `subprocess` attribute。下面从
-core.py re-export 让 lookup 命中真实 module 单例（Python 模块对象单例 →
-patch 同时影响 core.py 内的调用）。
+monkeypatch path compat: tests use
+`monkeypatch.setattr("studio.supervisor._secrets.load", X)` and
+`monkeypatch.setattr("studio.supervisor.subprocess.Popen", X)`, which rely on
+the `_secrets` / `subprocess` attributes existing on the `studio.supervisor`
+module object. Re-exporting them from core.py below makes the lookup hit the
+real module singleton (Python module objects are singletons, so the patch
+also affects calls inside core.py).
 """
 from __future__ import annotations
 
@@ -50,7 +54,7 @@ __all__ = [
     "_resolve_monitor_state_path",
     "_maybe_finalize_version",
     "_kill_process_tree",
-    # 下方 2 个仅为 monkeypatch path 兼容暴露；不属于业务 API
+    # the 2 below are exposed only for monkeypatch path compat; not part of the business API
     "_secrets",
     "subprocess",
 ]

@@ -90,7 +90,7 @@ describe('evalShowWhen', () => {
     expect(evalShowWhen('garbage', {})).toBe(true)
   })
 
-  // evalShowWhen 同时被 show_when 和 disable_when 复用（同一表达式语法）
+  // evalShowWhen is reused by both show_when and disable_when (same expression syntax)
   it('works for PPSF disable_when use case', () => {
     expect(
       evalShowWhen('optimizer_type==prodigy_plus_schedulefree', {
@@ -105,8 +105,9 @@ describe('evalShowWhen', () => {
   })
 })
 
-// pruneInactiveConfig 已删（刀 2 / R4）：YAML 预览改走后端 /api/schema/preview-yaml，
-// 裁剪语义唯一实现在 studio/domain/config_prune.py（tests/test_config_prune.py 锁）。
+// pruneInactiveConfig was removed (cut 2 / R4): YAML preview now goes through the
+// backend /api/schema/preview-yaml; the only remaining implementation of the pruning
+// semantics is studio/domain/config_prune.py (locked by tests/test_config_prune.py).
 
 describe('fieldLabel', () => {
   it('capitalizes underscored words', () => {

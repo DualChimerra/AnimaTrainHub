@@ -1,6 +1,6 @@
-"""PR-S1b — tools/check_requirements_changed.py bootstrap helper。
+"""PR-S1b -- tools/check_requirements_changed.py bootstrap helper.
 
-不读真 requirements.txt，用 tmp_path 隔离测试。
+Doesn't read the real requirements.txt; tests are isolated using tmp_path.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def helper_module():
 
 
 def _make_req(path: Path, content: str) -> None:
-    """写 requirements.txt，强制用二进制避免 Windows 平台 \\n 被改成 \\r\\n。"""
+    """Write requirements.txt, forcing binary mode to avoid Windows turning \\n into \\r\\n."""
     path.write_bytes(content.encode("utf-8"))
 
 
@@ -48,7 +48,7 @@ def test_compute_hash_changes_with_content(
     req = tmp_path / "requirements.txt"
     _make_req(req, "torch>=2.0.0\n")
     h1 = helper_module.compute_req_hash(req)
-    _make_req(req, "torch>=2.0.0\nmodelscope\n")  # 加新依赖
+    _make_req(req, "torch>=2.0.0\nmodelscope\n")  # add a new dependency
     h2 = helper_module.compute_req_hash(req)
     assert h1 != h2
 
@@ -72,7 +72,6 @@ def test_missing_requirements_outputs_missing(
 def test_no_marker_outputs_stale(
     helper_module, tmp_path: Path, capsys
 ) -> None:
-    """老 venv 没 marker → 视为 stale，触发 caller 同步一次。"""
     req = tmp_path / "requirements.txt"
     _make_req(req, "torch\n")
     rc = helper_module.main([
@@ -101,9 +100,9 @@ def test_marker_differs_outputs_stale(
     helper_module, tmp_path: Path, capsys
 ) -> None:
     req = tmp_path / "requirements.txt"
-    _make_req(req, "torch\nmodelscope\n")  # 新加 dep
+    _make_req(req, "torch\nmodelscope\n")
     marker = tmp_path / "marker.sha256"
-    marker.write_text("a" * 64, encoding="utf-8")  # 旧 hash
+    marker.write_text("a" * 64, encoding="utf-8")
 
     helper_module.main([
         "--marker", str(marker), "--requirements", str(req),
@@ -114,7 +113,6 @@ def test_marker_differs_outputs_stale(
 def test_corrupt_marker_outputs_stale(
     helper_module, tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """marker 文件损坏（read 抛 OSError）→ 当 stale，下次同步重写。"""
     req = tmp_path / "requirements.txt"
     _make_req(req, "torch\n")
     marker = tmp_path / "marker.sha256"
@@ -139,7 +137,7 @@ def test_update_marker_writes_hash(
 ) -> None:
     req = tmp_path / "requirements.txt"
     _make_req(req, "torch\nmodelscope\n")
-    marker = tmp_path / "subdir" / "marker.sha256"  # 不存在的子目录
+    marker = tmp_path / "subdir" / "marker.sha256"
 
     rc = helper_module.main([
         "--marker", str(marker), "--requirements", str(req),
@@ -147,7 +145,6 @@ def test_update_marker_writes_hash(
     ])
     assert rc == 0
     assert capsys.readouterr().out.strip() == "written"
-    # 父目录被自动创建（marker 在 venv/ 里，可能不存在）
     assert marker.exists()
     assert marker.read_text(encoding="utf-8") == helper_module.compute_req_hash(req)
 
@@ -168,7 +165,6 @@ def test_update_marker_overwrites_existing(
 
 
 # ---------------------------------------------------------------------------
-# 端到端：写 → 检查 current → 改 req → 检查 stale → 再写 → current
 # ---------------------------------------------------------------------------
 
 
@@ -177,26 +173,21 @@ def test_full_lifecycle(helper_module, tmp_path: Path, capsys) -> None:
     marker = tmp_path / "marker.sha256"
     _make_req(req, "torch\n")
 
-    # 1. 首次：没 marker → stale
     helper_module.main(["--marker", str(marker), "--requirements", str(req)])
     assert capsys.readouterr().out.strip() == "stale"
 
-    # 2. 写 marker（caller pip install 成功后）
     helper_module.main([
         "--marker", str(marker), "--requirements", str(req), "--update-marker",
     ])
     assert capsys.readouterr().out.strip() == "written"
 
-    # 3. 再检查 → current
     helper_module.main(["--marker", str(marker), "--requirements", str(req)])
     assert capsys.readouterr().out.strip() == "current"
 
-    # 4. 改 req（git pull 加了新 dep）
     _make_req(req, "torch\nmodelscope\n")
     helper_module.main(["--marker", str(marker), "--requirements", str(req)])
     assert capsys.readouterr().out.strip() == "stale"
 
-    # 5. 再次同步后写 marker
     helper_module.main([
         "--marker", str(marker), "--requirements", str(req), "--update-marker",
     ])

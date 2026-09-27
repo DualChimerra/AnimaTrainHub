@@ -316,9 +316,11 @@ def list_runs(version_dir: Path, eval_root: Path | None = None) -> list[dict[str
 
 
 def delete_all_runs(version_dir: Path, eval_root: Path | None = None) -> int:
-    """删该 eval scope 下所有 sample run（run.json + 图 + metrics）。返回删除的 run 数。
+    """Delete all sample runs under this eval scope (run.json + images + metrics).
+    Returns the number of runs deleted.
 
-    用于「清空评估、重新跑」：去掉该 task 的全部历史 run，下次评估从干净状态出图。
+    Used for "clear evaluation, rerun": removes all of this task's historical runs
+    so the next evaluation generates images from a clean state.
     """
     root = samples_dir(version_dir, eval_root)
     if not root.exists():
@@ -343,8 +345,9 @@ def create_run(
     ts = time.time() if now is None else float(now)
     cfg = _read_config(project, version)
     generation = _generation_from_cfg(cfg)
-    # baseline run = 纯底模对照（同 prompt/seed，lora_scale=0 → LoRA 不生效），
-    # 给各 checkpoint 算 Δ = checkpoint − baseline，解决「绝对值难解读」。
+    # baseline run = base-model-only reference (same prompt/seed, lora_scale=0 ->
+    # LoRA has no effect), lets each checkpoint compute delta = checkpoint -
+    # baseline, which solves "absolute values are hard to interpret".
     if baseline:
         generation["lora_scale"] = 0.0
     checkpoint = _resolve_checkpoint(version_dir, checkpoint_path)
@@ -566,8 +569,9 @@ def _default_generator(
     negative_prompt = str(generation.get("negative_prompt") or cfg.get("sample_negative_prompt") or "")
     sampler_name = str(generation.get("sampler_name") or cfg.get("sample_sampler_name") or "er_sde")
     scheduler = str(generation.get("scheduler") or cfg.get("sample_scheduler") or "simple")
-    # baseline run 用 lora_scale=0（纯底模对照）。不能写 `or 1.0`——0.0 是 falsy 会被
-    # 当成「没设」回退到 1.0，baseline 就变成正常 LoRA 跑、Δ 恒为 0。
+    # A baseline run uses lora_scale=0 (base-model-only reference). Must not write
+    # `or 1.0` here -- 0.0 is falsy and would be treated as "unset" and fall back to
+    # 1.0, turning the baseline into a normal LoRA run with delta always 0.
     _raw_scale = generation.get("lora_scale")
     lora_scale = float(_raw_scale) if _raw_scale is not None else 1.0
     precision = str(cfg.get("mixed_precision") or "bf16")
@@ -595,19 +599,20 @@ def _default_generator(
     check_load_budget(
         True,
         weight_paths=[transformer_path, vae_path, text_encoder_path],
-        stage="评估出图模型加载",
+        stage="eval sample-generation model loading",
     )
     vae = family.load_vae(vae_path, device, dtype)
-    # 族 opaque 文本栈不拆包；eval prompt 是 ad-hoc 输入，关缓存
+    # The family's opaque text stack isn't unpacked; eval prompts are ad-hoc input, so caching is off
     text_stack = family.load_text(
         text_encoder_path, device, dtype,
         t5_tokenizer_path=t5_tokenizer_path or None,
         purpose="generate",
         cache_enabled=False,
     )
-    # TE 先行编排（krea2，daemon/CLI 同款）：items 的 prompt 集合封闭——
-    # DiT 加载前预编码全部并彻底释放 TE，任一时刻 GPU 只有一个大模型。
-    # anima 文本栈无此 API 自然跳过。
+    # TE-first orchestration (krea2, same as daemon/CLI): items' prompt set is
+    # closed -- pre-encode all of them and fully release the TE before loading the
+    # DiT, so only one large model is ever on the GPU at once.
+    # The anima text stack has no such API, so this is naturally skipped.
     precache = getattr(text_stack, "precache_online_prompts", None)
     if callable(precache):
         try:
@@ -621,7 +626,7 @@ def _default_generator(
             if encoded:
                 progress(f"[eval-samples] precached {encoded} prompts; TE released")
         except Exception:
-            logger.exception("eval prompt 预编码失败；退回逐图惰性编码")
+            logger.exception("eval prompt precaching failed; falling back to per-image lazy encoding")
 
     model = family.load_dit(
         transformer_path, device, dtype,

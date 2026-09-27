@@ -1,13 +1,19 @@
-"""CCIP-I metric runner —— anime 域角色身份保真（DINO-I 的动漫替代）。
+"""CCIP-I metric runner — anime-domain character identity fidelity (the anime
+counterpart to DINO-I).
 
-对每张生成图与其 held-out 参考图，用 CCIP（deepghs/ccip_onnx）判是不是同一个
-动漫角色，``ccip_i = 判为同角色的配对比例 ∈ [0,1]``（越高越好）。CCIP 走两套 ONNX：
-``model_feat.onnx``（CAFormer 特征塔 → 768d）+ ``model_metrics.onnx``（learned
-metric head，出成对 difference 矩阵），按变体 ``metrics.json`` 的 threshold 判同/异
-（diff ≤ threshold = 同角色）。纯 onnxruntime，复用项目下载中心，不引 imgutils。
+For each generated image and its held-out reference image, CCIP
+(deepghs/ccip_onnx) judges whether they show the same anime character:
+``ccip_i = fraction of pairs judged as the same character ∈ [0,1]`` (higher is
+better). CCIP runs two ONNX graphs: ``model_feat.onnx`` (CAFormer feature tower
+-> 768d) + ``model_metrics.onnx`` (learned metric head, outputs a pairwise
+difference matrix), thresholded per the variant's ``metrics.json`` to decide
+same/different character (diff <= threshold = same character). Pure
+onnxruntime, reuses the project's download center, no imgutils dependency.
 
-局限：仅单角色图有意义（多角色/画风 LoRA 不适用，靠 Settings 复选框门控）；对发色/
-肤色不敏感。模型缺失时由 ``ensure_ccip_model`` 懒加载下载到 models/eval/ccip/。
+Limitations: only meaningful for single-character images (multi-character /
+style LoRAs are gated off via the Settings checkbox); not sensitive to hair
+color/skin tone. Missing models are lazily downloaded to models/eval/ccip/ by
+``ensure_ccip_model``.
 """
 from __future__ import annotations
 
@@ -21,7 +27,7 @@ JOB_KIND = "eval_ccip"
 DEFAULT_MODEL_NAME = "ccip-caformer-24-randaug-pruned"
 METRIC_KEY = "ccip_i"
 
-# CCIP 预处理（imgutils 同款）：384×384 BILINEAR、CHW、/255、CLIP mean/std。
+# CCIP preprocessing (matches imgutils): 384x384 BILINEAR, CHW, /255, CLIP mean/std.
 _CCIP_SIZE = 384
 _CCIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 _CCIP_STD = (0.26862954, 0.26130258, 0.27577711)
@@ -37,7 +43,7 @@ class EvalCcipError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# job lifecycle（与 eval_dino 同构，metric key = ccip_i）
+# job lifecycle (mirrors eval_dino's structure, metric key = ccip_i)
 # ---------------------------------------------------------------------------
 
 
@@ -131,7 +137,7 @@ def _normalize_model_name(model_name: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# helpers（与 eval_dino 同构）
+# helpers (mirrors eval_dino's structure)
 # ---------------------------------------------------------------------------
 
 
@@ -291,7 +297,7 @@ def _mean(values: list[float]) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# default scorer —— CCIP feat + metric ONNX（纯 onnxruntime）
+# default scorer -- CCIP feat + metric ONNX (pure onnxruntime)
 # ---------------------------------------------------------------------------
 
 
@@ -304,7 +310,7 @@ def _make_session(model_path: Path):
     )
     try:
         return ort.InferenceSession(str(model_path), providers=providers)
-    except Exception:  # noqa: BLE001 —— GPU EP 创建失败降 CPU
+    except Exception:  # noqa: BLE001 -- fall back to CPU if the GPU EP fails to init
         return ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
 
 

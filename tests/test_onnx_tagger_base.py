@@ -1,7 +1,8 @@
-"""PR-3 — OnnxTaggerBase CPU fallback：推理期 CUDA 错误自动降 CPU 重试。
+"""PR-3 -- OnnxTaggerBase CPU fallback: auto-retry on CPU after a CUDA error during inference.
 
-session 创建期的 CUDA fallback 已有 _create_session 覆盖；这里专门测
-推理期（_session.run 抛 cuBLAS / CUDA 错）的降级路径。
+The CUDA fallback during session creation is already covered by _create_session; this file
+specifically tests the fallback path during inference (_session.run raising a cuBLAS / CUDA
+error).
 """
 from __future__ import annotations
 
@@ -17,14 +18,15 @@ from studio.services.tagging.onnx_base import OnnxTaggerBase
 
 
 class _StubTagger(OnnxTaggerBase):
-    """最小 tagger 实现，绕过文件系统 + ONNX：单图固定 shape，单 logit 直通。"""
+    """Minimal tagger implementation bypassing the filesystem + ONNX: fixed shape for a single
+    image, single logit passthrough."""
     name = "stub"
 
     def __init__(self, batch: int = 2) -> None:
         super().__init__()
         self._batch = batch
 
-    def prepare(self) -> None:  # session 由测试直接注入，prepare 不会被调
+    def prepare(self) -> None:  # tests inject the session directly, prepare is never called
         raise AssertionError("prepare() should not be called in tests")
 
     def _preprocess(self, img: Image.Image) -> np.ndarray:
@@ -65,12 +67,12 @@ def test_is_cuda_inference_error_ignores_unrelated_failures(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _create_session — CUDA EP 静默降级检测
+# _create_session -- detecting a silent CUDA EP downgrade
 # ---------------------------------------------------------------------------
 
 
 def _make_fake_session(providers: list[str]):
-    """构造一个 mock onnxruntime session：input/output name + 指定 providers。"""
+    """Build a mock onnxruntime session: input/output name + given providers."""
     sess = MagicMock()
     sess.get_inputs.return_value = [MagicMock()]
     sess.get_inputs.return_value[0].name = "x"
@@ -83,11 +85,12 @@ def _make_fake_session(providers: list[str]):
 def test_create_session_records_error_on_silent_cuda_downgrade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """onnxruntime 在 CUDA dlopen 失败时不抛而是 silently 降 CPU；
-    `_create_session` 必须比对实际 providers 并 stash 错误，否则 UI 看不到。"""
+    """onnxruntime doesn't raise on a CUDA dlopen failure, it silently falls back to CPU;
+    `_create_session` must compare the actual providers and stash an error, or the UI never
+    sees it."""
     t = _StubTagger()
 
-    fake_session = _make_fake_session(["CPUExecutionProvider"])  # 装的是 GPU，但实际只剩 CPU
+    fake_session = _make_fake_session(["CPUExecutionProvider"])  # requested GPU, but only CPU remains
     requested_providers: list[list[str]] = []
 
     def fake_session_ctor(path, providers):
@@ -100,17 +103,17 @@ def test_create_session_records_error_on_silent_cuda_downgrade(
         "CPUExecutionProvider",
     ]
     monkeypatch.setitem(__import__("sys").modules, "onnxruntime", fake_ort)
-    # 起始无旧错记录
+    # start with no prior error recorded
     onnx_tagger_base.onnxruntime_setup.record_cuda_load_error(None)
 
     try:
         t._create_session(Path("/fake/model.onnx"))
-        # 用户请求过 CUDA
+        # the caller requested CUDA
         assert requested_providers and "CUDAExecutionProvider" in requested_providers[0]
-        # 但 onnxruntime 内部静默降 CPU → 必须有 cuda_load_error 让 UI 显示
+        # but onnxruntime silently downgraded to CPU internally -> cuda_load_error must be set so the UI can show it
         err = onnx_tagger_base.onnxruntime_setup.get_cuda_load_error()
         assert err is not None
-        assert "静默降级" in err or "silently" in err.lower()
+        assert "silently" in err.lower()
     finally:
         onnx_tagger_base.onnxruntime_setup.record_cuda_load_error(None)
 
@@ -118,7 +121,7 @@ def test_create_session_records_error_on_silent_cuda_downgrade(
 def test_create_session_clears_error_when_cuda_actually_works(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """请求 CUDA 且实际 providers 含 CUDA → 清空旧错（成功路径）。"""
+    """CUDA requested and the actual providers include CUDA -> clears the old error (success path)."""
     t = _StubTagger()
     fake_session = _make_fake_session(
         ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -130,7 +133,7 @@ def test_create_session_clears_error_when_cuda_actually_works(
         "CPUExecutionProvider",
     ]
     monkeypatch.setitem(__import__("sys").modules, "onnxruntime", fake_ort)
-    # 预置一个旧错
+    # pre-seed an old error
     onnx_tagger_base.onnxruntime_setup.record_cuda_load_error("old failure")
 
     try:
@@ -143,7 +146,7 @@ def test_create_session_clears_error_when_cuda_actually_works(
 def test_create_session_no_false_positive_when_cuda_not_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """机器没 GPU → 根本没请求 CUDA → providers 只有 CPU 是正常的，不应记错。"""
+    """No GPU on the machine -> CUDA was never requested -> CPU-only providers is normal, should not record an error."""
     t = _StubTagger()
     fake_session = _make_fake_session(["CPUExecutionProvider"])
 
@@ -162,8 +165,8 @@ def test_create_session_no_false_positive_when_cuda_not_requested(
 def test_create_session_uses_directml_when_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """装了 onnxruntime-directml → providers 应该是 [Dml, CPU]，不能漏掉
-    DirectML EP（否则 InferenceSession 实际只跑 CPU）。"""
+    """With onnxruntime-directml installed -> providers should be [Dml, CPU], the DirectML EP
+    must not be dropped (or InferenceSession would actually only run on CPU)."""
     t = _StubTagger()
     fake_session = _make_fake_session(
         ["DmlExecutionProvider", "CPUExecutionProvider"]
@@ -175,7 +178,7 @@ def test_create_session_uses_directml_when_available(
         return fake_session
 
     fake_ort = MagicMock(InferenceSession=fake_session_ctor)
-    # onnxruntime-directml wheel：DmlExecutionProvider 可用，无 CUDA
+    # onnxruntime-directml wheel: DmlExecutionProvider available, no CUDA
     fake_ort.get_available_providers.return_value = [
         "DmlExecutionProvider",
         "CPUExecutionProvider",
@@ -188,7 +191,7 @@ def test_create_session_uses_directml_when_available(
         assert requested_providers
         assert requested_providers[0][0] == "DmlExecutionProvider"
         assert "CPUExecutionProvider" in requested_providers[0]
-        # DirectML 成功路径不应该误 stash 到 cuda_load_error
+        # the DirectML success path must not accidentally stash into cuda_load_error
         assert onnx_tagger_base.onnxruntime_setup.get_cuda_load_error() is None
     finally:
         onnx_tagger_base.onnxruntime_setup.record_cuda_load_error(None)
@@ -197,8 +200,9 @@ def test_create_session_uses_directml_when_available(
 def test_create_session_directml_silent_downgrade_does_not_stash_cuda_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DirectML 静默降级（avail 报有，实际 get_providers 只剩 CPU）→ 不污染
-    cuda_load_error 字段（语义只属于 CUDA EP）。"""
+    """DirectML silently downgrades (available providers claim it's there, but get_providers
+    actually only returns CPU) -> must not pollute the cuda_load_error field (that field is
+    semantically CUDA-EP-only)."""
     t = _StubTagger()
     fake_session = _make_fake_session(["CPUExecutionProvider"])
 
@@ -212,7 +216,7 @@ def test_create_session_directml_silent_downgrade_does_not_stash_cuda_error(
 
     try:
         t._create_session(Path("/fake/model.onnx"))
-        # 走 DirectML 静默降级路径，cuda_load_error 仍应为 None
+        # went through the DirectML silent-downgrade path, cuda_load_error should still be None
         assert onnx_tagger_base.onnxruntime_setup.get_cuda_load_error() is None
     finally:
         onnx_tagger_base.onnxruntime_setup.record_cuda_load_error(None)
@@ -224,14 +228,14 @@ def test_create_session_directml_silent_downgrade_does_not_stash_cuda_error(
 
 
 def test_fallback_returns_false_without_model_path() -> None:
-    """没设 _model_path（异常路径，理论不该发生）→ 静默 False，不抛。"""
+    """_model_path unset (exceptional path, shouldn't happen in theory) -> silently returns False, doesn't raise."""
     t = _StubTagger()
     assert t._model_path is None
     assert t._fallback_to_cpu_session() is False
 
 
 def test_fallback_creates_cpu_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    """有 _model_path → 用 CPUExecutionProvider 重建 session 并 stash 错误。"""
+    """_model_path is set -> rebuilds the session with CPUExecutionProvider and stashes the error."""
     t = _StubTagger()
     t._model_path = Path("/fake/model.onnx")
 
@@ -251,7 +255,7 @@ def test_fallback_creates_cpu_session(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_ort = MagicMock(InferenceSession=fake_session_ctor)
     monkeypatch.setitem(__import__("sys").modules, "onnxruntime", fake_ort)
 
-    # 清掉旧 stash
+    # clear any old stashed error
     onnx_tagger_base.onnxruntime_setup.record_cuda_load_error(None)
     try:
         ok = t._fallback_to_cpu_session()
@@ -284,12 +288,12 @@ def test_fallback_returns_false_when_session_ctor_raises(
 
 
 # ---------------------------------------------------------------------------
-# _tag_loop CUDA 推理失败 → CPU fallback 重试
+# _tag_loop CUDA inference failure -> CPU fallback retry
 # ---------------------------------------------------------------------------
 
 
 def _attach_session(tagger: _StubTagger, run_side_effect, providers=("CPUExecutionProvider",)):
-    """构造一个 session 让 _tag_loop 能直接跑（绕过 prepare）。"""
+    """Build a session so _tag_loop can run directly (bypassing prepare)."""
     sess = MagicMock()
     sess.get_inputs.return_value = [MagicMock()]
     sess.get_inputs.return_value[0].name = "x"
@@ -306,14 +310,14 @@ def _attach_session(tagger: _StubTagger, run_side_effect, providers=("CPUExecuti
 def test_inference_cuda_error_triggers_cpu_fallback_and_retries(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """CUDA error 抛出 → fallback 重建 CPU session → 用 CPU session 重试 → 成功 yield 结果。"""
+    """CUDA error raised -> fallback rebuilds a CPU session -> retries on the CPU session -> yields a successful result."""
     img = tmp_path / "a.png"
     Image.new("RGB", (8, 8), (255, 0, 0)).save(img)
 
     t = _StubTagger(batch=2)
     t._model_path = tmp_path / "fake.onnx"
 
-    # 第一次 run 抛 cuBLAS 错；fallback 重建 session 后第二次 run 返回 logits
+    # the first run raises a cuBLAS error; after fallback rebuilds the session, the second run returns logits
     fail_then_succeed = [
         RuntimeError("CUBLAS_STATUS_EXECUTION_FAILED"),
     ]
@@ -323,7 +327,7 @@ def test_inference_cuda_error_triggers_cpu_fallback_and_retries(
         t, fail_then_succeed, providers=("CUDAExecutionProvider", "CPUExecutionProvider")
     )
 
-    # fallback 重建：sys.modules["onnxruntime"].InferenceSession 返回 CPU session
+    # fallback rebuild: sys.modules["onnxruntime"].InferenceSession returns the CPU session
     cpu_sess = MagicMock()
     cpu_sess.get_inputs.return_value = [MagicMock()]
     cpu_sess.get_inputs.return_value[0].name = "x"
@@ -339,10 +343,10 @@ def test_inference_cuda_error_triggers_cpu_fallback_and_retries(
     try:
         results = list(t.tag([img]))
         assert len(results) == 1
-        # 退到 CPU session 后重试成功 → 不应有 error 字段
+        # retry succeeds after falling back to the CPU session -> should have no error field
         assert "error" not in results[0], results[0]
         assert results[0]["tags"] == ["score=0.70"]
-        # session 已切换到 CPU 实例（不是原 CUDA mock）
+        # session has switched to the CPU instance (not the original CUDA mock)
         assert t._session is cpu_sess
         assert "cuBLAS" in (onnx_tagger_base.onnxruntime_setup.get_cuda_load_error() or "")
     finally:
@@ -352,7 +356,7 @@ def test_inference_cuda_error_triggers_cpu_fallback_and_retries(
 def test_non_cuda_inference_error_does_not_trigger_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """普通推理错（如 shape 不匹配）→ 不触发 CPU fallback，直接报错给用户。"""
+    """A plain inference error (e.g. shape mismatch) -> should not trigger CPU fallback, reports directly to the user."""
     img = tmp_path / "a.png"
     Image.new("RGB", (8, 8), (0, 255, 0)).save(img)
 
@@ -364,7 +368,7 @@ def test_non_cuda_inference_error_does_not_trigger_fallback(
         providers=("CUDAExecutionProvider", "CPUExecutionProvider"),
     )
 
-    # 探针：fallback 路径不应被触发 → InferenceSession 不应被调
+    # probe: the fallback path should not be triggered -> InferenceSession should not be called
     fallback_called: list[bool] = []
 
     def _explode(*_a, **_k):
@@ -384,7 +388,7 @@ def test_non_cuda_inference_error_does_not_trigger_fallback(
 def test_fallback_failure_propagates_original_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """CUDA 错 + fallback 重建 session 也挂 → 用户看到第一次（更有诊断价值的）错误。"""
+    """CUDA error + fallback session rebuild also fails -> the user sees the first (more diagnostically useful) error."""
     img = tmp_path / "a.png"
     Image.new("RGB", (8, 8), (0, 0, 255)).save(img)
 
@@ -404,5 +408,5 @@ def test_fallback_failure_propagates_original_error(
 
     results = list(t.tag([img]))
     assert "error" in results[0]
-    # 报原始 CUDA 错（不是 fallback 失败的 model corrupt）
+    # reports the original CUDA error (not the fallback's "model corrupt" failure)
     assert "CUDNN" in results[0]["error"]

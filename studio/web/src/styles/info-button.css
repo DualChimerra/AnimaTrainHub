@@ -1,8 +1,10 @@
-/* InfoButton —— click-toggle ⓘ 弹层。给字段名 / section title / 卡片角
- * 加帮助说明用。组件实现在 components/InfoButton.tsx。
+/* InfoButton -- a click-toggle "i" popover. Used for adding help text to a
+ * field name / section title / card corner. Component implementation lives
+ * in components/InfoButton.tsx.
  *
- * 之前同样功能的样式以 .vs-info-* 前缀放在 version-section.css 里
- * （只给版本卡用）；抽组件后改 .info-btn-* 中性前缀。
+ * The styles for this same feature used to live under the .vs-info-* prefix
+ * in version-section.css (version-card only); after extracting the
+ * component they were renamed to the neutral .info-btn-* prefix.
  */
 
 .info-btn-anchor {
@@ -13,9 +15,10 @@
 }
 
 .info-btn-trigger {
-  /* 固定 18x18 圆按钮，里面装 12x12 SVG。固定尺寸 + flex 居中：跟相邻
-     文字的中线对齐稳定（不受字体 / 字号差异影响，之前 Unicode ⓘ 字符在
-     不同字体里垂直位置不齐）。 */
+  /* Fixed 18x18 circular button holding a 12x12 SVG. Fixed size + flex
+     centering keeps it stably aligned with adjacent text's midline
+     (unaffected by font / size differences -- the old Unicode "i" character
+     used to sit at inconsistent vertical positions across fonts). */
   display: inline-flex;
   align-items: center;
   justify-content: center;

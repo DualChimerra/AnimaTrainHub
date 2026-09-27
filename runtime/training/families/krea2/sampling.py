@@ -28,18 +28,19 @@ from .text_encoding import Krea2TextCondition
 
 
 KREA2_SAMPLER = "euler"
-# scheduler 名对齐 ComfyUI（曾名 krea2_shift）：Comfy 的 simple 挂 Krea2
-# （ModelSamplingFlux shift=1.15）取出的 sigma 与 build_krea2_sigmas 恒等，
-# shift 属模型口径、不进 scheduler 命名——用户在 Comfy 复现时选 euler+simple。
+# scheduler name matches ComfyUI (formerly called krea2_shift): Comfy's simple
+# scheduler, attached to Krea2 (ModelSamplingFlux shift=1.15), produces sigmas
+# identical to build_krea2_sigmas; shift is a model-level convention and isn't
+# part of the scheduler name -- to reproduce this in Comfy, pick euler+simple.
 KREA2_SCHEDULER = "simple"
 KREA2_RAW_STEPS = 28
 KREA2_RAW_GUIDANCE = 4.5
 KREA2_TURBO_STEPS = 8
 KREA2_TURBO_GUIDANCE = 0.0
-# 推理 sigma 的固定 mu（Comfy parity：ModelSamplingFlux shift=1.15，Raw/Turbo 同）。
-# 曾名 KREA2_DISTILLED_MU——统一口径后它不再是蒸馏专属。
+# Fixed mu for inference sigmas (Comfy parity: ModelSamplingFlux shift=1.15, same for Raw/Turbo).
+# Formerly named KREA2_DISTILLED_MU -- after unifying the convention it's no longer distillation-only.
 KREA2_FIXED_MU = 1.15
-KREA2_DISTILLED_MU = KREA2_FIXED_MU  # 兼容别名
+KREA2_DISTILLED_MU = KREA2_FIXED_MU  # compatibility alias
 KREA2_BASE_IMAGE_SEQ_LEN = 256
 KREA2_MAX_IMAGE_SEQ_LEN = 6400
 KREA2_BASE_SHIFT = 0.5
@@ -57,7 +58,7 @@ class Krea2SamplingCondition:
 def _validate_guidance(value: float) -> float:
     guidance = float(value)
     if not math.isfinite(guidance) or guidance < 0:
-        raise ValueError("Krea2 guidance scale 必须为有限非负数")
+        raise ValueError("Krea2 guidance scale must be a finite non-negative number")
     return guidance
 
 
@@ -75,7 +76,7 @@ def resolve_sampling_settings(
     schedule = KREA2_SCHEDULER if scheduler is None else str(scheduler).lower().strip()
     if sampler != KREA2_SAMPLER or schedule != KREA2_SCHEDULER:
         raise ValueError(
-            "Krea2 仅支持 euler+simple，实际 "
+            "Krea2 only supports euler+simple, got "
             f"{sampler or '<empty>'}+{schedule or '<empty>'}"
         )
 
@@ -83,7 +84,7 @@ def resolve_sampling_settings(
     default_guidance = KREA2_TURBO_GUIDANCE if distilled else KREA2_RAW_GUIDANCE
     resolved_steps = default_steps if steps is None else int(steps)
     if resolved_steps <= 0:
-        raise ValueError("Krea2 sampling steps 必须为正数")
+        raise ValueError("Krea2 sampling steps must be positive")
     guidance = _validate_guidance(
         default_guidance if cfg_scale is None else cfg_scale,
     )
@@ -102,12 +103,12 @@ def calculate_krea2_mu(
 
     seq_len = int(image_seq_len)
     if seq_len <= 0:
-        raise ValueError("Krea2 image_seq_len 必须为正数")
+        raise ValueError("Krea2 image_seq_len must be positive")
     if max_image_seq_len <= base_image_seq_len:
-        raise ValueError("Krea2 max_image_seq_len 必须大于 base_image_seq_len")
+        raise ValueError("Krea2 max_image_seq_len must be greater than base_image_seq_len")
     values = (float(base_shift), float(max_shift))
     if not all(math.isfinite(value) for value in values):
-        raise ValueError("Krea2 shift 端点必须为有限数")
+        raise ValueError("Krea2 shift endpoints must be finite numbers")
     slope = (values[1] - values[0]) / (max_image_seq_len - base_image_seq_len)
     return slope * seq_len + (values[0] - slope * base_image_seq_len)
 
@@ -122,19 +123,23 @@ def build_krea2_sigmas(
 ) -> Tensor:
     """Build the shifted ``1 → 0`` FlowMatchEuler sigma grid.
 
-    默认固定 mu=1.15（Comfy parity 口径）：ComfyUI 把 Krea2 注册为
-    ModelType.FLUX → ModelSamplingFlux(shift=1.15)，其 flux_time_shift(mu, 1, t)
-    与本函数的 Möbius 形式恒等——Raw / Turbo 一律固定 mu，训练预览与 Generate
-    两面共用同一口径（与 Anima 的 ConstantShift 先例同构）。
+    Defaults to a fixed mu=1.15 (Comfy-parity convention): ComfyUI registers
+    Krea2 as ModelType.FLUX -> ModelSamplingFlux(shift=1.15), and its
+    flux_time_shift(mu, 1, t) is identical to this function's Mobius form --
+    Raw / Turbo both always use the fixed mu, and training preview and
+    Generate share the same convention (mirrors the Anima ConstantShift
+    precedent).
 
-    ``dynamic_mu=True`` 保留 diffusers/musubi Raw pipeline 的分辨率感知插值
-    （1024² 约等效 mu≈0.906），非默认，供对照实验。``distilled`` 不再影响
-    sigma（只决定 resolve_sampling_settings 的步数 / guidance 默认）。
+    ``dynamic_mu=True`` keeps the diffusers/musubi Raw pipeline's resolution-
+    aware interpolation (1024^2 is roughly equivalent to mu~=0.906); this is
+    non-default, kept for comparison experiments. ``distilled`` no longer
+    affects the sigma (it only decides the steps / guidance defaults in
+    resolve_sampling_settings).
     """
 
     if int(steps) <= 0:
-        raise ValueError("Krea2 sampling steps 必须为正数")
-    del distilled  # sigma 口径统一后仅存于签名兼容；见 docstring
+        raise ValueError("Krea2 sampling steps must be positive")
+    del distilled  # kept only for signature compatibility now that the sigma convention is unified; see docstring
     mu = (
         calculate_krea2_mu(image_seq_len)
         if dynamic_mu
@@ -152,7 +157,7 @@ def align_krea2_resolution(value: int, *, align: int = 16) -> int:
 
     dimension = int(value)
     if dimension <= 0 or int(align) <= 0:
-        raise ValueError("Krea2 resolution 与 align 必须为正数")
+        raise ValueError("Krea2 resolution and align must be positive")
     return ((dimension + int(align) - 1) // int(align)) * int(align)
 
 
@@ -195,11 +200,11 @@ def _move_condition(
     dtype: torch.dtype,
 ) -> Krea2TextCondition:
     if condition.context.ndim != 4 or condition.attention_mask.ndim != 2:
-        raise ValueError("Krea2 sampling condition 形状必须为 context 4D + mask 2D")
+        raise ValueError("Krea2 sampling condition shape must be context 4D + mask 2D")
     if condition.context.shape[:2] != condition.attention_mask.shape:
-        raise ValueError("Krea2 sampling context 与 attention mask 的 batch/seq 不一致")
+        raise ValueError("Krea2 sampling context and attention mask batch/seq don't match")
     if condition.context.shape[0] != 1:
-        raise ValueError("Krea2 sample_image 当前一次只生成一张图")
+        raise ValueError("Krea2 sample_image currently only generates one image at a time")
     return Krea2TextCondition(
         context=condition.context.to(device=device, dtype=dtype),
         attention_mask=condition.attention_mask.to(device=device, dtype=torch.bool),
@@ -253,7 +258,7 @@ def sample_latents(
     negative = None
     if guidance > 0:
         if condition.negative is None:
-            raise ValueError("Krea2 guidance > 0 时必须提供 negative condition")
+            raise ValueError("Krea2 must provide a negative condition when guidance > 0")
         negative = _move_condition(condition.negative, device=target, dtype=dtype)
 
     expected_shape = (1, channels, 1, latent_height, latent_width)
@@ -264,7 +269,7 @@ def sample_latents(
         latents = torch.randn(expected_shape, generator=generator, dtype=torch.float32)
     elif tuple(latents.shape) != expected_shape:
         raise ValueError(
-            f"Krea2 初始 latent 形状应为 {expected_shape}，实际 {tuple(latents.shape)}"
+            f"Krea2 initial latent shape should be {expected_shape}, got {tuple(latents.shape)}"
         )
     image = latents.to(device=target, dtype=dtype)
     sigmas = build_krea2_sigmas(
@@ -313,7 +318,7 @@ def _decode_to_pil(vae, latents: Tensor):
     pixels = vae.decode(latents)
     if pixels.ndim != 5 or pixels.shape[0] != 1 or pixels.shape[1] != 3:
         raise ValueError(
-            "Krea2 VAE decode 应返回单张 (1,3,T,H,W)，实际 "
+            "Krea2 VAE decode should return a single (1,3,T,H,W), got "
             f"{tuple(pixels.shape)}"
         )
     pixels = (pixels[:, :, 0].clamp(-1, 1) + 1) / 2

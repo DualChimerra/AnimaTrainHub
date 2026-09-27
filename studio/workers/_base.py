@@ -1,16 +1,18 @@
-"""Worker 子进程入口通用模板（PR-8 commit 1 从 4 个 worker 抽出）。
+"""Common worker subprocess entry-point template (extracted from 4 workers in PR-8 commit 1).
 
-`supervisor` 启动每个 worker 子进程都是相同模式：
+Every worker subprocess is launched by `supervisor` following the same pattern:
     python -m studio.workers.<kind>_worker --job-id N
-    → 读 project_jobs 行 → 跑业务 → 退出码反映成败
+    -> read the project_jobs row -> do the work -> exit code reflects success/failure
 
-每个 worker 模块只需提供 `run(job_id: int) -> int` 主体，本模板包：
-    - argparse 解析 `--job-id`
-    - 调用 run + sys.exit
+Each worker module only needs to provide a `run(job_id: int) -> int` body; this template
+wraps it with:
+    - argparse parsing of `--job-id`
+    - calling run + sys.exit
 
-可选 helper `reconfigure_console_utf8()` — Windows 控制台默认 cp932/cp936，
-写中文 / emoji 会 UnicodeEncodeError；调一次让 stdout/stderr 转 UTF-8 +
-replace 模式。当前只有 tag_worker 需要（其它 worker 不写中文 caption）。
+Optional helper `reconfigure_console_utf8()` -- the Windows console defaults to
+cp932/cp936, so writing non-ASCII / emoji raises UnicodeEncodeError; calling this once
+switches stdout/stderr to UTF-8 + replace mode. Currently only tag_worker needs it (other
+workers don't write non-ASCII captions).
 """
 from __future__ import annotations
 
@@ -20,23 +22,25 @@ from typing import Callable
 
 
 def worker_main(run_fn: Callable[[int], int]) -> None:
-    """4 个 worker 共用的 `if __name__ == "__main__"` 入口。
+    """The `if __name__ == "__main__"` entry point shared by all 4 workers.
 
-    worker 模块底部写：
+    Each worker module's bottom reads:
         if __name__ == "__main__":
             from ._base import worker_main
             worker_main(run)
 
-    PR-1 C4: 装 setup_logging (ADR-0009)。file=False — worker 走 stdout 进
-    supervisor 重定向 jobs/<id>.log 单写（C round2 §1.2 决策；0.13.x ADR-0009
-    §还的债"演进双写"后改 True）。process 名格式 "worker:<module>/<job_id>"，
-    便于 jq 按 process 过滤；module 取 sys.argv[0] basename（download_worker.py
-    → download_worker → 去掉 _worker 后缀 = download）。
+    PR-1 C4: sets up setup_logging (ADR-0009). file=False -- workers write to stdout,
+    which supervisor redirects into a single jobs/<id>.log (C round2 §1.2 decision;
+    changed to True after 0.13.x ADR-0009 §"pay off the debt" evolved to dual-write).
+    process name format is "worker:<module>/<job_id>", convenient for jq filtering by
+    process; module comes from sys.argv[0]'s basename (download_worker.py ->
+    download_worker -> strip the _worker suffix -> download).
 
-    PR-1 C6: bind_trace_id 从 ANIMA_TRACE_ID env（supervisor _spawn_task 注入
-    自 task.request_trace_id — HTTP 请求那一刻的 trace_id 一路传下来）。无则
-    new_trace_id 兜底（独立测 worker / 手动 -m studio.workers.x_worker 跑）。
-    bind 不 reset — worker 进程整个生命周期都该带这个 trace_id。
+    PR-1 C6: bind_trace_id reads the ANIMA_TRACE_ID env var (injected by supervisor's
+    _spawn_task from task.request_trace_id -- the trace_id from the moment of the HTTP
+    request, carried all the way down). Falls back to new_trace_id if absent (for testing
+    a worker standalone / running -m studio.workers.x_worker manually). bind is not reset
+    -- the trace_id should follow the worker process for its whole lifetime.
     """
     import os
     from ..infrastructure.logging import (
@@ -55,7 +59,7 @@ def worker_main(run_fn: Callable[[int], int]) -> None:
 
 
 def _worker_kind_from_argv() -> str:
-    """sys.argv[0] basename → kind（download_worker.py → download）。"""
+    """sys.argv[0] basename -> kind (download_worker.py -> download)."""
     from pathlib import Path as _Path
     name = _Path(sys.argv[0]).stem
     if name.endswith("_worker"):
@@ -64,12 +68,14 @@ def _worker_kind_from_argv() -> str:
 
 
 def reconfigure_console_utf8() -> None:
-    """Windows 控制台默认 cp932/cp936，写中文 / emoji 会 UnicodeEncodeError。
-    强制 stdout/stderr 用 UTF-8 + 替换不可编码字符，让 progress 永远不抛。
+    """The Windows console defaults to cp932/cp936, so writing non-ASCII / emoji raises
+    UnicodeEncodeError. Forces stdout/stderr to UTF-8 + replace-unencodable-chars, so
+    progress output never throws.
 
-    当前只 tag_worker 顶层调用（其它 worker 不写中文 caption）。supervisor
-    `_popen` 已经给所有 worker 子进程注入 `PYTHONIOENCODING=utf-8 / PYTHONUTF8=1`
-    env，但 Windows 上少数 console host 仍要 reconfigure 双保险。
+    Currently only called at tag_worker's top level (other workers don't write non-ASCII
+    captions). supervisor's `_popen` already injects `PYTHONIOENCODING=utf-8 /
+    PYTHONUTF8=1` into every worker subprocess's env, but a handful of Windows console
+    hosts still need this reconfigure as a second line of defense.
     """
     for stream in (sys.stdout, sys.stderr):
         try:

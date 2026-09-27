@@ -1,62 +1,62 @@
 # Architecture Decision Records
 
-记录架构层面的「**我们选 X 而不选 Y**」的决策与理由。代码会说"是什么"，但说不清楚"为什么不那么做"——ADR 填这个空。
+Records architectural-level "**we chose X over Y**" decisions and the reasoning behind them. Code tells you "what," but not "why not the other way" — that's the gap ADRs fill.
 
-## 索引
+## Index
 
-| # | 标题 | 状态 | 日期 |
+| # | Title | Status | Date |
 |---|---|---|---|
-| 0001 | [LoKr 适配器走 lycoris-lora 而不切 sd-scripts](0001-lokr-via-lycoris-lora.md) | Accepted | 2025 |
-| 0002 | [Webui 内自更新（flag + shell wrapper loop）](0002-webui-self-update.md) | Proposed | 2026-05-12 |
-| 0003 | [anima_train.py 模块化重构（plugin 边界 + adapter hook protocol）](0003-anima-train-refactor.md) | Proposed | 2026-05-14 |
-| 0004 | [预处理状态用单 manifest 替代「双 bucket + per-image sidecar」](0004-preprocess-manifest.md) | Superseded by #0010 | 2026-05-15 |
-| 0005 | [更新通道作为用户视图偏好，与 git 工作树状态解耦](0005-update-channel-as-preference.md) | Accepted | 2026-05-16 |
-| 0006 | [Queue 任务暂停 / 恢复 + 队列挂起 / 恢复调度](0006-queue-pause-resume.md) | Accepted | 2026-05-18 |
-| 0007 | [Project / Version / Task 生命周期重构](0007-project-version-lifecycle-refactor.md) | Proposed | 2026-05-23 |
-| 0008 | [studio/ 4 层重构（0.11.0）](0008-studio-restructure-0.11.0.md) | Accepted | 2026-05-28 |
-| 0009 | [统一日志 + 错误体系（0.12.0）](0009-logging-error-system.md) | Accepted | 2026-05-28 |
-| 0010 | [preprocess scope 从项目级 download 下沉到 version 级 train](0010-preprocess-train-scope.md) | Accepted | 2026-06-03 |
-| 0014 | [LyCORIS 4 fused kernels 与 Windows Triton](0014-lycoris4-fused-kernels.md) | Accepted | 2026-09-20 |
+| 0001 | [LoKr adapter via lycoris-lora instead of switching to sd-scripts](0001-lokr-via-lycoris-lora.md) | Accepted | 2025 |
+| 0002 | [In-webui self-update (flag + shell wrapper loop)](0002-webui-self-update.md) | Proposed | 2026-05-12 |
+| 0003 | [anima_train.py modular refactor (plugin boundaries + adapter hook protocol)](0003-anima-train-refactor.md) | Proposed | 2026-05-14 |
+| 0004 | [Replace "dual bucket + per-image sidecar" preprocessing state with a single manifest](0004-preprocess-manifest.md) | Superseded by #0010 | 2026-05-15 |
+| 0005 | [Update channel as a user view preference, decoupled from git worktree state](0005-update-channel-as-preference.md) | Accepted | 2026-05-16 |
+| 0006 | [Queue task pause/resume + queue suspend/resume scheduling](0006-queue-pause-resume.md) | Accepted | 2026-05-18 |
+| 0007 | [Project/Version/Task lifecycle refactor](0007-project-version-lifecycle-refactor.md) | Proposed | 2026-05-23 |
+| 0008 | [studio/ 4-layer refactor (0.11.0)](0008-studio-restructure-0.11.0.md) | Accepted | 2026-05-28 |
+| 0009 | [Unified logging + error system (0.12.0)](0009-logging-error-system.md) | Accepted | 2026-05-28 |
+| 0010 | [Move preprocess scope from project-level download down to version-level train](0010-preprocess-train-scope.md) | Accepted | 2026-06-03 |
+| 0014 | [LyCORIS 4 fused kernels and Windows Triton](0014-lycoris4-fused-kernels.md) | Accepted | 2026-09-20 |
 
-## 状态值
+## Status values
 
-- **Proposed** — 草拟中，未决
-- **Accepted** — 已采纳并落地
-- **Superseded by #N** — 被新 ADR 取代（保留原文，不删）
-- **Deprecated** — 不再适用（标记原因，保留原文）
+- **Proposed** — drafted, undecided
+- **Accepted** — adopted and implemented
+- **Superseded by #N** — replaced by a newer ADR (original text kept, not deleted)
+- **Deprecated** — no longer applicable (reason noted, original text kept)
 
-## 写一份新 ADR
+## Writing a new ADR
 
 ```markdown
-# NNNN — 简短标题（动词起头）
+# NNNN — Short title (starts with a verb)
 
-**状态**：Proposed | Accepted | Superseded by #N | Deprecated
-**日期**：YYYY-MM-DD
-**决策者**：@handle / 团队
+**Status**: Proposed | Accepted | Superseded by #N | Deprecated
+**Date**: YYYY-MM-DD
+**Decision makers**: @handle / team
 
-## 背景
+## Background
 
-当时面对的问题、约束、外部因素。让未来读者不需要回到当时的语境也能看懂。
+The problem, constraints, and external factors at the time. Written so a future reader can understand it without needing the original context.
 
-## 候选方案
+## Candidate approaches
 
-简要列出讨论过的所有方案，包括最后没选的。每个方案给出优缺点。
+Briefly list every approach discussed, including the ones not chosen. Give pros and cons for each.
 
-## 决策
+## Decision
 
-选了哪个、做了什么。
+Which one was chosen, and what was done.
 
-## 理由
+## Rationale
 
-为什么这么选。重点写**否决其他方案的具体理由**——这才是 ADR 的核心价值。
+Why this choice was made. Focus on **the specific reasons other approaches were rejected** — that's the core value of an ADR.
 
-## 后果
+## Consequences
 
-落地后带来的好处、新增的约束、未来可能要还的债。
+Benefits gained after implementation, new constraints introduced, technical debt that may need to be repaid later.
 
-## 参考
+## References
 
-链接到相关 PR、commit、外部资料。
+Links to relevant PRs, commits, external resources.
 ```
 
-文件名规则：`NNNN-kebab-case-title.md`，编号四位数字递增。
+File naming rule: `NNNN-kebab-case-title.md`, with the number a four-digit incrementing sequence.

@@ -1,4 +1,4 @@
-"""Lion optimizer build wrapper（ADR 0003 PR-C）。"""
+"""Lion optimizer build wrapper (ADR 0003 PR-C)."""
 
 from __future__ import annotations
 

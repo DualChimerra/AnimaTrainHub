@@ -86,7 +86,7 @@ def test_training_config_caption_comfy_encoding_default_true() -> None:
 
 
 def test_training_config_sampler_scheduler_are_enums() -> None:
-    """收紧为 Literal 后 UI 自动渲染下拉，非法值在 config 层就挡掉。"""
+    """Tightened to a Literal so the UI auto-renders a dropdown and invalid values are rejected at the config layer."""
     schema = TrainingConfig.model_json_schema()
     assert set(schema["properties"]["sample_sampler_name"]["enum"]) == {
         "er_sde", "dpmpp_3m_sde", "euler",
@@ -97,7 +97,7 @@ def test_training_config_sampler_scheduler_are_enums() -> None:
 
 
 def test_training_config_coerces_legacy_sampler_values() -> None:
-    """旧 preset 可能存了 euler（当年走 inline Euler 兜底）：归并默认而非炸 config。"""
+    """An old preset may have stored euler (from the old inline-Euler fallback path); it should coerce to the default instead of blowing up the config."""
     cfg = TrainingConfig(sample_sampler_name="euler", sample_scheduler="normal")
     assert cfg.sample_sampler_name == "er_sde"
     assert cfg.sample_scheduler == "simple"
@@ -123,7 +123,7 @@ def test_comfy_parity_runtime_config_forces_comfy_aki_runtime() -> None:
 
 
 def test_comfy_parity_runtime_config_preserves_explicit_vae_precision() -> None:
-    """vae_precision 是用户选项（settings.generate.vae_precision），不被强制覆盖。"""
+    """vae_precision is a user setting (settings.generate.vae_precision); it must not be force-overridden."""
     cfg = force_comfy_parity_runtime_config({"vae_precision": "fp32"})
     assert cfg["vae_precision"] == "fp32"
 

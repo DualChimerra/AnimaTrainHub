@@ -16,7 +16,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(projects, "PROJECTS_DIR", tmp_path / "projects")
     monkeypatch.setattr(project_jobs, "JOB_LOGS_DIR", tmp_path / "jobs")
-    # 建一个父 project，FK 才能成立
+    # create a parent project so the FK is valid
     with db.connection_for(dbfile) as conn:
         p = projects.create_project(conn, title="P")
     return {"db": dbfile, "project_id": p["id"]}
@@ -31,7 +31,7 @@ def test_create_job_assigns_log_path(isolated) -> None:
             params={"tag": "x", "count": 5},
         )
     assert job["status"] == "pending"
-    # R-3 台账合并：作业日志与 GPU 任务同款布局 tasks/<id>/run.log
+    # R-3 ledger merge: job logs use the same tasks/<id>/run.log layout as GPU tasks
     assert job["log_path"].replace("\\", "/").endswith(f"{job['id']}/run.log")
     assert job["params_decoded"] == {"tag": "x", "count": 5}
 
@@ -45,7 +45,7 @@ def test_create_rejects_unknown_kind(isolated) -> None:
 
 
 def test_create_accepts_preprocess_kind(isolated) -> None:
-    """preprocess 加入 VALID_KINDS（放大 / 裁剪 / 涂抹的统一 job kind）。"""
+    """preprocess added to VALID_KINDS (the unified job kind for upscale / crop / inpaint)."""
     with db.connection_for(isolated["db"]) as conn:
         job = project_jobs.create_job(
             conn,
@@ -85,7 +85,7 @@ def test_mark_failed_sets_error_msg(isolated) -> None:
 
 
 def test_list_pending_fifo_picks_oldest_first(isolated) -> None:
-    """R-3：派发顺序 = priority DESC, created_at ASC（与 GPU 任务同 FIFO 语义）。"""
+    """R-3: dispatch order = priority DESC, created_at ASC (same FIFO semantics as GPU tasks)."""
     with db.connection_for(isolated["db"]) as conn:
         a = project_jobs.create_job(conn, project_id=isolated['project_id'], kind="download", params={})
         b = project_jobs.create_job(conn, project_id=isolated['project_id'], kind="download", params={})
@@ -104,15 +104,15 @@ def test_latest_for_returns_most_recent(isolated) -> None:
 
 
 def test_cleanup_orphan_running_only_touches_legacy_table(isolated) -> None:
-    """R-3：作业已并入 tasks（孤儿由 supervisor task 收割统一处理）；
-    cleanup_orphan_running 只兜旧 project_jobs 遗留表。"""
+    """R-3: jobs have been merged into tasks (orphans are now reaped uniformly by the supervisor task);
+    cleanup_orphan_running only backstops the old legacy project_jobs table."""
     with db.connection_for(isolated["db"]) as conn:
-        # 新作业（tasks 表）running —— cleanup 不碰它
+        # new job (tasks table) running -- cleanup doesn't touch it
         job = project_jobs.create_job(
             conn, project_id=isolated['project_id'], kind="download", params={}
         )
         project_jobs.mark_running(conn, job["id"])
-        # 旧表遗留 running 行 —— cleanup 标 failed
+        # leftover running row in the old table -- cleanup marks it failed
         conn.execute(
             "INSERT INTO project_jobs(project_id, version_id, kind, params, status) "
             "VALUES (?, NULL, 'download', '{}', 'running')",
@@ -122,13 +122,13 @@ def test_cleanup_orphan_running_only_touches_legacy_table(isolated) -> None:
         n = project_jobs.cleanup_orphan_running(conn)
         got = project_jobs.get_job(conn, job["id"])
     assert n == 1
-    assert got["status"] == "running", "tasks 表的新作业不该被 legacy cleanup 碰"
+    assert got["status"] == "running", "new jobs in the tasks table should not be touched by legacy cleanup"
 
 
 def test_list_jobs_filters(isolated) -> None:
     pid = isolated["project_id"]
     with db.connection_for(isolated["db"]) as conn:
-        # 第二个 project，验证按 project_id 过滤
+        # second project, to verify filtering by project_id
         other = projects.create_project(conn, title="Other")
         project_jobs.create_job(conn, project_id=pid, kind="download", params={})
         b = project_jobs.create_job(conn, project_id=pid, kind="download", params={})

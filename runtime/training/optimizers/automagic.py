@@ -39,26 +39,30 @@ def validate(args) -> None:
     if variant == "v2":
         if getattr(args, "mixed_precision", "bf16") == "fp16":
             raise ValueError(
-                "Automagic v2 不兼容 fp16 混合精度"
-                "（fused backward hook 绕过 GradScaler，fp16 需要 scaler 防溢出）"
+                "Automagic v2 is not compatible with fp16 mixed precision "
+                "(the fused backward hook bypasses GradScaler, and fp16 needs "
+                "the scaler to prevent overflow)"
             )
         grad_accum = int(getattr(args, "grad_accum", 1) or 1)
         if grad_accum > 1:
             raise ValueError(
-                "Automagic v2 (fused backward) 与梯度累积不兼容：参数在每个 "
-                "micro-batch backward 时就地更新并清掉 grad，grad_accum>1 的累积"
-                "语义会被静默破坏。请改用 automagic_variant=v1 或 grad_accum=1。"
+                "Automagic v2 (fused backward) is not compatible with gradient "
+                "accumulation: parameters are updated in place and grad is "
+                "cleared on every micro-batch backward, so grad_accum>1 "
+                "silently breaks accumulation semantics. Use "
+                "automagic_variant=v1 or grad_accum=1 instead."
             )
         grad_clip = float(getattr(args, "grad_clip_max_norm", 0) or 0)
         if grad_clip > 0:
             logger.warning(
-                "Automagic v2 使用 fused backward hook，grad_clip=%.2g 将无效"
-                "（参数在 backward 中已更新）", grad_clip
+                "Automagic v2 uses a fused backward hook, so grad_clip=%.2g "
+                "has no effect (parameters are already updated during "
+                "backward)", grad_clip
             )
     else:
         grad_clip = float(getattr(args, "grad_clip_max_norm", 0) or 0)
         if grad_clip > 0:
             logger.warning(
-                "Automagic v1 内置 RMS clip (clip_threshold)；外部 grad_clip=%.2g "
-                "会双重裁剪梯度", grad_clip
+                "Automagic v1 has a built-in RMS clip (clip_threshold); an "
+                "external grad_clip=%.2g will clip gradients twice", grad_clip
             )

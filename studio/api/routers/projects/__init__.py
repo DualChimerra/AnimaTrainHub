@@ -1,6 +1,6 @@
-"""Projects 域 endpoints（PR-6.5 起从 server.py 抽出，71 routes 分 5 子文件）。
+"""Projects domain endpoints (extracted from server.py starting in PR-6.5; 71 routes split into 5 sub-files).
 
-按子域切：
+Split by sub-domain:
     crud.py        commit 1  16 routes  projects + versions CRUD + activate +
                                         advance/skip-phase + lora_ckpts / state_ckpts
     exports.py     commit 2  6 routes   train.zip / bundle.zip / export-bundle /
@@ -14,7 +14,7 @@
                                         version_config, queue training, version_thumb,
                                         jobs latest
 
-_shared.py — 跨子文件共用 helper：_project_payload / _publish_*_state /
+_shared.py — helpers shared across sub-files: _project_payload / _publish_*_state /
 _version_dir_or_404 / _project_and_version_or_404 / _version_train_dir_or_404 /
-_reg_dir。
+_reg_dir.
 """

@@ -1,15 +1,16 @@
-"""Anima 族训练前向（多模型 PR-2b，自 training/model_loading.py 迁入）。
+"""Anima family training forward pass (multi-model PR-2b, moved from training/model_loading.py).
 
-forward_with_optional_checkpoint 手工展开 Anima 内部 API（prepare_embedded_sequence
-/ t_embedder / blocks / final_layer / unpatchify）做逐 block 梯度检查点 ——
-纯族知识（03 §4.3：检查点展开策略是模型私货）。
+forward_with_optional_checkpoint manually unrolls Anima's internal API
+(prepare_embedded_sequence / t_embedder / blocks / final_layer / unpatchify)
+to do per-block gradient checkpointing -- pure family knowledge (03 S4.3:
+the checkpoint unrolling strategy is model-private).
 """
 
 from __future__ import annotations
 
 
 def forward_with_optional_checkpoint(model, latents, timesteps, cross, padding_mask, use_checkpoint=False):
-    """带可选梯度检查点的前向传播。"""
+    """Forward pass with optional gradient checkpointing."""
     if not use_checkpoint:
         return model(latents, timesteps, cross, padding_mask=padding_mask)
     from torch.utils.checkpoint import checkpoint

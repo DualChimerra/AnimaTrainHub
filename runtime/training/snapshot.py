@@ -1,15 +1,16 @@
-"""Pause / resume 用的 state snapshot helpers（ADR 0006 PR-2）。
+"""State snapshot helpers for pause / resume (ADR 0006 PR-2).
 
-落地三块：
+Three things live here:
 
-  - `build_pause_state_path(state_dir, step)`：拼 pause `.pt` 路径
-  - `write_config_snapshot(path, args, sample_prompts)`：把暂停那一刻
-    训练实际在用的全部 args 序列化成 JSON（详见 ADR §5.7）
-  - `emit_event(event_type, payload)`：往 stdout 写 `__EVENT__:...` 行，
-    supervisor `_on_line` 识别并 publish 成 SSE typed event
+  - `build_pause_state_path(state_dir, step)`: builds the pause `.pt` path
+  - `write_config_snapshot(path, args, sample_prompts)`: serializes every arg
+    training is actually using at the moment of pause into JSON (see ADR §5.7)
+  - `emit_event(event_type, payload)`: writes an `__EVENT__:...` line to stdout,
+    which the supervisor's `_on_line` recognizes and publishes as an SSE typed event
 
-这三个都没有训练流水线 import，故意独立成 module 让 supervisor / spike
-脚本 / 测试都能复用，避免 context.py 越长越臃肿。
+None of these three import the training pipeline, deliberately kept as an
+independent module so the supervisor / spike scripts / tests can all reuse
+them, without context.py growing ever more bloated.
 """
 from __future__ import annotations
 
@@ -20,50 +21,53 @@ from pathlib import Path
 from typing import Any
 
 
-# 跟 studio/supervisor.py:49 _EVENT_MARKER 协议对齐；改这个常量 = 跨进程
-# breaking change，所以挪到此模块顶部唯一字面量。
+# Aligned with studio/supervisor.py:49's _EVENT_MARKER protocol; changing this
+# constant is a cross-process breaking change, so it lives as the sole literal at the top of this module.
 EVENT_MARKER = "__EVENT__:"
 
 
 def build_pause_state_path(state_dir: Path, step: int) -> Path:
-    """暂停 `.pt` 文件路径（ADR §5.1）。
+    """The pause `.pt` file path (ADR §5.1).
 
-    `pause_` 前缀跟 PR-1 周期 save 的 `training_state_step<N>.pt` 区分；
-    同名 `.config.json` 是 snapshot（见 `write_config_snapshot`）。
+    The `pause_` prefix distinguishes it from PR-1's periodic save
+    `training_state_step<N>.pt`; the same-named `.config.json` is the snapshot (see `write_config_snapshot`).
     """
     return state_dir / f"pause_step_{step}.pt"
 
 
 def build_pause_config_path(state_dir: Path, step: int) -> Path:
-    """暂停 config snapshot 文件路径（与 state `.pt` 同前缀，`.config.json` 后缀）。"""
+    """The pause config snapshot file path (same prefix as the state `.pt`, `.config.json` suffix)."""
     return state_dir / f"pause_step_{step}.config.json"
 
 
-# ADR 0006 Addendum 1：epoch 自动备份用的覆盖式单文件路径。
-# 名字不带 step / epoch N 后缀 —— **覆盖式**，新 epoch 写盘前会覆盖旧的。
-# 跟 user-opt `save_state_every_epochs` 写出的 training_state_epoch{N}.pt（多份历史归档）
-# 完全独立，三类文件共存于 <state_dir>/task_<TID>/。
+# ADR 0006 Addendum 1: the overwrite-style single-file path used for the epoch auto backup.
+# The name carries no step / epoch N suffix -- it is **overwrite-style**: each new
+# epoch overwrites the previous file before writing. Fully independent from the
+# user-opt `save_state_every_epochs` output training_state_epoch{N}.pt (a
+# multi-file historical archive); all three file kinds coexist under <state_dir>/task_<TID>/.
 
 def build_auto_epoch_state_path(state_dir: Path) -> Path:
-    """Auto epoch backup state 文件路径（覆盖式单文件）。
+    """The auto epoch backup state file path (a single overwrite-style file).
 
-    ADR 0006 Addendum 1 方案 Δ：每个 epoch 末尾**强制**写一份覆盖式 state
-    用作 pause 后盾。pause 信号触发 `handle_interrupt` 只 emit + exit，
-    不自己写盘 —— resume 用这份 auto backup。
+    ADR 0006 Addendum 1 plan Delta: **forcibly** writes one overwrite-style
+    state file at the end of every epoch as a pause fallback. The pause signal
+    triggers `handle_interrupt`, which only emits + exits without writing to
+    disk itself -- resume uses this auto backup instead.
     """
     return state_dir / "auto_epoch_state.pt"
 
 
 def build_auto_epoch_config_path(state_dir: Path) -> Path:
-    """Auto epoch backup config snapshot 路径（与 state `.pt` 同前缀，`.config.json` 后缀）。"""
+    """The auto epoch backup config snapshot path (same prefix as the state `.pt`, `.config.json` suffix)."""
     return state_dir / "auto_epoch_state.config.json"
 
 
 def _jsonify(value: Any) -> Any:
-    """把 args / sample_prompts 里的对象转成可 json.dump 的形式。
+    """Convert objects found in args / sample_prompts into a json.dump-able form.
 
-    覆盖范围：Path → str，set → list，其他保持原样。argparse.Namespace
-    本身 vars() 出来都是 primitive + Path，遇到别的类型就 fallback repr()。
+    Coverage: Path -> str, set -> list, everything else passes through
+    unchanged. argparse.Namespace's own vars() output is always primitives +
+    Path; anything else falls back to repr().
     """
     if isinstance(value, Path):
         return str(value)
@@ -75,22 +79,23 @@ def _jsonify(value: Any) -> Any:
         return sorted(_jsonify(v) for v in value)
     if isinstance(value, dict):
         return {str(k): _jsonify(v) for k, v in value.items()}
-    return repr(value)  # 兜底，不抛错
+    return repr(value)  # fallback, never raises
 
 
 def write_config_snapshot(
     path: Path,
-    args: Any,  # argparse.Namespace 或 dict
+    args: Any,  # argparse.Namespace or dict
     sample_prompts: list[str] | None = None,
 ) -> None:
-    """暂停时把当前训练实际在用的全部参数 freeze 成 JSON（ADR §5.7）。
+    """Freeze every parameter training is actually using at the moment of pause into JSON (ADR §5.7).
 
-    Resume 严格用 snapshot 拼新 args，跟用户后续改 config / preset / yaml
-    完全解耦。snapshot 不含 wandb run id（已 finish）和 monitor live state
-    （已 dump 在 `.pt` 内）。
+    Resume strictly builds the new args from the snapshot, fully decoupled from
+    any config / preset / yaml changes the user makes afterward. The snapshot
+    excludes the wandb run id (already finished) and the monitor's live state
+    (already dumped inside the `.pt` file).
 
-    `sample_prompts` 来自 `ctx.sample_prompts`（运行时状态），不是 args
-    字段，单独传。
+    `sample_prompts` comes from `ctx.sample_prompts` (runtime state), not an
+    args field, so it's passed separately.
     """
     if hasattr(args, "__dict__"):
         args_dict = vars(args)
@@ -100,13 +105,14 @@ def write_config_snapshot(
         args_dict = {"_args_repr": repr(args)}
 
     payload = {
-        "version": 1,  # 给 future schema migration 留触点
+        "version": 1,  # leaves a hook for a future schema migration
         "args": {k: _jsonify(v) for k, v in args_dict.items()},
         "sample_prompts": list(sample_prompts) if sample_prompts else [],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    # ADR 0006 Addendum 2：跟 save_training_state 一样 tmp + os.replace 原子写，
-    # 防断电砸中写盘窗口留半截 json（resume 严格 freeze，损坏即拒绝恢复）。
+    # ADR 0006 Addendum 2: atomic tmp + os.replace write, same as save_training_state,
+    # so a power loss hitting the write window can't leave a half-written json
+    # (resume freezes strictly, and a corrupt snapshot just refuses to restore).
     tmp_path = path.with_name(path.name + ".tmp")
     try:
         tmp_path.write_text(
@@ -119,10 +125,11 @@ def write_config_snapshot(
 
 
 def emit_event(event_type: str, payload: dict[str, Any] | None = None) -> None:
-    """往 stdout 写 supervisor `__EVENT__:type:json` 协议行。
+    """Write a `__EVENT__:type:json` protocol line to stdout for the supervisor.
 
-    flush=True 是关键 — 否则被子进程 stdout buffer 攒到几 KB 才送达，
-    pause 链路 IO 反馈延迟，supervisor `_on_line` 抓不到事件就误判超时。
+    flush=True is essential -- otherwise the child process's stdout buffer
+    holds it back until several KB accumulate, delaying delivery on the pause
+    path; if the supervisor's `_on_line` doesn't catch the event in time, it wrongly declares a timeout.
     """
     body = json.dumps(payload or {}, ensure_ascii=False)
     sys.stdout.write(f"{EVENT_MARKER}{event_type}:{body}\n")

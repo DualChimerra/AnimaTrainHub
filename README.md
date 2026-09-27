@@ -176,7 +176,7 @@ Nothing is opened on your router. The link carries a persistent access key, and 
 <td width="33%" valign="top">
 
 **🎨 Interface**<br>
-New design, ported page by page from an approved mockup: warm neutrals, a lime accent, Geist type. Every setting explains itself on hover. Fully in English and Russian, no Chinese left in the UI.
+New design, ported page by page from an approved mockup: warm neutrals, a lime accent, Geist type. Every setting explains itself on hover. Fully in English and Russian.
 
 </td>
 <td width="33%" valign="top">

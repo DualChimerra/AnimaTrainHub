@@ -1,10 +1,10 @@
-"""Caption 快照（PP4）— 把 train/ 下全部 caption 文件打包成 zip 落 caption_snapshots/。
+"""Caption snapshot (PP4) -- packs all caption files under train/ into a zip in caption_snapshots/.
 
-用户在 ④ 标签编辑页点「💾 备份」即生成；可列出历史 / 还原 / 删除。
-
-快照路径：`<version_dir>/caption_snapshots/{ts}.zip`
-zip 内部按 `<folder>/<filename>` 平铺，例如 `1_data/a.txt`、`5_face/b.json`。
-还原时清空 train/ 下所有现存 *.txt / *.json，再解包写入。
+Created when the user clicks the backup button on the (4) tag-editing page; snapshots can be
+listed / restored / deleted.
+Snapshot path: `<version_dir>/caption_snapshots/{ts}.zip`
+Inside the zip, files are flattened as `<folder>/<filename>`, e.g. `1_data/a.txt`, `5_face/b.json`.
+On restore, all existing *.txt / *.json under train/ are cleared first, then unpacked back in.
 """
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ from studio.domain.errors import DomainError, NotFoundError
 
 
 class SnapshotError(DomainError):
-    """Snapshot 业务错误。
+    """Snapshot business error.
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    PR-2 C3 added a DomainError base -- the handler auto-translates it into the dual-write envelope.
     """
     default_code = "snapshot.error"
 
@@ -35,7 +35,7 @@ def snapshot_root(version_dir: Path) -> Path:
 
 
 def _iter_caption_files(train_dir: Path):
-    """yield (rel_path_in_zip, abs_path) 的 caption 文件对。"""
+    """Yield (rel_path_in_zip, abs_path) pairs for caption files."""
     if not train_dir.exists():
         return
     for sub in sorted(d for d in train_dir.iterdir() if d.is_dir()):
@@ -62,14 +62,14 @@ def _snapshot_meta(zip_path: Path) -> dict[str, Any]:
 
 
 def create_snapshot(version_dir: Path) -> dict[str, Any]:
-    """打包 train/ 下全部 caption 到一个新 zip。空 train 也允许（生成空 zip）。"""
+    """Pack all captions under train/ into a new zip. An empty train/ is allowed (produces an empty zip)."""
     train_dir = version_dir / "train"
     out_dir = snapshot_root(version_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sid = str(int(time.time() * 1000))
     zip_path = out_dir / f"{sid}.zip"
-    # 极小概率撞 ts，加后缀；防御性
+    # Extremely unlikely ts collision; suffix as a defensive fallback
     suffix = 0
     while zip_path.exists():
         suffix += 1
@@ -126,12 +126,12 @@ def _resolve_snapshot(version_dir: Path, sid: str) -> Path:
 
 
 def restore_snapshot(version_dir: Path, sid: str) -> dict[str, Any]:
-    """还原：先删 train/ 下全部 *.txt/*.json，再解包写入。图片文件保持不变。"""
+    """Restore: delete all *.txt/*.json under train/ first, then unpack the snapshot. Image files are left untouched."""
     zip_path = _resolve_snapshot(version_dir, sid)
     train_dir = version_dir / "train"
     train_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) 清旧 caption
+    # 1) Remove old captions
     removed = 0
     for sub in train_dir.iterdir():
         if not sub.is_dir():
@@ -141,7 +141,7 @@ def restore_snapshot(version_dir: Path, sid: str) -> dict[str, Any]:
                 f.unlink()
                 removed += 1
 
-    # 2) 解包写新（仅在对应 folder 已存在 / 或会创建）
+    # 2) Unpack new ones (only into folders that already exist / will be created)
     written = 0
     skipped: list[str] = []
     with zipfile.ZipFile(zip_path, "r") as z:

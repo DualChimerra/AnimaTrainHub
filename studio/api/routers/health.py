@@ -1,9 +1,10 @@
-"""健康检查 / 系统状态 / 训练监控状态读取（PR-5 从 server.py 抽出）。
+"""Health check / system status / training monitor state reads (extracted from server.py in PR-5).
 
-3 routes：
-    GET /api/health         健康检查（含 app version）
-    GET /api/system/stats   Topbar 系统资源（CPU / RAM / GPU / VRAM）冷启动用
-    GET /api/state          per-task monitor_state.json，前端监控页冷启拉一次后走 SSE 增量
+3 routes:
+    GET /api/health         health check (includes app version)
+    GET /api/system/stats   topbar system resources (CPU / RAM / GPU / VRAM) for cold start
+    GET /api/state          per-task monitor_state.json; the monitoring page fetches this once on
+                            cold start, then gets incremental updates via SSE
 """
 from __future__ import annotations
 
@@ -42,26 +43,30 @@ def health(request: Request) -> dict[str, Any]:
 
 @router.get("/api/system/stats")
 def get_system_stats() -> dict[str, Any]:
-    """Topbar 系统资源小组件用 (CPU/RAM/GPU/VRAM)。前端按 2-3s 轮询。"""
+    """For the topbar system-resources widget (CPU/RAM/GPU/VRAM). The frontend polls every 2-3s."""
     return system_stats.stats_to_json(system_stats.collect_stats())
 
 
 @router.get("/api/state")
 def get_state(task_id: Optional[int] = None, max_points: int = 0) -> JSONResponse:
-    """读取训练监控 state.json（PP6.1 改造 — per-task）。
+    """Read the training monitor's state.json (PP6.1 rework — per-task).
 
-    `task_id` 给了 → 查 tasks.monitor_state_path 对应文件；没有 / 文件缺失 →
-    返回 EMPTY_STATE，不报错。
-    `task_id` 没给 → 优先 running 的 task；没 running 时回退到**最近一次**
-    （done / failed / canceled）带 monitor_state_path 的 task，让监控页结束
-    后还能看到上一次训练的曲线。都没有再返回 EMPTY_STATE。
+    If `task_id` is given → look up the file at tasks.monitor_state_path; if
+    missing / the file doesn't exist → return EMPTY_STATE, no error.
+    If `task_id` is not given → prefer the running task; if none is running,
+    fall back to the **most recent** task (done / failed / canceled) that has
+    a monitor_state_path, so the monitoring page can still show the last
+    training run's curves after it finishes. If there's nothing at all,
+    return EMPTY_STATE.
 
-    `max_points`（默认 0 = 不降采样）— PR #37 引入时默认 1000，PR (此处)
-    改成默认 0：cold start 是一次性 HTTP，10k+ 步训练用户经常碰到，宁可
-    payload 大一点也要给完整历史。想降采样的 caller 显式传 max_points=N
-    （留着给未来 thumbnail / 预览之类的轻量场景）。
+    `max_points` (default 0 = no downsampling) — PR #37 originally defaulted
+    this to 1000; this PR changes the default to 0: cold start is a one-off
+    HTTP call, and users routinely have 10k+ step runs, so it's worth a
+    bigger payload to give them the full history. Callers who want
+    downsampling can pass max_points=N explicitly (kept around for future
+    lightweight use cases like thumbnails / previews).
 
-    旧的全局 `monitor_data/state.json` 路径已退役（PP6.1）。
+    The old global `monitor_data/state.json` path has been retired (PP6.1).
     """
     target_path: Optional[Path] = None
     target_task: dict[str, Any] | None = None
@@ -75,7 +80,7 @@ def get_state(task_id: Optional[int] = None, max_points: int = 0) -> JSONRespons
             target_path = Path(row["monitor_state_path"])
             target_task = dict(row)
     else:
-        # 没给 task_id：先找 running 的 task；没 running 回退到最近的完成任务
+        # No task_id given: look for a running task first; if none, fall back to the most recently finished task
         with db.connection_for() as conn:
             row = conn.execute(
                 _TASK_STATE_SELECT +
@@ -100,7 +105,7 @@ def get_state(task_id: Optional[int] = None, max_points: int = 0) -> JSONRespons
     except Exception as exc:
         raise HTTPException(500, f"failed to read state: {exc}")
 
-    # 服务端下采样 losses / lr_history（samples cap 50 已经在 train_monitor 端做了）
+    # Server-side downsampling of losses / lr_history (the samples cap of 50 is already handled on the train_monitor side)
     if max_points and max_points > 0:
         from runtime.train_monitor import _downsample_uniform
         if isinstance(data.get("losses"), list):

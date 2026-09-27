@@ -1,20 +1,20 @@
-"""studio_data 目录迁移 —— 扫描体积 + 后台复制到自定义位置（ADR 无；小功能）。
+"""studio_data directory migration -- scans size + copies to a custom location in the background (no ADR; a small feature).
 
-流程（前端 Settings → 系统 → 存储位置）：
-1. GET /api/studio-data/info       —— 当前/默认位置 + 全量扫描（文件数/字节数/顶层明细）
-2. POST /api/studio-data/migrate   —— 校验后起后台线程复制；进度走 SSE
-3. 复制完成 → 写仓库根指针文件 `studio_data_location.json` → 重启 server 生效
+Flow (frontend Settings -> System -> Storage location):
+1. GET /api/studio-data/info       -- current/default location + a full scan (file count/byte count/top-level breakdown)
+2. POST /api/studio-data/migrate   -- validates, then starts a background copy thread; progress goes over SSE
+3. Copy completes -> writes the repo-root pointer file `studio_data_location.json` -> takes effect after a server restart
 
-设计要点：
-- **目标是父目录**：用户选任意目录，数据落 `目标/studio_data/`（整个
-  studio_data「搬进去」），目标本身不要求为空 —— 只要求落地子目录不存在或
-  为空（不 merge 进已有数据）。
-- **只复制不删除**：旧数据原样保留（用户决策）；失败时清掉复制了一半的落地
-  目录（开始前要求其为空 / 不存在，rmtree 安全），指针不写，等于什么都没发生。
-- **sqlite 一致性**：server 进程随请求随时可能写 studio.db，直接 copy 可能
-  截到写一半的页。`.db` 文件走 sqlite3 backup API（在线备份，拿到一致快照）；
-  对应的 `-wal` / `-shm` 跳过（backup 产物自含）。
-- **单飞**：同时只允许一个迁移（模块级 lock + 状态单例）。
+Design notes:
+- **The target is a parent directory**: the user picks any directory, and data lands at `target/studio_data/` (the whole
+  studio_data gets "moved into it"); the target itself isn't required to be empty -- only the landing subdirectory
+  must not exist or be empty (never merged into existing data).
+- **Copy only, never delete**: the old data is left as-is (the owner's decision); on failure, the half-copied landing
+  directory is cleaned up (required to be empty/nonexistent before starting, so rmtree is safe), and the pointer is never written, so it's as if nothing happened.
+- **sqlite consistency**: the server process may write to studio.db at any time while a request is in flight,
+  so a plain copy could catch a half-written page mid-write. `.db` files go through the sqlite3 backup API (an online backup that gets a consistent snapshot);
+  the corresponding `-wal` / `-shm` files are skipped (the backup output is self-contained).
+- **Single-flight**: only one migration is allowed at a time (module-level lock + a status singleton).
 """
 from __future__ import annotations
 
@@ -35,20 +35,20 @@ logger = logging.getLogger(__name__)
 
 PROGRESS_INTERVAL_SECONDS = 0.2
 
-# 落地子目录名固定 —— 不跟随当前位置的目录名（老式迁移的自定义位置可能叫别的）
+# The landing subdirectory name is fixed -- it doesn't follow the current location's directory name (an old-style migration's custom location might be named something else)
 DATA_DIR_NAME = "studio_data"
 
 Publish = Callable[[dict[str, Any]], None]
 
 
 # ---------------------------------------------------------------------------
-# 扫描
+# Scanning
 # ---------------------------------------------------------------------------
 
 def scan_studio_data(root: Path | None = None) -> dict[str, Any]:
-    """全量扫描 studio_data：总文件数 / 总字节数 + 顶层条目明细（确认 modal 显示用）。
+    """Fully scans studio_data: total file count / total byte count + a top-level entry breakdown (used to display the confirm modal).
 
-    `-wal` / `-shm` 不计入（迁移时跳过，见模块 docstring）。目录不存在时返回全 0。
+    `-wal` / `-shm` are not counted (skipped during migration, see the module docstring). Returns all zeros if the directory doesn't exist.
     """
     base = root if root is not None else STUDIO_DATA
     entries: list[dict[str, Any]] = []
@@ -88,12 +88,12 @@ def scan_studio_data(root: Path | None = None) -> dict[str, Any]:
 
 
 def _skip_file(p: Path) -> bool:
-    """sqlite 伴生文件不复制：backup API 产物已是一致单文件。"""
+    """sqlite companion files are not copied: the backup API output is already a single consistent file."""
     return p.name.endswith(".db-wal") or p.name.endswith(".db-shm")
 
 
 # ---------------------------------------------------------------------------
-# 迁移状态（单例）
+# Migration status (singleton)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -104,7 +104,7 @@ class MigrationStatus:
     total_bytes: int = 0
     done_files: int = 0
     done_bytes: int = 0
-    current_file: str = ""       # 相对路径，进度展示用
+    current_file: str = ""       # relative path, used for progress display
     error: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -127,16 +127,16 @@ def _set_status(**kw: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 校验 + 启动
+# Validation + start
 # ---------------------------------------------------------------------------
 
 def validate_target(target: Path, *, source: Path | None = None) -> Path:
-    """迁移目标校验，不合法抛 ValueError（caller 转 422）；返回实际落地目录。
+    """Validates the migration target, raising ValueError if invalid (the caller turns this into a 422); returns the actual landing directory.
 
-    target 是用户选的任意目录，数据落 `target/studio_data/`，所以 target 本身
-    不要求为空。规则：绝对路径；target 已存在时必须是目录；落地目录不等于
-    当前位置；落地目录与当前位置互不嵌套（copy 进自己子树会无限递归）；
-    落地目录不存在或为空（不 merge 进已有数据）。
+    target is any directory the user picked; data lands at `target/studio_data/`, so target itself
+    isn't required to be empty. Rules: absolute path; if target already exists it must be a directory; the landing directory can't be
+    the current location; the landing directory and current location can't be nested inside each other (copying into your own subtree would recurse infinitely);
+    the landing directory must not exist or must be empty (never merged into existing data).
     """
     src = (source if source is not None else STUDIO_DATA).resolve()
     if not target.is_absolute():
@@ -167,11 +167,11 @@ def start_migration(
     publish: Publish = bus.publish,
     pointer_file: Path | None = None,
 ) -> None:
-    """校验 + 起后台复制线程。已有迁移在跑时抛 RuntimeError（caller 转 409）。
+    """Validates then starts the background copy thread. Raises RuntimeError if a migration is already running (the caller turns this into a 409).
 
-    target 是用户选的父目录，实际复制到 `target/studio_data/`（validate_target
-    返回值）。source / pointer_file 参数仅测试注入用；生产走默认（当前
-    STUDIO_DATA + 仓库根指针）。
+    target is the parent directory the user picked; the actual copy goes to `target/studio_data/` (validate_target's
+    return value). The source / pointer_file params are for test injection only; production uses the defaults (the current
+    STUDIO_DATA + the repo-root pointer).
     """
     src = (source if source is not None else STUDIO_DATA).resolve()
     ptr = pointer_file if pointer_file is not None else STUDIO_DATA_POINTER
@@ -197,7 +197,7 @@ def start_migration(
 
 
 # ---------------------------------------------------------------------------
-# 复制线程
+# Copy thread
 # ---------------------------------------------------------------------------
 
 def _run_migration(src: Path, dst: Path, publish: Publish, pointer_file: Path) -> None:
@@ -229,8 +229,8 @@ def _run_migration(src: Path, dst: Path, publish: Publish, pointer_file: Path) -
                 else:
                     shutil.copy2(f, out)
             except FileNotFoundError:
-                # 扫描后被删（如临时文件）—— 跳过，进度可能停在 <100%，无碍
-                logger.info("迁移期间文件消失，跳过: %s", rel)
+                # Deleted after the scan (e.g. a temp file) -- skip; progress may stall below 100%, harmless
+                logger.info("File disappeared during migration, skipping: %s", rel)
                 continue
             done_files += 1
             done_bytes += size
@@ -259,18 +259,18 @@ def _run_migration(src: Path, dst: Path, publish: Publish, pointer_file: Path) -
             "done_files": done_files,
             "done_bytes": done_bytes,
         })
-        logger.info("studio_data 迁移完成: %s → %s（%d 文件），重启后生效", src, dst, done_files)
+        logger.info("studio_data migration complete: %s -> %s (%d files), effective after restart", src, dst, done_files)
     except Exception as exc:
-        logger.exception("studio_data 迁移失败: %s → %s", src, dst)
-        # dst 是 target/studio_data 落地目录，开始前为空 / 不存在
-        # （validate_target 保证），整树清掉等于回到迁移前；用户的 target 父目录不动
+        logger.exception("studio_data migration failed: %s -> %s", src, dst)
+        # dst is the target/studio_data landing directory, which was empty/nonexistent before starting
+        # (guaranteed by validate_target), so clearing the whole tree just reverts to the pre-migration state; the user's target parent directory is untouched
         shutil.rmtree(dst, ignore_errors=True)
         _set_status(state="error", error=str(exc))
         publish({"type": "studio_data_migrate_done", "ok": False, "error": str(exc)})
 
 
 def _backup_sqlite(src_db: Path, out: Path) -> None:
-    """sqlite 在线备份拿一致快照；非 sqlite 的 .db 文件回退普通复制。"""
+    """Uses an sqlite online backup to get a consistent snapshot; falls back to a plain copy for non-sqlite .db files."""
     try:
         with sqlite3.connect(str(src_db)) as conn, sqlite3.connect(str(out)) as dst_conn:
             conn.backup(dst_conn)

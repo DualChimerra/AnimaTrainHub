@@ -1,4 +1,4 @@
-"""PP3 — /api/projects/{pid}/versions/{vid}/curation HTTP。"""
+"""HTTP tests for /api/projects/{pid}/versions/{vid}/curation."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -71,7 +71,7 @@ def _names(entries: list[dict]) -> list[str]:
 
 
 def test_curation_view_initial_empty(client: TestClient) -> None:
-    """新 version 默认有一个 1_data 训练文件夹，里面是空的。"""
+    """A new version has a default 1_data training folder that starts empty."""
     pid, vid = _make(client)
     r = client.get(f"/api/projects/{pid}/versions/{vid}/curation").json()
     assert r == {
@@ -94,7 +94,7 @@ def test_copy_then_view(client: TestClient) -> None:
     assert r["copied"] == ["1.png"]
     view = client.get(f"/api/projects/{pid}/versions/{vid}/curation").json()
     assert _names(view["left"]) == ["2.png"]
-    # mtime 字段附带；前端按需排序
+    # mtime field is included; frontend sorts by it as needed
     assert all("mtime" in e for e in view["left"])
     assert _names(view["right"]["5_concept"]) == ["1.png"]
     assert view["right"]["1_data"] == []
@@ -108,7 +108,8 @@ def test_copy_advances_stage(client: TestClient) -> None:
         f"/api/projects/{pid}/versions/{vid}/curation/copy",
         json={"files": ["1.png"], "dest_folder": "5_x"},
     )
-    # ADR-0007 PR-5: copy 不再自动推 stage；phase cursor 由用户 PhaseHeaderNav 推进。
+    # ADR-0007 PR-5: copy no longer auto-advances stage; the phase cursor is now
+    # advanced by the user via PhaseHeaderNav.
     proj = client.get(f"/api/projects/{pid}").json()
     assert any(v["id"] == vid for v in proj["versions"])
 
@@ -125,7 +126,7 @@ def test_remove_only_deletes_train(client: TestClient) -> None:
         json={"folder": "5_x", "files": ["1.png"]},
     ).json()
     assert r["removed"] == ["1.png"]
-    # download/ 应保留
+    # download/ should be preserved
     view = client.get(f"/api/projects/{pid}/versions/{vid}/curation").json()
     assert _names(view["left"]) == ["1.png"]
     assert view["right"]["5_x"] == []
@@ -158,7 +159,7 @@ def test_folder_create_rename_delete(client: TestClient) -> None:
     )
     assert r.status_code == 200
     view = client.get(f"/api/projects/{pid}/versions/{vid}/curation").json()
-    # 默认 1_data 仍在
+    # Default 1_data is still there
     assert view["folders"] == ["1_data"]
 
 
@@ -214,7 +215,7 @@ def test_version_thumb_rejects_traversal(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# validation curation（held-out 手动维护）
+# validation curation (held-out, manually maintained)
 # ---------------------------------------------------------------------------
 
 
@@ -222,13 +223,13 @@ def test_validation_copy_view_remove_flow(client: TestClient) -> None:
     pid, vid = _make(client)
     _drop(client, pid, "1.png")
     _drop(client, pid, "2.png")
-    # copy → validation（落固定 1_data）
+    # copy -> validation (lands in fixed 1_data)
     r = client.post(
         f"/api/projects/{pid}/versions/{vid}/curation/validation/copy",
         json={"files": ["1.png"]},
     ).json()
     assert r["copied"] == ["1.png"]
-    # validation 视图：right 扁平、left 减掉已分配
+    # validation view: right is flat, left has assigned items subtracted
     view = client.get(
         f"/api/projects/{pid}/versions/{vid}/curation/validation"
     ).json()
@@ -245,7 +246,7 @@ def test_validation_copy_view_remove_flow(client: TestClient) -> None:
         f"/api/projects/{pid}/versions/{vid}/curation/validation"
     ).json()
     assert view["val_total"] == 0
-    assert "1.png" in _names(view["left"])  # 回到候选池
+    assert "1.png" in _names(view["left"])  # back in the candidate pool
 
 
 def test_validation_copy_skips_train_member(client: TestClient) -> None:

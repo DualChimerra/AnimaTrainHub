@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { TranslatedTag } from './tagDisplay/TranslatedTag'
 import { TagSuggestList } from './tagSuggest/TagSuggestList'
 import { useTagSuggest } from './tagSuggest/useTagSuggest'
 
@@ -16,11 +15,11 @@ interface Props {
   triggerWord?: string
   /** Tag picked in the list; the footer actions work on it. */
   pickedTag: string | null
-  /** 点 tag 文字 = 选中所有含该 tag 的图（保留旧行为，仍是 tag 浏览的主路径）。 */
+  /** Clicking the tag text selects every image with that tag (keeps the old behavior; still the main way to browse tags). */
   onPickTag: (tag: string) => void
-  /** 从当前选中图中删除该 tag。 */
+  /** Removes this tag from the currently selected images. */
   onRemoveTag: (tag: string) => void
-  /** 从当前选中图中把 oldTag 替换为 newTag。 */
+  /** Replaces oldTag with newTag on the currently selected images. */
   onReplaceTag: (oldTag: string, newTag: string) => void
 }
 
@@ -40,8 +39,8 @@ export default function TagStatsPanel({
   const { t } = useTranslation()
   const [filter, setFilter] = useState('')
   const [sort, setSort] = useState<Sort>('count_desc')
-  // inline replace state：editingTag = 正在 inline 改名的 tag；editValue 是
-  // input 当前值。按回车提交；Esc / 失焦取消。
+  // inline replace state: editingTag = the tag currently being renamed inline;
+  // editValue holds the input's current value. Enter commits; Esc / blur cancels.
   const [editingTag, setEditingTag] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -74,7 +73,7 @@ export default function TagStatsPanel({
 
   const maxCount = countedKeys.length || 1
 
-  // 进入 edit mode 时 focus + select 输入框
+  // Focus + select the input when entering edit mode
   useEffect(() => {
     if (editingTag && editInputRef.current) {
       editInputRef.current.focus()
@@ -110,7 +109,7 @@ export default function TagStatsPanel({
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
           <input className="ds-inp" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t('tagStats.filterPlaceholder')} aria-label={t('tagStats.filterPlaceholder')} />
         </span>
-        <select className="ds-inp" style={{ width: 74, flex: 'none' }} value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label={t('tagStats.sortLabel')}>
+        <select className="ds-inp" style={{ width: 104, flex: 'none' }} value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label={t('tagStats.sortLabel')}>
           <option value="count_desc">{t('tagStats.sortCountDesc')}</option>
           <option value="count_asc">{t('tagStats.sortCountAsc')}</option>
           <option value="name_asc">{t('tagStats.sortNameAsc')}</option>
@@ -151,7 +150,7 @@ export default function TagStatsPanel({
             >
               <div className="ds-kv" style={{ padding: '0 0 3px' }}>
                 <span className="ds-k ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isTrigger ? 'var(--green-text)' : picked ? 'var(--ink)' : undefined }}>
-                  <TranslatedTag tag={tag} />
+                  {tag}
                 </span>
                 <span className="ds-v">{c}</span>
               </div>
@@ -183,8 +182,9 @@ export default function TagStatsPanel({
   )
 }
 
-/** Inline tag rename input + 翻译 autocomplete。抽出来是为了能放 useTagSuggest hook —
- *  父组件 .map 内部不能调 hook。 */
+/** Inline tag rename input + translation autocomplete. Extracted so it can
+ *  hold the useTagSuggest hook -- a hook can't be called inside the parent's
+ *  .map(). */
 function EditTagInput({ editInputRef, value, setValue, onCommit, onCancel }: {
   editInputRef: RefObject<HTMLInputElement>
   value: string

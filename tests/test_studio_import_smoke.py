@@ -1,18 +1,18 @@
-"""PR-1 安全网 — studio/ 下每个 .py 都能 import。
+"""PR-1 safety net -- every .py under studio/ must be importable.
 
-重构期间最易出的事故是循环 import / 搬目录后 import 路径忘改。
-本测试用 parametrize 给每个模块独立 case，定位精确。
+The most common accident during a refactor is a circular import, or forgetting to update an
+import path after moving a directory. This test uses parametrize to give each module its own case, for precise localization.
 
-排除：
+Excluded:
 - __pycache__/
-- studio/web/（前端构建产物 + node_modules）
-- 任何 .py 在 web/node_modules/ 下
-- studio/__main__.py（无 `if __name__ == "__main__"` 守护，import 时直接执行 main()）
+- studio/web/ (frontend build output + node_modules)
+- any .py under web/node_modules/
+- studio/__main__.py (no `if __name__ == "__main__"` guard -- importing it runs main() directly)
 
-已知 import-time 副作用（属现状，PR-5/PR-7 才改）：
+Known import-time side effects (current state, to be fixed in PR-5/PR-7):
 - studio.server: ensure_dirs() + db.init_db()
 - studio.services.onnxruntime_setup: DLL preload
-本测试接受这些副作用，只验证 import 不抛异常。
+This test accepts those side effects and only verifies that import doesn't raise.
 """
 from __future__ import annotations
 
@@ -29,16 +29,16 @@ def _enumerate_modules() -> list[str]:
     for py in sorted(STUDIO_ROOT.rglob("*.py")):
         rel = py.relative_to(STUDIO_ROOT.parent)
         parts = rel.with_suffix("").parts
-        # 跳过缓存
+        # skip cache
         if "__pycache__" in parts:
             continue
-        # 跳过前端目录下混进来的 .py（如 web/node_modules/flatted/python/flatted.py）
+        # skip .py files that leaked in under the frontend dir (e.g. web/node_modules/flatted/python/flatted.py)
         if "web" in parts:
             continue
-        # 跳过 __main__：无 if __name__ 守护，import 即执行 main() 并 SystemExit
+        # skip __main__: no if __name__ guard, importing it runs main() and raises SystemExit
         if parts[-1] == "__main__":
             continue
-        # 包内 __init__ 用包名表示
+        # represent a package's __init__ by the package name
         if parts[-1] == "__init__":
             parts = parts[:-1]
         modules.append(".".join(parts))
@@ -49,7 +49,7 @@ MODULES = _enumerate_modules()
 
 
 def test_module_list_not_empty() -> None:
-    assert len(MODULES) > 50, f"枚举到的 studio/ 模块数只有 {len(MODULES)}，可能扫描出错"
+    assert len(MODULES) > 50, f"only found {len(MODULES)} studio/ modules -- scanning may be broken"
 
 
 @pytest.mark.parametrize("module_name", MODULES, ids=MODULES)

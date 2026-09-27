@@ -1,11 +1,9 @@
-"""Stage 6 — schema 扩展字段验证：新算法选项 + DoRA/dropout/rs_lora 字段。"""
 from __future__ import annotations
 
 from studio.schema import TrainingConfig
 
 
 def test_lora_type_accepts_loha():
-    """新增 'loha' 算法支持"""
     cfg = TrainingConfig(lora_type="loha")
     assert cfg.lora_type == "loha"
 
@@ -13,10 +11,8 @@ def test_lora_type_accepts_loha():
 def test_lora_type_accepts_tlora():
     cfg = TrainingConfig(lora_type="tlora")
     assert cfg.lora_type == "tlora"
-    # min_rank / alpha_rank_scale 与官方 ControlGenAI/T-LoRA argparse default 对齐
     assert cfg.tlora_min_rank == 1
     assert cfg.tlora_alpha_rank_scale == 1.0
-    # use_ortho 默认开启：论文完整配方（官方主推的就是 ortho 变体）
     assert cfg.tlora_use_ortho is True
 
 
@@ -26,20 +22,17 @@ def test_lora_type_accepts_ortho():
 
 
 def test_lora_type_still_accepts_legacy_values():
-    """旧 yaml 配置（lora/lokr）加载零回归"""
     assert TrainingConfig(lora_type="lora").lora_type == "lora"
     assert TrainingConfig(lora_type="lokr").lora_type == "lokr"
 
 
 def test_lora_type_rejects_unknown():
-    """非法算法名仍然拒绝"""
     import pytest
     with pytest.raises(Exception):
         TrainingConfig(lora_type="random_string")
 
 
 def test_dora_field_default_off():
-    """DoRA 默认关闭，避免给老用户行为漂移"""
     assert TrainingConfig().lora_dora is False
 
 
@@ -55,7 +48,6 @@ def test_dropout_fields_default_zero():
 
 
 def test_dropout_fields_clamped_to_unit_range():
-    """[0, 1] 范围验证"""
     import pytest
     with pytest.raises(Exception):
         TrainingConfig(lora_dropout=1.5)
@@ -64,7 +56,6 @@ def test_dropout_fields_clamped_to_unit_range():
 
 
 def test_legacy_yaml_config_loads_with_only_old_fields():
-    """旧 yaml 缺新字段，所有 lora_* 新字段走默认值"""
     legacy = {
         "lora_type": "lokr",
         "lora_rank": 32,
@@ -78,12 +69,11 @@ def test_legacy_yaml_config_loads_with_only_old_fields():
 
 
 def test_new_fields_in_lora_group():
-    """所有新字段归入 'lora' UI 分组"""
     schema = TrainingConfig.model_json_schema()
     props = schema["properties"]
     for f in (
         "lora_dora", "lora_rs", "lora_dropout", "lora_rank_dropout", "lora_module_dropout",
         "tlora_min_rank", "tlora_alpha_rank_scale", "tlora_use_ortho",
     ):
-        assert f in props, f"字段缺失: {f}"
-        assert props[f].get("group") == "lora", f"{f} 不在 lora 分组"
+        assert f in props, f"missing field: {f}"
+        assert props[f].get("group") == "lora", f"{f} is not in the lora group"

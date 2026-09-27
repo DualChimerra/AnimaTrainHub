@@ -1,16 +1,16 @@
-"""Queue 任务 output 文件 列表 / 下载 / 打包 / 系统级 open-folder（PR-6 commit 6 从 server.py 抽出）。
+"""Queue task output files: list / download / zip / OS-level open-folder (extracted from server.py in PR-6 commit 6).
 
-5 routes：
-    GET  /api/queue/{task_id}/outputs                 列 output 目录所有文件（含 state/）
-    GET  /api/queue/{task_id}/outputs.zip             打包 zip 一次性下载
-    POST /api/queue/{task_id}/export-outputs          打包到 data_exports/
-    GET  /api/queue/{task_id}/output/{filename:path}  下载指定文件
-    POST /api/queue/{task_id}/open-folder             OS 文件管理器打开（仅 loopback）
+5 routes:
+    GET  /api/queue/{task_id}/outputs                 list all files in the output dir (including state/)
+    GET  /api/queue/{task_id}/outputs.zip             zip for a one-off download
+    POST /api/queue/{task_id}/export-outputs          zip into data_exports/
+    GET  /api/queue/{task_id}/output/{filename:path}  download a specific file
+    POST /api/queue/{task_id}/open-folder             open with the OS file manager (loopback only)
 
-关联 helpers 全留在本文件（只这 5 route 用）：_task_output_dir / _LOCALHOST_HOSTS /
-_LORA_EXTS / _task_output_kind / _task_output_relpath / _iter_task_output_files /
-_safe_output_relpath_or_400 / _select_task_output_files / _write_outputs_zip /
-_task_archive_basename / _is_loopback。
+All related helpers stay in this file (used only by these 5 routes): _task_output_dir /
+_LOCALHOST_HOSTS / _LORA_EXTS / _task_output_kind / _task_output_relpath /
+_iter_task_output_files / _safe_output_relpath_or_400 / _select_task_output_files /
+_write_outputs_zip / _task_archive_basename / _is_loopback.
 """
 from __future__ import annotations
 
@@ -41,10 +41,10 @@ _LORA_EXTS = {".safetensors", ".ckpt", ".pt", ".bin"}
 
 
 def _task_output_dir(task: dict[str, Any]) -> Optional[Path]:
-    """根据 task 推断 output 目录：versions/{label}/output。
+    """Infer the output directory from the task: versions/{label}/output.
 
-    没 project_id / version_id 的老任务（PP1 之前）→ 返回 None；调用方应该
-    处理为「无 output 目录」。
+    An old task with no project_id / version_id (pre-PP1) -> returns None; the caller should
+    treat this as "no output directory".
     """
     pid = task.get("project_id")
     vid = task.get("version_id")
@@ -106,10 +106,10 @@ def _write_outputs_zip(dest: Path, out_dir: Path, selected: list[Path]) -> None:
 
 
 def _task_archive_basename(task: dict[str, Any]) -> Optional[str]:
-    """task 关联 project / version → "{slug}-{label}"，用作 outputs zip 文件名
-    前缀。和 train.zip 命名风格一致（PP7：{slug}-{label}.train.zip）。
+    """Task's associated project / version -> "{slug}-{label}", used as the outputs zip
+    filename prefix. Matches train.zip's naming style (PP7: {slug}-{label}.train.zip).
 
-    没 project / version → None，调用方 fallback 到 task_{id}。
+    No project / version -> None; the caller falls back to task_{id}.
     """
     pid = task.get("project_id")
     vid = task.get("version_id")
@@ -168,7 +168,7 @@ def _safe_output_relpath_or_400(base: Path, relpath: str) -> Path:
 
 @router.get("/api/queue/{task_id}/outputs")
 def list_task_outputs(task_id: int, request: Request) -> dict[str, Any]:
-    """列出 task 关联 version 的 output 目录里所有文件。"""
+    """List all files in the output directory of the task's associated version."""
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task:
@@ -207,7 +207,7 @@ def download_task_outputs_zip(
     background: BackgroundTasks,
     files: Optional[str] = None,
 ) -> FileResponse:
-    """把 output 目录里的文件打包成 zip 一次性下载。"""
+    """Zip the files in the output directory for a one-off download."""
     import tempfile
     wanted = [n for n in files.split(",") if n] if files else None
     if files is not None and not wanted:
@@ -216,7 +216,7 @@ def download_task_outputs_zip(
         )
     task, selected, partial = _select_task_output_files(task_id, wanted)
     out_dir = _task_output_dir(task)
-    assert out_dir is not None  # _select_task_output_files 已经校验
+    assert out_dir is not None  # already validated by _select_task_output_files
 
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     tmp.close()
@@ -253,7 +253,7 @@ def export_task_outputs_to_data_exports(
     task_id: int,
     body: ExportOutputsBody,
 ) -> dict[str, Any]:
-    """把 output 文件打包保存到 data_exports/。"""
+    """Zip the output files and save them to data_exports/."""
     task, selected, partial = _select_task_output_files(task_id, body.files)
     DATA_EXPORTS.mkdir(parents=True, exist_ok=True)
     basename = _task_archive_basename(task) or f"task_{task_id}"
@@ -273,7 +273,7 @@ def export_task_outputs_to_data_exports(
 
 @router.get("/api/queue/{task_id}/output/{filename:path}")
 def download_task_output(task_id: int, filename: str) -> FileResponse:
-    """下载 output 目录下的指定文件。"""
+    """Download a specific file from the output directory."""
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
     if not task:
@@ -302,10 +302,11 @@ def delete_task_output_files(
     task_id: int,
     body: DeleteOutputsBody,
 ) -> dict[str, Any]:
-    """删除 output 目录下的指定文件（批量）。
+    """Delete specific files from the output directory (bulk).
 
-    body.files 是相对 output/ 的路径列表，禁绝对路径 / path traversal；
-    任何一个不存在 → 404 拒绝整批，避免半删状态。
+    body.files is a list of paths relative to output/; absolute paths / path traversal are
+    forbidden. If any one doesn't exist -> 404 rejects the whole batch, to avoid a
+    half-deleted state.
     """
     if not body.files:
         raise ValidationError(
@@ -326,10 +327,11 @@ def delete_task_output_files(
 
 @router.post("/api/queue/{task_id}/open-folder")
 def open_task_folder(task_id: int, request: Request) -> dict[str, Any]:
-    """在 server 主机上用 OS 文件管理器打开 output 目录。
+    """Open the output directory with the OS file manager on the server host.
 
-    **仅 loopback 请求允许**：云端部署时浏览器不在 server 那台机，开了用户也
-    看不到，反而是远程命令执行入口；这里直接 403 拒绝。
+    **Only loopback requests are allowed**: in a cloud deployment the browser isn't on the
+    same machine as the server, so opening it wouldn't be visible to the user anyway and
+    would instead be a remote-command-execution vector; this rejects with 403 directly.
     """
     if not _is_loopback(request):
         raise ForbiddenError(

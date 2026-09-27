@@ -1,17 +1,17 @@
-"""Task config snapshot — ADR-0007 §11.7。
+"""Task config snapshot -- ADR-0007 section 11.7.
 
-task 入队时把当时的 version config.yaml 冻结一份到
-``studio_data/tasks/{task_id}/snapshot/config.yaml``。
+When a task is enqueued, the version config.yaml at that moment is frozen into
+``studio_data/tasks/{task_id}/snapshot/config.yaml``.
 
-设计要点：
-- **仅冻 config**，不冻 caption / 图 / 正则集（跨 OS export OK，磁盘代价 KB 级）
-- 心智分离 UI：task 详情独立 [关联配置] tab，**不点 task 跳 version config 编辑页**
-  → 让 user 理解 config 是历史快照，caption / 图是 version 当前状态
-- 冻结时机：新 task 入队时；老 task 仍由 supervisor 启动时补冻结
-- 新 task 若无法冻结则不入队；老 task 的启动时补冻结仍为非阻塞
+Design notes:
+- **Only freezes config**, not caption / images / reg set (cross-OS export is fine, disk cost is KB-scale)
+- Mental separation in the UI: the task detail page has its own [Linked config] tab, **clicking a task never jumps to the version config edit page**
+  -> so the user understands config is a historical snapshot, while caption / images are the version's current state
+- Freeze timing: when a new task is enqueued; an old task still gets a freeze backfilled when the supervisor starts it
+- A new task that fails to freeze doesn't get enqueued; backfilling the freeze for an old task at startup is still non-blocking
 
-用 user 视角："点 task 详情 [关联配置] 看当时跑的什么参数，按'套用此配置'按钮
-跳到 ⑦ 训练 phase 页面 + prefill → 编辑 → 训练 = 新 task" （§11.7 流程）。
+From the user's perspective: "click a task's detail [Linked config] to see what params it ran with then, and hit
+'Apply this config' to jump to step 7 (training phase) with a prefill -> edit -> train = a new task" (the section 11.7 flow).
 """
 from __future__ import annotations
 
@@ -27,11 +27,11 @@ SNAPSHOT_CONFIG_FILENAME = "config.yaml"
 
 
 def snapshot_dir(task_id: int) -> Path:
-    """``studio_data/tasks/{task_id}/snapshot/``。
+    """``studio_data/tasks/{task_id}/snapshot/``.
 
-    跟 monitor/ samples/ run.log sibling，整组是 task 完整档案。
-    路径由 `paths.task_dir` 派生，跟其他 task-scoped helper 同源；
-    测试只需 monkeypatch `paths.TASKS_DIR` 一次即可隔离全部。
+    A sibling of monitor/ samples/ run.log; together they make up the task's complete archive.
+    The path is derived from `paths.task_dir`, from the same source as the other task-scoped helpers;
+    tests only need to monkeypatch `paths.TASKS_DIR` once to isolate all of it.
     """
     return task_dir(task_id) / "snapshot"
 
@@ -45,17 +45,17 @@ def has_snapshot(task_id: int) -> bool:
 
 
 def freeze_config(task_id: int, source: Path) -> Path:
-    """复制 source yaml 到 ``snapshot_config_path(task_id)``，返回目标路径。
+    """Copies the source yaml to ``snapshot_config_path(task_id)``, returning the destination path.
 
-    重复调用会覆盖（同 task_id 重启场景）。source 不存在时 raise FileNotFoundError。
+    Calling it again overwrites (the same-task_id restart scenario). Raises FileNotFoundError if source doesn't exist.
     """
     if not source.exists():
         raise FileNotFoundError(f"snapshot source not found: {source}")
     dst = snapshot_config_path(task_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    # 新 task 入队时已把 config_path 指向这份快照。supervisor
-    # 启动时仍会调用本函数以兼容老 task，此时 source == dst，
-    # 应直接复用，不要让 shutil.copy2 报 SameFileError。
+    # When a new task is enqueued, config_path already points at this snapshot. The supervisor
+    # still calls this function at startup for compat with old tasks, in which case source == dst,
+    # so it should just be reused directly rather than letting shutil.copy2 raise SameFileError.
     if dst.exists() and source.samefile(dst):
         return dst
     shutil.copy2(source, dst)
@@ -63,10 +63,10 @@ def freeze_config(task_id: int, source: Path) -> Path:
 
 
 def read_snapshot_config(task_id: int) -> Optional[dict[str, Any]]:
-    """读 task config snapshot；不存在返回 None。
+    """Reads the task config snapshot; returns None if it doesn't exist.
 
-    返回 ``{"yaml": raw_text, "config": parsed_dict}`` —— UI 既能展示原始 yaml
-    （只读 monaco），也能 prefill 训练 config 表单。
+    Returns ``{"yaml": raw_text, "config": parsed_dict}`` -- so the UI can both show the raw yaml
+    (read-only monaco) and prefill the training config form.
     """
     p = snapshot_config_path(task_id)
     if not p.exists():

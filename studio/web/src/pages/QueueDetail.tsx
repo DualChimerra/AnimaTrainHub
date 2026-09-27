@@ -73,14 +73,14 @@ export default function QueueDetailPage() {
   const [pauseModalOpen, setPauseModalOpen] = useState(false)
   const [outputs, setOutputs] = useState<TaskOutputs | null>(null)
 
-  // tab → hash 写回（点 tab 按钮时同步 URL，replaceState 不触发 router 重渲）
+  // tab → hash write-back (syncs the URL when a tab button is clicked; replaceState avoids a router re-render)
   useEffect(() => {
     if (typeof window === 'undefined') return
     const h = `#${tab}`
     if (window.location.hash !== h) window.history.replaceState(null, '', h)
   }, [tab])
 
-  // hash → tab（在本页 navigate 到同一 task 换 hash 时切 tab，如「查看输出」）。
+  // hash → tab (switches tab when navigating within this page to the same task with a different hash, e.g. "view output").
   useEffect(() => {
     const v = tabFromHash(location.hash)
     if (v) setTab((prev) => (prev === v ? prev : v))
@@ -164,7 +164,7 @@ export default function QueueDetailPage() {
     catch (e) { toast(String(e), 'error'); setBusy(false) }
   }
 
-  // ADR 0006 PR-4: 暂停 / 恢复。
+  // ADR 0006 PR-4: pause / resume.
   const pauseRunning = async () => {
     if (!task) return
     setPauseModalOpen(true)
@@ -336,7 +336,7 @@ export default function QueueDetailPage() {
         )}
       </div>
 
-      {/* ADR §4.3 暂停过程 modal — 跟 Queue.tsx 同组件，UI 锁屏让用户看进度。 */}
+      {/* ADR §4.3 pausing-progress modal — same component as Queue.tsx; locks the UI so the user watches the progress. */}
       {pauseModalOpen && task && (
         <PauseProgressModal taskId={task.id} taskName={task.name} onClose={() => setPauseModalOpen(false)} />
       )}
@@ -634,7 +634,9 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
   const [items, setItems] = useState<TaskSample[] | null>(null)
   const [zoom, setZoom] = useState<number | null>(null)
   const load = useCallback(() => {
-    api.listTaskSamples(taskId).then((r) => setItems(r.items)).catch(() => setItems([]))
+    api.listTaskSamples(taskId)
+      .then((r) => setItems([...r.items].sort((x, y) => (x.epoch ?? -1) - (y.epoch ?? -1) || (x.step ?? -1) - (y.step ?? -1))))
+      .catch(() => setItems([]))
   }, [taskId])
   useEffect(() => { load() }, [load])
   // New samples land every few epochs while training runs.
@@ -743,7 +745,7 @@ function PropsCard({ task, fmt, onSaved }: { task: Task; fmt: QueueFormat; onSav
           <div className="ds-note ds-warn font-mono" style={{ marginTop: 8, fontSize: 11, overflowWrap: 'anywhere' }}>{task.error_msg}</div>
         )}
 
-        {/* 备注（_v20 tasks.note）—— 队列页右键写的那句话，这里完整显示 + 可改。 */}
+        {/* Note (_v20 tasks.note) -- the text written via right-click on the queue page; shown in full here and editable. */}
         <div style={{ borderTop: '1px solid var(--line)', marginTop: 10, paddingTop: 10 }}>
           {editing ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -756,7 +758,7 @@ function PropsCard({ task, fmt, onSaved }: { task: Task; fmt: QueueFormat; onSav
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') { e.preventDefault(); setEditing(false) }
-                  // Ctrl/Cmd+Enter 保存 —— 纯 Enter 留给换行。
+                  // Ctrl/Cmd+Enter saves -- plain Enter is left for newlines.
                   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void save() }
                 }}
                 className="ds-inp"

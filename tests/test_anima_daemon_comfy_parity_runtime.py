@@ -71,7 +71,8 @@ def test_daemon_exact_ksampler_parity_fails_when_xformers_unavailable(monkeypatc
     reached: list[str] = []
 
     monkeypatch.setattr(mod._T, "find_diffusion_pipe_root", lambda: _REPO / "modeling")
-    # daemon 加载已经 family 派发（多模型 PR-2b D8'）：mock 面升级为 family 缝
+    # daemon loading is already dispatched by family (multi-model PR-2b D8'): the mock
+    # surface is upgraded to the family seam
     class _FakeFamily:
         def load_dit(self, *args, **kwargs):
             return object()
@@ -211,12 +212,14 @@ def test_daemon_restores_runtime_to_device_after_successful_generate(monkeypatch
 
 
 def test_unload_clears_cublas_workspaces_before_empty_cache(monkeypatch) -> None:
-    """「清理显存」必须清 cuBLAS workspace：C++ 级常驻分配会把 allocator
-    segment 整段钉住（实测 fp8 采样后 8GB+ reserved empty_cache 清不掉）。
-    顺序约束：clear workspace 在 empty_cache 之前才能让 segment 变空闲。"""
+    """"Clearing VRAM" must also clear the cuBLAS workspace: the C++-level resident
+    allocation pins down the entire allocator segment (empirically, after fp8 sampling,
+    8GB+ of reserved memory won't clear with empty_cache alone).
+    Ordering constraint: clear workspace must happen before empty_cache for the segment
+    to become free."""
     mod = importlib.import_module("anima_daemon")
     cache = mod.ModelCache()
-    cache.model = object()  # 让 loaded 为真
+    cache.model = object()  # make loaded True
 
     calls: list[str] = []
     monkeypatch.setattr(mod.torch.cuda, "is_available", lambda: True)

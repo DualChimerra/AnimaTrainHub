@@ -11,7 +11,7 @@ describe('parseAxisValues', () => {
     expect(parseAxisValues('cfg_scale', '3.0, 4.5, 5')).toEqual([3.0, 4.5, 5])
   })
 
-  it('parses string axis (lora_ckpt 路径)', () => {
+  it('parses string axis (lora_ckpt path)', () => {
     expect(parseAxisValues('lora_ckpt', '/a/step100.safetensors, /a/step200.safetensors'))
       .toEqual(['/a/step100.safetensors', '/a/step200.safetensors'])
   })
@@ -22,11 +22,11 @@ describe('parseAxisValues', () => {
   })
 
   it('rejects non-numeric on int axis', () => {
-    expect(() => parseAxisValues('steps', '20, foo, 30')).toThrow(/不是合法数字/)
+    expect(() => parseAxisValues('steps', '20, foo, 30')).toThrow(/is not a valid number/)
   })
 
   it('rejects float on int axis', () => {
-    expect(() => parseAxisValues('steps', '20, 25.5')).toThrow(/必须是整数/)
+    expect(() => parseAxisValues('steps', '20, 25.5')).toThrow(/must be an integer/)
   })
 
   it('accepts whitespace and trims', () => {
@@ -48,7 +48,7 @@ describe('draftToSpec', () => {
     expect(s.lora_index).toBeUndefined()
   })
 
-  it('lora_scale 改为全局轴：不再要求 lora_index（透传 spec.lora_index=undefined）', () => {
+  it('lora_scale is now a global axis: no longer requires lora_index (passes through spec.lora_index=undefined)', () => {
     const d: XYAxisDraft = { axis: 'lora_scale', raw: '0.5, 1.0', loraIndex: null }
     const s = draftToSpec(d, loras)
     expect(s.axis).toBe('lora_scale')
@@ -56,17 +56,17 @@ describe('draftToSpec', () => {
     expect(s.lora_index).toBeUndefined()
   })
 
-  it('lora_ckpt axis 仍要求 loraIndex（指向 caller 自己 push 的 anchor 槽）', () => {
+  it('the lora_ckpt axis still requires loraIndex (points at the anchor slot the caller pushed itself)', () => {
     const d: XYAxisDraft = { axis: 'lora_ckpt', raw: '/x/step.safetensors', loraIndex: null }
-    expect(() => draftToSpec(d, loras)).toThrow(/必须绑定一个 LoRA/)
+    expect(() => draftToSpec(d, loras)).toThrow(/must bind a LoRA/)
   })
 
-  it('lora_ckpt axis lora_index 越界 → throw', () => {
+  it('lora_ckpt axis with an out-of-range lora_index throws', () => {
     const d: XYAxisDraft = { axis: 'lora_ckpt', raw: '/x/step.safetensors', loraIndex: 5 }
-    expect(() => draftToSpec(d, loras)).toThrow(/不存在/)
+    expect(() => draftToSpec(d, loras)).toThrow(/does not exist/)
   })
 
-  it('lora_ckpt axis with valid lora_index → spec.lora_index 填入', () => {
+  it('lora_ckpt axis with a valid lora_index fills in spec.lora_index', () => {
     const d: XYAxisDraft = { axis: 'lora_ckpt', raw: '/x/step.safetensors', loraIndex: 1 }
     const s = draftToSpec(d, loras)
     expect(s.axis).toBe('lora_ckpt')
@@ -75,57 +75,59 @@ describe('draftToSpec', () => {
   })
 })
 
-describe('buildXYMatrix（只发被轴引用的 anchor，丢弃 picker 沉积的孤儿）', () => {
+describe('buildXYMatrix (only sends anchors referenced by an axis, drops orphans left over from the picker)', () => {
   const CHEN = { path: 'G:/chen-bin_v3.4.safetensors', scale: 1, project_id: 2, version_id: 4 }
   const ORPHAN = { path: 'G:/chen-bin_v3.2.safetensors', scale: 1, project_id: 1, version_id: 1 }
   const HOSHI = { path: 'G:/hoshi.safetensors', scale: 1, project_id: 3, version_id: 9 }
 
-  it('非 lora_ckpt 轴（steps）→ lora_configs 为空（孤儿不当 base LoRA 发）', () => {
-    // 复现根因：xyLoras 里有 ORPHAN（picker 残留），但当前 X 轴是 steps，没引用它。
+  it('a non-lora_ckpt axis (steps) -> lora_configs is empty (orphans are not sent as base LoRAs)', () => {
+    // Reproduces the root cause: xyLoras contains ORPHAN (left over from the
+    // picker), but the current X axis is steps and doesn't reference it.
     const x: XYAxisDraft = { axis: 'steps', raw: '20, 25, 30', loraIndex: null }
     const { xy_matrix, loraConfigs } = buildXYMatrix(x, null, [ORPHAN, HOSHI])
-    expect(loraConfigs).toEqual([]) // ← 修前会把 [ORPHAN, HOSHI] 整桶发出去
+    expect(loraConfigs).toEqual([]) // before the fix this would send the whole [ORPHAN, HOSHI] bucket
     expect(xy_matrix.x.values).toEqual([20, 25, 30])
     expect(xy_matrix.y).toBeNull()
   })
 
-  it('lora_ckpt 轴只发被引用的那条 anchor，loraIndex 重映射到 0', () => {
-    // xyLoras=[ORPHAN, CHEN]，X 轴 loraIndex=1 指向 CHEN；ORPHAN 没被引用 → 丢弃。
+  it('a lora_ckpt axis only sends the anchor it references, loraIndex remaps to 0', () => {
+    // xyLoras=[ORPHAN, CHEN], X axis loraIndex=1 points at CHEN; ORPHAN is
+    // unreferenced -> dropped.
     const x: XYAxisDraft = { axis: 'lora_ckpt', raw: CHEN.path, loraIndex: 1 }
     const { xy_matrix, loraConfigs } = buildXYMatrix(x, null, [ORPHAN, CHEN])
-    expect(loraConfigs).toEqual([CHEN]) // ← 没选过的 ORPHAN(v3.2) 不混进来
-    expect(xy_matrix.x.lora_index).toBe(0) // 1 → 0 重映射
+    expect(loraConfigs).toEqual([CHEN]) // the never-picked ORPHAN(v3.2) does not leak in
+    expect(xy_matrix.x.lora_index).toBe(0) // 1 -> 0 remap
     expect(xy_matrix.x.values).toEqual([CHEN.path])
   })
 
-  it('X/Y 都是 lora_ckpt 引用不同 anchor → 两条都保留，各自重映射', () => {
+  it('X/Y are both lora_ckpt referencing different anchors -> both are kept, each remapped', () => {
     const x: XYAxisDraft = { axis: 'lora_ckpt', raw: CHEN.path, loraIndex: 2 }
     const y: XYAxisDraft = { axis: 'lora_ckpt', raw: HOSHI.path, loraIndex: 0 }
-    // loras=[HOSHI, ORPHAN, CHEN]：X→idx2(CHEN)，Y→idx0(HOSHI)，ORPHAN(idx1) 丢弃
+    // loras=[HOSHI, ORPHAN, CHEN]: X -> idx2 (CHEN), Y -> idx0 (HOSHI), ORPHAN (idx1) dropped
     const { xy_matrix, loraConfigs } = buildXYMatrix(x, y, [HOSHI, ORPHAN, CHEN])
-    expect(loraConfigs).toEqual([CHEN, HOSHI]) // 按出现顺序：X 先 → CHEN=0, Y → HOSHI=1
+    expect(loraConfigs).toEqual([CHEN, HOSHI]) // in order of appearance: X first -> CHEN=0, Y -> HOSHI=1
     expect(xy_matrix.x.lora_index).toBe(0)
     expect(xy_matrix.y?.lora_index).toBe(1)
   })
 
-  it('X/Y 引用同一 anchor → 去重成一条，两轴指同一索引', () => {
+  it('X/Y reference the same anchor -> dedupe to one entry, both axes point at the same index', () => {
     const x: XYAxisDraft = { axis: 'lora_ckpt', raw: CHEN.path, loraIndex: 0 }
     const y: XYAxisDraft = { axis: 'lora_scale', raw: '0.6, 0.8', loraIndex: 0 }
     const { loraConfigs, xy_matrix } = buildXYMatrix(x, y, [CHEN])
     expect(loraConfigs).toEqual([CHEN])
     expect(xy_matrix.x.lora_index).toBe(0)
-    // lora_scale 不要求 lora_index，透传 undefined
+    // lora_scale does not require lora_index, passes through undefined
     expect(xy_matrix.y?.lora_index).toBeUndefined()
   })
 
-  it('lora_ckpt 轴 loraIndex 越界 → 抛错（不静默吞掉）', () => {
+  it('an out-of-range loraIndex on a lora_ckpt axis throws (not silently swallowed)', () => {
     const x: XYAxisDraft = { axis: 'lora_ckpt', raw: CHEN.path, loraIndex: 5 }
-    expect(() => buildXYMatrix(x, null, [CHEN])).toThrow(/不存在/)
+    expect(() => buildXYMatrix(x, null, [CHEN])).toThrow(/does not exist/)
   })
 })
 
 describe('cellCount', () => {
-  it('returns x for y=null (单轴退化)', () => {
+  it('returns x for y=null (single-axis degeneration)', () => {
     expect(cellCount(3, null)).toBe(3)
   })
 

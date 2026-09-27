@@ -1,4 +1,4 @@
-"""PP1 — /api/projects + /api/projects/{pid}/versions HTTP 端到端。"""
+"""PP1 -- /api/projects + /api/projects/{pid}/versions HTTP end-to-end."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -95,7 +95,7 @@ def test_delete_removes_dir(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# archive（v12 软隐藏）
+# archive (v12 soft-hide)
 # ---------------------------------------------------------------------------
 
 
@@ -107,7 +107,7 @@ def test_archive_roundtrip(client: TestClient) -> None:
     resp = client.post(f"/api/projects/{pid}/archive")
     assert resp.status_code == 200, resp.text
     assert resp.json()["archived_at"] is not None
-    # 归档只是软隐藏：目录原样、list 仍返回该行（带 archived_at 给前端切分）
+    # archiving is just a soft hide: the directory stays as-is, list still returns the row (with archived_at for the frontend to split on)
     assert pdir.exists()
     items = client.get("/api/projects").json()["items"]
     assert [r["id"] for r in items if r["archived_at"]] == [pid]
@@ -122,7 +122,7 @@ def test_archive_404(client: TestClient) -> None:
 
 
 def test_archive_keeps_updated_at(client: TestClient) -> None:
-    """归档/恢复不动 updated_at —— 恢复后按活跃时间排序的位置不变。"""
+    """Archive/restore doesn't touch updated_at -- position after restore stays the same when sorted by active time."""
     p = client.post("/api/projects", json={"title": "Keep"}).json()
     client.post(f"/api/projects/{p['id']}/archive")
     after = client.post(f"/api/projects/{p['id']}/unarchive").json()
@@ -130,7 +130,7 @@ def test_archive_keeps_updated_at(client: TestClient) -> None:
 
 
 def test_list_enriches_active_version_phase(client: TestClient) -> None:
-    """preparing 项目的 list 行带 phase cursor（badge"准备中 · 打标"用）。"""
+    """A preparing project's list row carries a phase cursor (used by the \"Preparing - tagging\" badge)."""
     client.post("/api/projects", json={"title": "PhaseTest"})
     row = client.get("/api/projects").json()["items"][0]
     assert row["active_version_status"] == "preparing"
@@ -176,7 +176,7 @@ def test_version_activate_updates_project(client: TestClient) -> None:
     )
     assert resp.status_code == 200
     assert resp.json()["active_version_id"] == v2["id"]
-    # 瘦响应只回 id，落库状态经 GET 验证。
+    # the thin response only returns id; the persisted state is verified via GET.
     got = client.get(f"/api/projects/{p['id']}").json()
     assert got["active_version_id"] == v2["id"]
 
@@ -198,7 +198,7 @@ def test_alien_version_404(client: TestClient) -> None:
     a = client.post("/api/projects", json={"title": "A"}).json()
     b = client.post("/api/projects", json={"title": "B"}).json()
     av = a["versions"][0]["id"]
-    # 在 b 路径下访问 a 的 version → 404
+    # accessing a's version under b's path -> 404
     assert (
         client.get(f"/api/projects/{b['id']}/versions/{av}").status_code == 404
     )
@@ -210,7 +210,7 @@ def test_alien_version_404(client: TestClient) -> None:
 
 
 def test_train_zip_export_then_import(client: TestClient) -> None:
-    """端到端：创建项目 → 放打标后的 train/ → 导出 zip → 上传 → 新项目应有同样的 train/。"""
+    """End-to-end: create project -> place tagged train/ -> export zip -> upload -> new project should have the same train/."""
     p = client.post("/api/projects", json={"title": "Round Trip"}).json()
     pid = p["id"]
     vid = p["versions"][0]["id"]
@@ -236,7 +236,7 @@ def test_train_zip_export_then_import(client: TestClient) -> None:
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["project"]["id"] != pid
-    # ADR-0007 PR-5: import-train 不再推 stage
+    # ADR-0007 PR-5: import-train no longer pushes stage
     assert body["stats"]["image_count"] == 2
     assert body["stats"]["tagged_count"] == 1
 

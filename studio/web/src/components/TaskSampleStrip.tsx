@@ -1,19 +1,19 @@
 /**
- * TaskSampleStrip —— 队列列表行内联的采样图带。
+ * TaskSampleStrip -- inline sample-image strip on a queue list row.
  *
- * 队列页每行（有 monitor_state_path 的训练任务）底下铺一条横向缩略图带，
- * 不用点进任务详情就能翻这次训练出的图；点任一张开灯箱（ImagePreviewModal，
- * ← / → 在本任务的采样序列里前后切）。
+ * Below each queue-page row for a training task with a monitor_state_path, a horizontal thumbnail strip lets you
+ * flip through this run's sample images without opening the task detail; clicking one opens a lightbox
+ * (ImagePreviewModal, left/right cycles through this task's sample sequence).
  *
- * 取数走 `GET /api/queue/{id}/samples`（扫盘，已结束的任务也有图），而不是
- * monitor state —— 后者只有 running task 推、且 cap 50。
+ * Data comes from `GET /api/queue/{id}/samples` (a disk scan, so finished tasks have images too), not from
+ * monitor state -- the latter is only pushed for running tasks and capped at 50.
  *
- * 两个「别把队列页拖垮」的约束：
- * - **懒加载**：IntersectionObserver，行滚进视口才发请求；队列几百行时只有
- *   屏幕上那几行真的打后端。
- * - **live 防抖**：running task 订阅 monitor_progress，只在 delta 里真有
- *   appended_samples 时才安排一次 1.5s 后的重拉（训练每几十步出一张图，
- *   没必要跟着每条 delta 抖）。
+ * Two constraints to keep the queue page from bogging down:
+ * - **Lazy loading**: an IntersectionObserver only fires the request once a row scrolls into view; with hundreds
+ *   of queue rows, only the ones on screen actually hit the backend.
+ * - **Live debouncing**: a running task subscribes to monitor_progress, and only schedules a refetch 1.5s later
+ *   when the delta actually contains appended_samples (training emits an image every few dozen steps,
+ *   no need to jitter on every single delta).
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -22,9 +22,9 @@ import { api, type TaskSample } from '../api/client'
 import { useEventStream } from '../lib/useEventStream'
 import ImagePreviewModal from './ImagePreviewModal'
 
-const THUMB_PX = 72
-/** 缩略图请求宽度：2× 显示尺寸，HiDPI 屏不糊。 */
-const THUMB_REQ = 160
+const THUMB_PX = 84
+/** Requested thumbnail width: 2x the display size, so it doesn't look blurry on HiDPI screens. */
+const THUMB_REQ = 192
 
 function marks(s: TaskSample): string {
   const parts: string[] = []
@@ -35,14 +35,14 @@ function marks(s: TaskSample): string {
 
 function shortMarks(s: TaskSample): string {
   const parts: string[] = []
-  if (s.epoch != null) parts.push(`ep${s.epoch}`)
-  if (s.step != null) parts.push(String(s.step))
-  return parts.join('·')
+  if (s.epoch != null) parts.push(`ep ${s.epoch}`)
+  if (s.step != null) parts.push(s.step.toLocaleString())
+  return parts.join(' · ')
 }
 
 export default function TaskSampleStrip({ taskId, live = false }: {
   taskId: number
-  /** running task → 订阅 monitor_progress，出新图自动追加。 */
+  /** running task -> subscribes to monitor_progress, auto-appends new images. */
   live?: boolean
 }) {
   const { t } = useTranslation()
@@ -52,19 +52,21 @@ export default function TaskSampleStrip({ taskId, live = false }: {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const [inView, setInView] = useState(false)
   const refetchTimer = useRef<number | null>(null)
-  // 用户自己往回滚看早期图时别把他拽回末尾；只在「本来就贴着右端」时跟随。
+  // Don't drag the user back to the end while they're scrolling back to look at earlier images; only follow when they were already stuck to the right edge.
   const followRef = useRef(true)
 
   const load = useCallback(async () => {
     try {
       const r = await api.listTaskSamples(taskId)
-      setItems(r.items)
+      // Oldest first, so the strip reads left → right as training went on.
+      setItems([...r.items].sort((x, y) =>
+        (x.epoch ?? -1) - (y.epoch ?? -1) || (x.step ?? -1) - (y.step ?? -1)))
     } catch {
-      setItems([])  // 网络错 / task 没了 → 当作没图，队列页不弹错
+      setItems([])  // Network error / task gone -> treat as no images, don't pop an error on the queue page
     }
   }, [taskId])
 
-  // 懒加载：滚进视口（提前 200px）才拉一次。
+  // Lazy load: only fetches once it scrolls into view (200px ahead of time).
   useEffect(() => {
     const el = hostRef.current
     if (!el) return
@@ -104,7 +106,7 @@ export default function TaskSampleStrip({ taskId, live = false }: {
     if (refetchTimer.current) window.clearTimeout(refetchTimer.current)
   }, [])
 
-  // 新图追加后跟到末尾（仅在用户没往回滚时）。
+  // Follow to the end once a new image is appended (only when the user hasn't scrolled back).
   const count = items?.length ?? 0
   useEffect(() => {
     const el = scrollRef.current
@@ -117,72 +119,53 @@ export default function TaskSampleStrip({ taskId, live = false }: {
   return (
     <div
       ref={hostRef}
-      className="border-t border-subtle px-[22px] py-2.5"
-      // 行本身是「点进详情」的按钮，采样条的点击不该顺带导航。
+      className="ds-samples"
+      // The row itself is a "go to detail" button; a click on the sample strip shouldn't also navigate.
       onClick={(e) => e.stopPropagation()}
     >
+      <div className="ds-samples-head">
+        <span className="ds-cap">{t('queue.samples')}</span>
+        {items && <span className="ds-samples-count">{items.length}</span>}
+      </div>
       {items === null ? (
-        <div className="flex gap-1.5">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div
-              key={i}
-              className="rounded-sm bg-overlay opacity-40 shrink-0"
-              style={{ width: THUMB_PX, height: THUMB_PX }}
-            />
+        <div className="ds-samples-row">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="ds-sample-thumb ds-skel" style={{ width: THUMB_PX, height: THUMB_PX }} />
           ))}
         </div>
       ) : (
-        <>
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-xs text-fg-tertiary font-mono uppercase tracking-wider">
-              {t('queue.samples')}
-            </span>
-            <span className="text-xs text-fg-tertiary font-mono">
-              {t('queue.samplesCount', { n: items.length })}
-            </span>
-          </div>
-          <div
-            ref={scrollRef}
-            onScroll={(e) => {
-              const el = e.currentTarget
-              followRef.current =
-                el.scrollWidth - el.scrollLeft - el.clientWidth < 24
-            }}
-            className="flex gap-1.5 overflow-x-auto pb-1"
-            style={{ scrollbarWidth: 'thin' }}
-            data-testid={`sample-strip-${taskId}`}
-          >
-            {items.map((s, i) => {
-              const caption = shortMarks(s)
-              return (
-                <button
-                  key={s.filename}
-                  type="button"
-                  onClick={() => setZoomIdx(i)}
-                  title={marks(s) || s.filename}
-                  className="shrink-0 flex flex-col items-center gap-0.5 p-0 bg-transparent border-none cursor-zoom-in"
-                >
-                  <div
-                    className="rounded-sm overflow-hidden border border-subtle hover:border-accent transition-colors bg-sunken"
-                    style={{ width: THUMB_PX, height: THUMB_PX }}
-                  >
-                    <img
-                      src={api.sampleImageUrl(s.filename, taskId, THUMB_REQ)}
-                      alt=""
-                      loading="lazy"
-                      className="w-full h-full object-cover block"
-                    />
-                  </div>
-                  {caption && (
-                    <span className="text-[10px] font-mono leading-tight text-fg-tertiary">
-                      {caption}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        </>
+        <div
+          ref={scrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget
+            followRef.current =
+              el.scrollWidth - el.scrollLeft - el.clientWidth < 24
+          }}
+          className="ds-samples-row"
+          data-testid={`sample-strip-${taskId}`}
+        >
+          {items.map((s, i) => {
+            const caption = shortMarks(s)
+            return (
+              <button
+                key={s.filename}
+                type="button"
+                onClick={() => setZoomIdx(i)}
+                title={marks(s) || s.filename}
+                className="ds-sample"
+              >
+                <span className="ds-sample-thumb" style={{ width: THUMB_PX, height: THUMB_PX }}>
+                  <img
+                    src={api.sampleImageUrl(s.filename, taskId, THUMB_REQ)}
+                    alt=""
+                    loading="lazy"
+                  />
+                </span>
+                {caption && <span className="ds-sample-cap">{caption}</span>}
+              </button>
+            )
+          })}
+        </div>
       )}
 
       {zoomIdx !== null && items && items[zoomIdx] && (

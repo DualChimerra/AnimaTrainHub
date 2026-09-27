@@ -1,28 +1,32 @@
-"""正则训练集构建器（PP5）。
+"""Regularization dataset builder (PP5).
 
-由 `C:/Users/Mei/Desktop/SD/danbooru/dev/regex_dataset_builder.py` 库化而来：
-去掉 input() / json 配置文件，全部参数走 `RegBuildOptions`；进度通过
-`on_progress(line)` 推回调用方（worker 转写到日志 + bus.publish）。
+Adapted from the standalone `C:/Users/Mei/Desktop/SD/danbooru/dev/regex_dataset_builder.py`
+script into a library: dropped input() / JSON config file, all parameters go
+through `RegBuildOptions`; progress is pushed back to the caller via
+`on_progress(line)` (the worker forwards it to the log + bus.publish).
 
-**逻辑必须与源脚本一致** —— 阈值 / 常量 / 判定全照搬：
-- 标签数递减序列：10 → 5 → 3 → 2 → 1（capped at max_search_tags）
-- 每个标签数最多尝试 3 个不同 offset
-- failed_tags：单标签搜索失败后不再尝试
-- invalid_tag_combinations：找到结果但本批未下载（源数据集已有 / 不符合）
-- max_rounds = 50；max_consecutive_failures = 5
-- find_best_match skip_similar 取偶数索引（`posts[::2]`）
-- 标签相似度 sigmoid 0.1 系数；分辨率打分 aspect 0.6 + resolution 0.4
-- 最终分数 = tag_score + resolution_score * 0.1（resolution 作 tie-breaker）
-- 80% 达成率算 success
-- 每图后 0.5s，每批后 1s
+**Logic must match the source script exactly** - every threshold / constant /
+decision is carried over as-is:
+- Descending tag-count sequence: 10 -> 5 -> 3 -> 2 -> 1 (capped at max_search_tags)
+- Up to 3 different offsets tried per tag count
+- failed_tags: once a single-tag search fails, it's never retried
+- invalid_tag_combinations: a search found results but nothing from this batch got downloaded (already in the source dataset / didn't qualify)
+- max_rounds = 50; max_consecutive_failures = 5
+- find_best_match's skip_similar takes even indices (`posts[::2]`)
+- tag similarity uses a sigmoid with coefficient 0.1; resolution score is aspect 0.6 + resolution 0.4
+- final score = tag_score + resolution_score * 0.1 (resolution acts as a tie-breaker)
+- 80% completion rate counts as success
+- 0.5s after each image, 1s after each batch
 
-不在范围（→ PP5.5）：分辨率 K-means 聚类后处理、按聚类裁剪到统一分辨率。
+Out of scope (-> PP5.5): resolution K-means clustering post-process, cropping to a uniform per-cluster resolution.
 
-PR-3.9 后：纯分析 / 评分 / 搜索过滤函数搬到 `analysis.py`，本文件留主流程
-（_build_for_subfolder / _build_inner / build）+ RegBuildOptions / RegMeta /
-meta CRUD。analysis 的 11 个公开 + 半公开名通过下方 `from .analysis import ...`
-re-export 进本模块命名空间，保 `from studio.services.reg.builder import X` /
-`reg_builder.X` 旧 import 路径兼容（tests 大量用 attribute 访问形式）。
+Since PR-3.9: pure analysis / scoring / search-filter functions moved to
+`analysis.py`; this file keeps the main flow (_build_for_subfolder /
+_build_inner / build) + RegBuildOptions / RegMeta / meta CRUD. analysis's 11
+public + semi-public names are re-exported into this module's namespace via
+the `from .analysis import ...` below, to keep the old
+`from studio.services.reg.builder import X` / `reg_builder.X` import path
+working (tests make heavy use of attribute access).
 """
 from __future__ import annotations
 
@@ -65,50 +69,50 @@ VIDEO_EXTS = {
 
 @dataclass
 class RegBuildOptions:
-    """构建正则集的所有参数。
+    """All parameters for building a regularization set.
 
-    `target_count=None` → 用 train 总图片数（与源脚本默认一致）。
+    `target_count=None` -> use train's total image count (matches the source script's default).
     """
 
     train_dir: Path
     output_dir: Path
 
-    # API 凭据
+    # API credentials
     api_source: str = "gelbooru"
     user_id: str = ""
     api_key: str = ""
     username: str = ""
 
-    # 上限
+    # limits
     target_count: Optional[int] = None
-    max_search_tags: int = 20  # gelbooru 默认 20，danbooru 免费 2 / gold 6 / platinum 12
-    # batch_size = 搜索循环内部「每下 N 张重算 missing_weight」的步进；与 train 子文件夹镜像无关
+    max_search_tags: int = 20  # gelbooru default 20; danbooru free 2 / gold 6 / platinum 12
+    # batch_size = the step inside the search loop for "recompute missing_weight every N downloads"; unrelated to the train subfolder mirroring
     batch_size: int = 5
 
-    # 标签
-    excluded_tags: list[str] = field(default_factory=list)  # 项目特定（角色名等）
-    blacklist_tags: list[str] = field(default_factory=list)  # 全局黑名单
+    # tags
+    excluded_tags: list[str] = field(default_factory=list)  # project-specific (character names etc.)
+    blacklist_tags: list[str] = field(default_factory=list)  # global blacklist
 
-    # 选图策略
+    # image selection strategy
     skip_similar: bool = True
     aspect_ratio_filter_enabled: bool = False
     min_aspect_ratio: float = 0.5
     max_aspect_ratio: float = 2.0
 
-    # 文件落盘
-    save_tags: bool = False  # PP5 默认 False（auto_tag 走 WD14）
+    # output to disk
+    save_tags: bool = False  # PP5 default False (auto_tag goes through WD14)
     convert_to_png: bool = True
     remove_alpha_channel: bool = False
 
-    # 后置
-    auto_tag: bool = True  # 拉完 reg 后是否跑 tagger
-    auto_tag_kind: str = "wd14"  # A3 — tagger 类型；约束在 VALID_TAGGER_NAMES，UI 目前暴露 wd14/cltagger
-    auto_dedup: bool = True  # A4 — build 后自动 dedup + 不够补足循环
-    # B1（PR-2）：构建模式。
-    # - "mirror"：源脚本旧行为，按 train 子文件夹镜像，每个子文件夹独立按其图数拉。
-    # - "flat"：所有图进 `1_data/` 单桶；target_count 决定总图数。
+    # post-processing
+    auto_tag: bool = True  # whether to run the tagger after pulling reg images
+    auto_tag_kind: str = "wd14"  # A3 - tagger kind; constrained to VALID_TAGGER_NAMES, UI currently exposes wd14/cltagger
+    auto_dedup: bool = True  # A4 - auto dedup after build + top-up loop if short
+    # B1 (PR-2): build mode.
+    # - "mirror": the old source-script behavior, mirroring train's subfolders, each pulled independently to its own image count.
+    # - "flat": all images go into a single `1_data/` bucket; target_count decides the total.
     build_mode: str = "flat"
-    based_on_version: str = ""  # 仅用于 meta，不影响逻辑
+    based_on_version: str = ""  # meta only, doesn't affect logic
 
 
 @dataclass
@@ -118,31 +122,36 @@ class RegMeta:
     api_source: str
     target_count: int
     actual_count: int
-    source_tags: list[str]            # 实际用过的搜索 tag（去重）
+    source_tags: list[str]            # search tags actually used (deduped)
     excluded_tags: list[str]
     blacklist_tags: list[str]
-    failed_tags: list[str]            # 搜索失败的 tag
-    train_tag_distribution: dict[str, int]  # train tag 频率（top 50）
+    failed_tags: list[str]            # tags whose search failed
+    train_tag_distribution: dict[str, int]  # train tag frequency (top 50)
     auto_tagged: bool
-    # A3 — 实际跑过 auto_tag 的 tagger 名（"wd14" / "cltagger" / ...）。
-    # None = 没跑或跑前 meta；老 meta（无此字段）按 None 解读。auto_tagged=True
-    # 但 auto_tag_kind=None 视为「未知 tagger」（旧版本数据）。
+    # A3 - name of the tagger auto_tag actually ran ("wd14" / "cltagger" / ...).
+    # None = never ran, or meta from before it ran. Old meta (missing this
+    # field) is read as None. auto_tagged=True with auto_tag_kind=None is
+    # treated as "unknown tagger" (data from an older version).
     auto_tag_kind: Optional[str] = None
-    # B1（PR-2）：该 reg 集是按哪种 mode 生成的（mirror / flat）。
-    # 老 meta（无此字段）= mirror（PR-1 之前默认）。前端切 mode 用此推断当前结构，
-    # 不一致时拦截 + 提示先清空。
+    # B1 (PR-2): which mode this reg set was generated with (mirror / flat).
+    # Old meta (missing this field) = mirror (the default before PR-1). The
+    # frontend uses this to infer the current structure when switching modes,
+    # and blocks the switch with a prompt to clear first if inconsistent.
     build_mode: str = "mirror"
-    incremental_runs: int = 0         # 补足跑了多少次（PP5.1）
-    # PP5.5 — 后处理摘要（postprocessed_at=None 表示没跑或失败）
+    incremental_runs: int = 0         # how many top-up runs have happened (PP5.1)
+    # PP5.5 - post-process summary (postprocessed_at=None means it never ran or failed)
     postprocessed_at: Optional[float] = None
     postprocess_clusters: Optional[int] = None
     postprocess_method: Optional[str] = None
     postprocess_max_crop_ratio: Optional[float] = None
-    # 生成方式："scrape" = booru 拉取（默认，兼容旧 meta），
-    # "ai_base" = base 模型对 train tag 反向出对照图作正则集（先验生成）。
-    # 引入此字段是为了让 api_source 字段不被 "ai_generated" 这种伪 source 污染：
-    # generation_method="scrape" 时 api_source 才是 "gelbooru"|"danbooru"；
-    # generation_method="ai_base" 时 api_source 留空（语义上无来源）。
+    # How this set was generated: "scrape" = pulled from a booru (default,
+    # compatible with old meta), "ai_base" = the base model generated
+    # counter-examples from train's tags as a regularization set (prior-based
+    # generation). This field exists so the api_source field doesn't get
+    # polluted by a fake source like "ai_generated": when
+    # generation_method="scrape", api_source is "gelbooru"|"danbooru"; when
+    # generation_method="ai_base", api_source stays empty (there's no
+    # meaningful source).
     generation_method: str = "scrape"
 
 
@@ -171,19 +180,19 @@ def _build_for_subfolder(
     cancel_event: Optional[threading.Event],
     pre_existing: Optional[dict[str, Any]] = None,  # PP5.1
     client: Optional[booru_pool.BooruClient] = None,  # PP9
-    deleted_ids: Optional[set[str]] = None,  # A2 — 用户从 UI 删过的 booru ID
+    deleted_ids: Optional[set[str]] = None,  # A2 - booru IDs the user deleted from the UI
 ) -> tuple[bool, int]:
-    """单子文件夹批量循环。返回 (success_80%达成, 实际下载数)。"""
+    """Batch loop for a single subfolder. Returns (success_reached_80pct, actual_downloaded_count)."""
     label = subfolder_name or "<root>"
-    on_progress(f"\n===== 子文件夹 {label} =====")
+    on_progress(f"\n===== Subfolder {label} =====")
 
     target_count = subfolder_data["image_count"]
     remaining_quota = total_target_count - total_downloaded_so_far
     if remaining_quota <= 0:
-        on_progress(f"  ⚠️  已达总数量限制 {total_target_count}，跳过 {label}")
+        on_progress(f"  Reached the total limit of {total_target_count}, skipping {label}")
         return False, 0
     target_count = min(target_count, remaining_quota)
-    on_progress(f"  目标 {target_count} 张，批次 {opts.batch_size}，最多 {opts.max_search_tags} tag")
+    on_progress(f"  Target {target_count} images, batch size {opts.batch_size}, up to {opts.max_search_tags} tags")
 
     if subfolder_name == "":
         out_sub = output_dir
@@ -197,16 +206,18 @@ def _build_for_subfolder(
     skipped = 0
     failed = 0
 
-    # A2 — 用户从 UI 删过的 booru ID 并入 downloaded_ids；这样 search 阶段
-    # 的 `exclude_ids=downloaded_ids` 自动把它们排除掉，避免增量补足再拉回来。
-    # 不计入 downloaded_count，因为它们已经不在盘上了。
+    # A2 - merge booru IDs the user deleted from the UI into downloaded_ids, so
+    # the search stage's `exclude_ids=downloaded_ids` automatically excludes
+    # them, preventing an incremental top-up from pulling them back in. Not
+    # counted in downloaded_count since they're no longer on disk.
     if deleted_ids:
         downloaded_ids.update(deleted_ids)
         on_progress(
-            f"  [a2] 排除已删 booru ID {len(deleted_ids)} 个（来自 reg/.deleted_ids.json）"
+            f"  [a2] Excluding {len(deleted_ids)} previously deleted booru IDs (from reg/.deleted_ids.json)"
         )
 
-    # PP5.1 — incremental：把已有图作为「已下载」计入起点 + 累加 current_weights
+    # PP5.1 - incremental: count existing images as "already downloaded" for
+    # the starting point + accumulate current_weights from them
     if pre_existing and pre_existing.get("count"):
         existing_count = int(pre_existing["count"])
         downloaded_count = min(existing_count, target_count)
@@ -216,10 +227,10 @@ def _build_for_subfolder(
             for t in tags:
                 current_weights[t] += 1 / target_count
         on_progress(
-            f"  [incremental] 沿用已有 {existing_count} 张（计入起点 {downloaded_count}/{target_count}）"
+            f"  [incremental] Reusing {existing_count} existing images (starting point {downloaded_count}/{target_count})"
         )
         if downloaded_count >= target_count:
-            on_progress("  [incremental] 已有图已达目标，无需补足")
+            on_progress("  [incremental] Existing images already meet the target, nothing to top up")
             return True, downloaded_count
 
     batch_round = 0
@@ -230,7 +241,7 @@ def _build_for_subfolder(
 
     while downloaded_count < target_count and batch_round < max_rounds:
         if cancel_event and cancel_event.is_set():
-            on_progress("  [cancel] 用户中止")
+            on_progress("  [cancel] Cancelled by user")
             return False, downloaded_count
 
         batch_round += 1
@@ -241,23 +252,23 @@ def _build_for_subfolder(
             target_weights, current_weights, blacklist_tags, failed_tags
         )
         if not missing_tags:
-            on_progress("  所有标签已达目标权重")
+            on_progress("  All tags have reached their target weight")
             break
 
         available_tags = [t for t, _ in missing_tags if t not in failed_tags]
         if not available_tags:
-            on_progress(f"  ⚠️  所有缺失标签都搜索失败：{list(failed_tags)}")
+            on_progress(f"  All missing tags failed to search: {list(failed_tags)}")
             break
 
         info_preview = ", ".join(
-            f"{t}(缺{w:.2f})" for t, w in missing_tags[:5]
+            f"{t}(missing {w:.2f})" for t, w in missing_tags[:5]
         )
-        on_progress(f"  最缺失: {info_preview}")
+        on_progress(f"  Most missing: {info_preview}")
 
-        # 标签数递减：10 → 5 → 3 → 2 → 1
+        # descending tag counts: 10 -> 5 -> 3 -> 2 -> 1
         tag_counts_seq = [10, 5, 3, 2, 1]
         tag_counts_seq = [min(tc, opts.max_search_tags) for tc in tag_counts_seq]
-        tag_counts_seq = list(dict.fromkeys(tag_counts_seq))  # 去重保序
+        tag_counts_seq = list(dict.fromkeys(tag_counts_seq))  # dedupe, keep order
 
         posts: list[dict[str, Any]] = []
         search_tags: list[str] = []
@@ -275,13 +286,13 @@ def _build_for_subfolder(
                 comb_key = tuple(sorted(cand_tags))
                 if comb_key in invalid_tag_combinations:
                     if offset == 0:
-                        on_progress(f"    跳过无效组合: {cand_tags}")
+                        on_progress(f"    Skipping invalid combination: {cand_tags}")
                     continue
                 if comb_key in tried_combinations:
                     continue
                 tried_combinations.add(comb_key)
 
-                on_progress(f"    用 {tag_count} tag 搜索: {cand_tags}")
+                on_progress(f"    Searching with {tag_count} tags: {cand_tags}")
                 posts = _search_with_filters(
                     cand_tags,
                     api_source=opts.api_source,
@@ -301,12 +312,12 @@ def _build_for_subfolder(
                     break
                 if tag_count == 1:
                     failed_tags.add(cand_tags[0])
-                    on_progress(f"    ✗ tag '{cand_tags[0]}' 搜索失败，加入跳过列表")
+                    on_progress(f"    x tag '{cand_tags[0]}' search failed, adding to the skip list")
                     remaining_avail = [
                         t for t, _ in missing_tags if t not in failed_tags
                     ]
                     if not remaining_avail:
-                        on_progress(f"  ⚠️  所有缺失标签都已失败：{list(failed_tags)}")
+                        on_progress(f"  All missing tags have now failed: {list(failed_tags)}")
                         all_tags_failed = True
                         break
             if posts or all_tags_failed:
@@ -315,9 +326,9 @@ def _build_for_subfolder(
         if not posts:
             consecutive_failures += 1
             on_progress(
-                f"  ⚠️  无匹配（连续失败 {consecutive_failures}/{max_consecutive_failures}）"
+                f"  No matches (consecutive failures {consecutive_failures}/{max_consecutive_failures})"
             )
-            # 检测：所有可能组合都被标记为 invalid → 退出
+            # check: if every possible combination has been marked invalid, exit
             all_invalid = True
             for tc in tag_counts_seq:
                 if len(available_tags) < tc:
@@ -327,23 +338,23 @@ def _build_for_subfolder(
                     all_invalid = False
                     break
             if all_invalid and invalid_tag_combinations:
-                on_progress("  所有组合标记 invalid，停止搜索")
+                on_progress("  Every combination is marked invalid, stopping search")
                 break
             if consecutive_failures >= max_consecutive_failures:
-                on_progress(f"  连续 {consecutive_failures} 次失败，停止")
+                on_progress(f"  Stopping after {consecutive_failures} consecutive failures")
                 break
             continue
         consecutive_failures = 0
-        on_progress(f"    候选 {len(posts)} 张")
+        on_progress(f"    {len(posts)} candidates")
 
-        # 从候选下载本批次
+        # download this batch from the candidates
         batch_downloaded = 0
         attempts = 0
         max_attempts = len(posts)
 
         while batch_downloaded < batch_remaining and attempts < max_attempts:
             if cancel_event and cancel_event.is_set():
-                on_progress("  [cancel] 用户中止")
+                on_progress("  [cancel] Cancelled by user")
                 return False, downloaded_count
 
             attempts += 1
@@ -373,18 +384,18 @@ def _build_for_subfolder(
                 skipped += 1
                 continue
             if pid in source_image_ids:
-                on_progress(f"    跳过（源已有）: {pid}")
+                on_progress(f"    Skipping (already in source): {pid}")
                 skipped += 1
                 downloaded_ids.add(pid)
                 continue
             ext_lower = (file_ext or "").lower()
             if ext_lower in VIDEO_EXTS:
-                on_progress(f"    跳过（视频）: {pid} .{file_ext}")
+                on_progress(f"    Skipping (video): {pid} .{file_ext}")
                 skipped += 1
                 downloaded_ids.add(pid)
                 continue
             if ext_lower not in _IMAGE_EXT_NODOT:
-                on_progress(f"    跳过（非图片）: {pid} .{file_ext}")
+                on_progress(f"    Skipping (not an image): {pid} .{file_ext}")
                 skipped += 1
                 downloaded_ids.add(pid)
                 continue
@@ -396,7 +407,7 @@ def _build_for_subfolder(
                 max_ar=opts.max_aspect_ratio,
             ):
                 ar_v = pw / ph if pw and ph else 0
-                on_progress(f"    跳过（长宽比 {ar_v:.2f}）: {pid}")
+                on_progress(f"    Skipping (aspect ratio {ar_v:.2f}): {pid}")
                 skipped += 1
                 downloaded_ids.add(pid)
                 continue
@@ -409,7 +420,7 @@ def _build_for_subfolder(
                 try:
                     image_path.unlink()
                 except Exception as exc:
-                    on_progress(f"    警告：无法删 {image_path.name}: {exc}")
+                    on_progress(f"    Warning: could not delete {image_path.name}: {exc}")
 
             try:
                 if client is not None:
@@ -431,7 +442,7 @@ def _build_for_subfolder(
                         username=opts.username,
                     )
             except Exception as exc:
-                on_progress(f"    ✗ 下载失败: {pid} ({exc})")
+                on_progress(f"    x Download failed: {pid} ({exc})")
                 if image_path.exists():
                     try:
                         image_path.unlink()
@@ -443,10 +454,12 @@ def _build_for_subfolder(
 
             post_tags = booru_api.post_tag_list(best_post, opts.api_source)
             if opts.save_tags and post_tags:
-                # caption 一律空格形式（与 WD14/CLTagger 输出、训练集统一）。下划线
-                # 只是 booru 的线格式，仅在匹配 / 查询时用 —— post_tags 原值在下面
-                # current_weights 仍按下划线累加，不动。tag-form 约定：用户可见 /
-                # caption = 空格；underscore 只在 booru 边界。
+                # captions always use space form (consistent with WD14/CLTagger
+                # output and the training set). The underscore form is just
+                # booru's wire format, only used for matching / querying -
+                # post_tags below still accumulates into current_weights with
+                # underscores untouched. Tag-form convention: user-visible /
+                # caption = spaces; underscores only cross the booru boundary.
                 txt_path.write_text(
                     ", ".join(t.replace("_", " ") for t in post_tags),
                     encoding="utf-8",
@@ -460,7 +473,7 @@ def _build_for_subfolder(
             downloaded_ids.add(pid)
             matched = [t for t in post_tags if t in target_weights][:5]
             on_progress(
-                f"    [{downloaded_count}/{target_count}] ✓ {pid} "
+                f"    [{downloaded_count}/{target_count}] OK {pid} "
                 f"score={score:.4f} matched={matched}"
             )
 
@@ -468,19 +481,19 @@ def _build_for_subfolder(
                 total_target_count is not None
                 and total_downloaded_so_far + downloaded_count >= total_target_count
             ):
-                on_progress(f"  已达总数量限制 {total_target_count}")
+                on_progress(f"  Reached the total limit of {total_target_count}")
                 break
 
-            # PP9 — 删每图 0.5s 硬 sleep；速率由 BooruClient 的 token bucket 控
+            # PP9 - removed the hard 0.5s sleep per image; rate is controlled by BooruClient's token bucket
             if cancel_event and cancel_event.is_set():
-                on_progress("  [cancel] 用户中止")
+                on_progress("  [cancel] Cancelled by user")
                 return False, downloaded_count
 
-        on_progress(f"  本批次下载: {batch_downloaded}")
+        on_progress(f"  Downloaded this batch: {batch_downloaded}")
 
         if batch_downloaded == 0 and posts and search_tags:
             invalid_tag_combinations.add(tuple(sorted(search_tags)))
-            on_progress(f"  ⚠️  组合 {search_tags} 找到候选但未下载，标 invalid")
+            on_progress(f"  Combination {search_tags} found candidates but downloaded none, marking invalid")
             continue
         elif batch_downloaded > 0 and search_tags:
             invalid_tag_combinations.discard(tuple(sorted(search_tags)))
@@ -488,13 +501,13 @@ def _build_for_subfolder(
         if downloaded_count < target_count:
             if cancel_event:
                 if cancel_event.wait(1.0):
-                    on_progress("  [cancel] 用户中止")
+                    on_progress("  [cancel] Cancelled by user")
                     return False, downloaded_count
             else:
                 time.sleep(1.0)
 
     on_progress(
-        f"\n  子文件夹 {label} 完成: {downloaded_count}/{target_count} "
+        f"\n  Subfolder {label} done: {downloaded_count}/{target_count} "
         f"(skipped={skipped} failed={failed})"
     )
     success = downloaded_count >= target_count * 0.8
@@ -509,18 +522,19 @@ def build(
     incremental: bool = False,
     client: Optional[booru_pool.BooruClient] = None,
 ) -> RegMeta:
-    """构建正则集主流程。返回 RegMeta（即使中途取消也尽量返回部分元数据）。
+    """Main flow for building a regularization set. Returns a RegMeta (returns partial metadata even if cancelled mid-way).
 
-    源脚本逻辑：
-    1. analyze_dataset_structure（train_dir）
-    2. collect_source_image_ids（避免与 train 撞图）
-    3. 自动黑名单：把 based_on_version 标签化加入临时 blacklist（防同人画师）
-    4. 各子文件夹按比例分配目标数量，循环 _build_for_subfolder
-    5. 写 meta.json
+    Source script logic:
+    1. analyze_dataset_structure(train_dir)
+    2. collect_source_image_ids (avoid colliding with train)
+    3. auto-blacklist: add based_on_version as a tag to a temporary blacklist (avoid pulling the same artist's fan art)
+    4. allocate the target count across subfolders proportionally, looping _build_for_subfolder
+    5. write meta.json
 
-    PP5.1：`incremental=True` 时保留 output_dir 已有图作为「已下载」起点，
-    `current_weights` 从已有 caption 累加，仅补足缺口；旧 meta 的
-    `incremental_runs + 1` 写回。
+    PP5.1: when `incremental=True`, existing images under output_dir are kept
+    as the "already downloaded" starting point, `current_weights` is
+    accumulated from their existing captions, and only the gap is topped up;
+    the old meta's `incremental_runs + 1` is written back.
     """
     on_progress(f"[reg] api={opts.api_source} train={opts.train_dir}")
 
@@ -531,7 +545,7 @@ def build(
     if opts.api_source == "danbooru" and not (opts.username and opts.api_key):
         raise ValueError("danbooru needs username + api_key (set secrets.danbooru in Settings)")
 
-    # PP9 — 没传 client 就建一个（按 secrets.download.* 调速），用完关掉
+    # PP9 - build a client if none was passed (rate-controlled by secrets.download.*), close it when done
     owns_client = False
     if client is None:
         try:
@@ -573,49 +587,49 @@ def _build_inner(
         raise ValueError(f"The train directory has no captioned images: {opts.train_dir}")
 
     source_image_ids = collect_source_image_ids(opts.train_dir)
-    on_progress(f"[reg] 源图片 ID 共 {len(source_image_ids)} 个，避免重复")
+    on_progress(f"[reg] {len(source_image_ids)} source image IDs collected, will be avoided")
 
-    # 标签集合
+    # tag sets
     blacklist_tags = set(_normalize_tags(opts.blacklist_tags))
     excluded = set(_normalize_tags(opts.excluded_tags))
     blacklist_tags |= excluded
-    # 自动黑名单：based_on_version
+    # auto-blacklist: based_on_version
     if opts.based_on_version:
         ver_tag = opts.based_on_version.lower().strip().replace(" ", "_")
         if ver_tag and ver_tag not in blacklist_tags:
             blacklist_tags.add(ver_tag)
-            on_progress(f"[reg] 自动加入黑名单: {ver_tag}")
+            on_progress(f"[reg] Auto-added to blacklist: {ver_tag}")
 
     failed_tags: set[str] = set()
     source_tags_used: set[str] = set()
 
-    # 目标数量
+    # target count
     total_target = (
         opts.target_count
         if opts.target_count and opts.target_count > 0
         else structure["total_images"]
     )
-    # B1（PR-2）：build_mode 决定子文件夹分配
-    # - mirror：源脚本旧行为，按 train 子文件夹镜像，每个独立按图数拉
-    # - flat：所有图进 1_data/ 单桶，total_target 一次满足
+    # B1 (PR-2): build_mode decides the subfolder allocation
+    # - mirror: old source-script behavior, mirrors train's subfolders, each pulled independently to its own count
+    # - flat: all images go into a single 1_data/ bucket, satisfied by total_target in one go
     if opts.build_mode == "flat":
         subfolders_plan: dict[str, dict[str, Any]] = {
             "1_data": {"image_count": total_target}
         }
         on_progress(
-            f"[reg] flat 模式：目标 {total_target} 张，单桶 1_data/"
+            f"[reg] Flat mode: target {total_target} images, single bucket 1_data/"
         )
     else:
         subfolders_plan = structure["subfolders"]
         on_progress(
-            f"[reg] mirror 模式：目标 {total_target} 张（train 总 "
-            f"{structure['total_images']}），镜像 {len(subfolders_plan)} 个子文件夹"
+            f"[reg] Mirror mode: target {total_target} images (train total "
+            f"{structure['total_images']}), mirroring {len(subfolders_plan)} subfolders"
         )
 
-    # 输出目录
+    # output directory
     opts.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # PP5.1 — incremental 时扫已有图
+    # PP5.1 - scan existing images when incremental
     pre_existing_per_sub: dict[str, dict[str, Any]] = {}
     prior_meta: Optional[RegMeta] = None
     if incremental:
@@ -623,16 +637,18 @@ def _build_inner(
         prior_meta = read_meta(opts.output_dir)
         existing_total = sum(b["count"] for b in pre_existing_per_sub.values())
         on_progress(
-            f"[reg] incremental 模式：已有 {existing_total} 张图、"
-            f"{len(pre_existing_per_sub)} 个子文件夹"
+            f"[reg] Incremental mode: {existing_total} existing images across "
+            f"{len(pre_existing_per_sub)} subfolders"
         )
 
-    # A2 — 用户从 UI 删除过的 booru ID（含跨子文件夹），无论 incremental 与否都
-    # 应排除：fresh build 时 .deleted_ids.json 已被 DELETE /reg 清掉；
-    # incremental 时这个集合才非空，避免补足把删除的图再拉回。
+    # A2 - booru IDs the user deleted from the UI (across all subfolders)
+    # should be excluded regardless of incremental: on a fresh build
+    # .deleted_ids.json has already been cleared by DELETE /reg; this set is
+    # only non-empty during incremental, to avoid a top-up pulling deleted
+    # images back in.
     deleted_ids = read_deleted_ids(opts.output_dir)
     if deleted_ids:
-        on_progress(f"[reg] 已删 booru ID 共 {len(deleted_ids)} 个（A2 排除）")
+        on_progress(f"[reg] {len(deleted_ids)} previously deleted booru IDs (A2 exclusion)")
 
     target_resolution = structure.get("median_resolution")
     target_aspect_ratio = structure.get("median_aspect_ratio")
@@ -667,16 +683,16 @@ def _build_inner(
                 success_subfolder_count += 1
             total_downloaded += dled
             if total_downloaded >= total_target:
-                on_progress(f"[reg] 已达总目标 {total_target}，停止剩余子文件夹")
+                on_progress(f"[reg] Reached the overall target of {total_target}, stopping remaining subfolders")
                 break
         except Exception as exc:
-            on_progress(f"[reg] 子文件夹 {sub_name} 出错: {exc}")
+            on_progress(f"[reg] Error in subfolder {sub_name}: {exc}")
             import traceback
             on_progress(traceback.format_exc())
 
-    # 写 meta
+    # write meta
     top_dist = dict(structure["global_tag_freq"].most_common(50))
-    # incremental 时，failed_tags / source_tags / auto_tagged / runs 都基于旧 meta 合并
+    # when incremental, failed_tags / source_tags / auto_tagged / runs are all merged with the old meta
     if incremental and prior_meta is not None:
         merged_failed = sorted(set(failed_tags) | set(prior_meta.failed_tags))
         merged_source = sorted(set(source_tags_used) | set(prior_meta.source_tags))
@@ -698,16 +714,16 @@ def _build_inner(
         blacklist_tags=sorted(blacklist_tags),
         failed_tags=merged_failed,
         train_tag_distribution=top_dist,
-        auto_tagged=False,  # worker 在 auto_tag 完成后改写
+        auto_tagged=False,  # overwritten by the worker once auto_tag finishes
         incremental_runs=runs,
         build_mode=opts.build_mode,
     )
     write_meta(opts.output_dir, meta)
 
     on_progress(
-        f"[reg] 完成: {total_downloaded}/{total_target}"
-        f" 张（{success_subfolder_count}/{len(subfolders_plan)} "
-        f"子文件夹达 80%）"
+        f"[reg] Done: {total_downloaded}/{total_target}"
+        f" images ({success_subfolder_count}/{len(subfolders_plan)} "
+        f"subfolders reached 80%)"
     )
     return meta
 
@@ -750,10 +766,11 @@ def read_meta(reg_dir: Path) -> Optional[RegMeta]:
 def update_meta_auto_tagged(
     reg_dir: Path, auto_tagged: bool, kind: Optional[str] = None,
 ) -> None:
-    """auto_tag 完成后改写 meta.auto_tagged，同时记录使用的 tagger 名。
+    """Rewrite meta.auto_tagged after auto_tag finishes, and record which tagger was used.
 
-    `kind=None` 时只动 `auto_tagged`，不动 `auto_tag_kind`（兼容旧 caller）。
-    新 caller 应传 kind 一起写。
+    When `kind=None`, only `auto_tagged` is touched, `auto_tag_kind` is left
+    alone (compatibility with old callers). New callers should pass kind
+    alongside it.
     """
     m = read_meta(reg_dir)
     if m is None:
@@ -765,7 +782,7 @@ def update_meta_auto_tagged(
 
 
 # ---------------------------------------------------------------------------
-# A2 — 用户删除黑名单（reg/.deleted_ids.json）
+# A2 - user-deleted blacklist (reg/.deleted_ids.json)
 # ---------------------------------------------------------------------------
 
 
@@ -777,7 +794,7 @@ def deleted_ids_path(reg_dir: Path) -> Path:
 
 
 def read_deleted_ids(reg_dir: Path) -> set[str]:
-    """读 reg/.deleted_ids.json；不存在 / 损坏返回空 set。"""
+    """Read reg/.deleted_ids.json; missing / corrupt returns an empty set."""
     import json
     p = deleted_ids_path(reg_dir)
     if not p.exists():
@@ -792,14 +809,15 @@ def read_deleted_ids(reg_dir: Path) -> set[str]:
 
 
 def clear_reg_dir(reg_dir: Path) -> None:
-    """清空 reg/ 内所有内容（图、子文件夹、meta、`.deleted_ids.json` 等），
-    保留空目录本身。
+    """Clear everything under reg/ (images, subfolders, meta,
+    `.deleted_ids.json`, etc.), keeping the empty directory itself.
 
-    full-mode build 入口用：用户语义是「从零开始」，所以 `.deleted_ids.json`
-    也一起清掉（如果想保留 deleted 偏好，应该选 incremental mode）。
+    Used by the full-mode build entry point: the user's intent is "start from
+    zero", so `.deleted_ids.json` is cleared too (if the user wants to keep
+    their deleted preferences, they should choose incremental mode instead).
 
-    跟 `DELETE /api/projects/{pid}/versions/{vid}/reg` 端点行为一致 ——
-    那个端点也是 iterdir + rmtree/unlink children。
+    Matches the behavior of `DELETE /api/projects/{pid}/versions/{vid}/reg` -
+    that endpoint also does iterdir + rmtree/unlink on children.
     """
     import shutil
     if not reg_dir.exists():
@@ -812,10 +830,11 @@ def clear_reg_dir(reg_dir: Path) -> None:
 
 
 def append_deleted_ids(reg_dir: Path, new_ids: list[str]) -> None:
-    """把 new_ids（booru ID = 文件名 stem）追加到 reg/.deleted_ids.json，去重保序。
+    """Append new_ids (booru ID = filename stem) to reg/.deleted_ids.json, deduped, order preserved.
 
-    DELETE /reg 端点清 reg/ 时会一并清掉这个文件（按 rglob 通配删 children），
-    所以 fresh build 不会看到上轮的删除黑名单。
+    The DELETE /reg endpoint clears this file too when it clears reg/ (it
+    globs and deletes all children), so a fresh build never sees the
+    previous round's deletion blacklist.
     """
     import json
     if not new_ids:
@@ -838,7 +857,7 @@ def update_meta_postprocess(
     method: Optional[str],
     max_crop_ratio: Optional[float],
 ) -> None:
-    """PP5.5 — 后处理完成后改写 meta 的后处理字段。"""
+    """PP5.5 - rewrite meta's post-process fields once post-processing finishes."""
     m = read_meta(reg_dir)
     if m is None:
         return
@@ -850,14 +869,14 @@ def update_meta_postprocess(
 
 
 # ---------------------------------------------------------------------------
-# preview helper（端点 GET /reg/preview-tags 用）
+# preview helper (used by the GET /reg/preview-tags endpoint)
 # ---------------------------------------------------------------------------
 
 
 def preview_train_tag_distribution(
     train_dir: Path, top: int = 20
 ) -> list[tuple[str, int]]:
-    """轻量扫 train 的 tag 频率，返回 top N。不读图片尺寸（快）。"""
+    """Lightweight scan of train's tag frequency, returns the top N. Doesn't read image dimensions (fast)."""
     counter: Counter[str] = Counter()
     if not train_dir.exists():
         return []

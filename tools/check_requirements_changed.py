@@ -1,22 +1,23 @@
 #!/usr/bin/env python
-"""Bootstrap helper: 检测 requirements.txt 自上次 venv 同步以来有没有变。
+"""Bootstrap helper: detects whether requirements.txt changed since the last venv sync.
 
-studio.sh / studio.bat 启动期调用本脚本，根据 stdout 决定是否补装新增依赖。
+studio.sh / studio.bat call this script during startup and decide whether to install
+new dependencies based on stdout.
 
-模式：
-- 默认（读模式）：比对 requirements.txt 内容 hash 与 marker 文件
-  - 输出 `stale`：内容变了 / 没 marker（首次启动或老 venv）→ caller 应跑 pip install
-  - 输出 `current`：hash 一致 → skip
-  - 输出 `missing`：requirements.txt 不存在 → skip
+Modes:
+- Default (read mode): compares the requirements.txt content hash against the marker file
+  - Prints `stale`: content changed / no marker (first run or an old venv) -> caller should run pip install
+  - Prints `current`: hash matches -> skip
+  - Prints `missing`: requirements.txt doesn't exist -> skip
 
-- `--update-marker`：成功同步后写入新 hash，输出 `written`
+- `--update-marker`: writes the new hash after a successful sync, prints `written`
 
-为什么用 content hash 不用 mtime：
-- `git checkout` / `git pull` 在某些 git 配置下保留 commit 时间戳，mtime 会
-  误判为「stale」触发不必要的 pip install
-- hash 只对真实内容变化敏感，bulletproof
+Why content hash instead of mtime:
+- `git checkout` / `git pull` preserve commit timestamps under some git configs, so mtime
+  would be misread as "stale" and trigger unnecessary pip installs
+- a hash only reacts to actual content changes -- bulletproof
 
-stdlib only —— 在 venv 刚装好（pip 都还没装包）时也能跑。
+Stdlib only -- must run right after the venv is created (before pip has installed anything).
 """
 from __future__ import annotations
 
@@ -34,15 +35,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--marker", required=True,
-        help="marker 文件路径（如 venv/.studio-requirements.sha256）",
+        help="path to the marker file (e.g. venv/.studio-requirements.sha256)",
     )
     parser.add_argument(
         "--requirements", default="requirements.txt",
-        help="要比对的 requirements 文件",
+        help="requirements file to compare against",
     )
     parser.add_argument(
         "--update-marker", action="store_true",
-        help="写入当前 hash 到 marker（同步成功后调）",
+        help="write the current hash to the marker (call after a successful sync)",
     )
     args = parser.parse_args(argv)
 
@@ -61,14 +62,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not marker.exists():
-        # 老 venv 没 marker → 视为 stale；caller 跑一次 pip 后写 marker，下次正常
+        # Old venv with no marker -> treat as stale; caller runs pip once and writes the
+        # marker, then it's fine on subsequent runs
         print("stale")
         return 0
 
     try:
         stored = marker.read_text(encoding="utf-8").strip()
     except OSError:
-        # marker 损坏 → 当 stale，下次同步时重写
+        # Marker is corrupted -> treat as stale, it gets rewritten on the next sync
         print("stale")
         return 0
 

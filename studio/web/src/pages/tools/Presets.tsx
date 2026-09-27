@@ -17,7 +17,6 @@ import SchemaForm from '../../components/SchemaForm'
 import { useToast } from '../../components/Toast'
 import { schemaEnumLabel } from '../../lib/schema'
 import { useSettingsDrawer } from '../../lib/SettingsDrawer'
-import { useAdvancedMode } from '../../lib/useAdvancedMode'
 import {
   PRESET_NAME_RE,
   defaultsFromSchema,
@@ -25,7 +24,7 @@ import {
   savePresetDescriptions,
 } from '../../lib/preset-helpers'
 
-// ── TOML 生成（键按字母排序，值尽量保留原始类型） ──────────────────────────
+// ── TOML generation (keys sorted alphabetically, values keep their original type where possible) ──────────────────────────
 function toTomlValue(v: unknown): string {
   if (v === null || v === undefined) return ''
   if (typeof v === 'boolean') return v ? 'true' : 'false'
@@ -49,7 +48,7 @@ function generateToml(config: ConfigData): string {
   return keys.map((k) => `${k} = ${toTomlValue(config[k])}`).join('\n')
 }
 
-// 表格列 / 详情卡用：从一份 config 派生 optimizer / rank / resolution。
+// For table columns / detail cards: derives optimizer / rank / resolution from a single config.
 function cfgRank(c?: ConfigData): string {
   const v = c?.lora_rank
   return v === undefined || v === null ? '—' : String(v)
@@ -63,10 +62,10 @@ function cfgRes(c?: ConfigData): string {
   return v === undefined || v === null ? '—' : String(v)
 }
 
-// 预设名校验 / 描述存储 / schema 默认值 抽到 lib/preset-helpers.ts，
-// 跟 Train 页面「新建预设」内联表单共享，避免两份维护。
+// Preset name validation / description storage / schema defaults are extracted into
+// lib/preset-helpers.ts, shared with the Train page's "New preset" inline form to avoid maintaining two copies.
 
-// 上传冲突时,后端 409 body 透传到这里;用户决定覆盖 / 另存为 / 取消。
+// On an upload conflict, the backend's 409 body is passed through here; the user decides overwrite / save-as / cancel.
 interface ConflictState {
   config: ConfigData
   desc: string
@@ -92,28 +91,28 @@ export default function PresetsPage() {
   const [config, setConfig] = useState<ConfigData | null>(null)
   const [busy, setBusy] = useState(false)
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
-  // 4 个模型字段当前 Settings 算出的绝对路径（reset 按钮 + 新建预设默认值）
+  // The 4 model fields' absolute paths as currently computed by Settings (used by the reset button + new-preset defaults)
   const [modelPathDefaults, setModelPathDefaults] = useState<Record<string, string>>({})
-  // prototype 表格列（Optimizer/Rank/Res）需要每个 preset 的 config —— 列表 API
-  // 只回 name/path/updated，这里按需拉全部 config 填表格（preset 数量很少）。
+  // The prototype table columns (Optimizer/Rank/Res) need each preset's config -- the list API
+  // only returns name/path/updated, so we fetch every config on demand here to fill the table (there are very few presets).
   const [configCache, setConfigCache] = useState<Record<string, ConfigData>>({})
 
-  // 已保存快照，用于 dirty 判定
+  // Saved snapshot, used to determine dirty state
   const savedJsonRef = useRef<string | null>(null)
   const [droppedFields, setDroppedFields] = useState<string[]>([])
   const [defaultedFields, setDefaultedFields] = useState<string[]>([])
 
-  // 描述
+  // description
   const [descriptions, setDescriptions] = useState<Record<string, string>>(loadPresetDescriptions)
   const [descDraft, setDescDraft] = useState('')
   const [descDirty, setDescDirty] = useState(false)
 
-  // 新建模式输入
+  // New-mode input
   const [newName, setNewName] = useState('')
   const [newNameError, setNewNameError] = useState('')
   const isNew = selected === null
 
-  // ── 上传冲突 dialog 状态 + 命令式 resolver ──
+  // ── Upload-conflict dialog state + imperative resolver ──
   const [conflict, setConflict] = useState<ConflictState | null>(null)
   const conflictResolveRef = useRef<((c: ConflictChoice) => void) | null>(null)
   const askConflict = (state: ConflictState): Promise<ConflictChoice> =>
@@ -128,8 +127,8 @@ export default function PresetsPage() {
     r?.(choice)
   }
 
-  // ── UI 状态 ──
-  // editorOpen：prototype 把整套 schema 编辑收进「Edit config / New preset」模态。
+  // ── UI state ──
+  // editorOpen: the prototype tucks the whole schema-editing flow into the "Edit config / New preset" modal.
   const [editorOpen, setEditorOpen] = useState(false)
   const [tomlOpen, setTomlOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
@@ -137,16 +136,15 @@ export default function PresetsPage() {
   const [filter, setFilter] = useState('')
   const [summaryFormat, setSummaryFormat] = useState<'yaml' | 'toml'>('yaml')
   const [previewYaml, setPreviewYaml] = useState('')
-  const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
   const newNameInputRef = useRef<HTMLInputElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  // 4 个模型字段（用于新建预设默认值 / reset 按钮）。同 Train.tsx 的 GLOBAL_MODEL_FIELDS。
+  // The 4 model fields (used for new-preset defaults / the reset button). Same as Train.tsx's GLOBAL_MODEL_FIELDS.
   const MODEL_PATH_FIELDS = useMemo(() => [
     'transformer_path', 'vae_path', 'text_encoder_path', 't5_tokenizer_path',
   ], [])
 
-  // ── 加载 schema + 预设列表 + Settings toggle + 模型路径默认 ──
+  // ── Load schema + preset list + Settings toggle + model-path defaults ──
   useEffect(() => {
     api.schema().then(setSchema).catch((e) => toast(t('presets.loadSchemaFailed', { error: e }), 'error'))
     refreshList()
@@ -158,7 +156,7 @@ export default function PresetsPage() {
     api.listPresets().then((list) => {
       setPresets(list)
       setPresetsLoaded(true)
-      // 拉每个 preset 的 config 填表格列（best-effort，失败列显示 —）。
+      // Fetch each preset's config to fill the table columns (best-effort; a failed column shows —).
       list.forEach((p) => {
         api.getPreset(p.name)
           .then((c) => setConfigCache((m) => ({ ...m, [p.name]: c })))
@@ -167,7 +165,7 @@ export default function PresetsPage() {
     }).catch(() => { setPresets([]); setPresetsLoaded(true) })
   }
 
-  // ── 选 preset 切换 ──
+  // ── Preset selection switch ──
   useEffect(() => {
     if (!selected) {
       if (schema) {
@@ -202,11 +200,11 @@ export default function PresetsPage() {
       toast(t('presets.loadFailed', { error: e }), 'error')
       setSelected(null)
     })
-    // modelPathDefaults 故意排除：late-arrival 由下一个 useEffect 处理
+    // modelPathDefaults is deliberately excluded: a late arrival is handled by the next useEffect
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, schema, descriptions, t, toast])
 
-  // modelPathDefaults 异步晚到时，新建模式下用户没改过就地覆盖 4 字段为绝对路径。
+  // When modelPathDefaults arrives late asynchronously, in new-preset mode overwrite the 4 fields in place with absolute paths, as long as the user hasn't edited them.
   useEffect(() => {
     if (selected !== null) return
     if (!schema || !config) return
@@ -227,7 +225,7 @@ export default function PresetsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelPathDefaults, selected, schema])
 
-  // ── 首次拿到列表后：自动选最近一个，省一次「切换」点击 ──
+  // ── The first time the list arrives: auto-select the most recent one, saving a "switch" click ──
   const autoSelectedRef = useRef(false)
   useEffect(() => {
     // Wait for the list itself: the schema can arrive first, and an empty
@@ -237,7 +235,7 @@ export default function PresetsPage() {
     if (presets.length > 0 && selected === null) setSelected(presets[0].name)
   }, [presets, presetsLoaded, selected])
 
-  // 编辑器开着时 Esc 关闭（dirty 时仍可关 —— 改动留在内存，跟切 preset 一致）。
+  // Esc closes the editor while it's open (still closable while dirty -- changes stay in memory, consistent with switching presets).
   useEffect(() => {
     if (!editorOpen) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditorOpen(false) }
@@ -245,14 +243,14 @@ export default function PresetsPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [editorOpen])
 
-  // ── 派生 ──
+  // ── Derived ──
   const dirty = useMemo(() => {
     if (!config) return false
     return JSON.stringify(config) !== savedJsonRef.current
   }, [config])
   const hasAnyChange = dirty || descDirty
 
-  // auto_sync_paths ON：预设里 4 模型字段灰显。OFF：可编辑 + 重置按钮。
+  // auto_sync_paths ON: the 4 model fields in the preset show grayed out. OFF: editable + a reset button.
   const disabledFields = autoSyncPaths ? MODEL_PATH_FIELDS : []
   const disabledHints = useMemo(() => {
     const h: Record<string, React.ReactNode> = {}
@@ -303,7 +301,7 @@ export default function PresetsPage() {
     return out
   }, [autoSyncPaths, modelPathDefaults, config, t, MODEL_PATH_FIELDS])
 
-  // ── 操作 ──
+  // ── Actions ──
   const handleSave = async () => {
     const name = isNew ? newName.trim() : selected
     if (!name) {
@@ -343,7 +341,7 @@ export default function PresetsPage() {
     finally { setBusy(false) }
   }
 
-  // "复制副本":Save-As 语义 —— 把当前 config 写到新名字下,refresh + 自动选中。
+  // "Duplicate": Save-As semantics -- writes the current config under a new name, refreshes + auto-selects it.
   const handleDuplicate = async (name: string | null = selected) => {
     if (busy || !name) return
     const src = name === selected && config
@@ -371,7 +369,7 @@ export default function PresetsPage() {
     finally { setBusy(false) }
   }
 
-  // 「+ New preset」：进新建模式 + 打开编辑器（schema 默认值由 selected→null effect 预填）。
+  // "+ New preset": enters new-preset mode + opens the editor (schema defaults are pre-filled by the selected→null effect).
   const handleNew = () => {
     setSelected(null)
     setEditorOpen(true)
@@ -421,7 +419,7 @@ export default function PresetsPage() {
     }
   }
 
-  // 「导入」：上传 / server path → 后端校验落盘 → refresh + 选中；409 冲突弹三选一。
+  // "Import": upload / server path → backend validates and writes to disk → refresh + select; a 409 conflict pops a three-way choice.
   const handleImportedPreset = (name: string) => {
     refreshList()
     setSelected(name)
@@ -512,7 +510,7 @@ export default function PresetsPage() {
     return new Intl.DateTimeFormat(i18n.language, { day: 'numeric', month: 'short' }).format(d)
   }
 
-  // ── 渲染 ──
+  // ── Render ──
   const q = filter.trim().toLowerCase()
   const shownPresets = q
     ? presets.filter((p) => p.name.toLowerCase().includes(q) || (descriptions[p.name] ?? '').toLowerCase().includes(q))
@@ -723,7 +721,7 @@ export default function PresetsPage() {
         </div>
       </div>
 
-      {/* ── 编辑器模态（New / Edit config） ── */}
+      {/* ── Editor modal (New / Edit config) ── */}
       {editorOpen && (
         <div
           role="dialog"
@@ -742,22 +740,6 @@ export default function PresetsPage() {
                 {isNew ? t('presets.newPresetBtn') : <>{t('presets.editPrefix')} · <span className="mono">{selected}</span></>}
               </h2>
               <span style={{ flex: 1 }} />
-              <span className="ds-seg">
-                <button
-                  type="button"
-                  onClick={() => advancedMode && toggleAdvancedMode()}
-                  className={`ds-seg-item${!advancedMode ? ' ds-is-active' : ''}`}
-                >
-                  {t('train.simpleMode')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => !advancedMode && toggleAdvancedMode()}
-                  className={`ds-seg-item${advancedMode ? ' ds-is-active' : ''}`}
-                >
-                  {t('train.advancedMode')}
-                </button>
-              </span>
               <button type="button" onClick={() => setEditorOpen(false)} className="ds-kebab" aria-label={t('common.cancel')}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
               </button>
@@ -822,11 +804,10 @@ export default function PresetsPage() {
                   disabledHints={disabledHints}
                   autoHints={autoHints}
                   fieldSuffixes={fieldSuffixes}
-                  advancedMode={advancedMode}
                 />
               )}
 
-              {/* TOML preview（折叠） */}
+              {/* TOML preview (collapsed) */}
               {config && Object.keys(config).length > 0 && (
                 <section className={`rounded-md border border-subtle bg-surface ${tomlOpen ? 'px-3.5 py-2.5' : 'px-3.5 py-1.5'}`}>
                   <button
@@ -941,7 +922,7 @@ function PresetExportDialog({
   )
 }
 
-// ImportConflictDialog —— 上传 preset 名字撞库时弹三选一（覆盖 / 另存为 / 取消）。
+// ImportConflictDialog -- pops a three-way choice (overwrite / save-as / cancel) when an uploaded preset's name collides with an existing one.
 function ImportConflictDialog({
   suggestedName,
   existingNames,

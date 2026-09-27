@@ -1,4 +1,4 @@
-"""Krea2 本地主模型注册、选择与回退（统一来源候选端点）。"""
+"""Krea2 local main-model registration, selection, and fallback (unified source candidate endpoint)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,7 +47,7 @@ def test_krea2_custom_endpoint_registers_dedupes_and_resets_selected(
 
     catalog = add_model_source("krea2", request)
     add_model_source("krea2", request)
-    # local 候选同步进兼容面 models.custom（回滚可读）
+    # local candidates are mirrored into the legacy models.custom field (readable on rollback)
     assert state["settings"].models.custom["krea2"] == [str(custom)]
     assert catalog["krea2_main"]["custom"][0]["path"] == str(custom)
     local_rows = [

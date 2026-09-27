@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next'
 
-/** Task 状态徽章（pending / running / done / failed / canceled）。 */
+/** Task status badge (pending / running / done / failed / canceled). */
 export default function StatusBadge({ status }: { status: string }) {
   const { t } = useTranslation()
   const cls =

@@ -1,4 +1,4 @@
-"""PP4 — tagedit: stats / add / remove / replace / dedupe + format 自适应。"""
+"""PP4 -- tagedit: stats / add / remove / replace / dedupe + format auto-detection."""
 from __future__ import annotations
 
 import json
@@ -19,7 +19,7 @@ def train_dir(tmp_path: Path) -> Path:
 def _img(folder: Path, name: str) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     p = folder / name
-    p.write_bytes(b"x")  # 假图，仅为 caption_path 做存在判定
+    p.write_bytes(b"x")  # fake image, only used so caption_path existence check passes
     return p
 
 
@@ -53,9 +53,9 @@ def test_json_takes_precedence(train_dir: Path) -> None:
     f = _img(train_dir / "5_a", "1.png")
     _txt(f, "from txt")
     _json(f, ["from", "json"])
-    # 两个都在时，json 优先
+    # when both exist, json takes priority
     assert tagedit.read_tags(f) == ["from", "json"]
-    # 写入也走 json
+    # writes go through json too
     out = tagedit.write_tags(f, ["new"])
     assert out.suffix == ".json"
     data = json.loads(out.read_text(encoding="utf-8"))
@@ -138,7 +138,7 @@ def test_stats_scoped_to_files(train_dir: Path) -> None:
 def test_add_back_skips_dups(train_dir: Path) -> None:
     _setup_scope(train_dir)
     n = tagedit.add_tags({"kind": "all"}, train_dir, ["x", "new1"])
-    # 三张图都应该被改（都新增了 new1，x 已有不重复）
+    # all three images should be changed (all get new1 added; x already has it, no duplicate)
     assert n == 3
     assert tagedit.read_tags(train_dir / "5_a" / "1.png") == ["x", "y", "new1"]
 
@@ -170,7 +170,7 @@ def test_replace_into_existing_dedupes(train_dir: Path) -> None:
     _txt(f, "a, b, c")
     n = tagedit.replace_tag({"kind": "all"}, train_dir, "a", "b")
     assert n == 1
-    # b 已存在 → 把 a 删掉，b 保留一次
+    # b already exists -> remove a, keep one copy of b
     assert tagedit.read_tags(f) == ["b", "c"]
 
 

@@ -1,12 +1,15 @@
-"""运行模式（Colab / Local）—— 本 fork 新增。
+"""Runtime mode (Colab / Local) — new in this fork.
 
-2 routes：
-    GET /api/runtime         当前模式 + 探测结果 + 该模式下的环境事实
-    PUT /api/runtime         持久化用户选择（前端首次进应用的选择框）
+2 routes:
+    GET /api/runtime         current mode + detection results + environment facts for that mode
+    PUT /api/runtime         persist the user's choice (the frontend's first-run selection dialog)
 
-前端在启动时 GET 一次：`mode` 为空串 = 用户还没选过 → 弹选择框；选完 PUT。
-`locked=true`（`ALS_RUNTIME_MODE` 已注入，Colab notebook 的启动 cell 会设）时
-前端不弹框也不允许改 —— 环境已经替用户答过了。
+The frontend does one GET on startup: `mode` being an empty string means the
+user hasn't chosen yet → show the selection dialog; PUT once they choose.
+When `locked=true` (set once `ALS_RUNTIME_MODE` has been injected, which the
+Colab notebook's startup cell does), the frontend neither shows the dialog
+nor allows changing it — the environment has already answered on the user's
+behalf.
 """
 from __future__ import annotations
 
@@ -35,11 +38,13 @@ class RuntimeModePatch(BaseModel):
 
 
 def _environment() -> dict[str, Any]:
-    """选择框和设置区展示的环境事实。
+    """Environment facts shown in the selection dialog and settings area.
 
-    刻意都是「用户能据此判断自己选对没有」的东西：磁盘在哪、还剩多少、有没有
-    GPU。GPU 名走 nvidia-smi 而不是 import torch —— 这个端点在 UI 启动路径上，
-    不该为了一行字付 torch 的 import 成本（首次 import 秒级）。
+    Deliberately limited to things the user can use to judge whether they
+    picked correctly: where the disk is, how much space is left, whether
+    there's a GPU. The GPU name comes from nvidia-smi rather than `import
+    torch` — this endpoint sits on the UI startup path, and it shouldn't pay
+    torch's import cost (seconds on first import) just to show one line of text.
     """
     total = free = None
     try:
@@ -97,8 +102,9 @@ def put_runtime(body: RuntimeModePatch) -> dict[str, Any]:
         )
     override = runtime_mode.env_override()
     if override and override != mode:
-        # env 是权威且不落盘：写 secrets 会造成"设置里显示 local、实际跑 colab"
-        # 的分裂状态，不如直接拒绝并把原因说清楚。
+        # The env var is authoritative and never persisted: writing to secrets
+        # here would create a split-brain state ("settings show local, but
+        # it's actually running colab"), so we just reject and explain why.
         raise DomainError(
             f"runtime mode is pinned to {override!r} by the "
             f"{runtime_mode.ENV_OVERRIDE} environment variable",

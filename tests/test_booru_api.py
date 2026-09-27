@@ -1,12 +1,12 @@
-"""services/booru_api.py — search_posts 头部 / 路由回归。
+"""services/booru_api.py -- regression tests for search_posts headers / routing.
 
-hotfix 背景：danbooru 挂了 Cloudflare 后，缺 User-Agent (requests 默认
-`python-requests/X.Y.Z`) 会被 CF 直接 403 挑战页。这里固化两条最关键的
-不变量：
-- 请求时必须带可识别的 UA (含 'AnimaLoraStudio')
-- Accept: application/json 让中间件路由更确定
+Hotfix background: after danbooru put up Cloudflare, a missing User-Agent
+(requests' default `python-requests/X.Y.Z`) gets a 403 challenge page straight
+from CF. This pins down the two key invariants:
+- requests must carry a recognizable UA (containing 'AnimaLoraStudio')
+- Accept: application/json makes middleware routing more deterministic
 
-不真发 HTTP：用 fake session 截 sess.get 参数验证。
+No real HTTP is sent: a fake session intercepts and verifies sess.get's arguments.
 """
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ def test_search_posts_sends_app_user_agent_for_danbooru() -> None:
 
 
 def test_search_posts_ua_includes_username_when_provided() -> None:
-    """搜索带 username 时 UA 应为 'AnimaLoraStudio/X (by username)' —
-    符合 danbooru TOS 推荐格式，让 CF 端能按账户白名单而不是匿名拦截。"""
+    """When searching with a username, the UA should be 'AnimaLoraStudio/X (by username)' --
+    the format danbooru's TOS recommends, so CF can allowlist by account instead of blocking anonymously."""
     sess = _fake_session([])
     booru_api.search_posts("danbooru", "1girl", username="alice", session=sess)
     ua = sess.get.call_args.kwargs["headers"]["User-Agent"]
@@ -46,7 +46,7 @@ def test_search_posts_ua_includes_username_when_provided() -> None:
 
 
 def test_search_posts_ua_falls_back_when_no_username() -> None:
-    """没传 username 时 UA 不应带空括号。"""
+    """When no username is passed, the UA should not carry empty parentheses."""
     sess = _fake_session([])
     booru_api.search_posts("danbooru", "1girl", session=sess)
     ua = sess.get.call_args.kwargs["headers"]["User-Agent"]
@@ -55,7 +55,7 @@ def test_search_posts_ua_falls_back_when_no_username() -> None:
 
 
 def test_search_posts_sends_app_user_agent_for_gelbooru() -> None:
-    """gelbooru 没那么严，但同样应带 UA 以符合礼貌使用。"""
+    """gelbooru is less strict, but should still carry a UA for polite usage."""
     sess = _fake_session({"post": [{"id": 2}]})
     booru_api.search_posts("gelbooru", "1girl", session=sess)
     _, kwargs = sess.get.call_args
@@ -64,15 +64,16 @@ def test_search_posts_sends_app_user_agent_for_gelbooru() -> None:
 
 
 def test_build_user_agent_strips_whitespace() -> None:
-    """username 含前后空格 / 全空格时不应生成 '(by   )' 这种空 UA 段。"""
+    """When username has leading/trailing spaces or is all spaces, it should not generate an empty UA segment like '(by   )'."""
     assert "(by" not in booru_api._build_user_agent("   ")
     assert booru_api._build_user_agent("  alice  ") == \
         f"{booru_api._USER_AGENT_BASE} (by alice)"
 
 
 def test_search_posts_user_agent_does_not_impersonate_browser() -> None:
-    """回归：之前曾用 Chrome 浏览器 UA 反而被 Cloudflare 当作"浏览器但
-    不跑 JS"识破并 403。UA 必须明确说是 AnimaLoraStudio。"""
+    """Regression: a Chrome browser UA was once used but Cloudflare flagged it as
+    "a browser that doesn't run JS" and returned 403. The UA must clearly identify
+    itself as AnimaLoraStudio."""
     sess = _fake_session([])
     booru_api.search_posts("danbooru", "x", session=sess)
     ua = sess.get.call_args.kwargs["headers"]["User-Agent"]
@@ -122,7 +123,7 @@ def test_search_posts_no_auth_when_username_missing() -> None:
 
 
 def test_download_image_ua_includes_username(tmp_path) -> None:
-    """download 路径也走 CF；UA 同样要带 username 让账户白名单生效。"""
+    """The download path also goes through CF; the UA must likewise carry the username for the account allowlist to work."""
     from io import BytesIO
     from PIL import Image as _PILImage
     buf = BytesIO()

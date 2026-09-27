@@ -1,4 +1,4 @@
-"""ADR-0007 §11.7: task config snapshot module + endpoint 测试。"""
+"""ADR-0007 section 11.7: task config snapshot module + endpoint tests."""
 from __future__ import annotations
 
 import time
@@ -20,14 +20,14 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(projects, "PROJECTS_DIR", tmp_path / "projects")
     monkeypatch.setattr(db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(server.db, "STUDIO_DB", dbfile)
-    # task_snapshot 走 paths.task_dir → 共享 paths.TASKS_DIR；
-    # 整组 task-scoped helper（snapshot / monitor / samples / log）一并隔离。
+    # task_snapshot goes through paths.task_dir -> shares paths.TASKS_DIR;
+    # the whole set of task-scoped helpers (snapshot / monitor / samples / log) is isolated together.
     monkeypatch.setattr(_paths, "TASKS_DIR", tmp_path / "studio_data" / "tasks")
     return {"db": dbfile, "data": tmp_path / "studio_data"}
 
 
 # ---------------------------------------------------------------------------
-# 纯 module tests
+# pure module tests
 # ---------------------------------------------------------------------------
 
 
@@ -102,7 +102,7 @@ def test_read_snapshot_missing_returns_none(isolated) -> None:
 def test_read_snapshot_non_mapping_falls_back_to_empty(
     isolated, tmp_path: Path
 ) -> None:
-    """如果 yaml 不是 mapping（如纯字符串），config 字段应是 {}。"""
+    """If the yaml isn't a mapping (e.g. a plain string), the config field should be {}."""
     src = tmp_path / "weird.yaml"
     src.write_text("just_a_string\n", encoding="utf-8")
     task_snapshot.freeze_config(10, src)

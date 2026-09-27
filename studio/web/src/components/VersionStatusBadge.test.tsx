@@ -44,9 +44,10 @@ describe('VersionStatusBadge', () => {
     expect(container.querySelector('.badge')?.className).toContain('badge-neutral')
   })
 
-  // v12 — preparing 时显示 phase 后缀（项目卡片"准备中 · 标签编辑"）。
-  // 断言拼 i18n 值而不是字面量：这条测试此前写死的是 editing 阶段的旧文案
-  // （"打标"），文案改名后它就一直红着，而组件其实是对的。
+  // v12 - shows a phase suffix while preparing (project card "Preparing - Tag edit").
+  // Asserts against the composed i18n value rather than a literal: this test used to
+  // hardcode the editing phase's old copy ("Tagging"); once that copy was renamed it
+  // stayed red forever even though the component itself was correct.
   it('appends phase suffix when preparing', () => {
     const { container } = render(
       <VersionStatusBadge status="preparing" phase="editing" />
@@ -58,8 +59,8 @@ describe('VersionStatusBadge', () => {
 
   it('shows suffix for optional phases too (PR #265 review)', () => {
     const cases = [
-      ['preprocessing', '准备中 · 预处理'],
-      ['regularizing', '准备中 · 正则集'],
+      ['preprocessing', 'Preparing · Preprocess'],
+      ['regularizing', 'Preparing · Regularization'],
     ] as const
     for (const [phase, text] of cases) {
       const { container } = render(
@@ -73,6 +74,6 @@ describe('VersionStatusBadge', () => {
     const { container } = render(
       <VersionStatusBadge status="training" phase="editing" />
     )
-    expect(container.querySelector('.badge')?.textContent).toBe('训练中')
+    expect(container.querySelector('.badge')?.textContent).toBe('Training')
   })
 })

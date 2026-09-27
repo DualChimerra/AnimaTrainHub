@@ -151,8 +151,9 @@ class OrthoLoRALinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         org_forwarded = self.org_module(x)
-        # 用 torch RNG（而非 python random）：grad checkpoint 重算只恢复 torch
-        # RNG 状态，python random 会让重算分支与首次前向不一致 → recompute mismatch。
+        # Use torch RNG (not python random): grad-checkpoint recompute only restores the
+        # torch RNG state, so python random would make the recompute branch diverge from
+        # the original forward pass -> recompute mismatch.
         if self.module_dropout > 0.0 and self.training and bool(torch.rand(()) < self.module_dropout):
             return org_forwarded
 
@@ -229,7 +230,7 @@ class OrthoLoRAAdapter:
         self.rank_dropout = float(rank_dropout or 0.0)
         self.module_dropout = float(module_dropout or 0.0)
         self.use_timestep_mask = bool(use_timestep_mask)
-        # 族知识（target/exclude）由调用方注入，见 families/<fam>/preset.py
+        # Family knowledge (target/exclude) is injected by the caller; see families/<fam>/preset.py
         self._preset = preset
         self.tlora_min_rank = max(1, int(tlora_min_rank))
         self.tlora_alpha_rank_scale = max(0.0, float(tlora_alpha_rank_scale))
@@ -240,7 +241,7 @@ class OrthoLoRAAdapter:
 
     @contextmanager
     def disabled(self):
-        """临时把每层的 multiplier 置 0（DOP 的「无 LoRA」参照前向）。"""
+        """Temporarily set every layer's multiplier to 0 (DOP's "no-LoRA" reference forward pass)."""
         previous = [layer.multiplier for layer in self.loras]
         try:
             for layer in self.loras:
@@ -271,7 +272,7 @@ class OrthoLoRAAdapter:
             self.loras.append(layer)
 
         logger.info(
-            "注入 %s 到 %s 层（OrthoLoRA, save=baked LoRA）",
+            "Injected %s into %s layers (OrthoLoRA, save=baked LoRA)",
             "T-LORA+ORTHO" if self.use_timestep_mask else "ORTHO",
             len(self.loras),
         )
@@ -367,9 +368,10 @@ class OrthoLoRAAdapter:
 
         if projected_layers:
             logger.warning(
-                "OrthoLoRA: %s 层从 plain LoRA 投影恢复（仅取冻结 SVD 基上的对角分量，"
-                "旋转信息丢失）—— 这是近似续训，非完整恢复。无损断点续训请用训练 state "
-                "(.pt) 而非蒸馏后的 LoRA 文件。", projected_layers,
+                "OrthoLoRA: %s layers restored by projecting from plain LoRA (only the diagonal "
+                "component on the frozen SVD basis is recovered; rotation information is lost) -- "
+                "this is an approximate resume, not a full restore. For lossless checkpoint "
+                "resume, use the training state (.pt) rather than the distilled LoRA file.", projected_layers,
             )
 
         if strict and (missing or unexpected):
@@ -398,7 +400,7 @@ class OrthoLoRAAdapter:
             "ss_network_args": json.dumps(ss_args),
         }
         save_file(sd, str(path), metadata=meta)
-        logger.info("OrthoLoRA 保存到: %s (baked as plain LoRA)", path)
+        logger.info("OrthoLoRA saved to: %s (baked as plain LoRA)", path)
 
     def load(self, path: str | Path) -> None:
         sd: dict[str, torch.Tensor] = {}

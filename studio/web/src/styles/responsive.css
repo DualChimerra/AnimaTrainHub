@@ -1,6 +1,6 @@
-/* 单点窄屏优化 —— 项目当前不做系统级响应式（见
- * docs/architecture/studio-pipeline.md §11），需要时再单独加 className + 媒体查询。
- * 断点取 viewport 1280px（< laptop "中屏" 阈值），不用 container query。
+/* One-off narrow-screen tweaks -- the project doesn't do system-wide responsive design right now (see
+ * docs/architecture/studio-pipeline.md SS11); add a className + media query one at a time as needed.
+ * Breakpoint is viewport 1280px (below the laptop "mid-size screen" threshold); no container queries.
  */
 
 .banner-shell { padding: 16px 18px; }

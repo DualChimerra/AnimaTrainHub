@@ -1,9 +1,12 @@
-"""Tag-Recall metric runner —— 动漫原生的 prompt-following 替代 CLIP-T。
+"""Tag-Recall metric runner -- an anime-native prompt-following stand-in for CLIP-T.
 
-对每张生成图跑现有 WD14 tagger 回标，看 prompt 里的 booru tag 被召回多少：
-``recall = |生成图 tag ∩ prompt tag| / |prompt tag|``。只统计 WD14 词表里有的 tag
-（触发词、非 danbooru token 既无法被召回，也不计入分母），仅对 booru-tag 形态的
-caption 有意义。复用项目已下载的 WD14（零新模型），无参考图。
+Runs the existing WD14 tagger over each generated image and checks how many of
+the prompt's booru tags it recovers:
+``recall = |generated-image tags ∩ prompt tags| / |prompt tags|``. Only tags in
+the WD14 vocabulary are counted (trigger words and other non-danbooru tokens
+can't be recalled, and are excluded from the denominator too), so this is only
+meaningful for booru-tag-style captions. Reuses the project's already-downloaded
+WD14 (no new model), no reference image needed.
 """
 from __future__ import annotations
 
@@ -28,17 +31,18 @@ class EvalTagError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# tag 归一 + prompt 解析
+# tag normalization + prompt parsing
 # ---------------------------------------------------------------------------
 
 
 def _norm_tag(tag: str) -> str:
-    """归一键：下划线↔空格、大小写、首尾空格都不敏感（同 wd14 blacklist 口径）。"""
+    """Normalize a tag key: insensitive to underscore/space, case, and surrounding
+    whitespace (same convention as the wd14 blacklist)."""
     return tag.replace("_", " ").strip().lower()
 
 
 def parse_booru_tags(prompt: str | None) -> list[str]:
-    """逗号分隔的 caption → 去重归一的 tag 列表（保序）。"""
+    """Comma-separated caption -> deduplicated, normalized tag list (order preserved)."""
     if not prompt:
         return []
     out: list[str] = []
@@ -52,7 +56,7 @@ def parse_booru_tags(prompt: str | None) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# job lifecycle（与 eval_dino 同构）
+# job lifecycle (mirrors eval_dino's structure)
 # ---------------------------------------------------------------------------
 
 
@@ -141,7 +145,7 @@ def run_tag_job(
 
 
 # ---------------------------------------------------------------------------
-# helpers（与 eval_dino 同构，metric key = tag_recall）
+# helpers (mirrors eval_dino's structure, metric key = tag_recall)
 # ---------------------------------------------------------------------------
 
 
@@ -280,7 +284,7 @@ def _mean(values: list[float]) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# default scorer —— 复用 WD14 tagger
+# default scorer -- reuses the WD14 tagger
 # ---------------------------------------------------------------------------
 
 
@@ -302,7 +306,9 @@ def _default_scorer(
     tagger.prepare()
     known = {_norm_tag(t) for t in tagger.known_tags()}
 
-    # 只保留有「WD14 词表内 prompt tag」的样本（触发词等不在词表→不计分母）
+    # Keep only samples that have at least one prompt tag inside the WD14
+    # vocabulary (trigger words etc. that aren't in the vocabulary don't count
+    # toward the denominator)
     scored_items: list[tuple[dict[str, Any], set[str]]] = []
     for item in items:
         prompt_tags = {t for t in parse_booru_tags(item.get("prompt")) if t in known}

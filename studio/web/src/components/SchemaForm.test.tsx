@@ -33,8 +33,8 @@ vi.mock('react-i18next', () => ({
 
 const schema: SchemaResponse = {
   groups: [
-    { key: 'training', label: '训练' },
-    { key: 'timestep_sampling', label: '时间步采样' },
+    { key: 'training', label: 'Training' },
+    { key: 'timestep_sampling', label: 'Timestep Sampling' },
   ],
   schema: {
     properties: {
@@ -66,7 +66,7 @@ const schema: SchemaResponse = {
         enum: ['logit_normal', 'uniform'],
         default: 'logit_normal',
         group: 'timestep_sampling',
-        description: '后端普通说明',
+        description: 'Backend normal description',
         alt_description_when: 'infonoise_enabled==true',
         disable_when: 'infonoise_enabled==true',
         advanced: true,
@@ -206,10 +206,10 @@ describe('SchemaForm takeover behavior', () => {
 
 })
 
-// ─── option_show_when：enum 选项按 model_family 过滤（多模型 P4-2） ─────────
+// --- option_show_when: enum options filtered by model_family (multi-model P4-2) ---
 
 const gatedSchema: SchemaResponse = {
-  groups: [{ key: 'sample', label: '采样' }],
+  groups: [{ key: 'sample', label: 'Sampling' }],
   schema: {
     properties: {
       model_family: {
@@ -271,8 +271,9 @@ describe('SchemaForm option_show_when filtering', () => {
   })
 
   it('keeps the currently selected value visible even when gated out', () => {
-    // config 里存了越族值（如手改 yaml / 换族未迁移）：表单如实显示，
-    // 不凭空消失——拒绝该值是后端校验的职责
+    // config holds a value from another family (e.g. hand-edited yaml / family switch
+    // that wasn't migrated): the form shows it as-is instead of hiding it - rejecting
+    // the value is the backend validator's job
     render(
       <SchemaForm
         schema={gatedSchema}
@@ -285,8 +286,8 @@ describe('SchemaForm option_show_when filtering', () => {
   })
 })
 
-// ─── R6（D6）：setField 入口拦截 —— 有损联动改值先弹确认 ────────────────────
-// mock 的 t() 对未知 key 返回 raw key，RuleImpactDialog 的按钮/标题按 key 断言。
+// --- R6 (D6): the setField entrypoint intercepts lossy linked changes with a confirm first ---
+// The mocked t() returns the raw key for unknown keys; RuleImpactDialog's button/title assert on the key.
 
 describe('SchemaForm rule takeover confirm (R6)', () => {
   const base: ConfigData = {
@@ -300,9 +301,9 @@ describe('SchemaForm rule takeover confirm (R6)', () => {
   it('intercepts lossy takeover with a confirm dialog; apply commits all writes', () => {
     const onChange = vi.fn()
     render(<SchemaForm schema={schema} values={base} onChange={onChange} advancedMode />)
-    // 开 InfoNoise → timestep_sampling(uniform) 会被钉回 logit_normal = 有损
+    // enabling InfoNoise -> timestep_sampling(uniform) gets pinned back to logit_normal = lossy
     fireEvent.click(screen.getByRole('checkbox'))
-    expect(onChange).not.toHaveBeenCalled()  // 违反态不进表单 state
+    expect(onChange).not.toHaveBeenCalled()  // the violating state never enters form state
     expect(screen.getByText('ruleImpact.title')).toBeInTheDocument()
     fireEvent.click(screen.getByText('ruleImpact.ok'))
     expect(onChange).toHaveBeenCalledWith({
@@ -332,7 +333,7 @@ describe('SchemaForm rule takeover confirm (R6)', () => {
       />,
     )
     fireEvent.click(screen.getByRole('checkbox'))
-    // 无损（目标本来就在钉值上）→ 不弹窗直接提交
+    // lossless (the target is already at its pinned value) -> commits directly, no dialog
     expect(screen.queryByText('ruleImpact.title')).not.toBeInTheDocument()
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ infonoise_enabled: true }),
@@ -349,7 +350,7 @@ describe('SchemaForm rule takeover confirm (R6)', () => {
         Array.from((el as HTMLSelectElement).options).some((o) => o.value === 'adamw'),
       ) as HTMLSelectElement
     fireEvent.change(optimizerSelect, { target: { value: 'automagic' } })
-    // learning_rate 0.0001 > 1e-5 → advisory 改写 1e-6，有损 → 弹窗
+    // learning_rate 0.0001 > 1e-5 -> advisory rewrites it to 1e-6, lossy -> dialog
     expect(screen.getByText('ruleImpact.title')).toBeInTheDocument()
     fireEvent.click(screen.getByText('ruleImpact.ok'))
     expect(onChange).toHaveBeenCalledWith(

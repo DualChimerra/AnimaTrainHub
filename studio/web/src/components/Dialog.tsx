@@ -1,18 +1,22 @@
-// Dialog.tsx —— 命令式 confirm / prompt / alert,替代浏览器原生 window.* 三件套。
+// Dialog.tsx -- imperative confirm / prompt / alert, replacing the browser's
+// native window.* trio.
 //
-// 设计动机:浏览器原生对话框样式跟应用 UI 完全脱节(灰蒙蒙系统弹框),且无法
-// 支持自定义按钮文案 / 危险操作配色 / 输入校验。仓库里散落 20+ 处 confirm/
-// prompt/alert,这里集中成一个 Provider + hook 的命令式 API,call site 改动
-// 最小(`if (!confirm(...))` → `if (!await confirm(...))`)。
+// Design motivation: the browser's native dialog styling is completely
+// disconnected from the app UI (a dull gray system popup), and it can't
+// support custom button text / danger-action coloring / input validation. The
+// repo had 20+ scattered confirm/prompt/alert call sites; this centralizes them
+// into a single Provider + hook imperative API, with minimal call-site changes
+// (`if (!confirm(...))` -> `if (!await confirm(...))`).
 //
-// API 形态:
+// API shape:
 //   const { confirm, prompt, alert } = useDialog()
-//   const ok    = await confirm('删除版本 v1？', { tone: 'danger' })   // Promise<boolean>
-//   const name  = await prompt('新预设名称', { defaultValue, validate }) // Promise<string|null>
-//   await alert('JSON 解析失败', { tone: 'error' })
+//   const ok    = await confirm('Delete version v1?', { tone: 'danger' })   // Promise<boolean>
+//   const name  = await prompt('New preset name', { defaultValue, validate }) // Promise<string|null>
+//   await alert('Failed to parse JSON', { tone: 'error' })
 //
-// 不替代:已有的复杂表单对话框(NewVersionDialog 之类),那些有自定义字段/
-// 嵌入 SchemaForm,声明式 JSX 写更清楚,继续保留。
+// Not a replacement for: existing complex form dialogs (like NewVersionDialog)
+// that have custom fields / embed SchemaForm -- declarative JSX is clearer
+// there, so those stay as they are.
 import {
   createContext,
   useCallback,
@@ -23,27 +27,28 @@ import {
   type ReactNode,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { playSound } from '../lib/sound'
 
 export type DialogTone = 'default' | 'danger' | 'warn'
 
 export interface ConfirmOptions {
-  /** 决定确认按钮颜色:default=accent / danger=err 红 / warn=warn 橙 */
+  /** Decides the confirm button color: default=accent / danger=err red / warn=warn orange */
   tone?: DialogTone
   okText?: string
   cancelText?: string
-  /** 对话框标题(默认"确认操作") */
+  /** Dialog title (defaults to "Confirm action") */
   title?: string
 }
 
 export interface PromptOptions {
   defaultValue?: string
   placeholder?: string
-  /** 同步校验:返回 null = 通过,返回 string = 错误信息。每次输入立刻跑。 */
+  /** Synchronous validation: return null = passes, return string = error message. Runs on every keystroke. */
   validate?: (v: string) => string | null
   okText?: string
   cancelText?: string
   title?: string
-  /** 跟 ConfirmOptions 对齐 — 用于「输入后会做危险操作」的场景。 */
+  /** Mirrors ConfirmOptions -- for the "submitting this input triggers a dangerous action" case. */
   tone?: DialogTone
 }
 
@@ -108,8 +113,8 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     [],
   )
 
-  // 取消通用入口(ESC / 点遮罩 / 取消按钮):confirm → false, prompt → null,
-  // alert → 直接 resolve。
+  // Common cancel entry point (ESC / click backdrop / cancel button): confirm ->
+  // false, prompt -> null, alert -> resolves directly.
   const cancel = useCallback(() => {
     setState((cur) => {
       if (!cur) return null
@@ -130,7 +135,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  // ESC 关闭(等价取消)
+  // ESC closes (equivalent to cancel)
   useEffect(() => {
     if (!state) return
     const onKey = (e: KeyboardEvent) => {
@@ -161,10 +166,9 @@ export function useDialog(): DialogApi {
 
 // ────────────────────────────────────────────────────────────────────────────
 
-/** 确认键恒用全局 accent 主色（btn-primary）——tone 只影响语义/文案，不换按钮
- *  底色。此前 warn/danger 换成橙/红实心底，用户点名和全 app 惯用主色不一致。 */
-function toneButtonClass(_tone: DialogTone | undefined): string {
-  return 'btn btn-primary'
+/** The confirm button uses the primary color; the danger tone switches it to btn-danger. */
+function toneButtonClass(tone: DialogTone | undefined): string {
+  return tone === 'danger' ? 'btn btn-danger' : 'btn btn-primary'
 }
 
 interface RootProps {
@@ -175,15 +179,18 @@ interface RootProps {
 
 function DialogRoot({ state, onCancel, onOk }: RootProps) {
   const { t } = useTranslation()
-  // input value 用 ref 而非 state,避免每次按键触发 DialogRoot rerender。
-  // 错误信息走 state,因为要触发 re-render。
+  // input value uses a ref rather than state, to avoid triggering a DialogRoot
+  // rerender on every keystroke. The error message uses state since it needs to
+  // trigger a re-render.
   const [inputValue, setInputValue] = useState(
     state.type === 'prompt' ? (state.options.defaultValue ?? '') : '',
   )
   const [error, setError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
-  // Prompt 自动 focus + select 默认值,方便用户改名
+  useEffect(() => { playSound('open') }, [])
+
+  // Prompt auto-focuses + selects the default value, so users can rename it easily
   useEffect(() => {
     if (state.type === 'prompt') {
       requestAnimationFrame(() => {
@@ -223,15 +230,15 @@ function DialogRoot({ state, onCancel, onOk }: RootProps) {
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-950/40 backdrop-blur-[2px]"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-950/40 backdrop-blur-[2px] ds-backdrop-anim"
       onMouseDown={(e) => {
-        // 只在点击在背景上时关 — 点 form 内部 mouseDown 不触发
+        // Only close on a click on the backdrop itself -- a mouseDown inside the form doesn't fire this
         if (e.target === e.currentTarget) onCancel()
       }}
     >
       <form
         onSubmit={handleSubmit}
-        className="bg-elevated border border-subtle rounded-2xl w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl"
+        className="bg-elevated border border-subtle rounded-2xl w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl ds-dialog-anim"
       >
         <h2 className="m-0 text-lg font-semibold text-fg-primary">{title}</h2>
 
@@ -240,7 +247,7 @@ function DialogRoot({ state, onCancel, onOk }: RootProps) {
             <span className="text-sm text-fg-secondary">{state.label}</span>
             <input
               ref={inputRef}
-              className="input input-mono font-mono"
+              className="input"
               value={inputValue}
               placeholder={state.options.placeholder}
               onChange={(e) => {
@@ -258,8 +265,9 @@ function DialogRoot({ state, onCancel, onOk }: RootProps) {
           </p>
         )}
 
-        {/* min-w-[96px] + justify-center：两键等宽（96px 盖住 4 字 okText 的自然宽
-            ~90px，「取消」不再比「取消计划」窄一截）。 */}
+        {/* min-w-[96px] + justify-center: both buttons stay the same width (96px
+            covers the natural ~90px width of a 4-character okText, so "Cancel"
+            no longer looks narrower than "Cancel plan"). */}
         <div className="flex gap-2 justify-end mt-1">
           {state.type !== 'alert' && (
             <button

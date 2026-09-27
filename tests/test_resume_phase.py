@@ -36,7 +36,7 @@ def _ctx(tmp_path: Path, *, sample_every: int, sample_steps: int = 0):
 
 
 def test_resume_phase_runs_startup_baseline_at_step0(tmp_path, monkeypatch):
-    """周期采样开启时，新训练（global_step == 0）跑 step 0 baseline 采样。"""
+    """When periodic sampling is enabled, a fresh run (global_step == 0) runs the step 0 baseline sample."""
     pytest.importorskip("torch")
     from training.phases import resume
 
@@ -54,7 +54,7 @@ def test_resume_phase_runs_startup_baseline_at_step0(tmp_path, monkeypatch):
 
 
 def test_resume_phase_skips_baseline_when_sampling_disabled(tmp_path, monkeypatch):
-    """sample_every / sample_steps 都为 0（周期采样禁用）时不跑 baseline。"""
+    """No baseline sample when sample_every / sample_steps are both 0 (periodic sampling disabled)."""
     pytest.importorskip("torch")
     from training.phases import resume
 

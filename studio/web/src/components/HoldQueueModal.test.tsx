@@ -1,12 +1,12 @@
 /**
- * HoldQueueModal 单元测试（ADR 0006 PR-4 §4.4）。
+ * HoldQueueModal unit tests (ADR 0006 PR-4 4.4).
  *
- * 验证：
- *   - 无 running task → 简单确认 modal，无 radio
- *   - 有 running task → 渲染 radio + 默认 "让它跑完"
- *   - 主按钮文案随 radio 联动
- *   - confirm 回调按 radio 选项分发 hold-only vs hold-and-pause
- *   - cancel 回调
+ * Verifies:
+ *   - no running task -> simple confirm modal, no radio
+ *   - running task -> renders radio, defaulting to "let it finish"
+ *   - main button text tracks the radio selection
+ *   - confirm callback dispatches hold-only vs hold-and-pause based on the radio choice
+ *   - cancel callback
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -64,7 +64,7 @@ describe('HoldQueueModal', () => {
     expect(pauseToo.checked).toBe(false)
   })
 
-  it('confirm with let-run selected → hold-only decision', () => {
+  it('confirm with let-run selected -> hold-only decision', () => {
     const onConfirm = vi.fn()
     render(
       <HoldQueueModal runningTask={mkTask()} onCancel={vi.fn()} onConfirm={onConfirm} />,
@@ -73,7 +73,7 @@ describe('HoldQueueModal', () => {
     expect(onConfirm).toHaveBeenCalledWith({ kind: 'hold-only' })
   })
 
-  it('confirm with pause-too selected → hold-and-pause with task id', () => {
+  it('confirm with pause-too selected -> hold-and-pause with task id', () => {
     const onConfirm = vi.fn()
     render(
       <HoldQueueModal runningTask={mkTask({ id: 7 })} onCancel={vi.fn()} onConfirm={onConfirm} />,
@@ -97,7 +97,7 @@ describe('HoldQueueModal', () => {
       <HoldQueueModal runningTask={mkTask({ id: 9 })} onCancel={vi.fn()} onConfirm={vi.fn()} />,
     )
     const btn = screen.getByTestId('hold-confirm-btn')
-    // 默认 let-run → confirmLetRun
+    // default let-run -> confirmLetRun
     expect(btn.textContent).toContain('confirmLetRun')
     fireEvent.click(screen.getByTestId('hold-opt-pause-too'))
     expect(btn.textContent).toContain('confirmPauseToo')

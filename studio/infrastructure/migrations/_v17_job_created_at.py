@@ -1,10 +1,12 @@
-"""v15 → v16: project_jobs 加 created_at（0.17 P-G 数据作业详情页）。
+"""v15 -> v16: adds created_at to project_jobs (0.17 P-G data-job detail page).
 
-project_jobs 从建表起只有 started_at / finished_at，入队时间从未记录——
-数据作业详情页要显示「入队时间」（对齐 task detail 的 summary）。
+project_jobs has only had started_at / finished_at since the table was created; enqueue time
+was never recorded -- the data-job detail page needs to show "enqueued at" (to match the task
+detail summary).
 
-NULLABLE，不 backfill：老作业入队时刻已不可考（started_at 只能证明"何时
-开始跑"），UI 对 NULL 显示「—」。新作业由 create_job 写入。
+NULLABLE, no backfill: the enqueue moment for old jobs is simply unknowable (started_at only
+proves "when it started running"); the UI shows "--" for NULL. New jobs get it written by
+create_job.
 """
 from __future__ import annotations
 

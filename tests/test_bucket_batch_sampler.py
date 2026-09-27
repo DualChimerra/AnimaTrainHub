@@ -1,8 +1,11 @@
-"""ARB BucketBatchSampler 回归：桶尾零头不丢图 + __len__ 按桶算。
+"""ARB BucketBatchSampler regression: no images dropped from a bucket's short tail,
+and __len__ computed per bucket.
 
-旧默认 drop_last=True 写死 → 桶 size < batch_size 时整桶被丢（单图奇形比例图永远训不到）；
-__len__ 用全局 n/bs，没按桶各自零头算 → steps_per_epoch / total_steps / scheduler 都偏。
-对齐 kohya sd-scripts / ostris ai-toolkit 的「短 batch 不丢」语义。
+The old hardcoded drop_last=True default dropped an entire bucket whenever its size
+was smaller than batch_size (an image with a unique aspect ratio would then never be
+trained on); __len__ used the global n/bs instead of accounting for each bucket's own
+remainder, skewing steps_per_epoch / total_steps / the scheduler. This aligns with the
+"short batches aren't dropped" semantics of kohya sd-scripts / ostris ai-toolkit.
 """
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ from training.dataset import BucketBatchSampler
 
 
 class _MockBucketedDataset:
-    """模拟 CachedLatentDataset：暴露 bucket_for_index 给 BucketBatchSampler 走桶分支。"""
+    """Simulates CachedLatentDataset: exposes bucket_for_index so BucketBatchSampler takes the bucketed path."""
     def __init__(self, bucket_for_index):
         self.bucket_for_index = list(bucket_for_index)
 
@@ -30,7 +33,7 @@ def test_small_bucket_yields_short_batch_when_drop_last_false():
 
 
 def test_small_bucket_dropped_when_drop_last_true():
-    """记录历史行为：drop_last=True 时单图桶被整桶丢（回归保护，防误改默认）。"""
+    """Documents the historical behavior: with drop_last=True a single-image bucket is dropped entirely (regression guard against accidentally changing the default)."""
     bucket_for_index = [(1, 1), (2, 2), (2, 2)]
     ds = _MockBucketedDataset(bucket_for_index)
     sampler = BucketBatchSampler(ds, batch_size=2, drop_last=True, shuffle=False)

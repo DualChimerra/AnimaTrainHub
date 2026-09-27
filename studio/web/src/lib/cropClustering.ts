@@ -1,4 +1,4 @@
-/** 1-D k-means on aspect ratios for the crop "智能聚类" mode.
+/** 1-D k-means on aspect ratios for the crop "smart clustering" mode.
  *
  *  Why client-side: AR values are tiny (one float per image), and the
  *  algorithm runs in <10ms for thousands of images. Going through a backend
@@ -230,7 +230,7 @@ export function clusterByAspectRatio(
 
   // For each cluster center, snap to the trainer's bucket grid (internal —
   // drives the actual crop AR so we don't get a second resize at train time)
-  // AND compute a pretty AR for the user-facing label (e.g. "聚类 3:2").
+  // AND compute a pretty AR for the user-facing label (e.g. "Cluster 3:2").
   const trainBuckets = defaultBuckets()
   const clusterTargets = centers.map((c) => {
     const bucket = snapToBucket(c, trainBuckets)

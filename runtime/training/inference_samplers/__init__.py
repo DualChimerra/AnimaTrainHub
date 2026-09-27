@@ -1,14 +1,15 @@
-"""Inference sampler plugin registry（ADR 0003 PR-C）。
+"""Inference sampler plugin registry (ADR 0003 PR-C).
 
-加新 sampler（Euler / Heun / DPM++2M / DDIM / unipc）的步骤：
-1. 写 training/inference_samplers/{variant}.py 含 `sample(denoise_fn, x, sigmas, **kw)`
-2. 本文件 BUILDERS 字典加一行
-3. （可选）改 studio/schema.py 的 sample_sampler_name 加 Literal 校验
+Steps to add a new sampler (Euler / Heun / DPM++2M / DDIM / unipc):
+1. Write training/inference_samplers/{variant}.py containing `sample(denoise_fn, x, sigmas, **kw)`
+2. Add one line to the BUILDERS dict in this file
+3. (Optional) Update sample_sampler_name in studio/schema.py to add Literal validation
 
-详见 ADR 0003 "Case 8: Euler / DPM++2M"。
+See ADR 0003 "Case 8: Euler / DPM++2M" for details.
 
-注：sample_sampler_name 在 schema 里是 str 不是 Literal，未注册名会回退到
-sampling.py 里 inline 的简化 Euler ODE 路径（保持原 main() 行为）。
+Note: sample_sampler_name is a str in the schema, not a Literal — an unregistered
+name falls back to the simplified inline Euler ODE path in sampling.py (preserving
+the original main() behavior).
 """
 
 from __future__ import annotations
@@ -27,5 +28,5 @@ BUILDERS: dict[str, Callable] = {
 
 
 def build_inference_sampler(name: str) -> Callable:
-    """按 name 取 sampler fn；未注册返回 None（caller 应走 fallback）。"""
+    """Look up the sampler fn by name; returns None if unregistered (caller should fall back)."""
     return BUILDERS.get(str(name).lower().strip())

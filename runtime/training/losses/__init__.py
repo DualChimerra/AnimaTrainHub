@@ -1,16 +1,19 @@
-"""训练 loss plugin registry（ADR 0003 PR-C 模式）。
+"""Training loss plugin registry (ADR 0003 PR-C pattern).
 
-`build_loss(args) -> LossProtocol` 按 args.loss_type 派发到具体 loss：
-- mse    — F.mse_loss 包装（默认，与历史行为字节级一致）
-- huber  — Huber loss with constant delta（EDM/Karras 标准做法）
+`build_loss(args) -> LossProtocol` dispatches to a specific loss based on
+args.loss_type:
+- mse    -- wraps F.mse_loss (default, byte-identical to legacy behavior)
+- huber  -- Huber loss with constant delta (standard EDM/Karras approach)
 
-加新 loss 步骤：
-1. 写 training/losses/{name}.py 含 `build(args) -> LossProtocol`
-2. 本文件 BUILDERS 字典加一行
-3. studio/schema.py 的 `loss_type: Literal[...]` 加值 + 该 loss 专属字段
-4. 完。phases/optimizer.py / loop.py / TrainingContext 0 改动。
+Steps to add a new loss:
+1. Write training/losses/{name}.py containing `build(args) -> LossProtocol`
+2. Add one line to the BUILDERS dict in this file
+3. Add the value to `loss_type: Literal[...]` in studio/schema.py, plus any
+   fields specific to that loss
+4. Done. No changes needed to phases/optimizer.py / loop.py / TrainingContext.
 
-删 loss：逆操作，3 步删完；`validate_schema_consistency()` 保不漏。
+Removing a loss: reverse the above, 3 steps and done;
+`validate_schema_consistency()` guards against missing one.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ from training.losses.protocol import LossProtocol
 __all__ = ["LossProtocol", "BUILDERS", "build_loss", "validate_schema_consistency"]
 
 
-# 单一 truth source：所有 loss 工厂的注册表
+# Single source of truth: the registry of all loss factories
 BUILDERS: dict[str, Callable[..., LossProtocol]] = {
     "mse": mse.build,
     "huber": huber.build,
@@ -31,19 +34,20 @@ BUILDERS: dict[str, Callable[..., LossProtocol]] = {
 
 
 def build_loss(args) -> LossProtocol:
-    """按 args.loss_type 派发到对应 build()。"""
+    """Dispatch to the corresponding build() based on args.loss_type."""
     loss_type = (getattr(args, "loss_type", "mse") or "mse").lower()
     if loss_type not in BUILDERS:
         raise ValueError(
-            f"未知 loss_type={loss_type!r}；已注册: {sorted(BUILDERS)}"
+            f"Unknown loss_type={loss_type!r}; registered: {sorted(BUILDERS)}"
         )
     return BUILDERS[loss_type](args)
 
 
 def validate_schema_consistency() -> None:
-    """启动期校验：TrainingConfig.loss_type Literal 集合 == BUILDERS keys。
+    """Startup-time check: TrainingConfig.loss_type's Literal set == BUILDERS keys.
 
-    失配通常意味着加了新 loss 但漏改了一处（schema 或 registry）。早 fail 早修。
+    A mismatch usually means a new loss was added but one spot (schema or
+    registry) was missed. Fail early to fix it early.
     """
     from studio.schema import TrainingConfig
 
@@ -52,7 +56,7 @@ def validate_schema_consistency() -> None:
     registered = set(BUILDERS)
     if schema_options != registered:
         raise RuntimeError(
-            f"loss 注册与 schema 不同步：\n"
-            f"  schema 有但未注册: {schema_options - registered}\n"
-            f"  注册但 schema 没列: {registered - schema_options}"
+            f"loss registry out of sync with schema:\n"
+            f"  in schema but not registered: {schema_options - registered}\n"
+            f"  registered but not listed in schema: {registered - schema_options}"
         )

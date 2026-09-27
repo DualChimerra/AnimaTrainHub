@@ -1,9 +1,10 @@
-"""ER-SDE-Solver-3 在 CONST(flow) 噪声日程下的实现。
+"""ER-SDE-Solver-3 implementation under the CONST (flow) noise schedule.
 
-抽自原 training/sampling.py 的 _sample_er_sde_const_x0（ADR 0003 PR-C 把它
-移到 inference_samplers/ plugin 子包）。
+Extracted from the original _sample_er_sde_const_x0 in training/sampling.py
+(ADR 0003 PR-C moved it into the inference_samplers/ plugin subpackage).
 
-参考 ComfyUI 的 k_diffusion_sampling.sample_er_sde（删去 model_patcher 依赖）。
+Based on ComfyUI's k_diffusion_sampling.sample_er_sde (with the model_patcher
+dependency stripped out).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import torch
 
 
 def _default_noise_sampler(x: torch.Tensor, seed: Optional[int]):
-    """参考 ComfyUI k_diffusion_sampling.default_noise_sampler"""
+    """Based on ComfyUI's k_diffusion_sampling.default_noise_sampler"""
     if seed is not None:
         if x.device.type == "cpu":
             seed = int(seed) + 1
@@ -30,9 +31,9 @@ def _default_noise_sampler(x: torch.Tensor, seed: Optional[int]):
 
 
 def _offset_first_sigma_for_snr(sigmas: torch.Tensor, shift: float = 3.0) -> torch.Tensor:
-    """对齐 ComfyUI offset_first_sigma_for_snr（CONST）：σ_0 ≥ 1 时替换为
-    percent_to_sigma(1e-4) = time_snr_shift(shift, 1 - 1e-4)，避免 logSNR 爆
-    inf 导致 er_lambda 溢出 → noise_scaler NaN。"""
+    """Aligned with ComfyUI's offset_first_sigma_for_snr (CONST): when sigma_0 >= 1,
+    replace it with percent_to_sigma(1e-4) = time_snr_shift(shift, 1 - 1e-4), to
+    avoid logSNR blowing up to inf, which would overflow er_lambda -> noise_scaler NaN."""
     if sigmas.numel() <= 1:
         return sigmas
     if float(sigmas[0]) >= 1.0:
@@ -54,12 +55,14 @@ def sample(
     shift: float = 3.0,
     step_callback=None,
 ) -> torch.Tensor:
-    """ER-SDE-3 stochastic sampler。
+    """ER-SDE-3 stochastic sampler.
 
-    step_callback：可选钩子（daemon 中间步预览用）。签名
-        callback(step:int, total:int, denoised:torch.Tensor) → None。每步算
-        完 x0 估计调一次；同步阻塞返回 —— 调用方应做轻量解码 + 异步 push，
-        不在 callback 内阻塞。默认 None 时行为完全等价旧版。
+    step_callback: an optional hook (used for daemon mid-step previews).
+        Signature: callback(step:int, total:int, denoised:torch.Tensor) -> None.
+        Called once per step after the x0 estimate is computed; it returns
+        synchronously/blocking, so the caller should do lightweight decoding +
+        async push and not block inside the callback. Behavior is identical to
+        the previous version when this is None (the default).
     """
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     if sigmas.numel() <= 1:
@@ -67,11 +70,13 @@ def sample(
 
     noise_sampler = _default_noise_sampler(x, seed=seed)
 
-    # 对齐 ComfyUI：先 offset σ_0（≥1 → ~0.9997），再算 half-log-SNR。直接 clamp
-    # 到 1-1e-12 会让 er_lambda≈1e12 → noise_scaler exp 溢出 NaN。
+    # Aligned with ComfyUI: first offset sigma_0 (>= 1 -> ~0.9997), then compute
+    # half-log-SNR. Clamping straight to 1-1e-12 would make er_lambda≈1e12,
+    # overflowing noise_scaler's exp into NaN.
     sigmas = _offset_first_sigma_for_snr(sigmas, shift=shift)
-    # CONST: half_log_snr = log((1 - t) / t) = -logit(t)。末尾 0 留给下方
-    # sigmas[i+1]==0 分支处理，这里只 clamp 下界避免 log(0)。
+    # CONST: half_log_snr = log((1 - t) / t) = -logit(t). The trailing 0 is
+    # handled by the sigmas[i+1]==0 branch below; here we only clamp the
+    # lower bound to avoid log(0).
     eps = 1e-12
     t = sigmas.clamp(min=eps, max=1.0 - eps)
     half_log_snrs = torch.log((1 - t) / t)
@@ -96,7 +101,7 @@ def sample(
             try:
                 step_callback(i, len(sigmas) - 1, denoised)
             except Exception:
-                pass  # 预览失败不该影响采样
+                pass  # a preview failure shouldn't affect sampling
 
         stage_used = min(int(max_stage), i + 1)
         if sigmas[i + 1] == 0:

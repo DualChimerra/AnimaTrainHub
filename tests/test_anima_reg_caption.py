@@ -1,14 +1,18 @@
-"""anima_reg_ai 的 JSON caption filter + sidecar 重写单测（PR #185 follow-up）。
+"""Unit tests for anima_reg_ai's JSON caption filter + sidecar rewrite (PR #185
+follow-up).
 
-校验 _rewrite_json_caption_for_prompt 走 normalize_caption_json + 单层过滤后：
-- meta.trigger 永远从 reg sidecar + prompt 里去掉（base prior 不带 LoRA handle）
-- excluded_tags 在 space/underscore 两种形态下都能命中
-- documented_full / 简化 shape 全部折叠成标准 shape 写回（reg 是派生产物）
-- scalar 字段含逗号时按单 tag 过 excluded
-- nl 自然语言保留到 prompt 末尾
-- _clear_reg_dir 复用自 reg_builder.clear_reg_dir（不再本地复刻）
+Verifies that after _rewrite_json_caption_for_prompt goes through
+normalize_caption_json + single-pass filtering:
+- meta.trigger is always dropped from both the reg sidecar + prompt (the base prior
+  doesn't carry a LoRA handle)
+- excluded_tags matches in both space/underscore forms
+- documented_full / simplified shapes all collapse to the standard shape when written
+  back (reg is a derived artifact)
+- scalar fields containing commas are filtered per-tag against excluded
+- nl natural language is preserved at the end of the prompt
+- _clear_reg_dir is reused from reg_builder.clear_reg_dir (no longer duplicated locally)
 
-不跑 GPU，不触发 anima_train 真 import — top-level stub。
+Does not run on GPU, does not trigger a real anima_train import -- top-level stub.
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ import pytest
 
 @pytest.fixture(scope="module")
 def reg_module():
-    """import runtime.anima_reg_ai 一次复用，stub 掉 anima_train 重依赖。"""
+    """import runtime.anima_reg_ai once and reuse it, stubbing out anima_train's heavy deps."""
     if "anima_train" not in sys.modules or not hasattr(sys.modules["anima_train"], "sample_image"):
         at = types.ModuleType("anima_train")
         at.sample_image = lambda *a, **k: None
@@ -51,7 +55,7 @@ def _read(p: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# trigger 不进 reg
+# trigger never enters reg
 # ---------------------------------------------------------------------------
 
 def test_drops_meta_trigger_from_prompt_and_sidecar(reg_module, tmp_path: Path) -> None:
@@ -81,14 +85,14 @@ def test_drops_trigger_even_when_other_meta_kept(reg_module, tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# excluded space / underscore 等价
+# excluded space / underscore equivalence
 # ---------------------------------------------------------------------------
 
 def test_excluded_underscore_matches_space_form(reg_module, tmp_path: Path) -> None:
     src = _write(tmp_path, {
         "tags": {"appearance": ["brown hair", "blue eyes"]},
     })
-    # excluded_tags 传 underscore，命中 JSON 里的 space 形态
+    # excluded_tags is passed as underscore, matches the space form in the JSON
     excluded = {reg_module._tag_key("brown_hair")}
     prompt = reg_module._rewrite_json_caption_for_prompt(src, excluded)
     assert "brown hair" not in prompt
@@ -102,13 +106,13 @@ def test_excluded_space_matches_underscore_form(reg_module, tmp_path: Path) -> N
     excluded = {reg_module._tag_key("brown hair")}
     prompt = reg_module._rewrite_json_caption_for_prompt(src, excluded)
     assert "brown" not in prompt or "hair" not in prompt
-    # blue_eyes 经 normalize 会被 split_tags 收敛到 "blue_eyes" 一项；
-    # 取一个轻断言：另一个 tag 仍在
+    # blue_eyes gets collapsed by split_tags during normalize into a single
+    # "blue_eyes" entry; use a light assertion here: the other tag is still present
     assert "blue" in prompt
 
 
 # ---------------------------------------------------------------------------
-# shape 折叠：documented_full → standard
+# shape folding: documented_full -> standard
 # ---------------------------------------------------------------------------
 
 def test_documented_full_shape_folds_to_standard_on_disk(reg_module, tmp_path: Path) -> None:
@@ -127,14 +131,15 @@ def test_documented_full_shape_folds_to_standard_on_disk(reg_module, tmp_path: P
     prompt = reg_module._rewrite_json_caption_for_prompt(src, set())
     on_disk = _read(src)
 
-    # 落盘 shape：标准 shape，原 fixed/character/ai_output/from_path 顶层 key 全没了
+    # On-disk shape: standard shape, the original fixed/character/ai_output/from_path
+    # top-level keys are all gone
     assert isinstance(on_disk.get("tags"), dict)
     assert "fixed" not in on_disk
     assert "ai_output" not in on_disk
     assert "from_path" not in on_disk
-    assert "character" not in on_disk  # character 折到 tags.character
+    assert "character" not in on_disk  # character folds into tags.character
 
-    # prompt：character 折成 full、appearance / tags 合并 from_path 部分、nl 接在末尾
+    # prompt: character folds to full, appearance / tags merge the from_path part, nl appended at the end
     assert "misaka mikoto" in prompt.lower()
     assert "brown hair" in prompt
     assert "smile" in prompt
@@ -153,16 +158,17 @@ def test_simplified_tags_list_top_level_shape(reg_module, tmp_path: Path) -> Non
     assert "1girl" in prompt
     assert "brown hair" in prompt
     on_disk = _read(src)
-    assert isinstance(on_disk["tags"], dict)  # 折成标准 shape
+    assert isinstance(on_disk["tags"], dict)  # folded into the standard shape
     assert "1girl" in on_disk["tags"]["tags"]
 
 
 # ---------------------------------------------------------------------------
-# character / scalar 字段
+# character / scalar fields
 # ---------------------------------------------------------------------------
 
 def test_character_dict_full_name_excluded_drops_character(reg_module, tmp_path: Path) -> None:
-    """character 是 dict 形态时折叠到 full 字符串，excluded 命中 full 名直接清空。"""
+    """When character is dict-shaped it folds into a full string; excluded matching
+    the full name clears it entirely."""
     src = _write(tmp_path, {
         "fixed": {"quality": "best quality"},
         "character": {"name": "Misaka", "variant": "", "full": "Misaka Mikoto"},
@@ -175,7 +181,7 @@ def test_character_dict_full_name_excluded_drops_character(reg_module, tmp_path:
 
 
 def test_scalar_field_with_comma_per_tag_exclude(reg_module, tmp_path: Path) -> None:
-    """count="1girl, 1boy" 里 exclude="1boy" 只删 1boy 一个 token。"""
+    """In count="1girl, 1boy", exclude="1boy" only removes the 1boy token."""
     src = _write(tmp_path, {
         "tags": {"count": "1girl, 1boy", "appearance": []},
     })
@@ -189,7 +195,7 @@ def test_scalar_field_with_comma_per_tag_exclude(reg_module, tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# nl 自然语言保留
+# nl natural language preservation
 # ---------------------------------------------------------------------------
 
 def test_nl_preserved_at_prompt_tail(reg_module, tmp_path: Path) -> None:
@@ -205,18 +211,19 @@ def test_nl_preserved_at_prompt_tail(reg_module, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 复用：clear_reg_dir 来自 reg_builder
+# reuse: clear_reg_dir comes from reg_builder
 # ---------------------------------------------------------------------------
 
 def test_clear_reg_dir_is_reused_from_reg_builder(reg_module) -> None:
     from studio.services.reg.builder import clear_reg_dir as upstream
     assert reg_module.clear_reg_dir is upstream
-    # 同时确认本地不再定义私有复制
+    # Also confirm there's no more local private copy defined
     assert not hasattr(reg_module, "_clear_reg_dir")
 
 
 # ---------------------------------------------------------------------------
-# txt 路径不退化：单 .txt caption 仍按 space-form 写回，trigger 由 .txt 内容决定
+# txt path unchanged: a plain .txt caption is still written back in space-form,
+# trigger is determined by the .txt content
 # ---------------------------------------------------------------------------
 
 def test_txt_caption_path_unchanged(reg_module, tmp_path: Path) -> None:
@@ -224,7 +231,7 @@ def test_txt_caption_path_unchanged(reg_module, tmp_path: Path) -> None:
     src.write_text("brown_hair, blue eyes, 1girl", encoding="utf-8")
     excluded = {reg_module._tag_key("1girl")}
     prompt = reg_module._rewrite_caption_for_prompt(src, excluded)
-    assert "brown hair" in prompt  # underscore → space 归一
+    assert "brown hair" in prompt  # underscore -> space normalization
     assert "blue eyes" in prompt
     assert "1girl" not in prompt
     on_disk = src.read_text(encoding="utf-8")
@@ -232,13 +239,15 @@ def test_txt_caption_path_unchanged(reg_module, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _scan_train：mask sidecar 不算训练图
+# _scan_train: mask sidecar does not count as a training image
 # ---------------------------------------------------------------------------
 
 def test_scan_train_ignores_mask_sidecar(reg_module, tmp_path: Path) -> None:
-    """{stem}.mask sidecar 后缀不在 IMAGE_EXTS —— 递归扫描天然不命中，
-    不会把 mask 计入生成清单（曾有 bug：老 masks/ 目录布局下 mask 被当
-    训练图 → 生成总数虚高、删图后重新生成数量不降）。"""
+    """The {stem}.mask sidecar extension is not in IMAGE_EXTS -- the recursive scan
+    naturally skips it, so masks are never counted toward the generation manifest
+    (there was previously a bug: under the old masks/ directory layout, masks were
+    treated as training images -> inflated generation totals, and counts wouldn't
+    drop after deleting images and regenerating)."""
     train = tmp_path / "train"
     (train / "1_data").mkdir(parents=True)
     (train / "1_data" / "a.png").write_bytes(b"png")

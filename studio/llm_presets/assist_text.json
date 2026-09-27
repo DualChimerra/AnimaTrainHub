@@ -1,6 +1,6 @@
 {
   "id": "assist_text",
-  "label": "本地 tagger 辅助 · 文本",
+  "label": "Local tagger assist · Text",
   "builtin": true,
   "output_format": "text",
   "assist_tagger": "wd14",

@@ -1,4 +1,4 @@
-"""services/system_stats.py — 采集 + NVML 优雅降级 + SSE sampler 线程。"""
+"""services/system_stats.py -- collection + graceful NVML degradation + SSE sampler thread."""
 from __future__ import annotations
 
 import sys
@@ -12,13 +12,13 @@ from studio.services import system_stats
 
 
 def test_collect_stats_returns_sane_basic():
-    """实环境采集：CPU/RAM 范围合理，结构完整。"""
+    """Real-environment collection: CPU/RAM ranges are sane, structure is complete."""
     stats = system_stats.collect_stats()
     assert 0.0 <= stats.cpu_pct <= 100.0
     assert stats.ram_used_gb >= 0.0
     assert stats.ram_total_gb > 0.0
     assert stats.ram_used_gb <= stats.ram_total_gb
-    # gpu 字段在 CI 环境通常是 None；本地有卡时是 list[GpuStats]
+    # the gpu field is usually None in CI; it's a list[GpuStats] locally when a card is present
 
 
 def test_stats_to_json_no_gpu():
@@ -48,7 +48,7 @@ def test_stats_to_json_with_gpu():
 
 
 def test_nvml_init_failure_returns_none(monkeypatch: pytest.MonkeyPatch):
-    """模拟 nvmlInit 抛错：collect_gpu 永久返回 None。"""
+    """Simulate nvmlInit raising: collect_gpu permanently returns None."""
     monkeypatch.setattr(
         system_stats, "_nvml_state", {"inited": False, "ok": False},
     )
@@ -61,12 +61,12 @@ def test_nvml_init_failure_returns_none(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "pynvml", fake)
 
     assert system_stats._collect_gpu() is None
-    # 第二次调用走缓存，仍是 None；不应再次抛错
+    # the second call hits the cache and is still None; it should not raise again
     assert system_stats._collect_gpu() is None
 
 
 def test_nvml_zero_devices_returns_empty_list(monkeypatch: pytest.MonkeyPatch):
-    """NVML 可用但没卡：返回 [] (前端跟 None 一样隐藏 GPU pill)。"""
+    """NVML available but no card: returns [] (frontend hides the GPU pill the same as for None)."""
     monkeypatch.setattr(
         system_stats, "_nvml_state", {"inited": True, "ok": True},
     )
@@ -78,7 +78,7 @@ def test_nvml_zero_devices_returns_empty_list(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_nvml_one_fake_gpu(monkeypatch: pytest.MonkeyPatch):
-    """单张 mock 卡：字段按预期映射。"""
+    """A single mock card: fields map as expected."""
     monkeypatch.setattr(
         system_stats, "_nvml_state", {"inited": True, "ok": True},
     )
@@ -112,7 +112,7 @@ def test_nvml_one_fake_gpu(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_sampler_emits_payloads(monkeypatch: pytest.MonkeyPatch):
-    """SystemStatsSampler 启动后会定期 callback；stop() 干净退出。"""
+    """SystemStatsSampler calls back periodically once started; stop() exits cleanly."""
     samples: list[dict] = []
     event = threading.Event()
 
@@ -134,7 +134,7 @@ def test_sampler_emits_payloads(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_sampler_swallows_collection_errors(monkeypatch: pytest.MonkeyPatch):
-    """采集抛错时 sampler 不应崩溃，继续下一轮。"""
+    """The sampler should not crash when collection raises; it continues to the next round."""
     fail_count = [0]
     samples: list[dict] = []
 
@@ -157,13 +157,13 @@ def test_sampler_swallows_collection_errors(monkeypatch: pytest.MonkeyPatch):
     finally:
         sampler.stop()
 
-    # 第一次 collect 抛错被吞，第二次成功 → samples >= 1
+    # the first collect raises and is swallowed, the second succeeds -> samples >= 1
     assert fail_count[0] >= 2
     assert len(samples) >= 1
 
 
 def test_nvml_temp_failure_keeps_other_fields(monkeypatch: pytest.MonkeyPatch):
-    """部分指标 (温度) 抛错时不应让整张卡丢失。"""
+    """A raise from a partial metric (temperature) should not drop the whole card."""
     monkeypatch.setattr(
         system_stats, "_nvml_state", {"inited": True, "ok": True},
     )

@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-# PR-7：本文件搬到 studio/infrastructure/ 后，json 数据资源仍留 studio/llm_presets/
-# （不是 python module），所以 parent 要上跳一层到 studio/。
+# PR-7: after this file moved to studio/infrastructure/, the json data assets stayed
+# in studio/llm_presets/ (not a python module), so parent needs to go up one more level to studio/.
 PRESETS_DIR = Path(__file__).resolve().parent.parent / "llm_presets"
 BUILTIN_PRESET_ORDER = (
     "style_json",

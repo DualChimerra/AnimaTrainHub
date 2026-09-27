@@ -1,8 +1,3 @@
-"""ModelSpec / latent 缓存指纹（多模型支持 PR-1）单元测试。
-
-设计出处：docs/design/multi-model/03-interface-evolution.md §2.1/§2.5、
-04-synthesis.md D12/D17。
-"""
 
 from __future__ import annotations
 
@@ -22,7 +17,6 @@ from training.families.spec import (
 )
 
 
-# ── spec 与 registry ─────────────────────────────────────────────────────
 
 def test_anima_spec_registered():
     assert get_spec("anima") is ANIMA_SPEC
@@ -48,8 +42,6 @@ def test_anima_latent_constants():
 
 
 def test_spec_matches_vae_wrapper_constants():
-    # VAEWrapper 内部常量是权重侧事实（03 §4.3 不抽象清单，刻意不读 spec）；
-    # 此断言把 spec 与它的一致性 codify，防止两处漂移。
     from training.vae import VAEWrapper
 
     assert VAEWrapper._UPSAMPLE == ANIMA_SPEC.latent.spatial_stride
@@ -69,7 +61,6 @@ def _spec_with(text_strategy, caps):
 
 
 def test_cached_varlen_excludes_caption_tag_ops():
-    # 交叉不变量（03 §2.4）：缓存键 = caption 内容 hash，与 tag shuffle/dropout 互斥
     with pytest.raises(ValueError):
         validate_spec(_spec_with("cached_varlen", {"caption_tag_ops"}))
     validate_spec(_spec_with("cached_varlen", {"masked_loss", "text_cache"}))
@@ -80,7 +71,7 @@ def test_cached_varlen_requires_capability_and_text_fingerprint():
         validate_spec(_spec_with("cached_varlen", {"masked_loss"}))
     spec = _spec_with("cached_varlen", {"masked_loss", "text_cache"})
     spec = replace(spec, text=replace(spec.text, fingerprint=""))
-    with pytest.raises(ValueError, match="TE 指纹"):
+    with pytest.raises(ValueError, match="TE fingerprint"):
         validate_spec(spec)
 
 
@@ -89,7 +80,6 @@ def test_unknown_capability_rejected():
         validate_spec(_spec_with("online", {"warp_drive"}))
 
 
-# ── latent npz 缓存指纹判据（grandfather / 失配删除）────────────────────
 
 def _bare_cached_dataset():
     from training.dataset import CachedLatentDataset
@@ -99,14 +89,12 @@ def _bare_cached_dataset():
     ds.flip_augment = False
     ds.load_masks = False
     ds.base_image_dataset = None
-    # 绕过 bucket 尺寸校验（None → 跳过），只测指纹判据
     ds._expected_bucket_size = lambda img_path, target_reso=None: None
     ds.latent_spec = ANIMA_SPEC.latent
     return ds
 
 
 def _write_pair(tmp_path, name, **npz_kwargs):
-    """写 img + npz，并把 img mtime 拨到过去（缓存必须新于图）。"""
     img = tmp_path / f"{name}.png"
     img.write_bytes(b"fake")
     npz = tmp_path / f"{name}.npz"

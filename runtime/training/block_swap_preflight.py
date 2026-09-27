@@ -1,23 +1,30 @@
-"""block swap 预检：在**任何权重加载之前**判断当前 blocks_to_swap 能不能跑，
-不能就带着推荐值 fail-fast。
+"""Block swap preflight: decide *before any weight loading* whether the current
+blocks_to_swap can actually run, and fail fast with a recommended value if not.
 
-为什么需要它：``blocks_to_swap`` 默认 0，而 Krea 2 的 DiT 就算 fp8 也有
-13GB —— 12GB 卡上「选中模型直接开跑」必然 OOM，而 OOM 发生在数据集扫描、
-latent 缓存、文本编码全跑完之后，用户已经等了几分钟，报错还只是一句
-CUDA out of memory，不告诉他该把哪个数字调到多少。
+Why this exists: ``blocks_to_swap`` defaults to 0, and the Krea 2 DiT is 13GB
+even in fp8 -- on a 12GB card, "load the selected model and go" is guaranteed
+to OOM, and that OOM happens after dataset scanning, latent caching and text
+encoding have all finished, once the user has already waited several minutes,
+with an error that's just "CUDA out of memory" and no hint which number to
+change.
 
-既有的两道护栏解决不了这件事：
-- ``check_load_budget``：只在**加载那一刻**按文件大小预算，且训练侧默认关闭
-  （误拒率高，见 secrets.TrainingSecretsConfig.ram_guard）；
-- ``check_pinned_budget``：只管**内存**侧，且在 loader 内部、换出层要落 pinned
-  的那一刻才触发。
+The two existing guardrails don't solve this:
+- ``check_load_budget``: budgets by file size only **at load time**, and is
+  disabled by default on the training side (too many false rejects, see
+  secrets.TrainingSecretsConfig.ram_guard);
+- ``check_pinned_budget``: only covers the **RAM** side, and only fires inside
+  the loader, at the moment a swapped-out layer is about to be pinned.
 
-本模块把两侧算术合到一起、提前到加载前，并且**给出推荐值**而不只是拒绝。
-纯算术，不碰 CUDA、不读权重（只 stat 文件大小），失败一律静默放行。
+This module combines both sides of the arithmetic, moves it ahead of loading,
+and **produces a recommended value** instead of just rejecting. Pure
+arithmetic, no CUDA access, no weight reads (just file size stat); on failure
+it silently lets the run proceed.
 
-族无关：只要族实现了 ``swapped_param_ratio`` / ``swappable_blocks``（krea2 与
-anima，即有 block_swap 能力位的族）就参与，否则整块跳过。两个方法都收
-``checkpoint_path`` 关键字：anima 的层数与参数分布只有权重文件自己知道。
+Family-agnostic: any family that implements ``swapped_param_ratio`` /
+``swappable_blocks`` (currently krea2 and anima, i.e. families with the
+block_swap capability flag) takes part; everything else is skipped entirely.
+Both methods accept a ``checkpoint_path`` keyword: for anima, the layer count
+and parameter distribution are only known from the weight file itself.
 """
 
 from __future__ import annotations
@@ -31,17 +38,20 @@ logger = logging.getLogger(__name__)
 
 _GIB = 1024 ** 3
 
-#: 推荐值要预留的显存余量。比 ``_VRAM_BASE_BYTES``（3GB，标定给「权重装得下吗」
-#: 那道护栏）更宽，因为训练期显存不止权重：LoRA 参数 + 梯度 + 优化器状态、
-#: gradient checkpointing 存下的层间激活、fp8 底模逐层 dequant 的临时权重、
-#: 分配器碎片。推荐一个「刚好装下权重」的数字然后让用户在第 3 分钟 OOM，
-#: 比不推荐更糟，所以这里刻意保守。
+#: VRAM headroom to reserve for the recommended value. Wider than
+#: ``_VRAM_BASE_BYTES`` (3GB, the figure used by the "do the weights even
+#: fit" guardrail) because training-time VRAM is more than just weights:
+#: LoRA params + gradients + optimizer state, activations kept by gradient
+#: checkpointing, temporary weights from per-layer dequant of an fp8 base
+#: model, allocator fragmentation. Recommending a value that "just barely
+#: fits the weights" and then letting the user OOM three minutes in is worse
+#: than not recommending anything, so this is deliberately conservative.
 _RECOMMEND_HEADROOM_BYTES = 5 * _GIB
 
 
 @dataclass(frozen=True)
 class SwapVerdict:
-    """某个 blocks_to_swap 候选值的预算结论。"""
+    """Budget verdict for one candidate blocks_to_swap value."""
 
     blocks: int
     vram_need: int
@@ -56,7 +66,8 @@ class SwapVerdict:
 
 @dataclass(frozen=True)
 class PreflightResult:
-    """预检结论。``checked=False`` 表示信息不足、本次不下判断。"""
+    """Preflight verdict. ``checked=False`` means not enough information to
+    decide this time."""
 
     checked: bool
     ok: bool
@@ -76,26 +87,33 @@ def evaluate(
     vram_base_bytes: int,
     pinned_limit_bytes: Optional[int],
 ) -> PreflightResult:
-    """纯算术核心：给定预算输入，判断当前设置并搜推荐值。
+    """Pure arithmetic core: given budget inputs, judge the current setting
+    and search for a recommendation.
 
-    调用方负责把系统查询（空闲显存 / 可用内存 / 文件大小）取好传进来 ——
-    这样本函数零副作用、可直接用数字测。
+    The caller is responsible for gathering system queries (free VRAM /
+    available RAM / file size) and passing them in -- that keeps this
+    function side-effect free and directly testable with plain numbers.
 
-    ``free_vram_bytes is None``（非 CUDA / 查询失败）→ 不下判断。
-    ``pinned_limit_bytes is None``（内存查询失败）→ 只查显存侧，内存侧一律放行。
+    ``free_vram_bytes is None`` (no CUDA / query failed) -> no verdict.
+    ``pinned_limit_bytes is None`` (RAM query failed) -> only check the VRAM
+    side, the RAM side always passes.
     """
     if file_bytes <= 0 or total_blocks <= 0 or free_vram_bytes is None:
         return PreflightResult(checked=False, ok=True)
 
     def verdict(blocks: int) -> SwapVerdict:
         ratio = min(max(float(ratio_fn(blocks)), 0.0), 1.0)
-        # 显存侧与 check_load_budget 同一条算术（need × (1-ratio) + 基底），
-        # 两道护栏才不会出现「预检说行、加载时拒」。
+        # Same arithmetic as check_load_budget on the VRAM side
+        # (need x (1-ratio) + base), so the two guardrails never disagree
+        # ("preflight says fine, load rejects it").
         vram_need = int(file_bytes * (1.0 - ratio)) + vram_base_bytes
-        # 内存侧是近似：loader 的 check_pinned_budget 读 header 数换出层的
-        # **实际**字节，这里按参数比例 × 文件大小估。单一 dtype 的 checkpoint
-        # 两者几乎相等（fp8_scaled 多出的 F32 scale 是零头）。权威判定仍归
-        # loader，本预检只负责提前提醒和给推荐值。
+        # The RAM side is an approximation: the loader's check_pinned_budget
+        # reads the header to count the **actual** bytes of swapped-out
+        # layers; here we estimate via param ratio x file size. For a
+        # single-dtype checkpoint the two are nearly equal (the extra F32
+        # scale in fp8_scaled is negligible). The loader remains the
+        # authoritative check; this preflight is only responsible for an
+        # early warning and a recommended value.
         pinned_need = int(file_bytes * ratio)
         return SwapVerdict(
             blocks=blocks,
@@ -109,8 +127,10 @@ def evaluate(
     if current.ok:
         return PreflightResult(checked=True, ok=True, current=current)
 
-    # 推荐：能满足「更宽的训练余量」的最小换出层数（换得越少越快）。
-    # 没有这样的档位时退到「至少装得下权重」的最小值，并在文案里标注为紧。
+    # Recommend: the smallest swap count that satisfies "a wider training
+    # headroom" (fewer swapped layers = faster). If no such value exists,
+    # fall back to the minimum that "at least fits the weights" and flag it
+    # as tight in the message.
     candidates = [verdict(n) for n in range(total_blocks + 1)]
 
     def has_training_headroom(v: SwapVerdict) -> bool:
@@ -122,9 +142,11 @@ def evaluate(
     if roomy:
         recommended, tight = roomy[0].blocks, False
     elif workable:
-        # 有能装下权重的值，但没有一个留够训练余量。仍然推荐它（那是本机能
-        # 给的最好结果），但必须在文案里说清是紧的——照着改完在第 3 分钟
-        # OOM 而事先没被提醒，比不推荐更伤。
+        # There's a value that fits the weights, but none leaves enough
+        # training headroom. Still recommend it (it's the best this machine
+        # can offer), but the message must say it's tight -- OOMing three
+        # minutes into training with no warning is worse than not
+        # recommending at all.
         recommended, tight = workable[0].blocks, True
     else:
         recommended, tight = None, False
@@ -148,7 +170,7 @@ def evaluate(
 
 
 def _gb(value: Optional[int]) -> str:
-    return "未知" if value is None else f"{value / _GIB:.1f}GB"
+    return "unknown" if value is None else f"{value / _GIB:.1f}GB"
 
 
 def _message(
@@ -163,59 +185,68 @@ def _message(
     pinned_limit_bytes: Optional[int],
 ) -> str:
     head = (
-        f"block swap 预检未通过：blocks_to_swap={current.blocks} 时底模约需 "
-        f"{_gb(current.vram_need)} 显存、{_gb(current.pinned_need)} 锁定内存，"
-        f"当前空闲显存 {_gb(free_vram_bytes)}"
+        f"block swap preflight failed: at blocks_to_swap={current.blocks} the "
+        f"base model needs approx {_gb(current.vram_need)} VRAM, "
+        f"{_gb(current.pinned_need)} pinned RAM; "
+        f"currently free VRAM {_gb(free_vram_bytes)}"
     )
     if pinned_limit_bytes is not None:
-        head += f"、可用内存 {_gb(avail_ram_bytes)}（可锁定上限 {_gb(pinned_limit_bytes)}）"
-    head += "。"
+        head += f", available RAM {_gb(avail_ram_bytes)} (pinnable cap {_gb(pinned_limit_bytes)})"
+    head += "."
 
     if recommended is not None:
         body = (
             f"{head}\n"
-            f"  建议：把 blocks_to_swap 设为 {recommended}（共 {total_blocks} 层）。"
-            f"换出的层常驻内存、算到才搬进显存，不影响训练结果，只慢一点。"
+            f"  Suggestion: set blocks_to_swap to {recommended} (out of {total_blocks} layers). "
+            f"Swapped-out layers stay resident in RAM and are moved to VRAM only when needed; "
+            f"this does not affect training results, just makes it a bit slower."
         )
         if tight:
             body += (
-                f"\n  注意：这个值只是**刚好装下权重**，本机没有能同时留够"
-                f"训练余量（LoRA + 优化器状态 + 激活 + dequant 临时权重）的档位。"
-                f"训练中途仍可能 OOM —— 更稳的出路是换 fp8 底模（体积减半），"
-                f"或降低训练分辨率。"
+                f"\n  Note: this value only **just barely fits the weights** -- this "
+                f"machine has no setting that also leaves enough training headroom "
+                f"(LoRA + optimizer state + activations + dequant temp weights). "
+                f"You may still OOM mid-training -- a more reliable fix is switching "
+                f"to an fp8 base model (half the size), or lowering the training resolution."
             )
         return (
             f"{body}\n"
-            f"  确认估算不准可在「block swap 预检」开关处关掉本检查。"
+            f"  If you're confident this estimate is wrong, you can disable this check "
+            f"at the \"block swap preflight\" toggle."
         )
 
-    # 一个候选都不成立：区分是显存还是内存卡住，给不同出路。
+    # No candidate works at all: distinguish whether VRAM or RAM is the
+    # blocker and give a different fix for each.
     vram_reachable = any(v.vram_ok for v in candidates)
     if not vram_reachable:
         why = (
-            f"即使换出全部 {total_blocks} 层，不可换出的部分（嵌入层 / 输出层等）"
-            f"仍需约 {_gb(candidates[total_blocks].vram_need)} 显存。"
+            f"Even swapping out all {total_blocks} layers, the non-swappable parts "
+            f"(embedding / output layers, etc.) still need approx "
+            f"{_gb(candidates[total_blocks].vram_need)} VRAM."
         )
-        fix = "换用 fp8 底模（体积减半），或关掉占着显存的其他程序（ComfyUI / 出图任务）。"
+        fix = "Switch to an fp8 base model (half the size), or close other programs using VRAM (ComfyUI, image generation jobs)."
     else:
         why = (
-            f"显存侧可以满足，但换出层要锁定的内存超过上限"
-            f"（最少需锁定 {_gb(min(v.pinned_need for v in candidates if v.vram_ok))}）。"
-            f"锁定内存不可换页，超限会拖垮整机。"
+            f"VRAM is fine, but the RAM that swapped-out layers need to pin exceeds "
+            f"the cap (needs at least {_gb(min(v.pinned_need for v in candidates if v.vram_ok))} pinned). "
+            f"Pinned RAM can't be paged out, and going over the cap can bring down the whole machine."
         )
-        fix = "换用 fp8 底模（锁定内存同样减半），或关闭占内存的其他程序后重试。"
-    return f"{head}\n  {why}\n  出路：{fix}"
+        fix = "Switch to an fp8 base model (halves pinned RAM too), or close other programs using RAM and retry."
+    return f"{head}\n  {why}\n  Fix: {fix}"
 
 
 def run(ctx) -> None:
-    """在 models_phase 里调用：不通过就抛 RuntimeError（带推荐值）。
+    """Called from models_phase: raises RuntimeError (with a recommended
+    value) if the check fails.
 
-    以下情况静默跳过（宁可不判也不误拒）：开关关闭、族没有 block_swap 能力、
-    族未实现比例/层数估算、权重文件读不到大小、显存查询失败。
+    Silently skipped in these cases (better to skip than to falsely reject):
+    the toggle is off, the family has no block_swap capability, the family
+    doesn't implement the ratio/block-count estimators, the weight file size
+    can't be read, or the VRAM query fails.
     """
     args = ctx.args
     if not bool(getattr(args, "block_swap_preflight", True)):
-        logger.info("block swap 预检已关闭（block_swap_preflight=false）")
+        logger.info("block swap preflight disabled (block_swap_preflight=false)")
         return
     family = ctx.family
     if family is None or "block_swap" not in family.spec.capabilities:
@@ -227,9 +258,13 @@ def run(ctx) -> None:
 
     from training import sysmem
 
-    # checkpoint_path 是跨族协议参数：anima 的层数与参数分布由 checkpoint 决定
-    # （2B=28 层 / 14B=36 层），不给就只能返回 0——那会让预检把「换出后显存够」
-    # 误判成「一点也省不下」并拒掉本可以跑的配置。krea2 结构唯一、收下即忽略。
+    # checkpoint_path is a cross-family protocol parameter: for anima, the
+    # layer count and parameter distribution are determined by the
+    # checkpoint (2B=28 layers / 14B=36 layers); without it we can only
+    # return 0, which would make the preflight misjudge "VRAM is fine once
+    # swapped" as "nothing can be saved at all" and reject a configuration
+    # that would actually run. krea2's structure is fixed, so it accepts
+    # and ignores this.
     transformer_path = str(getattr(args, "transformer_path", "") or "")
 
     def ratio_at(blocks: int) -> float:
@@ -252,8 +287,9 @@ def run(ctx) -> None:
             ),
         )
     except Exception:  # noqa: BLE001
-        # 预检是辅助设施，自身出错绝不能挡住训练
-        logger.warning("block swap 预检执行失败，跳过", exc_info=True)
+        # The preflight is a helper facility; an error in it must never
+        # block training itself.
+        logger.warning("block swap preflight failed, skipping", exc_info=True)
         return
 
     if not result.checked:
@@ -262,7 +298,7 @@ def run(ctx) -> None:
         raise RuntimeError(result.message)
     if result.current is not None and result.current.blocks > 0:
         logger.info(
-            "block swap 预检通过：换出 %d 层，底模约占显存 %s、锁定内存 %s",
+            "block swap preflight passed: swapping out %d layers, base model uses approx %s VRAM, %s pinned RAM",
             result.current.blocks,
             _gb(result.current.vram_need),
             _gb(result.current.pinned_need),

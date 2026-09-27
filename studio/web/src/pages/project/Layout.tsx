@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Outlet, useMatch, useNavigate, useParams } from 'react-router-dom'
+import { Outlet, useLocation, useMatch, useNavigate, useParams } from 'react-router-dom'
 import { api, type ProjectDetail } from '../../api/client'
 import { useProjectCtxSetter, useSelectedProjectSetter } from '../../context/ProjectContext'
 import { useDialog } from '../../components/Dialog'
@@ -25,21 +25,25 @@ export default function ProjectLayout() {
   const [showExportDialog, setShowExportDialog] = useState(false)
   const projectRef = useRef<ProjectDetail | null>(null)
   projectRef.current = project
-  // 版本切换请求序号：快速连切时只认最后一次切换的结果，防止先发后至的响应/回滚覆盖新选择。
+  // Version-switch request sequence number: on rapid successive switches only the result of the
+  // last switch counts, so a late-arriving response/rollback can't overwrite the newer choice.
   const switchSeqRef = useRef(0)
-  // 版本切换守卫：步骤页有需确认才能丢弃的状态时（如 TagEdit 未保存编辑）注册，
-  // 返回 false 取消切换。切版本重挂载步骤页不走路由导航，useBlocker 拦不住，
-  // 需要这条独立通道。
+  // Version-switch guard: step pages with state that needs confirmation before discarding
+  // (e.g. unsaved edits in TagEdit) register here. Returning false cancels the switch. Switching
+  // versions remounts the step page without going through route navigation, so useBlocker can't
+  // catch it -- hence this separate channel.
   const switchGuardRef = useRef<(() => Promise<boolean>) | null>(null)
   const setVersionSwitchGuard = useCallback(
     (g: (() => Promise<boolean>) | null) => { switchGuardRef.current = g },
     [],
   )
-  // 版本作用域路由（v/:vid/*）下 Outlet 以 activeVersion.id 为 key：切版本强制
-  // 步骤页重挂载，本地 state / 缓存全部换代，杜绝「挂着新版本显示旧数据」
-  //（如 Curation 的 view 缓存守卫不会因 vid 变化重拉）。Overview / Download 是
-  // project 作用域（Overview 另有自己的 selectedVid 本地态），不跟切。
+  // Under the version-scoped route (v/:vid/*), the Outlet is keyed on activeVersion.id: switching
+  // versions forces the step page to remount, so local state / caches all get replaced, ruling out
+  // "still showing old data under the new version" (e.g. Curation's view-cache guard wouldn't
+  // otherwise refetch on a vid change). Overview / Download are project-scoped (Overview also has
+  // its own local selectedVid) and don't remount on switch.
   const inVersionScope = useMatch('/projects/:pid/v/:vid/*') != null
+  const location = useLocation()
 
   const reload = useCallback(async () => {
     if (!Number.isFinite(projectId)) return
@@ -98,16 +102,17 @@ export default function ProjectLayout() {
     if (guard && !(await guard())) return
     const prevVid = prev.active_version_id
     const seq = ++switchSeqRef.current
-    // 乐观更新：先本地切换再等后端。activate 往返期间 activeVersion 若停在旧值，
-    // 「切完版本马上点开始训练」会把旧版本入队（#386）。
+    // Optimistic update: switch locally first, then wait for the backend. If activeVersion stayed
+    // at the old value during the activate round-trip, "switch version then immediately start
+    // training" would enqueue the old version (#386).
     setProject((cur) => (cur ? { ...cur, active_version_id: vid } : cur))
     try {
       await api.activateVersion(prev.id, vid)
-      // 成功不应用响应（瘦响应）：乐观值即服务端新状态，全量数据由
-      // project_state_changed → reload 收敛。
+      // Don't apply the response on success (thin response): the optimistic value is already the
+      // new server state; full data converges via project_state_changed → reload.
     } catch (e) {
       if (seq === switchSeqRef.current) {
-        // 只回滚 active_version_id 字段，不整包回退——避免吞掉在途 reload 带来的其他更新。
+        // Roll back only the active_version_id field, not the whole object -- avoids swallowing other updates from an in-flight reload.
         setProject((cur) => (cur ? { ...cur, active_version_id: prevVid } : cur))
         toast(String(e), 'error')
       }
@@ -175,7 +180,7 @@ export default function ProjectLayout() {
 
   const handleCreateVersion = useCallback(async (label: string, forkFromVersionId: number | null) => {
     if (!projectRef.current || creatingBusy) return
-    // 建新版本会激活它 → 步骤页重挂载，同样要过切换守卫（取消则对话框留在原地）。
+    // Creating a new version activates it → step page remounts, so it also needs to pass the switch guard (canceling leaves the dialog in place).
     const guard = switchGuardRef.current
     if (guard && !(await guard())) return
     setCreatingBusy(true)
@@ -218,8 +223,9 @@ export default function ProjectLayout() {
     return () => { setCtx?.(null) }
   }, [setCtx])
 
-  // 粘性快照：加载/刷新时写入，离开项目页时**不清**（见 ProjectContext 注释），
-  // 让侧边栏跨页保留选中项目用于导航。打开另一个项目会覆盖这份快照。
+  // Sticky snapshot: written on load/refresh, and deliberately **not cleared** when leaving the
+  // project page (see the ProjectContext comment), so the sidebar keeps the selected project
+  // across pages for navigation. Opening a different project overwrites this snapshot.
   useEffect(() => {
     if (project) setSelected?.({ project, activeVersion })
   }, [project, activeVersion, setSelected])
@@ -237,14 +243,14 @@ export default function ProjectLayout() {
 
   return (
     <div className="flex flex-col h-full">
-      <Outlet key={inVersionScope ? activeVersion?.id ?? -1 : 'project'} context={{
+      <StepOutlet stepKey={`${inVersionScope ? activeVersion?.id ?? -1 : 'project'}:${location.pathname}`} context={{
         project,
         activeVersion,
         reload,
         onCreateVersion: (forkFromVid?: number) => setCreating({ forkFrom: forkFromVid ?? null }),
         creatingVersionBusy: creatingBusy,
         setVersionSwitchGuard,
-      }} />
+      }} remountKey={inVersionScope ? activeVersion?.id ?? -1 : 'project'} />
       {creating && (
         <NewVersionDialog
           existingLabels={project.versions.map((v) => v.label)}
@@ -265,6 +271,20 @@ export default function ProjectLayout() {
   )
 }
 
+/** Step outlet that eases in on every step change; `remountKey` still forces a
+ *  full remount when the active version changes (see inVersionScope above). */
+function StepOutlet({ stepKey, remountKey, context }: {
+  stepKey: string
+  remountKey: string | number
+  context: unknown
+}) {
+  return (
+    <div key={stepKey} className="ds-page-anim flex flex-col flex-1 min-h-0">
+      <Outlet key={remountKey} context={context} />
+    </div>
+  )
+}
+
 export function NewVersionDialog({
   existingLabels,
   existingVersions,
@@ -275,7 +295,7 @@ export function NewVersionDialog({
 }: {
   existingLabels: string[]
   existingVersions: { id: number; label: string }[]
-  /** 打开对话框时预填的 forkFrom version id（null = 不预填，user 自己选）。 */
+  /** forkFrom version id pre-filled when the dialog opens (null = not pre-filled, user picks their own). */
   initialForkFrom?: number | null
   busy?: boolean
   onCancel: () => void
@@ -306,26 +326,34 @@ export function NewVersionDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
-        className="bg-elevated border border-subtle rounded-2xl w-[90%] max-w-[440px] p-6 flex flex-col gap-4 shadow-xl"
+        className="ds-modal"
+        style={{ width: 'min(460px, 92vw)' }}
       >
-        <h2 className="m-0 text-lg font-semibold">{t('layout.newVersionTitle')}</h2>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-fg-tertiary font-mono">label</span>
+        <div className="ds-modal-head">
+          <span className="ds-optcard-ico" style={{ background: 'var(--green)', color: 'var(--green-ink)' }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="8" r="2.4" /><path d="M6 8.4v7.2" /><path d="M18 10.4c0 3.4-3.2 3.9-6 4.4" /></svg>
+          </span>
+          <h2 className="ds-modal-title">{t('layout.newVersionTitle')}</h2>
+        </div>
+        <label className="ds-modal-field">
+          <span className="ds-modal-label">{t('layout.versionName')}</span>
           <input
             autoFocus
             value={label}
             onChange={(e) => { setLabel(e.target.value); setErr(null) }}
-            className="input input-mono"
+            className="ds-inp"
+            style={{ height: 36 }}
             placeholder={t('layout.labelPlaceholder')}
           />
         </label>
         {existingVersions.length > 0 && (
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-fg-tertiary font-mono">{t('layout.forkFrom')}</span>
+          <label className="ds-modal-field">
+            <span className="ds-modal-label">{t('layout.forkFrom')}</span>
             <select
               value={forkFrom}
               onChange={(e) => setForkFrom(e.target.value)}
-              className="input"
+              className="ds-inp"
+              style={{ height: 36 }}
             >
               <option value="">{t('layout.forkBlank')}</option>
               {existingVersions.map((v) => (
@@ -335,27 +363,16 @@ export function NewVersionDialog({
               ))}
             </select>
             {forkFrom !== '' && (
-              <p className="m-0 text-xs text-fg-tertiary">
-                {t('layout.forkNote')}
-              </p>
+              <span className="ds-kpi-meta">{t('layout.forkNote')}</span>
             )}
           </label>
         )}
-        {err && <p className="m-0 text-sm text-err">{err}</p>}
-        <div className="flex gap-2 justify-end">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={busy}
-            className="btn btn-secondary"
-          >
+        {err && <div className="ds-note ds-err" style={{ padding: '8px 11px' }}>{err}</div>}
+        <div className="ds-modal-foot">
+          <button type="button" onClick={onCancel} disabled={busy} className="ds-ctl">
             {t('common.cancel')}
           </button>
-          <button
-            type="submit"
-            disabled={busy}
-            className="btn btn-primary"
-          >
+          <button type="submit" disabled={busy} className="ds-btn-primary" style={{ minWidth: 110 }}>
             {busy ? t('layout.creatingBtn') : t('common.create')}
           </button>
         </div>

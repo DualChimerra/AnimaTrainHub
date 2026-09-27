@@ -1,7 +1,7 @@
-"""ADR 0010 — train-scope preprocess endpoint smoke tests（PR-3 step 2）。
+"""ADR 0010 -- train-scope preprocess endpoint smoke tests (PR-3 step 2).
 
-老 endpoint 测试在 test_preprocess_endpoints.py / test_curation_endpoints.py，
-本文件只覆盖新 `/api/projects/{pid}/versions/{vid}/preprocess/*` 路径。
+The old endpoint tests live in test_preprocess_endpoints.py / test_curation_endpoints.py;
+this file only covers the new `/api/projects/{pid}/versions/{vid}/preprocess/*` routes.
 """
 from __future__ import annotations
 
@@ -237,14 +237,14 @@ def test_reset_endpoint_clears_manifest_keeps_files(client: TestClient) -> None:
         f"/api/projects/{p['id']}/versions/{v['id']}/preprocess/files/reset"
     )
     assert resp.status_code == 200
-    # manifest 空，物理文件保留
+    # manifest empty, physical files kept
     m = preprocess_manifest.train_load(pdir, v["label"])
     assert m["images"] == {}
     assert (sub / "X.png").exists()
 
 
 # ---------------------------------------------------------------------------
-# restore — 3 组返回
+# restore -- returns 3 groups
 # ---------------------------------------------------------------------------
 
 
@@ -252,8 +252,8 @@ def test_restore_endpoint_copies_from_download(client: TestClient) -> None:
     p, v = _make_pv(client)
     pdir = projects.project_dir(p["id"], p["slug"])
     sub = _train_sub(p)
-    _write_png(sub / "X.png")  # 假设上调过
-    # download/X.jpg 是 origin
+    _write_png(sub / "X.png")  # assume it was previously upscaled
+    # download/X.jpg is the origin
     (pdir / "download").mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (10, 10), "blue").save(pdir / "download" / "X.jpg", "JPEG")
     preprocess_manifest.train_add_processed(
@@ -279,7 +279,7 @@ def test_restore_endpoint_no_origin_when_download_missing(client: TestClient) ->
     preprocess_manifest.train_add_processed(
         pdir, v["label"], "1_data/Y.png", {"origin": "Y.jpg"},
     )
-    # 不创建 download/Y.jpg
+    # don't create download/Y.jpg
     resp = client.post(
         f"/api/projects/{p['id']}/versions/{v['id']}/preprocess/files/restore",
         json={"names": ["1_data/Y.png"]},
@@ -331,5 +331,5 @@ def test_duplicates_apply_endpoint_marks_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["removed"] == ["1_data/X.png"]
-    # 物理文件已删（tombstone 只在 manifest）
+    # physical file already deleted (tombstone lives only in the manifest)
     assert not (sub / "X.png").exists()

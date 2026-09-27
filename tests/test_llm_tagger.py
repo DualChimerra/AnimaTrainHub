@@ -267,7 +267,7 @@ def test_chat_completions_tag_normalizes_json(isolated_secrets, tmp_path: Path) 
     assert "anime style LoRA" in body["messages"][0]["content"]
     assert body["stream"] is False
     assert kwargs["timeout"] == (10, 60)
-    # messages[1] 是 image item，被铺开成 user/[image_url]
+    # messages[1] is an image item, expanded into user/[image_url]
     assert body["messages"][1]["content"][0]["image_url"]["url"].startswith(
         "data:image/jpeg;base64,"
     )
@@ -457,7 +457,7 @@ def test_responses_endpoint_payload(isolated_secrets, tmp_path: Path) -> None:
     body = kwargs["json"]
     assert body["instructions"]
     assert body["stream"] is False
-    # builtin style_json 只有 system message，无 user → input content 仅 input_image
+    # the builtin style_json preset only has a system message, no user -> input content is just input_image
     image_part = next(c for c in body["input"][0]["content"] if c["type"] == "input_image")
     assert image_part["image_url"].startswith("data:image/jpeg;base64,")
 
@@ -606,7 +606,7 @@ def test_responses_payload_uses_instructions(isolated_secrets, tmp_path: Path) -
 
 
 def test_text_preset_returns_natural_caption(isolated_secrets, tmp_path: Path) -> None:
-    # 切换到 joycaption preset 并把 endpoint 重新指向测试 URL
+    # switch to the joycaption preset and repoint the endpoint at the test URL
     secrets.update(
         {
             "llm_tagger": {

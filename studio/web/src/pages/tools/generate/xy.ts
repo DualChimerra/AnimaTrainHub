@@ -1,24 +1,25 @@
-/** XY 模式本地 state + values 解析/校验工具。
+/** XY mode local state + values parsing/validation utilities.
  *
- * 后端 schema 要求 values 类型按 axis 派生（int / float / string）；前端
- * 把用户输入的逗号字符串解析成正确类型，并在解析失败时给出错误信息。 */
+ * The backend schema requires the values type to be derived per axis (int / float / string);
+ * the frontend parses the user's comma-separated input string into the correct type, and
+ * produces an error message when parsing fails. */
 
 import type { LoraEntry, XYAxisSpec, XYAxisType, XYMatrixSpec } from '../../../api/client'
 import i18n from '../../../i18n'
 
-/** UI 侧 axis 状态：raw 是用户输入的逗号字符串（不实时解析便于编辑）。 */
+/** UI-side axis state: raw is the user's comma-separated input string (not parsed live, for easier editing). */
 export interface XYAxisDraft {
   axis: XYAxisType
   raw: string
   loraIndex: number | null
 }
 
-/** XYAxisSpec 配套的字段类型映射（与 schema._check_axis_values 同源）。 */
+/** Field-type mapping that goes with XYAxisSpec (shares its source with schema._check_axis_values). */
 export const AXIS_VALUE_TYPE: Record<XYAxisType, 'int' | 'float' | 'string'> = {
   steps: 'int',
   cfg_scale: 'float',
   lora_scale: 'float',
-  lora_ckpt: 'string',  // ckpt 路径
+  lora_ckpt: 'string',  // ckpt path
 }
 
 export const AXIS_LABEL_KEYS: Record<XYAxisType, string> = {
@@ -32,11 +33,11 @@ export function axisLabel(axis: XYAxisType): string {
   return i18n.t(AXIS_LABEL_KEYS[axis])
 }
 
-/** 仅 lora_ckpt 需要 loraIndex（指 cell 内 mutate 哪条 LoRA 的 path）。
- *  lora_scale 改成全局轴（所有 LoRA 共用 cell 值），不再绑特定 LoRA。 */
+/** Only lora_ckpt needs loraIndex (identifies which LoRA's path gets mutated within a cell).
+ *  lora_scale was changed to a global axis (all LoRAs share the cell value), no longer bound to a specific LoRA. */
 export const REQUIRES_LORA_INDEX: Set<XYAxisType> = new Set(['lora_ckpt'])
 
-/** 解析逗号分隔的 raw 字符串成 axis values。失败抛 string error。 */
+/** Parses a comma-separated raw string into axis values. Throws a string error on failure. */
 export function parseAxisValues(axis: XYAxisType, raw: string): Array<number | string> {
   const parts = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
   if (parts.length === 0) {
@@ -60,7 +61,7 @@ export function parseAxisValues(axis: XYAxisType, raw: string): Array<number | s
   return out
 }
 
-/** 把 draft 转成 XYAxisSpec —— schema 校验前的客户端 sanity check。 */
+/** Converts a draft into an XYAxisSpec -- a client-side sanity check before schema validation. */
 export function draftToSpec(
   draft: XYAxisDraft,
   loras: LoraEntry[],
@@ -79,17 +80,19 @@ export function draftToSpec(
   return spec
 }
 
-/** XY 提交时构建 xy_matrix + 实际要发的 lora_configs。
+/** Builds xy_matrix + the lora_configs actually sent, at XY submit time.
  *
- * **为什么不能直接整桶发 loras**：XY 模式下唯一能往 loras（xyLoras）加 anchor
- * 的入口是 lora_ckpt 轴 picker，且它只 push 不 prune（SidebarXYAxes.commitPicks）
- * —— 切项目/版本、切轴类型、删 Y 轴都会把旧 anchor 留下成「孤儿」。后端把
- * lora_configs 全部当 base LoRA 叠到每个 cell（anima_daemon._run_xy），孤儿就会
- * 混进每张图（「选 chenbin V3.4 却带上没选过的 v3.2 / 跨 mode 的 hoshi」的根因）。
+ * **Why we can't just send the whole `loras` bucket**: in XY mode the only entry point that adds
+ * an anchor to loras (xyLoras) is the lora_ckpt axis picker, and it only pushes, never prunes
+ * (SidebarXYAxes.commitPicks) -- switching project/version, changing an axis type, or deleting the
+ * Y axis all leave old anchors behind as "orphans". The backend stacks every entry in
+ * lora_configs onto each cell as a base LoRA (anima_daemon._run_xy), so orphans would leak into
+ * every image (the root cause of "picked chenbin V3.4 but got v3.2, which was never selected, mixed in / a hoshi from a different mode").
  *
- * 这里只保留被当前 X/Y 轴 loraIndex 引用的 anchor，按出现顺序重映射索引，孤儿
- * 一律丢弃。非 lora_ckpt 轴不贡献任何 anchor → lora_configs 为空。
- * 校验失败（轴值缺失 / loraIndex 越界）沿用 draftToSpec 抛 string error。 */
+ * Here we keep only the anchors referenced by the current X/Y axes' loraIndex, remapping indices
+ * in order of appearance and dropping every orphan. A non-lora_ckpt axis contributes no anchor →
+ * lora_configs ends up empty. Validation failures (missing axis values / loraIndex out of range)
+ * still throw a string error via draftToSpec. */
 export function buildXYMatrix(
   xDraft: XYAxisDraft,
   yDraft: XYAxisDraft | null,
@@ -100,7 +103,7 @@ export function buildXYMatrix(
   const remapDraft = (d: XYAxisDraft): XYAxisDraft => {
     if (d.axis !== 'lora_ckpt' || d.loraIndex == null) return d
     const entry = loras[d.loraIndex]
-    if (!entry || !entry.path.trim()) return d // draftToSpec 会抛 axisLoraMissing
+    if (!entry || !entry.path.trim()) return d // draftToSpec will throw axisLoraMissing
     if (!remap.has(d.loraIndex)) {
       remap.set(d.loraIndex, loraConfigs.length)
       loraConfigs.push(entry)
@@ -112,18 +115,18 @@ export function buildXYMatrix(
   return { xy_matrix: { x, y }, loraConfigs }
 }
 
-/** 计算 cell 总数（y=null 时退化成 1×N）。 */
+/** Computes the total cell count (degrades to 1×N when y=null). */
 export function cellCount(xLen: number, yLen: number | null): number {
   return xLen * (yLen ?? 1)
 }
 
-/** path → 不带目录前缀和 .safetensors 后缀的"短名"（XY 标头 / LoRA 卡片用）。 */
+/** path → a "short name" stripped of directory prefix and the .safetensors suffix (used by the XY header / LoRA cards). */
 export function ckptStemFromPath(path: string): string {
   const filename = path.split(/[\\/]/).pop() ?? path
   return filename.replace(/\.safetensors$/i, '')
 }
 
-/** 如果 axis 是 lora_ckpt（值是 path），用 stem 显示；其他类型原样返回。 */
+/** If axis is lora_ckpt (value is a path), display using the stem; other types are returned as-is. */
 export function formatAxisValue(axis: XYAxisType, value: string): string {
   if (axis === 'lora_ckpt') return ckptStemFromPath(value)
   return value

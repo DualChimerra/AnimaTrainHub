@@ -1,18 +1,18 @@
-"""HTTP routers — PR-5 起从 studio/server.py 逐批搬过来。
+"""HTTP routers — migrated over from studio/server.py in batches starting at PR-5.
 
-每个文件 = 一个域。api/app.py 一次性 `app.include_router` 全部。
+Each file = one domain. api/app.py calls `app.include_router` on all of them at once.
 
-## 17 顶层 router + 1 子包
+## 17 top-level routers + 1 subpackage
 
-| router 文件 | routes | 说明 |
+| router file | routes | description |
 |---|---:|---|
 | `health.py`        | 3   | health / system stats / training monitor state |
 | `presets.py`       | 13  | preset CRUD + import/export + schema + configs redirect |
 | `browse.py`        | 3   | datasets / browse / dataset thumbnail |
 | `events_sse.py`    | 1   | /api/events SSE |
-| `announcements.py` | 1   | /api/announcements（公告栏，docs/announcements/ 派生） |
-| `root.py`          | 3   | / → SPA index；/studio、/studio/{rest} → / 兼容跳转（ADR 0012） |
-| `samples.py`       | 2   | /samples/{filename} + /api/queue/{task_id}/samples（采样图清单） |
+| `announcements.py` | 1   | /api/announcements (announcements bar, derived from docs/announcements/) |
+| `root.py`          | 3   | / → SPA index; /studio, /studio/{rest} → / compat redirect (ADR 0012) |
+| `samples.py`       | 2   | /samples/{filename} + /api/queue/{task_id}/samples (sample image listing) |
 | `logs.py`          | 1   | /api/logs/{task_id} |
 | `data_exports.py`  | 1   | /api/data-exports |
 | `tagger.py`        | 1   | /api/tagger/{name}/check |
@@ -22,21 +22,21 @@
 | `upscalers.py`     | 2   | upscaler select / custom download |
 | `installs.py`      | 10  | wd14 + torch + flash-attn + xformers + llm-tagger admin |
 | `system.py`        | 9   | restart / update / rollback / preflight / dev_commits / init_git |
-| `generate.py`      | 8   | 测试出图 + daemon 控制 + TAEFlux |
-| `queue/`           | 21  | 内拆 lifecycle (13) / io (3) / outputs (5) |
-| `projects/`        | 71  | 内拆 crud (16) / exports (6) / ingestion (14) / curation (12) / training (23) |
+| `generate.py`      | 8   | test generation + daemon control + TAEFlux |
+| `queue/`           | 21  | split internally into lifecycle (13) / io (3) / outputs (5) |
+| `projects/`        | 71  | split internally into crud (16) / exports (6) / ingestion (14) / curation (12) / training (23) |
 
-**合计**：约 158 routes（+ 5 非 APIRoute：SPA mount + openapi/docs/redoc 等）。route 三元组精确集见 `tests/_snapshots/studio_routes.json`（snapshot 测试守门）。
+**Total**: about 158 routes (+ 5 non-APIRoute: SPA mount + openapi/docs/redoc etc.). The exact route triple set lives in `tests/_snapshots/studio_routes.json` (snapshot test gate).
 
-## 子包内部 helpers
+## Subpackage-internal helpers
 
-- `queue/__init__.py` — 子包说明
-- `projects/_shared.py` — projects 域 8 个共用 helper（_project_payload /
-  _publish_*_state / _version_dir_or_404 / 等），仅 projects sub-router 内部 import
+- `queue/__init__.py` — subpackage overview
+- `projects/_shared.py` — 8 shared helpers for the projects domain (_project_payload /
+  _publish_*_state / _version_dir_or_404 / etc.), imported only inside the projects sub-router
 
-## include 顺序约束
+## Include-order constraint
 
-queue/ 的 io 必须在 lifecycle 之前 include（FastAPI 按 path 定义顺序匹配，
-`/api/queue/export` / `/api/queue/import` 否则会被 `/api/queue/{task_id}` 的
-整数解析截胡 422）。
+queue/'s io must be included before lifecycle (FastAPI matches paths in the order
+routes are defined, otherwise `/api/queue/export` / `/api/queue/import` would get
+intercepted by `/api/queue/{task_id}`'s integer parsing and 422).
 """

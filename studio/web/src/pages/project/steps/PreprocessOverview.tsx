@@ -24,18 +24,21 @@ interface Ctx {
 
 type Tab = 'all' | 'removed'
 
-/** Preprocess overview — 两 tab 视图：
+/** Preprocess overview — two tab views:
  *
- *  - **all**：当前数据集真实状态（处理后数据集）。list_crop_workspace 合并
- *    了 download 未派生 + preprocess 派生产物（已 filter duplicate_removed）。
- *    每张图按各自来源取缩略图；processed 项右下角带「已处理」badge，点击放大
- *    走 split 布局（左 download 原图 + 右 preprocess 派生）；未处理项点击单图。
- *    可选中已处理项恢复（撤销处理回 download/ 原图）或全部撤销。
- *  - **removed**：被去重审核标记的 entry（已删除）。物理图仍在 download/{source}，
- *    缩略图按 download bucket 取。可选中恢复（删 manifest entry）。
+ *  - **all**: the dataset's current real state (the processed dataset). list_crop_workspace
+ *    merges download items with no derivative + preprocess derivatives (duplicate_removed
+ *    already filtered out). Each image's thumbnail comes from its own source; processed items
+ *    carry a "processed" badge in the bottom-right corner, and clicking to enlarge goes to a
+ *    split layout (download original on the left + preprocess derivative on the right);
+ *    unprocessed items open a single-image view on click.
+ *    Processed items can be selected and restored (undo processing back to the download/
+ *    original), or all restored at once.
+ *  - **removed**: entries flagged by duplicate review (deleted). The physical image still lives
+ *    at download/{source}; thumbnails come from the download bucket. Can be selected and restored (deletes the manifest entry).
  *
- *  恢复都走 restorePreprocessFiles —— restore() 对 duplicate_removed entry 也
- *  work（删 entry，对应 PNG 不存在静默跳过）。
+ *  All restores go through restorePreprocessFiles -- restore() also works for a
+ *  duplicate_removed entry (deletes the entry; a missing corresponding PNG is silently skipped).
  */
 export default function PreprocessOverviewPage() {
   const { t } = useTranslation()
@@ -81,7 +84,7 @@ export default function PreprocessOverviewPage() {
     }
   })
 
-  // Tab 切换重置选择和预览
+  // Reset selection and preview on tab switch
   useEffect(() => {
     setSel(new Set())
     setSelAnchor(null)
@@ -101,16 +104,16 @@ export default function PreprocessOverviewPage() {
     name: string
     thumbUrl: string
     previewUrl: string
-    /** 右侧对比图（preprocess 派生）。设了 modal 切 split 布局。仅 processed 项有。 */
+    /** Right-side comparison image (preprocess derivative). Once set, the modal switches to a split layout. Only present for processed items. */
     compareSrc?: string
-    /** cell 右下角常显小角标。仅 processed 项有「已处理」徽章。 */
+    /** Small badge always shown in the cell's bottom-right corner. Only processed items carry the "processed" badge. */
     badge?: string
     caption: string
   }
 
-  // ADR 0010: workspace 的 name 是 train rel path "1_data/X.png"。
-  // 拆 folder + filename 喂 versionThumbUrl(bucket='train')；split 预览左侧
-  // 仍走 download bucket 看原图（origin 平铺名）。
+  // ADR 0010: the workspace's name is the train rel path "1_data/X.png".
+  // Split into folder + filename to feed versionThumbUrl(bucket='train'); the split preview's left
+  // side still goes through the download bucket to show the original image (origin's flat name).
   const splitRel = (rel: string) => {
     const i = rel.lastIndexOf('/')
     return i >= 0
@@ -128,14 +131,14 @@ export default function PreprocessOverviewPage() {
         return {
           name: im.name,
           thumbUrl: trainThumb(256),
-          // split 预览：左 = download 原图（origin 平铺名），右 = train 派生
+          // split preview: left = download original (origin's flat name), right = train derivative
           previewUrl: api.projectThumbUrl(project.id, im.source, 'download', 1600, im.mtime, true),
           compareSrc: trainThumb(1600),
           badge: t('preprocessOverview.badgeProcessed'),
           caption: `${im.name} · ${im.w}×${im.h}`,
         }
       }
-      // 原样未处理：train 里的图就是 download 原图副本
+      // Unprocessed, unchanged: the image in train is just a copy of the download original
       return {
         name: im.name,
         thumbUrl: trainThumb(256),
@@ -148,7 +151,7 @@ export default function PreprocessOverviewPage() {
   const removedItems = useMemo<GridItem[]>(
     () => removed.map((im) => ({
       name: im.name,
-      // duplicate_removed 物理已删；缩略图走 download bucket + im.source (origin)
+      // duplicate_removed is physically deleted; thumbnails go through the download bucket + im.source (origin)
       thumbUrl: api.projectThumbUrl(project.id, im.source, 'download', 256, im.mtime, true),
       previewUrl: api.projectThumbUrl(project.id, im.source, 'download', 1600, im.mtime, true),
       caption: im.w && im.h ? `${im.source} · ${im.w}×${im.h}` : im.source,
@@ -202,8 +205,8 @@ export default function PreprocessOverviewPage() {
     }
   }, [confirm, processed.length, project.id, vid, t, toast, refresh, reload])
 
-  // all tab 里 select all 只选「已处理」项 —— 未处理的 download 原图没什么
-  // 可恢复（没有 manifest entry），加进选中会浪费一次 confirm。
+  // In the all tab, select-all only selects "processed" items -- an unprocessed download
+  // original has nothing to restore (no manifest entry), so including it would waste a confirm.
   const selectableNames = useMemo(
     () => tab === 'all'
       ? visibleNames.filter((n) => processedNames.has(n))
@@ -220,7 +223,7 @@ export default function PreprocessOverviewPage() {
     tab === 'all' ? t('preprocessOverview.emptyAll')
     : t('preprocessOverview.emptyRemoved')
 
-  // ADR 0010: hooks 之后再做 vid guard
+  // ADR 0010: do the vid guard after the hooks
   if (!activeVersion) {
     return (
       <div className="p-6 text-fg-secondary">

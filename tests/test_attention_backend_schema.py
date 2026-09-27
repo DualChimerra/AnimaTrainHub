@@ -1,10 +1,10 @@
-"""schema.attention_backend 字段回归。"""
+"""Regression tests for the schema.attention_backend field."""
 from __future__ import annotations
 
 import pytest
 
 from studio.schema import (
-    AttentionBackend,  # noqa: F401  re-export 烟雾测试
+    AttentionBackend,  # noqa: F401  re-export smoke test
     GenerateConfig,
     RegAiConfig,
     TrainingConfig,
@@ -17,7 +17,7 @@ from studio.schema import (
 
 
 def test_generate_config_default_is_flash_attn() -> None:
-    """无字段 → 默认 flash_attn（与历史 flash_attn=True 默认一致）。"""
+    """No field set -> defaults to flash_attn (consistent with the legacy flash_attn=True default)."""
     g = GenerateConfig(transformer_path="", vae_path="", text_encoder_path="")
     assert g.attention_backend == "flash_attn"
 
@@ -30,7 +30,7 @@ def test_generate_config_new_field() -> None:
 
 @pytest.mark.parametrize("backend", ["none", "xformers", "flash_attn"])
 def test_all_backends_validate(backend: str) -> None:
-    """三个枚举值都能 validate。"""
+    """All three enum values validate."""
     g = GenerateConfig(transformer_path="", vae_path="", text_encoder_path="",
                        attention_backend=backend)  # type: ignore[arg-type]
     assert g.attention_backend == backend
@@ -47,7 +47,7 @@ def test_training_config_default_backend() -> None:
 
 
 def test_invalid_backend_rejected() -> None:
-    """无效 backend → ValidationError。"""
+    """Invalid backend -> ValidationError."""
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         GenerateConfig(transformer_path="", vae_path="", text_encoder_path="",

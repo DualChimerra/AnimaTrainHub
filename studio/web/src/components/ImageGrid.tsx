@@ -5,9 +5,9 @@ import { VirtuosoGrid } from 'react-virtuoso'
 export interface ImageGridItem {
   name: string
   thumbUrl: string
-  /** 鼠标悬停时显示在角标的小字（可选）：例如标签预览。 */
+  /** Small text shown on the corner badge on hover (optional): e.g. a tag preview. */
   meta?: string
-  /** 常显小角标，cell 右下角（可选）。例如 "已处理"，用于在合并视图里区分状态。 */
+  /** Always-visible small badge, bottom-right of the cell (optional). E.g. "processed", used to distinguish state in a merged view. */
   badge?: string
   /** Always-visible caption along the bottom edge (e.g. "1024×1408"). */
   caption?: string
@@ -16,56 +16,56 @@ export interface ImageGridItem {
 interface Props {
   items: ImageGridItem[]
   selected: Set<string>
-  /** 单击 = checkbox 切换；shift+click = 区间选；详见 applySelection。 */
+  /** Click = toggle checkbox; shift+click = range-select; see applySelection. */
   onSelect: (name: string, e: React.MouseEvent) => void
-  /** 鼠标悬停时回调：用于驱动外部「大图预览面板」。 */
+  /** Hover callback: used to drive an external "large preview panel". */
   onHover?: (name: string) => void
-  /** 全屏 modal 预览，由 cell 上的放大镜按钮触发（可选）。 */
+  /** Fullscreen modal preview, triggered by the cell's magnifier button (optional). */
   onPreview?: (name: string) => void
-  /** 主点击行为：默认选择；activate 模式下普通点击交给外部打开/激活。 */
+  /** Primary click behavior: selects by default; in activate mode, a plain click is handed to the caller to open/activate. */
   onActivate?: (name: string) => void
   clickMode?: 'select' | 'activate'
   emptyHint?: string
-  /** 测试 / 长列表场景下传入用于 grid 标识的 aria-label。 */
+  /** aria-label for the grid, passed in for tests / long-list scenarios. */
   ariaLabel?: string
-  /** 列数（默认按宽度自适应）。FolderColumn 这种窄列会传 2-3。 */
+  /** Column count (auto-fits by width by default). Narrow columns like FolderColumn pass 2-3. */
   columnsClass?: string
-  /** 当前「活跃」项（如 TagEdit 正在编辑的那张），名字精确匹配 item.name。
+  /** The current "active" item (e.g. the one TagEdit is editing), matched exactly against item.name.
    *
-   * **传了**这个 prop 就启用「解耦视觉」模式：
-   * - border / ring 只跟 activeName 走（标识活跃项）
-   * - checkbox 只跟 selected 走（标识多选）
+   * **Passing** this prop enables "decoupled visuals" mode:
+   * - border / ring follow only activeName (marks the active item)
+   * - checkbox follows only selected (marks multi-select)
    *
-   * **不传**沿用旧行为：selected 同时驱动 border 和 checkbox（其他用 ImageGrid
-   * 的页面，如 Curation / Download / Reg 未引入「活跃项」概念，行为不变）。 */
+   * **Not passing** it keeps the old behavior: selected drives both border and checkbox (other pages using
+   * ImageGrid, like Curation / Download / Reg, never adopted the "active item" concept -- unchanged). */
   activeName?: string
 }
 
-// 默认按容器宽度自动塞满：每格最小 120px，剩余宽度均分给最后一列；
-// 容器越宽列越多，无需断点切换。
+// Auto-fills by container width by default: 120px minimum per cell, remaining width split across the last column;
+// more columns as the container widens, no breakpoint switching needed.
 const DEFAULT_COLUMNS = 'grid-cols-[repeat(auto-fill,minmax(120px,1fr))]'
 
-// 虚拟滚动 buffer：约 5-6 行 cell。暗主题 cell 底色是 #110f0b（接近纯黑），
-// 滚动时新 mount 的 cell 在 img decode 完成前会闪一下黑色；overscan 足够大
-// 才能让 buffer 区图提前 decode 好，进入视口直接显示而非"先黑后图"。代价是
-// DOM 多 ~50 个节点 — 缩略图轻量，可接受。
+// Virtual-scroll buffer: about 5-6 rows of cells. The dark theme's cell background is #110f0b (near black);
+// a newly mounted cell flashes black while the img is still decoding when scrolling. A large enough overscan
+// lets buffer-region images decode ahead of time so they show immediately on entering the viewport instead of
+// "black then image". Cost: ~50 extra DOM nodes -- thumbnails are lightweight, acceptable.
 const OVERSCAN_PX = 600
 
-// 主导色 placeholder cache：thumbUrl → '#RRGGBB'。
+// Dominant-color placeholder cache: thumbUrl -> '#RRGGBB'.
 //
-// 模块级 Map（不是 React state）— 跨 ImageGrid 实例、跨 cell unmount/mount 都
-// 保留。Cell 第一次 mount 时 lookup 拿不到色 → 显示默认 bg-sunken（黑）；img
-// onLoad 后用 canvas 取色入 map + setState；之后用户滚出再滚回时 cell 重 mount
-// → lookup 命中 → 立即用主导色填底，img 还在 decode 时用户看到的是色块而非黑
-// 块，"滚动闪黑"消失。
+// Module-level Map (not React state) -- persists across ImageGrid instances and across cell unmount/mount.
+// On a cell's first mount, a cache lookup miss shows the default bg-sunken (black); once the img
+// onLoad fires, the dominant color is sampled via canvas into the map + setState; if the user scrolls away
+// and back, the cell remounts and the lookup hits, immediately filling the background with the dominant
+// color, so the user sees a color block instead of black while the img decodes -- the "black flash on scroll" is gone.
 //
-// 缺点：首次浏览（cache 冷）还是黑 → 图；但常规浏览（滚来滚去）从第二次起就
-// 有色。不持久化到 sessionStorage —— 每次刷页面 cache 重建几秒内就满，开销
-// 可忽略；持久化反而要处理 mtime invalidation 之类。
+// Downside: on first browse (cold cache) it's still black -> image; but on regular browsing (scrolling back and
+// forth) it has color from the second time on. Not persisted to sessionStorage -- the cache refills within a
+// few seconds of every page refresh anyway, negligible cost; persisting it would also mean handling mtime invalidation.
 const colorCache = new Map<string, string>()
 
-// 复用单个 1×1 canvas：drawImage(img, 0, 0, 1, 1) 让浏览器内部做完整缩放求平均
-// （比手动遍历 ImageData 快 1-2 个数量级）；getImageData 拿这一个像素 ≈ 平均色。
+// Reuses a single 1x1 canvas: drawImage(img, 0, 0, 1, 1) lets the browser do the full downscale-and-average
+// internally (1-2 orders of magnitude faster than manually iterating ImageData); getImageData on that one pixel ~= the average color.
 let _colorCanvas: HTMLCanvasElement | null = null
 function extractAvgColor(img: HTMLImageElement): string | null {
   try {
@@ -80,8 +80,8 @@ function extractAvgColor(img: HTMLImageElement): string | null {
     const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data
     return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`
   } catch {
-    // canvas tainted（跨域）/ jsdom 无真实 canvas / 其它失败 — 静默 fallback
-    // 到默认 bg-sunken。生产环境 thumb 同源不会 tainted。
+    // canvas tainted (cross-origin) / jsdom has no real canvas / other failure -- silently fall back
+    // to the default bg-sunken. Same-origin thumbs in production are never tainted.
     return null
   }
 }
@@ -105,10 +105,10 @@ export default function ImageGrid({
   }
   const decoupled = activeName !== undefined
 
-  // role="grid" + aria-label 放在外层 wrapper：VirtuosoGrid 内部 List/Item 包多
-  // 层 div（scroller/list/item），role 直接挂内层会被 Virtuoso 改写 className/
-  // style；外层 wrapper 是稳定的。getAllByRole('gridcell') 会穿透中间 div 找到
-  // Cell 上的 role="gridcell"，AT / 测试都不受影响。
+  // role="grid" + aria-label go on the outer wrapper: VirtuosoGrid wraps its internal List/Item in several
+  // layers of div (scroller/list/item); putting the role directly on an inner layer would get its className/
+  // style rewritten by Virtuoso. The outer wrapper is stable. getAllByRole('gridcell') pierces the intermediate
+  // divs to find the role="gridcell" on Cell -- unaffected for AT / tests.
   return (
     <div role="grid" aria-label={ariaLabel} className="h-full">
       <VirtuosoGrid
@@ -120,7 +120,7 @@ export default function ImageGrid({
           const it = items[index]
           const isSel = selected.has(it.name)
           const isActive = decoupled && it.name === activeName
-          // border = 旧行为时跟 selected 走；解耦时跟 activeName 走
+          // border follows selected in the old behavior; follows activeName when decoupled
           const borderHighlight = decoupled ? isActive : isSel
           return (
             <Cell
@@ -140,13 +140,13 @@ export default function ImageGrid({
   )
 }
 
-/** Cell 用 memo 包起来：父组件每次因为 hover 改 focus 都会重渲，但绝大多数
- * cell 的 selected / onSelect / item 引用都没变，能跳过重渲，避免 N 张缩略图
- * 全部重新创建 DOM。
+/** Cell is wrapped in memo: the parent re-renders every time hover changes focus, but most
+ * cells' selected / onSelect / item references don't change, so the re-render can be skipped, avoiding
+ * recreating the DOM for all N thumbnails.
  *
- * `borderHighlight` 控制 accent border + ring（"高亮"视觉），跟 `selected`
- * （checkbox 状态）解耦：旧路径上两者一致，TagEdit 解耦模式下 border 跟
- * activeName 走，checkbox 跟多选走。 */
+ * `borderHighlight` controls the accent border + ring (the "highlighted" look), decoupled from `selected`
+ * (checkbox state): they match on the old path, but in TagEdit's decoupled mode border follows
+ * activeName while checkbox follows multi-select. */
 const Cell = memo(function Cell({
   item,
   selected,
@@ -167,23 +167,24 @@ const Cell = memo(function Cell({
   clickMode: 'select' | 'activate'
 }) {
   const { t } = useTranslation()
-  // mount 时同步从 cache lookup —— 命中就立刻用主导色填底（避免黑闪），
-  // miss 就 undefined → 类名里的 bg-sunken 兜底。lazy init 保证只查一次。
+  // Synchronously check the cache on mount -- a hit fills the background with the dominant color right away
+  // (avoiding the black flash); a miss leaves undefined -> falls back to bg-sunken in the class name. Lazy init keeps this a one-time lookup.
   const [bg, setBg] = useState<string | undefined>(() => colorCache.get(item.thumbUrl))
-  // img 是否已 load —— 默认 false（opacity-0），onLoad 后 true（opacity-100）。
-  // 配合 transition-opacity 让"色块 → 图"是 150ms 淡入而非突变，进一步柔化
-  // cache 命中场景下的视觉跳变；cache miss 场景也从"黑 → 啪一下出图"变成
-  // "黑 → 图淡入"。
+  // Whether the img has loaded -- false by default (opacity-0), true after onLoad (opacity-100).
+  // Paired with transition-opacity so "color block -> image" is a 150ms fade rather than a snap, further softening
+  // the visual jump on a cache hit; on a cache miss it also turns "black -> image pops in" into
+  // "black -> image fades in".
   const [loaded, setLoaded] = useState(false)
   const imgRef = useRef<HTMLImageElement>(null)
-  // unmount 时 abort 还在下载的缩略图（src='' 是 <img> 唯一的取消手段）。
-  // 浏览器不会因为节点被移除就取消请求 —— 切路由后几十张半途的 thumb 会
-  // 继续占满同源 HTTP/1.1 的 6 个连接，新页面的 /api fetch 全在队尾排队，
-  // 用户视角就是"路由被图片卡住"。半途取消的图不进 HTTP 缓存，但后端
-  // thumb_cache 已落盘 + 完整加载过的走 304，重进页面的代价很小。
+  // On unmount, abort any thumbnail still downloading (src='' is the only way to cancel an <img> request).
+  // The browser doesn't cancel the request just because the node was removed -- after switching routes,
+  // dozens of half-loaded thumbs would keep occupying the same-origin HTTP/1.1 connection limit of 6,
+  // starving the new page's /api fetches at the back of the queue. From the user's view it looks like
+  // "the route is stuck behind images". A canceled image doesn't enter the HTTP cache, but the backend's
+  // thumb_cache is already on disk + a fully-loaded one gets a 304, so re-entering the page is cheap.
   useEffect(() => {
-    // mount 时抓住元素：unmount 时 React 已把 ref 置 null，cleanup 里直接读
-    // imgRef.current 拿不到节点。脱离 DOM 的 <img> 改 src 同样会 abort 请求。
+    // Grab the element on mount: by unmount React has already nulled the ref, so reading
+    // imgRef.current in the cleanup wouldn't get the node. Changing src on a detached <img> still aborts the request.
     const img = imgRef.current
     // StrictMode (dev) runs mount → cleanup → mount: the cleanup below has
     // already blanked src, and React will not set an unchanged prop again.
@@ -205,7 +206,7 @@ const Cell = memo(function Cell({
     onSelect(item.name, e)
   }
 
-  // img 加载完成：(1) 取色入 cache（如果还没有）；(2) 标记 loaded → 触发淡入。
+  // img finished loading: (1) sample the color into the cache (if not already there); (2) mark loaded -> triggers the fade-in.
   const handleImgLoad = (e: SyntheticEvent<HTMLImageElement>) => {
     if (!colorCache.has(item.thumbUrl)) {
       const color = extractAvgColor(e.currentTarget)
@@ -227,19 +228,19 @@ const Cell = memo(function Cell({
       style={bg ? { background: bg } : undefined}
       className={'ds-thumb group aspect-square cursor-pointer select-none' + (borderHighlight ? ' ds-sel' : '')}
     >
-      {/* 虚拟化场景不能用 loading="lazy"：cell 进入 DOM（包括 overscan 区）
-       * 时浏览器不主动 load，要等真正进入视口才 fetch，overscan 的预热效果
-       * 全废。这里改 eager（默认）让 Virtuoso 一 mount cell 浏览器就开 fetch
-       * + decode，配合大 overscan 几乎看不到滚动闪。 */}
+      {/* Can't use loading="lazy" in a virtualized context: the browser won't proactively load a cell as soon as
+       * it enters the DOM (including the overscan zone) -- it waits until it actually enters the viewport, which
+       * defeats the whole point of overscan pre-warming. Switched to eager (the default) here so the browser starts
+       * fetching + decoding as soon as Virtuoso mounts the cell, which combined with a large overscan makes scroll flashing nearly invisible. */}
       <img
         ref={imgRef}
         src={item.thumbUrl}
         alt={item.name}
         decoding="async"
         draggable={false}
-        // 让尚未开始的 thumb 请求排在数据 fetch 之后，页内操作不被图片饿死。
-        // React 18 只透传小写 unknown attribute（camelCase fetchPriority 是
-        // React 19 的事），spread 绕开 TS 对未知 prop 的检查。
+        // Lets thumb requests that haven't started yet queue behind data fetches, so in-page actions aren't starved by images.
+        // React 18 only passes through lowercase unknown attributes (camelCase fetchPriority is
+        // a React 19 thing); spread bypasses TS's check on the unknown prop.
         {...{ fetchpriority: 'low' }}
         onLoad={handleImgLoad}
         className={
@@ -257,7 +258,7 @@ const Cell = memo(function Cell({
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round"><path d="m5 13 4 4L19 7" /></svg>
         </span>
       </button>
-      {/* 放大镜：悬停时出现，点击触发 modal 全屏预览（不影响选择状态） */}
+      {/* Magnifier: appears on hover, click triggers the fullscreen modal preview (doesn't affect selection state) */}
       {onPreview && (
         <button
           type="button"
@@ -281,13 +282,13 @@ const Cell = memo(function Cell({
   )
 })
 
-/** 给 caller 用的工具：单击 = checkbox 切换；shift+click = 区间选。
+/** Utility for callers: click = toggle checkbox; shift+click = range-select.
  *
- * - 单击已选中 → 取消选中
- * - 单击未选中 → 加入选中
- * - shift+click：从 anchor 到当前位置之间所有项加入选中（不取消已选中的）
+ * - Click an already-selected item -> deselect it
+ * - Click an unselected item -> select it
+ * - shift+click: selects every item between the anchor and the current position (doesn't deselect already-selected ones)
  *
- * 注意：不再要求 ctrl/cmd —— 单击就是切换，符合「checkbox 多选」UX。
+ * Note: no longer requires ctrl/cmd -- a plain click toggles, matching "checkbox multi-select" UX.
  */
 export function applySelection(
   current: Set<string>,

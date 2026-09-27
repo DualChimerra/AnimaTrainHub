@@ -1,20 +1,24 @@
-"""Automagic v1/v2 + Lion + CAME 断点续训兼容性测试。
+"""Resume compatibility tests for Automagic v1/v2 + Lion + CAME.
 
-走真实 save_training_state → load_training_state 链路（torch.save/load 序列化），
-覆盖三类优化器各自的 resume 风险点：
+Exercises the real save_training_state -> load_training_state chain (torch.save/load
+serialization), covering each optimizer's resume risk points:
 
-- Automagic v1：lr_mask (Auto8bitTensor) 序列化为 plain dict、load 后 int8/bool
-  state 搬回 param device、bf16 Kahan shift dtype 稳定（PyTorch load 会把 float
-  state cast 到 param dtype —— shift 与 param 同 dtype 所以 roundtrip 不漂移）。
-- Automagic v2：scalar lr / 二阶矩在 load fixup 后恢复 fp32（PyTorch 在 bf16
-  param 下会把它们降成 bf16）；fused backward hook 在 resume 后继续工作。
-- Lion：标准 PyTorch state（exp_avg），无自定义钩子，验证数值保留 + 续步可跑。
-- CAME：factored state（行/列二阶矩 + instability）数值保留；bf16 param 下
-  load fixup 恢复 fp32 state（PyTorch load 会 cast 到 param dtype）。
+- Automagic v1: lr_mask (Auto8bitTensor) serializes to a plain dict, int8/bool state is moved
+  back to the param device after load, bf16 Kahan shift dtype stays stable (PyTorch load casts
+  float state to the param dtype -- shift shares the param dtype so the roundtrip doesn't drift).
+- Automagic v2: scalar lr / second moment are restored to fp32 after the load fixup (PyTorch
+  would otherwise downcast them to bf16 under a bf16 param); the fused backward hook keeps
+  working after resume.
+- Lion: standard PyTorch state (exp_avg), no custom hooks, verifies values are preserved and
+  training can continue.
+- CAME: factored state (row/col second moment + instability) preserves values; under a bf16
+  param, the load fixup restores fp32 state (PyTorch load would otherwise cast to the param
+  dtype).
 
-注意：pause snapshot freeze（bootstrap）保证 UI 路径下 resume 不会换 optimizer
-类型 / variant；跨 variant 手动 resume（CLI 改 yaml）不在支持范围，v2 加载 v1
-state 会在首次 update 时 KeyError fail-fast 而非静默错误。
+Note: pause snapshot freeze (bootstrap) guarantees the UI resume path never changes the
+optimizer type / variant; a manual cross-variant resume (editing yaml via the CLI) is
+unsupported -- v2 loading v1 state fails fast with a KeyError on the first update rather than
+failing silently.
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ from utils.optimizer_utils import CAME, Automagic, Automagic2, Lion
 
 
 class _StubInjector:
-    """state.py 只要求 state_dict() / load_state_dict(sd, strict=False)。"""
+    """state.py only requires state_dict() / load_state_dict(sd, strict=False)."""
 
     def __init__(self):
         self.loaded = None
@@ -43,7 +47,7 @@ class _StubInjector:
 
 
 def _roundtrip(tmp_path: Path, optimizer, model_factory, optimizer_factory):
-    """save → 新 model/optimizer → load，返回 (新 optimizer, 新 model)。"""
+    """save -> new model/optimizer -> load, returns (new optimizer, new model)."""
     from training.state import load_training_state, save_training_state
 
     ckpt = tmp_path / "state.pt"
@@ -87,19 +91,19 @@ def test_automagic_v1_resume_roundtrip_fp32(tmp_path: Path) -> None:
     p2 = next(iter(model2.parameters()))
     st = optim2.state[p2]
 
-    # lr_mask 数值精确保留（int8 quantized + scale 序列化为 plain dict）
+    # lr_mask values are preserved exactly (int8 quantized + scale serialize to a plain dict)
     assert torch.allclose(st["lr_mask"].dequantize(), mask_before, atol=1e-9)
     assert optim2.get_avg_learning_rate() == pytest.approx(lr_before)
-    # 续步可跑：lr 轨迹从恢复值继续而不是重置
+    # can continue training: the lr trajectory continues from the restored value instead of resetting
     model2(torch.randn(2, 8)).sum().backward()
     optim2.step()
     assert torch.isfinite(p2).all()
 
 
 def test_automagic_v1_resume_bf16_kahan_shift_stable(tmp_path: Path) -> None:
-    """bf16 训练 resume：shift 与 param 同 dtype，roundtrip 后不漂移；
-    bool last_polarity / int8 lr_mask 搬回 param device（CPU 下退化为 no-op，
-    但 dtype 断言仍然有效）。"""
+    """bf16 training resume: shift shares dtype with param, doesn't drift after the roundtrip;
+    bool last_polarity / int8 lr_mask are moved back to the param device (a no-op on CPU, but
+    the dtype assertions still hold)."""
     torch.manual_seed(0)
     model = nn.Linear(8, 8, bias=False).to(torch.bfloat16)
     optim = Automagic(model.parameters(), lr=1e-5)
@@ -114,9 +118,9 @@ def test_automagic_v1_resume_bf16_kahan_shift_stable(tmp_path: Path) -> None:
     )
     p2 = next(iter(model2.parameters()))
     st = optim2.state[p2]
-    assert st["shift"].dtype == p2.dtype, "Kahan shift dtype 在 resume 后必须稳定"
+    assert st["shift"].dtype == p2.dtype, "Kahan shift dtype must stay stable after resume"
     assert st["lr_mask"].quantized.dtype == torch.int8
-    # 续步 Kahan 路径可跑
+    # the Kahan path continues to work
     model2(torch.randn(2, 8, dtype=torch.bfloat16)).sum().backward()
     optim2.step()
     assert torch.isfinite(p2).all()
@@ -132,7 +136,7 @@ def test_automagic_v2_resume_scalar_lr_fp32_and_hook_alive(tmp_path: Path) -> No
     model = nn.Linear(8, 8, bias=False)
     optim = Automagic2(model.parameters(), lr=1e-6, lr_bump=1e-6)
     for _ in range(3):
-        model(torch.randn(2, 8)).sum().backward()  # hook 内完成 update
+        model(torch.randn(2, 8)).sum().backward()  # the update happens inside the hook
         optim.zero_grad()
     p1 = next(iter(model.parameters()))
     lr_before = float(optim.state[p1]["lr"])
@@ -149,17 +153,17 @@ def test_automagic_v2_resume_scalar_lr_fp32_and_hook_alive(tmp_path: Path) -> No
     assert float(st["lr"]) == pytest.approx(lr_before)
     assert st["step"] == step_before
 
-    # resume 后 fused hook 继续工作：backward 即更新参数并清 grad
+    # the fused hook keeps working after resume: backward updates the param and clears grad
     before = p2.detach().clone()
     model2(torch.randn(2, 8)).sum().backward()
-    assert p2.grad is None, "fused hook 应在 backward 中消费 grad"
-    assert not torch.equal(p2.detach(), before), "resume 后 hook 应继续更新参数"
-    assert st["step"] == step_before + 1, "step 应从恢复值继续递增"
+    assert p2.grad is None, "the fused hook should consume grad during backward"
+    assert not torch.equal(p2.detach(), before), "the hook should keep updating params after resume"
+    assert st["step"] == step_before + 1, "step should keep incrementing from the restored value"
 
 
 def test_automagic_v2_resume_bf16_second_moment_fp32(tmp_path: Path) -> None:
-    """bf16 param 下 PyTorch load 会把 fp32 state 降成 bf16，
-    Automagic2.load_state_dict fixup 必须恢复 fp32。"""
+    """Under a bf16 param, PyTorch load downcasts fp32 state to bf16 --
+    Automagic2.load_state_dict's fixup must restore fp32."""
     torch.manual_seed(0)
     model = nn.Linear(8, 8, bias=False).to(torch.bfloat16)
     optim = Automagic2(model.parameters(), lr=1e-6)
@@ -202,7 +206,7 @@ def test_lion_resume_roundtrip(tmp_path: Path) -> None:
     p2 = next(iter(model2.parameters()))
     assert torch.allclose(optim2.state[p2]["exp_avg"], exp_avg_before)
     assert optim2.param_groups[0]["lr"] == 1e-5
-    # 续步可跑
+    # training can continue
     model2(torch.randn(2, 8)).sum().backward()
     optim2.step()
     assert torch.isfinite(p2).all()
@@ -238,15 +242,15 @@ def test_came_resume_roundtrip_fp32(tmp_path: Path) -> None:
     assert torch.allclose(st2["exp_avg_sq_row"], row_before)
     assert torch.allclose(st2["exp_avg_res_row"], res_row_before)
     assert st2["step"] == 3
-    # 续步可跑
+    # training can continue
     model2(torch.randn(2, 8)).sum().backward()
     optim2.step()
     assert torch.isfinite(p2).all()
 
 
 def test_came_resume_bf16_state_restored_fp32(tmp_path: Path) -> None:
-    """bf16 param 下 PyTorch load 会把 fp32 state 降成 bf16，
-    CAME.load_state_dict fixup 必须恢复 fp32。"""
+    """Under a bf16 param, PyTorch load downcasts fp32 state to bf16 --
+    CAME.load_state_dict's fixup must restore fp32."""
     torch.manual_seed(0)
     model = nn.Linear(8, 8, bias=False).to(torch.bfloat16)
     optim = CAME(model.parameters(), lr=1e-3)
@@ -263,8 +267,8 @@ def test_came_resume_bf16_state_restored_fp32(tmp_path: Path) -> None:
     st = optim2.state[p2]
     for key in ("exp_avg", "exp_avg_sq_row", "exp_avg_sq_col",
                 "exp_avg_res_row", "exp_avg_res_col"):
-        assert st[key].dtype == torch.float32, f"{key} 应在 resume 后恢复 fp32"
-    # 续步 stochastic rounding 写回可跑
+        assert st[key].dtype == torch.float32, f"{key} should be restored to fp32 after resume"
+    # the stochastic rounding writeback continues to work
     model2(torch.randn(2, 8, dtype=torch.bfloat16)).sum().backward()
     optim2.step()
     assert torch.isfinite(p2).all()

@@ -1,13 +1,14 @@
-"""Block swap 机制核心单测（docs/design/block-swap.md §9 刀 1）。
+"""Core unit tests for the block swap mechanism (docs/design/block-swap.md §9 knife 1).
 
-覆盖：
-- 数值正确性：swap 前向/反向与全常驻逐位一致
-- 原地换语义：module 身份不变（LoRA 兼容的前提）、param.data 指向槽
-- fp8 场景：weight_scale 非持久 buffer 恒与权重配对
-- 边界：num_swap 校验、非换出层 no-op
-- 分配失败：BlockSwapAllocationError 携带上下文
+Covers:
+- Numerical correctness: swap forward/backward matches fully-resident bit-for-bit
+- In-place swap semantics: module identity is preserved (a precondition for LoRA
+  compatibility), param.data points into a slot
+- fp8 case: the non-persistent weight_scale buffer always stays paired with its weight
+- Boundaries: num_swap validation, no-op for non-swapped layers
+- Allocation failure: BlockSwapAllocationError carries context
 
-无 CUDA 时整文件 skip（block swap 是 CUDA-only 机制）。
+The whole file is skipped without CUDA (block swap is a CUDA-only mechanism).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import torch
 from torch import nn
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="block swap 是 CUDA-only 机制"
+    not torch.cuda.is_available(), reason="block swap is a CUDA-only mechanism"
 )
 
 
@@ -35,7 +36,7 @@ def _import():
 
 
 class _Tiny(nn.Module):
-    """一个结构同构、可堆叠的小 block（避免依赖真实 krea2 权重）。"""
+    """A structurally-identical, stackable small block (avoids depending on real krea2 weights)."""
 
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -47,10 +48,10 @@ class _Tiny(nn.Module):
 
 
 def _make_blocks(n: int, dim: int, device) -> nn.ModuleList:
-    """底模 frozen —— 与真实流程一致（loader 里 model.requires_grad_(False)）。
+    """Base model frozen -- matches the real flow (loader calls model.requires_grad_(False)).
 
-    组件只管理冻结的基权重，可训练参数（LoRA）不归它管，所以测试基线必须冻结，
-    否则什么都不会被换出。
+    The component only manages frozen base weights; trainable params (LoRA) aren't
+    its concern, so the test baseline must be frozen, otherwise nothing gets swapped out.
     """
     torch.manual_seed(0)
     blocks = nn.ModuleList([_Tiny(dim) for _ in range(n)])
@@ -88,7 +89,7 @@ def test_forward_matches_resident():
 
 
 def test_module_identity_preserved():
-    """原地换的核心保证：block/Linear 对象不变 —— 这是 LoRA 兼容的前提。"""
+    """The core guarantee of in-place swap: block/Linear objects don't change -- a precondition for LoRA compatibility."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(5, 16, device)
@@ -105,10 +106,10 @@ def test_module_identity_preserved():
 
 
 def test_lora_style_forward_hook_not_bypassed():
-    """模拟 LyCORIS bypass：在 Linear 外包一层加法。swap 必须仍走这层。
+    """Simulate a LyCORIS bypass: wrap Linear with an extra addition. swap must still go through this layer.
 
-    若 swap 用 buffer 轮转（换 module 实例），这个 hook 会被绕过 —— 本测试
-    正是钉死 doc §9.1 那个「静默学不到东西」的陷阱。
+    If swap rotated buffers (swapping module instances), this hook would be bypassed --
+    this test pins down exactly the "silently learns nothing" trap from doc §9.1.
     """
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
@@ -118,7 +119,7 @@ def test_lora_style_forward_hook_not_bypassed():
 
     def hook(_module, _inp, out):
         marker["calls"] += 1
-        return out + 1.0  # LoRA-like 额外贡献
+        return out + 1.0  # LoRA-like extra contribution
 
     handles = [b.lin1.register_forward_hook(hook) for b in blocks]
 
@@ -128,12 +129,12 @@ def test_lora_style_forward_hook_not_bypassed():
 
     for h in handles:
         h.remove()
-    # 4 个 block 每个的 lin1 都应被 hook 命中一次（含 2 个换出层）
+    # each of the 4 blocks' lin1 should be hit by the hook exactly once (including the 2 swapped-out layers)
     assert marker["calls"] == 4
 
 
 def test_backward_grad_flows_through_swapped_blocks():
-    """底模 frozen 时梯度仍须穿过换出层传到输入（LoRA 训练依赖这条链路）。"""
+    """With the base model frozen, gradients must still flow through swapped-out layers to the input (LoRA training depends on this path)."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(6, 16, device)
@@ -155,22 +156,22 @@ def test_num_swap_validation():
     device = torch.device("cuda")
     blocks = _make_blocks(4, 8, device)
 
-    with pytest.raises(ValueError, match="num_swap 必须为正"):
+    with pytest.raises(ValueError, match="num_swap must be positive"):
         PinnedBlockSwap(blocks, num_swap=0, device=device)
-    with pytest.raises(ValueError, match="超过 block 总数"):
+    with pytest.raises(ValueError, match="exceeds the total block count"):
         PinnedBlockSwap(blocks, num_swap=5, device=device)
-    with pytest.raises(ValueError, match="num_slots 至少为 2"):
+    with pytest.raises(ValueError, match="num_slots must be at least 2"):
         PinnedBlockSwap(blocks, num_swap=2, device=device, num_slots=1)
 
 
 def test_non_swapped_layers_noop():
-    """前 N-num_swap 层的 ensure_resident/release 是 no-op，不改其 param。"""
+    """The first N-num_swap layers' ensure_resident/release are no-ops, leaving their params untouched."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(5, 16, device)
     swap = PinnedBlockSwap(blocks, num_swap=2, device=device)
 
-    # block 0/1/2 常驻（first_swapped == 3）
+    # blocks 0/1/2 are resident (first_swapped == 3)
     assert swap.first_swapped == 3
     resident_ptr = blocks[0].lin1.weight.data_ptr()
     swap.ensure_resident(0)
@@ -185,14 +186,15 @@ def test_pinned_bytes_accounting():
     blocks = _make_blocks(n, dim, device)
     swap = PinnedBlockSwap(blocks, num_swap=num_swap, device=device)
 
-    # 每个 _Tiny：2 个 Linear，各 dim*dim 权重 + dim 偏置，fp32
+    # each _Tiny: 2 Linears, each dim*dim weights + dim bias, fp32
     per_block = num_swap * 2 * (dim * dim + dim) * 4
     assert swap.pinned_bytes == per_block
 
 
 def test_fp8_scale_stays_paired():
-    """fp8 场景：weight_scale 是绑在 module 上的非持久 buffer；原地换权重后
-    scale 必须仍与该 module 的权重配对（module 不变 → 自动正确）。"""
+    """fp8 case: weight_scale is a non-persistent buffer bound to the module; after
+    swapping weights in place, the scale must still be paired with that module's weight
+    (module unchanged -> automatically correct)."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
 
@@ -200,7 +202,7 @@ def test_fp8_scale_stays_paired():
         def __init__(self, dim):
             super().__init__()
             self.lin = nn.Linear(dim, dim)
-            # 模拟 patch_fp8_linears：非持久 buffer
+            # simulate patch_fp8_linears: non-persistent buffer
             self.lin.register_buffer(
                 "weight_scale", torch.tensor(2.0, device=device), persistent=False
             )
@@ -217,15 +219,16 @@ def test_fp8_scale_stays_paired():
     swap = PinnedBlockSwap(blocks, num_swap=3, device=device)
     got = _run_swap(swap, blocks, x)
 
-    # scale 未被搬运破坏，前向仍逐位一致
+    # scale wasn't corrupted by the move, forward still matches bit-for-bit
     torch.testing.assert_close(got, expected)
     for b in blocks:
         assert b.lin.weight_scale.item() == 2.0
 
 
 def test_shape_readable_after_construct():
-    """构造后（权重已下 CPU）仍能读到正确 shape/dtype —— LyCORIS 在 swap 之后
-    注入时要读基权重形状，指向 empty(0) 会让它读到错误形状（doc §9.1）。"""
+    """After construction (weights already moved to CPU), shape/dtype are still readable
+    correctly -- LyCORIS reads the base weight shape when injecting after swap; pointing
+    to empty(0) would make it read the wrong shape (doc §9.1)."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     dim = 24
@@ -237,13 +240,13 @@ def test_shape_readable_after_construct():
     for i, block in enumerate(blocks):
         assert tuple(block.lin1.weight.shape) == shapes_before[i]
         assert block.lin1.weight.dtype == torch.float32
-    # 换出层的权重此刻应在 CPU（显存已释放），常驻层仍在 GPU
+    # the swapped-out layer's weight should now be on CPU (VRAM freed), resident layers still on GPU
     assert blocks[swap.first_swapped].lin1.weight.device.type == "cpu"
     assert blocks[0].lin1.weight.device.type == "cuda"
 
 
 def test_attach_hooks_forward_matches_resident():
-    """attach() 的钩子路径：前向数值与全常驻一致，且不需要改模型循环。"""
+    """attach()'s hook path: forward values match fully-resident, without needing to change the model loop."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(6, 32, device)
@@ -252,16 +255,18 @@ def test_attach_hooks_forward_matches_resident():
 
     swap = PinnedBlockSwap(blocks, num_swap=4, device=device)
     swap.attach()
-    got = _run_resident(blocks, x)  # 普通循环，钩子自动接管
+    got = _run_resident(blocks, x)  # plain loop, the hook takes over automatically
 
     torch.testing.assert_close(got, expected)
 
 
 def test_attach_with_gradient_checkpointing_backward():
-    """**核心 claim 验证**：开 gradient checkpointing 后，反向的重算会再次触发
-    block forward，pre-hook 随之按逆序换回权重 —— 所以反向无需单独编排。
+    """**Core claim verification**: with gradient checkpointing on, the backward recompute
+    triggers block forward again, and the pre-hook swaps weights back in in reverse
+    order -- so backward needs no separate orchestration.
 
-    对照组是同一份权重的全常驻模型，比较 LoRA-style 可训练参数的梯度。
+    The control group is a fully-resident model with the same weights, comparing
+    gradients of LoRA-style trainable params.
     """
     from torch.utils.checkpoint import checkpoint
 
@@ -270,7 +275,7 @@ def test_attach_with_gradient_checkpointing_backward():
     dim, n = 32, 6
     blocks = _make_blocks(n, dim, device)
 
-    # 模拟 LoRA：每个 block 挂一个可训练小参数，底模 frozen
+    # simulate LoRA: attach a small trainable param to each block, base model frozen
     for b in blocks:
         b.lora = nn.Parameter(torch.ones(dim, device=device) * 0.1)
     for b in blocks:
@@ -285,7 +290,7 @@ def test_attach_with_gradient_checkpointing_backward():
             h = checkpoint(fwd, h, use_reentrant=False) if use_checkpoint else fwd(h)
         return h.sum()
 
-    # 基线：全常驻 + checkpoint
+    # baseline: fully resident + checkpoint
     run(True).backward()
     expected = [b.lora.grad.clone() for b in blocks]
     for b in blocks:
@@ -297,35 +302,37 @@ def test_attach_with_gradient_checkpointing_backward():
     run(True).backward()
 
     for i, b in enumerate(blocks):
-        assert b.lora.grad is not None, f"block {i} 无梯度"
-        torch.testing.assert_close(b.lora.grad, expected[i], msg=f"block {i} 梯度不一致")
+        assert b.lora.grad is not None, f"block {i} has no gradient"
+        torch.testing.assert_close(b.lora.grad, expected[i], msg=f"block {i} gradient mismatch")
 
 
 def test_trainable_params_are_not_managed():
-    """可训练参数（LoRA）必须原地不动、常驻 GPU —— 不被当基权重换出。"""
+    """Trainable params (LoRA) must stay in place, resident on GPU -- not swapped out as base weights."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(4, 16, device)
     for b in blocks:
         b.lin1.requires_grad_(False)
         b.lin2.requires_grad_(False)
-        b.lora = nn.Parameter(torch.ones(16, device=device))  # 可训练
+        b.lora = nn.Parameter(torch.ones(16, device=device))  # trainable
 
     swap = PinnedBlockSwap(blocks, num_swap=2, device=device)
 
     for b in list(blocks)[swap.first_swapped:]:
-        assert b.lora.device.type == "cuda", "LoRA 参数被错误地换到了 CPU"
-        assert b.lin1.weight.device.type == "cpu", "冻结基权重应已下 CPU"
-    # 登记的 spec 里不应出现 lora
+        assert b.lora.device.type == "cuda", "the LoRA param was incorrectly swapped to CPU"
+        assert b.lin1.weight.device.type == "cpu", "the frozen base weight should already be on CPU"
+    # lora should not appear in the registered spec
     for rel in range(swap.num_swap):
         names = [n for n, _s, _d in swap._param_specs[rel]]
         assert "lora" not in names
 
 
 def test_params_added_after_construct_do_not_break_rebind():
-    """构造后新增参数（LoRA 在 block 内建子模块的情形）不应让换入崩溃。
+    """Params added after construction (the case where LoRA builds a submodule inside
+    the block) should not crash the swap-in.
 
-    回归：_rebind 曾遍历 named_parameters() 直接查 buf[name] → KeyError。
+    Regression: _rebind used to iterate named_parameters() and look up buf[name]
+    directly -> KeyError.
     """
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
@@ -334,7 +341,7 @@ def test_params_added_after_construct_do_not_break_rebind():
         b.requires_grad_(False)
 
     swap = PinnedBlockSwap(blocks, num_swap=2, device=device)
-    # 构造之后再挂参数
+    # attach the param after construction
     for b in blocks:
         b.late = nn.Parameter(torch.ones(16, device=device))
     swap.attach()
@@ -352,20 +359,20 @@ def test_detach_removes_hooks():
     blocks = _make_blocks(4, 16, device)
     swap = PinnedBlockSwap(blocks, num_swap=2, device=device)
     swap.attach()
-    swap.attach()  # 幂等
-    # 每个换出 block 4 个钩子：前向 pre/post + 反向 pre/post。反向那两个不能省，
-    # 少了梯度会静默算错（见 test_block_swap_grad_fidelity.py）
+    swap.attach()  # idempotent
+    # 4 hooks per swapped-out block: forward pre/post + backward pre/post. The backward
+    # two can't be skipped -- missing them silently miscomputes gradients (see test_block_swap_grad_fidelity.py)
     assert len(swap._handles) == 2 * 4
     swap.detach()
     assert swap._handles == []
 
 
 def test_adopts_cpu_weights_without_recopy():
-    """loader 已把尾部层放到 CPU pinned 时，组件就地接管不重复拷贝。"""
+    """When the loader has already placed the tail layers on pinned CPU memory, the component takes over in place without recopying."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(4, 16, device)
-    # 模拟 loader：把末尾 2 层放到 CPU pinned
+    # simulate the loader: put the last 2 layers on pinned CPU memory
     for b in list(blocks)[2:]:
         for p in b.parameters():
             p.data = p.detach().to("cpu").pin_memory()
@@ -373,7 +380,7 @@ def test_adopts_cpu_weights_without_recopy():
 
     swap = PinnedBlockSwap(blocks, num_swap=2, device=device)
 
-    # 主副本应就是原来那批 pinned 张量（未重新分配）
+    # the master copy should be the same pinned tensors as before (not reallocated)
     for rel in range(swap.num_swap):
         for _name, t in swap._cpu_weights[rel].items():
             assert t.is_pinned()
@@ -383,12 +390,13 @@ def test_adopts_cpu_weights_without_recopy():
 
 
 def test_fp8_base_with_swap_forward_matches_resident():
-    """fp8 底模 + block swap（B7 的核心组合）：走真的 patch_fp8_linears。
+    """fp8 base model + block swap (B7's core combination): goes through the real patch_fp8_linears.
 
-    钉死两件事：
-    - fp8 权重能 pin / H2D 搬运（dtype 原样，不 cast）
-    - weight_scale 必须常驻计算设备。它跟随 module.weight.device 的话，换出层
-      patch 时权重在 CPU → scale 落 CPU → 前向时权重已上 GPU，device 不匹配。
+    Pins down two things:
+    - fp8 weights can be pinned / H2D-transferred (dtype unchanged, no cast)
+    - weight_scale must stay resident on the compute device. If it followed
+      module.weight.device, patching a swapped-out layer with the weight on CPU would
+      leave scale on CPU -> mismatched device once the weight is back on GPU for forward.
     """
     import sys
     from pathlib import Path
@@ -414,7 +422,7 @@ def test_fp8_base_with_swap_forward_matches_resident():
     torch.manual_seed(3)
     blocks = nn.ModuleList([_Fp8Block() for _ in range(n)]).to(device)
     blocks.requires_grad_(False)
-    # 转 fp8 存储 + per-layer scale（模拟 fp8_scaled checkpoint）
+    # convert to fp8 storage + per-layer scale (simulate an fp8_scaled checkpoint)
     scales = {}
     for i, b in enumerate(blocks):
         b.lin.weight.data = b.lin.weight.data.to(torch.float8_e4m3fn)
@@ -429,10 +437,10 @@ def test_fp8_base_with_swap_forward_matches_resident():
     got = _run_resident(blocks, x)
 
     torch.testing.assert_close(got, expected)
-    # scale 全程在 GPU（不随权重下 CPU）
+    # scale stays on GPU throughout (doesn't follow the weight to CPU)
     for b in blocks:
         assert b.lin.weight_scale.device.type == "cuda"
-    # 换出层的 fp8 权重主副本确实是 fp8 且 pinned
+    # the swapped-out layer's fp8 weight master copy is indeed fp8 and pinned
     for rel in range(swap.num_swap):
         for _name, t in swap._cpu_weights[rel].items():
             assert t.dtype == torch.float8_e4m3fn
@@ -440,14 +448,14 @@ def test_fp8_base_with_swap_forward_matches_resident():
 
 
 def test_restore_masters_points_params_back_to_cpu():
-    """restore_masters 把参数指回 CPU 主副本 —— fp8 merge 前必须先做。"""
+    """restore_masters points params back to the CPU master copy -- must be done before an fp8 merge."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(5, 16, device)
     swap = PinnedBlockSwap(blocks, num_swap=3, device=device)
     swap.attach()
 
-    # 跑一次前向：换出层的 .data 此刻指向 GPU 槽
+    # run one forward: the swapped-out layer's .data now points into a GPU slot
     _run_resident(blocks, torch.randn(1, 16, device=device))
     assert blocks[swap.first_swapped].lin1.weight.device.type == "cuda"
 
@@ -458,13 +466,16 @@ def test_restore_masters_points_params_back_to_cpu():
 
 
 def test_write_after_restore_masters_takes_effect_in_forward():
-    """**核心保证**：restore 后写进权重的改动（= fp8 merge 的 delta）会被后续
-    换入带上卡、真实影响前向输出，不会被 GPU 槽轮转吞掉。
+    """**Core guarantee**: changes written to weights after restore (= the fp8 merge delta)
+    get carried onto the GPU by the next swap-in and genuinely affect the forward output --
+    they aren't swallowed by GPU slot rotation.
 
-    注意断言的是**前向输出**而不是换出层的 `.data` —— 一次 pass 结束后，某个
-    换出层的 `.data` 仍指向它当时用的槽，而那个槽早已被后面的层覆盖（双缓冲
-    轮转）。换出层的权重只在它自己的 forward 窗口内有效；窗口外要读权重必须
-    先 restore_masters()。
+    Note the assertion is on the **forward output**, not the swapped-out layer's `.data` --
+    after a pass ends, a swapped-out layer's `.data` still points to whichever slot it
+    used at the time, and that slot has long since been overwritten by a later layer
+    (double buffering rotation). A swapped-out layer's weight is only valid within its
+    own forward window; reading the weight outside that window requires calling
+    restore_masters() first.
     """
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
@@ -475,23 +486,25 @@ def test_write_after_restore_masters_takes_effect_in_forward():
     x = torch.randn(1, 16, device=device)
     before = _run_resident(blocks, x).clone()
 
-    # 模拟 fp8 merge：restore 后就地改主副本
+    # simulate an fp8 merge: modify the master copy in place after restore
     swap.restore_masters()
     blocks[swap.first_swapped].lin1.weight.data.add_(1.0)
 
     after = _run_resident(blocks, x)
-    assert not torch.allclose(before, after), "merge 的改动没有生效（被槽轮转吞了）"
+    assert not torch.allclose(before, after), "the merge's changes did not take effect (swallowed by slot rotation)"
 
-    # 主副本是那份持久的：restore 后应仍带着改动
+    # the master copy is the persistent one: after restore it should still carry the change
     swap.restore_masters()
     w = blocks[swap.first_swapped].lin1.weight
     assert w.device.type == "cpu" and w.is_pinned()
 
 
 def test_swapped_weight_outside_forward_window_is_stale():
-    """钉死上面那条语义：pass 结束后换出层的 .data 是被覆盖过的槽，不可信。
+    """Pins down the semantics above: after a pass ends, a swapped-out layer's .data is an
+    overwritten slot and cannot be trusted.
 
-    这不是 bug 而是双缓冲的必然结果 —— 记录下来防止后来者按 `.data` 读权重。
+    This isn't a bug but an inevitable result of double buffering -- recorded here to
+    stop future readers from reading weights via `.data`.
     """
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
@@ -501,11 +514,11 @@ def test_swapped_weight_outside_forward_window_is_stale():
     _run_resident(blocks, torch.randn(1, 16, device=device))
 
     first, last = swap.first_swapped, swap.total - 1
-    # rel=0 与 rel=2 共用槽 0（rel % 2）→ pass 后 rel=0 的 .data 里其实是 rel=2
+    # rel=0 and rel=2 share slot 0 (rel % 2) -> after the pass, rel=0's .data actually holds rel=2's data
     torch.testing.assert_close(
         blocks[first].lin1.weight.data, blocks[last].lin1.weight.data,
     )
-    # restore 之后各归各位
+    # after restore, everything is back where it belongs
     swap.restore_masters()
     assert not torch.allclose(
         blocks[first].lin1.weight.data, blocks[last].lin1.weight.data,
@@ -513,7 +526,7 @@ def test_swapped_weight_outside_forward_window_is_stale():
 
 
 def test_move_module_excluding_keeps_swapped_on_cpu():
-    """一刀切 module.to(device) 会把主副本搬上卡、swap 白做；本 helper 必须跳过。"""
+    """A blanket module.to(device) would move the master copy onto the GPU, wasting the swap; this helper must skip it."""
     import sys
     from pathlib import Path
 
@@ -530,19 +543,19 @@ def test_move_module_excluding_keeps_swapped_on_cpu():
     swap = PinnedBlockSwap(blocks, num_swap=3, device=device)
     swap.restore_masters()
 
-    # 先把一个常驻层挪到 CPU，模拟 offload 后要搬回的场景
+    # first move a resident layer to CPU, simulating the case of needing to move it back after offload
     blocks[0].lin1.weight.data = blocks[0].lin1.weight.data.cpu()
 
     move_module_excluding(model, device, swap)
 
-    assert blocks[0].lin1.weight.device.type == "cuda", "常驻层应被搬回 GPU"
+    assert blocks[0].lin1.weight.device.type == "cuda", "the resident layer should be moved back to GPU"
     for b in list(blocks)[swap.first_swapped:]:
-        assert b.lin1.weight.device.type == "cpu", "换出层必须留在 CPU"
+        assert b.lin1.weight.device.type == "cpu", "the swapped-out layer must stay on CPU"
         assert b.lin1.weight.is_pinned()
 
 
 def test_move_module_excluding_without_swap_is_plain_move():
-    """swap=None 时退化为普通 .to()，零行为变化。"""
+    """With swap=None, this degrades to a plain .to() with zero behavior change."""
     import sys
     from pathlib import Path
 
@@ -561,11 +574,12 @@ def test_move_module_excluding_without_swap_is_plain_move():
 
 
 def test_close_drops_masters_even_with_other_holders():
-    """close() 必须在**别人还持有 block 时**也能放掉 pinned 主副本。
+    """close() must be able to release the pinned master copy even **while others still hold the block**.
 
-    真机实测：只丢 swap 对象归还 0 字节 —— pinned 被 param.data 引用着，而持有
-    block 的不止 ctx.model（LyCORIS injector 持 org_module、optimizer 持参数）。
-    逐个去找持有者不可靠，所以由组件自己把参数指走。
+    Real-machine testing: just dropping the swap object frees 0 bytes -- pinned memory
+    is referenced by param.data, and more than ctx.model holds the block (LyCORIS
+    injector holds org_module, the optimizer holds params). Hunting down holders one by
+    one isn't reliable, so the component redirects the params itself.
     """
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
@@ -573,21 +587,21 @@ def test_close_drops_masters_even_with_other_holders():
     swap = PinnedBlockSwap(blocks, num_swap=3, device=device)
     swap.attach()
 
-    holder = [b.lin1 for b in blocks]        # 模拟 LyCORIS 持 org_module
+    holder = [b.lin1 for b in blocks]        # simulate LyCORIS holding org_module
     masters = [swap._cpu_weights[r]["lin1.weight"] for r in range(swap.num_swap)]
     assert all(m.is_pinned() for m in masters)
     assert swap.pinned_bytes > 0
 
     swap.close()
 
-    # 内部存储清空、记账归零、钩子摘掉
+    # internal storage cleared, accounting zeroed, hooks removed
     assert swap._cpu_weights == [] and swap._slot_buffers == []
     assert swap.pinned_bytes == 0
     assert swap._handles == []
-    # 被管理的参数已指向空张量 → 主副本不再被模型引用
+    # the managed params now point at empty tensors -> the master copy is no longer referenced by the model
     for b in list(blocks)[swap.first_swapped:]:
         assert b.lin1.weight.numel() == 0
-    assert holder  # 持有者仍在，但已不再钉住 pinned
+    assert holder  # the holder still exists, but no longer pins the memory
 
 
 def test_close_is_idempotent():
@@ -597,11 +611,11 @@ def test_close_is_idempotent():
     swap = PinnedBlockSwap(blocks, num_swap=2, device=device)
     swap.attach()
     swap.close()
-    swap.close()  # 不应抛出
+    swap.close()  # should not raise
 
 
 def test_release_pinned_host_cache_is_silent_without_api(monkeypatch):
-    """内部 API 缺失/失败要静默 —— 清理失败不该让训练收尾崩掉。"""
+    """A missing/failing internal API should be silent -- a cleanup failure shouldn't crash training teardown."""
     import sys
     from pathlib import Path
 
@@ -619,7 +633,7 @@ def test_release_pinned_host_cache_is_silent_without_api(monkeypatch):
 
 
 def test_allocation_error_carries_context():
-    """BlockSwapAllocationError 携带 num_swap/first_swapped/detail（供上层文案）。"""
+    """BlockSwapAllocationError carries num_swap/first_swapped/detail (for the caller's error text)."""
     _, BlockSwapAllocationError = _import()
     err = BlockSwapAllocationError(num_swap=14, first_swapped=14, detail="out of memory")
     assert err.num_swap == 14
@@ -629,18 +643,19 @@ def test_allocation_error_carries_context():
 
 
 def test_build_packs_unpinned_weights_into_pow2_chunks():
-    """未 pinned 的基权重（anima 放置路径 / GPU 常驻路径）经 PinnedPacker 打包：
-    主副本全部 pinned，且落在少数几个共享大块上（不是逐张量 pin 各自一块）。"""
+    """Unpinned base weights (the anima placement path / the GPU-resident path), once
+    packed by PinnedPacker: master copies are all pinned, and land in a small number
+    of shared large chunks (not pinned tensor-by-tensor into its own block each)."""
     PinnedBlockSwap, _ = _import()
     device = torch.device("cuda")
     blocks = _make_blocks(4, 16, device)
-    # 末尾 2 层模拟 anima 放置：CPU 可分页；前 2 层留 GPU（验证 GPU→pinned 也走打包）
+    # the last 2 layers simulate anima placement: pageable CPU; the first 2 layers stay on GPU (verifies GPU->pinned also goes through packing)
     for b in list(blocks)[3:]:
         for p in b.parameters():
             p.data = p.detach().to("cpu")
     ref = {n: p.detach().clone().cpu() for n, p in blocks.named_parameters()}
     x = torch.randn(3, 16, device=device)
-    expected = _run_resident(_make_blocks(4, 16, device), x)  # 同 seed 的常驻基线
+    expected = _run_resident(_make_blocks(4, 16, device), x)  # resident baseline with the same seed
 
     swap = PinnedBlockSwap(blocks, num_swap=2, device=device)
 
@@ -649,10 +664,10 @@ def test_build_packs_unpinned_weights_into_pow2_chunks():
         for _name, t in swap._cpu_weights[rel].items():
             assert t.is_pinned() and t.device.type == "cpu"
             storages.add(t.untyped_storage().data_ptr())
-    # 2 层 × 4 个参数 = 8 张量，但只应有 1 个共享大块（总量 < 64MB 粒度）
+    # 2 layers x 4 params = 8 tensors, but there should only be 1 shared large chunk (total < the 64MB granularity)
     assert len(storages) == 1
     for n, p in blocks.named_parameters():
         if n.startswith(("2.", "3.")):
             assert torch.equal(p.detach().cpu(), ref[n])
-    # 行为不变：前向仍与常驻一致
+    # behavior unchanged: forward still matches resident
     torch.testing.assert_close(_run_swap(swap, blocks, x), expected)

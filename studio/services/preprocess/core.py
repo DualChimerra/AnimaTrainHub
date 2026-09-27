@@ -1,31 +1,31 @@
-"""预处理业务层：列表 / 状态 / 启动 job / 还原。
+"""Preprocessing business layer: listing / status / starting jobs / restore.
 
-第一阶段只做"放大"，但目录契约和接口预留好裁剪 / 涂抹的位置。
+Phase one only does "upscaling", but the directory contract and interfaces already reserve room for crop / inpaint.
 
-数据模型（ADR 0004）
+Data model (ADR 0004)
 -------------------
-`projects/{id}-{slug}/preprocess/manifest.json` 是状态唯一真理：
+`projects/{id}-{slug}/preprocess/manifest.json` is the single source of truth for status:
 
     {"images": {"bar.png": {"kind": "processed", "model": "...", "scale": 4, ...}}}
 
-- manifest 没记 → 默认 = 用 download/ 原图
-- `kind: processed` → preprocess/{name}.png 是改过的副本
+- not recorded in the manifest -> default = use the original image in download/
+- `kind: processed` -> preprocess/{name}.png is a modified copy
 
-下游（curation / thumbnail / copy_to_train）通过
-`studio.services.preprocess_manifest.resolve()` 拿实际文件路径，本模块只负责
-**列图状态 + 启动 job + 还原**。
+Downstream consumers (curation / thumbnail / copy_to_train) get the actual file path via
+`studio.services.preprocess_manifest.resolve()`; this module is only responsible for
+**listing image status + starting jobs + restore**.
 
-产物文件名规则：固定 `{src_stem}.png`。同 stem 但不同扩展名的源图碰撞时
-（如 `cat.jpg` 和 `cat.png` 同存）— 后处理的覆盖前者，并在日志里 warn。
+Output filename rule: always `{src_stem}.png`. When source images share a stem but differ in extension
+(e.g. both `cat.jpg` and `cat.png` exist) -- the later-processed one overwrites the former, with a warning logged.
 
-Job 调度
+Job scheduling
 --------
-preprocess 是 GPU-bound job kind，走 DATA 槽位：
-- light 档：训练正在跑时按 `queue.light_tasks_during_train` 开关放行（默认开）
-- daemon 占着 VRAM → 触发让位（_maybe_yield_daemon），等下次 tick
+preprocess is a GPU-bound job kind, using the DATA slot:
+- light tier: while training is running, gated by the `queue.light_tasks_during_train` switch (on by default)
+- if the daemon is holding VRAM -> triggers yielding (_maybe_yield_daemon), waits for the next tick
 
-不复用 download_worker 的并发设计 —— 串行处理就行，模型加载到 GPU 后
-单张耗时 1-3s（4x，512px 输入，cuda）。批量并发的收益不抵 VRAM 风险。
+Doesn't reuse download_worker's concurrency design -- serial processing is enough; once the model is loaded on GPU,
+a single image takes 1-3s (4x, 512px input, cuda). The benefit of batch concurrency doesn't outweigh the VRAM risk.
 """
 from __future__ import annotations
 
@@ -39,20 +39,20 @@ from . import masks as train_masks
 
 
 PREPROCESS_KIND = "preprocess"
-# 同一个 kind 下用 params['stage'] 分发到不同 worker 分支。默认 'upscale' 兼容
-# 历史 job（params 缺 stage 时按放大处理）。
+# Within the same kind, params['stage'] dispatches to different worker branches. Default 'upscale' for compat with
+# legacy jobs (treated as upscale when params lacks stage).
 STAGE_UPSCALE = "upscale"
 STAGE_CROP = "crop"
 DEFAULT_MODEL = "4x-AnimeSharp"
 DEFAULT_TILE_SIZE = 256
 DEFAULT_TILE_PAD = 16
 DEFAULT_DEVICE = "auto"
-# LoRA 训练桶的目标面积。1024² = 1048576 px 是 SDXL/Flux/Anima 常用桶；用户
-# 可以在 UI 选 768²/1024²/1536²/2048² 或自定义边长。
+# Target area for LoRA training buckets. 1024^2 = 1048576 px is a common SDXL/Flux/Anima bucket; the user
+# can pick 768^2/1024^2/1536^2/2048^2 in the UI, or a custom side length.
 DEFAULT_TARGET_AREA = 1024 * 1024
 
 PRODUCT_SUFFIX = ".png"
-# 裁剪框最小归一化边长，画布上小于这个的不算有效（避免误触出零像素图）
+# Minimum normalized side length for a crop box; smaller than this on the canvas doesn't count as valid (avoids accidental zero-pixel images)
 MIN_CROP_NORM = 0.02
 
 
@@ -60,37 +60,37 @@ from studio.domain.errors import DomainError, InvalidPathError, NotFoundError, V
 
 
 class PreprocessError(DomainError):
-    """预处理业务错误（项目不存在 / 参数非法 / 文件名非法）。
+    """Preprocessing business error (project not found / invalid params / invalid filename).
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    PR-2 C3 added a DomainError base -- the handler auto-translates it into the dual-write envelope.
     """
     default_code = "preprocess.error"
 
 
 # ---------------------------------------------------------------------------
-# 路径
+# Paths
 # ---------------------------------------------------------------------------
 
 
 def project_paths(p: dict[str, Any]) -> tuple[Path, Path]:
-    """返回 `(download_dir, preprocess_dir)`，不保证存在。"""
+    """Returns `(download_dir, preprocess_dir)`; existence is not guaranteed."""
     pdir = projects.project_dir(p["id"], p["slug"])
     return pdir / "download", pdir / "preprocess"
 
 
 def project_root(p: dict[str, Any]) -> Path:
-    """项目根目录（manifest 路径基于此）。"""
+    """Project root directory (manifest paths are based on this)."""
     return projects.project_dir(p["id"], p["slug"])
 
 
 def product_path_for(preprocess_dir: Path, source_name: str) -> Path:
-    """`download/foo.webp` → `preprocess/foo.png`。"""
+    """`download/foo.webp` -> `preprocess/foo.png`."""
     stem = Path(source_name).stem
     return preprocess_dir / f"{stem}{PRODUCT_SUFFIX}"
 
 
 # ---------------------------------------------------------------------------
-# 列表 / 状态（基于 manifest）
+# Listing / status (based on the manifest)
 # ---------------------------------------------------------------------------
 
 
@@ -105,7 +105,7 @@ def _download_images(download: Path) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# 目标选择 + 启动
+# Target selection + start
 # ---------------------------------------------------------------------------
 
 
@@ -118,9 +118,9 @@ def _validate_name(name: str) -> None:
 
 
 def _validate_rel_name(name: str) -> None:
-    """ADR 0010 train-scope name 校验：必须形如 `"folder/image"`（POSIX 形式）。
+    """ADR 0010 train-scope name validation: must look like `"folder/image"` (POSIX form).
 
-    严格 2 段 + 拒 `..` / 反斜杠 / 绝对路径 / 空段，防 path traversal。
+    Strictly 2 segments; rejects `..` / backslashes / absolute paths / empty segments, to prevent path traversal.
     """
     if not name:
         raise InvalidPathError("Invalid path", details={"name": name})
@@ -132,7 +132,7 @@ def _validate_rel_name(name: str) -> None:
 
 
 def _validate_rect(rect: dict[str, Any]) -> dict[str, float]:
-    """归一化 + clamp 一条裁剪 rect。非法 → 抛 PreprocessError。"""
+    """Normalize + clamp a crop rect. Invalid -> raises PreprocessError."""
     try:
         x = float(rect["x"])
         y = float(rect["y"])
@@ -143,7 +143,7 @@ def _validate_rect(rect: dict[str, Any]) -> dict[str, float]:
             "Invalid crop region",
             code="preprocess.crop_rect_invalid", http_status=400,
         ) from exc
-    # clamp 到 [0,1]，但保留 w/h 下限校验
+    # Clamp to [0,1], but still enforce the w/h lower-bound check
     x = max(0.0, min(1.0, x))
     y = max(0.0, min(1.0, y))
     w = max(0.0, min(1.0 - x, w))
@@ -157,15 +157,15 @@ def _validate_rect(rect: dict[str, Any]) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# ADR 0010 — train-scope 列表 / 状态 / job
+# ADR 0010 -- train-scope listing / status / job
 #
-# 新代码用 *_train 系列：
+# New code uses the *_train family:
 #
-# - list_train_images:   列 train/ 全部图 + manifest 元数据
-# - summary_train:       train scope 简短统计
-# - resolve_targets_train / start_job_train / start_crop_job_train: job 创建
-# - list_crop_workspace_train / list_duplicate_removed_workspace_train: 子页工作集
-# - restore_products_train: 调 manifest.train_restore（语义：copy download → train）
+# - list_train_images:   lists all images in train/ + manifest metadata
+# - summary_train:       brief stats for the train scope
+# - resolve_targets_train / start_job_train / start_crop_job_train: job creation
+# - list_crop_workspace_train / list_duplicate_removed_workspace_train: sub-page workspaces
+# - restore_products_train: calls manifest.train_restore (semantics: copy download -> train)
 # ---------------------------------------------------------------------------
 
 
@@ -174,11 +174,11 @@ def version_train_dir(p: dict[str, Any], version_label: str) -> Path:
 
 
 def _train_images_listing(train_dir: Path) -> list[tuple[str, Path]]:
-    """递归 train_dir 一级 sub-folder（LoRA repeat folder）收集 `(rel_path, full_path)`。
+    """Recursively collects `(rel_path, full_path)` from train_dir's first-level sub-folders (LoRA repeat folders).
 
-    rel_path = POSIX 形式 `"{folder}/{image}"`，跟 manifest entry key 一致。
-    train_dir 根目录直接放的图忽略（LoRA 训练只读 sub-folder 内）。
-    按 rel_path 字典序稳定输出。
+    rel_path is in POSIX form `"{folder}/{image}"`, matching the manifest entry key.
+    Images placed directly at the root of train_dir are ignored (LoRA training only reads inside sub-folders).
+    Output is stable, sorted lexicographically by rel_path.
     """
     if not train_dir.exists():
         return []
@@ -197,21 +197,21 @@ def _train_images_listing(train_dir: Path) -> list[tuple[str, Path]]:
 def list_train_images(
     p: dict[str, Any], version_label: str
 ) -> list[dict[str, Any]]:
-    """列 `versions/{vlabel}/train/` 全部图 + manifest entry 元数据。
+    """Lists all images under `versions/{vlabel}/train/` + manifest entry metadata.
 
-    替代老 `list_pending + list_processed` 二元概念——新模型下 train/ 即"训练集
-    grid"，无 pending/processed 区分（状态从字段差异隐含推断，详 ADR 0010
-    §Manifest schema v2）。
+    Replaces the old binary concept of `list_pending + list_processed` -- under the new model, train/ IS the "training
+    grid", with no pending/processed distinction (status is inferred implicitly from field differences, see ADR 0010
+    section "Manifest schema v2").
 
-    返回 `[{name, mtime, size, w, h, origin, source, orphan, duplicate_removed,
-    model, scale, action, target_area, src_size, dst_size, elapsed_seconds}]`：
-    - `origin / source`：都填 `entry.origin`（兼容老前端字段名 source）
-    - `orphan`：`download/{origin}` 缺失（restore 会落 no_origin）
-    - `duplicate_removed`：bool（默认 False；UI 区分"训练参与" vs "审核跳过"）
-    - 老 schema 透传字段（model/scale/...）新 entry 一律 None；前端容忍
+    Returns `[{name, mtime, size, w, h, origin, source, orphan, duplicate_removed,
+    model, scale, action, target_area, src_size, dst_size, elapsed_seconds}]`:
+    - `origin / source`: both filled with `entry.origin` (kept for compat with the old frontend field name source)
+    - `orphan`: `download/{origin}` is missing (restore will report no_origin)
+    - `duplicate_removed`: bool (defaults to False; the UI distinguishes "included in training" vs "skipped during review")
+    - legacy schema pass-through fields (model/scale/...) are always None for new entries; the frontend tolerates this
 
-    极端情况：manifest 标 duplicate_removed 但 train/ 物理已删（用户外部删）→
-    仍报告一条 stale 项，UI 容忍 w/h 为 None。
+    Edge case: the manifest marks duplicate_removed but the file under train/ was physically deleted (deleted externally by the user) ->
+    a stale entry is still reported; the UI tolerates w/h being None.
     """
     from PIL import Image
 
@@ -251,7 +251,7 @@ def list_train_images(
             "source": origin,
             "orphan": origin not in download_names,
             "duplicate_removed": is_dup,
-            # ADR 0010 fixup（2026-06-04）：直接读 manifest entry.processed 字段
+            # ADR 0010 fixup (2026-06-04): reads the manifest entry.processed field directly
             "processed": not is_dup and _is_processed(entry),
             "model": entry.get("model"),
             "scale": entry.get("scale"),
@@ -262,7 +262,7 @@ def list_train_images(
             "elapsed_seconds": entry.get("elapsed_seconds"),
         })
 
-    # stale duplicate_removed entry（manifest 有 + train/ 物理无）
+    # stale duplicate_removed entry (present in the manifest, missing from train/ on disk)
     for name, entry in sorted(entries.items()):
         if name in seen:
             continue
@@ -288,10 +288,10 @@ def list_train_images(
 
 
 def summary_train(p: dict[str, Any], version_label: str) -> dict[str, Any]:
-    """train scope 简短统计。
+    """Brief stats for the train scope.
 
-    `image_count` = train/ 里物理图像数 + 仅 manifest 标记 duplicate_removed
-    且物理已删的数（罕见 stale entry，仍计入展示）。
+    `image_count` = number of physical images in train/ + entries only marked duplicate_removed in the manifest
+    and already physically deleted (a rare stale entry, still counted for display).
     """
     pdir = project_root(p)
     train_dir = version_train_dir(p, version_label)
@@ -309,10 +309,10 @@ def resolve_targets_train(
     p: dict[str, Any], version_label: str, *,
     mode: str, names: Optional[Iterable[str]] = None,
 ) -> list[str]:
-    """根据 mode + names 返回当前 train/ grid 中要处理的图名列表。
+    """Returns the list of image names to process in the current train/ grid, based on mode + names.
 
-    mode='all' / 'all_force' → train/ 全部图
-    mode='selected'          → 名单与 train/ 实存交集
+    mode='all' / 'all_force' -> all images in train/
+    mode='selected'          -> the intersection of the given names with what actually exists in train/
     """
     train_dir = version_train_dir(p, version_label)
     if not train_dir.exists() and mode != "selected":
@@ -351,8 +351,8 @@ def start_job_train(
     device: str = DEFAULT_DEVICE,
     target_area: Optional[int] = DEFAULT_TARGET_AREA,
 ) -> dict[str, Any]:
-    """train scope preprocess job。worker 通过 job.version_id 拿 version label
-    后从 `versions/{label}/train/` 列源 + 写产物（PR-2 step D 改 worker）。
+    """train scope preprocess job. The worker gets the version label via job.version_id,
+    then lists sources and writes outputs from `versions/{label}/train/` (worker changed in PR-2 step D).
     """
     p = projects.get_project(conn, project_id)
     if not p:
@@ -401,7 +401,7 @@ def start_crop_job_train(
     version_id: int,
     crops: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    """train scope crop job。`crops` 的源文件名为 `train/` 下当前文件名。"""
+    """train scope crop job. The source filenames in `crops` are the current filenames under `train/`."""
     p = projects.get_project(conn, project_id)
     if not p:
         raise NotFoundError(
@@ -448,12 +448,12 @@ def start_crop_job_train(
 
 
 def _is_processed(entry: dict[str, Any]) -> bool:
-    """ADR 0010 状态推断（2026-06-04 fixup）：直接读 manifest entry 的
-    `processed` 字段。
+    """ADR 0010 status inference (2026-06-04 fixup): reads the manifest entry's
+    `processed` field directly.
 
-    worker upscale/crop 完成后写 `processed: True`；curate 复制原图不写
-    （默认 False）。老 entry（没 `processed` 字段）一律视为未处理——
-    用户重新跑 preprocess 即升级到新字段。
+    The worker writes `processed: True` after upscale/crop completes; curate copying the original doesn't write it
+    (defaults to False). Legacy entries (without a `processed` field) are always treated as unprocessed --
+    the user re-running preprocess upgrades them to the new field.
     """
     return bool(entry.get("processed", False))
 
@@ -461,10 +461,10 @@ def _is_processed(entry: dict[str, Any]) -> bool:
 def list_crop_workspace_train(
     p: dict[str, Any], version_label: str
 ) -> list[dict[str, Any]]:
-    """裁剪页工作集（train scope）：train/ 里所有图，附像素尺寸 + processed 标记。
+    """Crop-page workspace (train scope): all images in train/, with pixel dimensions + processed flag.
 
-    详 `_is_processed` 的判定逻辑。duplicate_removed 的图跳过（不让用户对软
-    删除图再裁）。
+    See `_is_processed` for the determination logic. Images marked duplicate_removed are skipped (so users can't
+    crop an already soft-deleted image).
     """
     from PIL import Image
 
@@ -499,8 +499,8 @@ def list_crop_workspace_train(
             "mtime": st.st_mtime,
             "size": st.st_size,
             "processed": _is_processed(entry),
-            # 训练 mask sidecar：无 mask 时 None。前端用它画角标 + 决定
-            # 是否 GET mask（值兼作 cache-buster）。
+            # Training mask sidecar: None when there's no mask. The frontend uses it to draw a corner badge and decide
+            # whether to GET the mask (the value also doubles as a cache-buster).
             "mask_mtime": mask_info["mtime"] if mask_info else None,
         })
     return items
@@ -509,10 +509,10 @@ def list_crop_workspace_train(
 def list_duplicate_removed_workspace_train(
     p: dict[str, Any], version_label: str
 ) -> list[dict[str, Any]]:
-    """train scope 软删除工作集（"已删除"tab）。
+    """train scope soft-delete workspace (the "Deleted" tab).
 
-    `mark_duplicate_removed` 已删 train/{name} 物理图；本函数扫 manifest tombstone，
-    缩略图 metadata 从 `download/{origin}` 现读，前端 thumb 也走 download bucket。
+    `mark_duplicate_removed` has already deleted the physical file at train/{name}; this function scans manifest tombstones,
+    reading thumbnail metadata live from `download/{origin}`; the frontend thumbnail also goes through the download bucket.
     """
     from PIL import Image
 
@@ -553,11 +553,11 @@ def list_duplicate_removed_workspace_train(
 def restore_products_train(
     p: dict[str, Any], version_label: str, names: Iterable[str],
 ) -> dict[str, list[str]]:
-    """train scope 还原：从 `download/{entry.origin}` 复制覆盖 `train/{name}`。
+    """train scope restore: copies from `download/{entry.origin}` over `train/{name}`.
 
-    返回 `{restored, missing, no_origin}` 三组。详 ADR 0010 §Restore 语义。
-    `no_origin` = download 物理缺失，UI 应该给用户三选项（拖入替换 / 保留 /
-    从 train 移除）而不是隐瞒失败。
+    Returns three groups: `{restored, missing, no_origin}`. See ADR 0010 section "Restore semantics".
+    `no_origin` = the file is physically missing from download; the UI should offer the user three options (drag in a replacement / keep /
+    remove from train) instead of hiding the failure.
     """
     pdir = project_root(p)
     name_list: list[str] = []
@@ -570,15 +570,15 @@ def restore_products_train(
 def inpaint_save_train(
     p: dict[str, Any], version_label: str, *, name: str, data: bytes,
 ) -> dict[str, Any]:
-    """涂抹整图保存（train scope）：前端 canvas 导出的图覆盖 `train/{name}`。
+    """Inpaint-whole-image save (train scope): the image exported from the frontend canvas overwrites `train/{name}`.
 
-    产物对齐 crop 约定统一 `{folder}/{stem}.png`；源图非 .png 时删旧源文件
-    （caption sidecar 因 stem 不变保留不动）。manifest 复用
-    train_replace_with_crops 的单产物路径（删旧 entry + 写新 entry，
-    processed=True），origin 沿用旧 entry。
+    The output follows the same `{folder}/{stem}.png` convention as crop; if the source wasn't .png, the old source file is deleted
+    (the caption sidecar is left alone since the stem doesn't change). The manifest reuses
+    train_replace_with_crops's single-output path (delete the old entry + write a new one,
+    processed=True); origin carries over from the old entry.
 
-    上传图必须与现有源图同尺寸——涂抹是逐像素编辑，尺寸不符说明前端笔画
-    重放的对象错位，直接拒绝而不是静默接受。
+    The uploaded image must match the existing source's dimensions exactly -- inpainting is pixel-by-pixel editing, so a size mismatch means the frontend's
+    stroke-replay target is misaligned; reject outright instead of silently accepting it.
     """
     import io
     import os
@@ -608,7 +608,7 @@ def inpaint_save_train(
     try:
         img = Image.open(io.BytesIO(data))
         img.load()
-    except Exception as exc:  # PIL 解码失败抛的类型不稳定，统一翻 400
+    except Exception as exc:  # PIL raises inconsistent types on decode failure, normalize to 400
         raise ValidationError(
             "Uploaded image is not a valid image file",
             code="preprocess.inpaint_image_invalid",
@@ -632,7 +632,7 @@ def inpaint_save_train(
     out_rel = f"{folder}/{Path(filename).stem}{PRODUCT_SUFFIX}"
     out_path = train_dir / out_rel
 
-    # origin 沿用 manifest 已有 entry，否则回退源文件名（对齐 crop worker）
+    # origin carries over from the existing manifest entry, otherwise falls back to the source filename (matches crop worker)
     existing = preprocess_manifest.train_get_entry(pdir, version_label, name)
     origin = (
         preprocess_manifest.entry_origin(existing, filename)
@@ -674,14 +674,14 @@ def inpaint_save_train(
 
 
 # ---------------------------------------------------------------------------
-# 训练 mask sidecar（PR-B B1，详 services/preprocess/masks.py）
+# Training mask sidecar (PR-B B1, see services/preprocess/masks.py)
 # ---------------------------------------------------------------------------
 
 
 def _mask_source_size(
     p: dict[str, Any], version_label: str, name: str,
 ) -> tuple[Path, tuple[int, int]]:
-    """校验 rel name + 源图存在，返回 (train_dir, 源图尺寸)。"""
+    """Validates the rel name + that the source image exists, returns (train_dir, source image size)."""
     from PIL import Image
 
     _validate_rel_name(name)
@@ -706,7 +706,7 @@ def _mask_source_size(
 def mask_save_train(
     p: dict[str, Any], version_label: str, *, name: str, data: bytes,
 ) -> dict[str, Any]:
-    """写入训练 mask（灰度 PNG，尺寸必须等于源图当前尺寸）。"""
+    """Writes the training mask (grayscale PNG, size must match the source image's current size)."""
     train_dir, size = _mask_source_size(p, version_label, name)
     return train_masks.write_mask(train_dir, name, data, expected_size=size)
 
@@ -714,7 +714,7 @@ def mask_save_train(
 def mask_delete_train(
     p: dict[str, Any], version_label: str, *, name: str,
 ) -> dict[str, Any]:
-    """删除训练 mask（= 恢复全图正常学习）。mask 不存在也返回 ok。"""
+    """Deletes the training mask (= restores normal full-image learning). Returns ok even if the mask doesn't exist."""
     _validate_rel_name(name)
     train_dir = version_train_dir(p, version_label)
     return {"deleted": train_masks.delete_mask(train_dir, name)}
@@ -723,7 +723,7 @@ def mask_delete_train(
 def mask_file_train(
     p: dict[str, Any], version_label: str, *, name: str,
 ) -> Optional[Path]:
-    """mask 文件路径（不存在返回 None）。GET 端点用。"""
+    """Mask file path (returns None if it doesn't exist). Used by the GET endpoint."""
     _validate_rel_name(name)
     train_dir = version_train_dir(p, version_label)
     return train_masks.mask_file(train_dir, name)

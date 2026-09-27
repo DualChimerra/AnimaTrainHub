@@ -1,4 +1,4 @@
-"""本地上传 service：accept_one / accept_many。"""
+"""Local upload service: accept_one / accept_many."""
 from __future__ import annotations
 
 import io
@@ -55,28 +55,28 @@ def test_reject_unsupported_format(tmp_path: Path) -> None:
     assert out.added == []
     assert len(out.skipped) == 1
     assert out.skipped[0]["name"] == "note.bin"
-    assert "格式不支持" in out.skipped[0]["reason"]
+    assert "unsupported format" in out.skipped[0]["reason"]
 
 
 def test_lone_caption_txt_skipped(tmp_path: Path) -> None:
-    """单独上传的 .txt（无对应图片）被跳过并报告，不落盘。"""
+    """A lone uploaded .txt (no matching image) is skipped and reported, not written to disk."""
     out = uploads.accept_one("note.txt", io.BytesIO(b"hi"), tmp_path)
     assert out.added == []
     assert len(out.skipped) == 1
     assert out.skipped[0]["name"] == "note.txt"
-    assert "无对应图片" in out.skipped[0]["reason"]
+    assert "no matching image" in out.skipped[0]["reason"]
     assert not (tmp_path / "note.txt").exists()
 
 
 def test_accepts_extended_image_formats(tmp_path: Path) -> None:
-    """PP10：上传白名单与全链路 IMAGE_EXTS 对齐，webp/bmp/gif 也接受。"""
+    """PP10: the upload whitelist matches the pipeline-wide IMAGE_EXTS; webp/bmp/gif are also accepted."""
     for fname, payload in [
         ("a.webp", b"WEBP"),
         ("b.bmp", b"BMP"),
         ("c.gif", b"GIF"),
     ]:
         out = uploads.accept_one(fname, io.BytesIO(payload), tmp_path)
-        assert out.added == [fname], f"{fname} 应被接受"
+        assert out.added == [fname], f"{fname} should be accepted"
         assert (tmp_path / fname).read_bytes() == payload
 
 
@@ -84,7 +84,7 @@ def test_skip_existing_does_not_overwrite(tmp_path: Path) -> None:
     (tmp_path / "p.png").write_bytes(b"old")
     out = uploads.accept_one("p.png", io.BytesIO(b"new"), tmp_path)
     assert out.added == []
-    assert out.skipped[0]["reason"] == "已存在，跳过"
+    assert out.skipped[0]["reason"] == "already exists, skipped"
     assert (tmp_path / "p.png").read_bytes() == b"old"
 
 
@@ -98,11 +98,11 @@ def test_zip_extracts_jpg_png(tmp_path: Path) -> None:
     )
     out = uploads.accept_one("pack.zip", io.BytesIO(blob), tmp_path)
     assert sorted(out.added) == ["a.jpg", "b.png"]
-    # txt 被跳过；子目录被拍平
+    # txt is skipped; subdirectories are flattened
     assert any("ignored.txt" in s["name"] for s in out.skipped)
     assert (tmp_path / "a.jpg").read_bytes() == b"AA"
     assert (tmp_path / "b.png").read_bytes() == b"BB"
-    # 不应该创建 sub/ 子目录
+    # should not create a sub/ subdirectory
     assert not (tmp_path / "sub").exists()
 
 
@@ -111,7 +111,7 @@ def test_zip_skip_dup_in_zip(tmp_path: Path) -> None:
     blob = _zip_bytes({"x.png": b"new"})
     out = uploads.accept_one("p.zip", io.BytesIO(blob), tmp_path)
     assert out.added == []
-    assert out.skipped[0]["reason"] == "已存在，跳过"
+    assert out.skipped[0]["reason"] == "already exists, skipped"
     assert (tmp_path / "x.png").read_bytes() == b"existing"
 
 
@@ -120,11 +120,11 @@ def test_corrupt_zip_skipped(tmp_path: Path) -> None:
         "broken.zip", io.BytesIO(b"not-a-real-zip"), tmp_path
     )
     assert out.added == []
-    assert out.skipped[0]["reason"] == "zip 损坏"
+    assert out.skipped[0]["reason"] == "corrupt zip"
 
 
 def test_zip_path_traversal_flattened(tmp_path: Path) -> None:
-    """zip 内包含 ../ 或绝对路径段时也只取 basename，不会跳出 dest_dir。"""
+    """When a zip entry contains a ../ or absolute path segment, only the basename is used — it never escapes dest_dir."""
     blob = _zip_bytes(
         {
             "../escape.jpg": b"E",
@@ -135,7 +135,7 @@ def test_zip_path_traversal_flattened(tmp_path: Path) -> None:
     assert sorted(out.added) == ["escape.jpg", "p.png"]
     assert (tmp_path / "escape.jpg").exists()
     assert (tmp_path / "p.png").exists()
-    # 不应该写到 tmp_path 之外
+    # should not write outside tmp_path
     assert not (tmp_path.parent / "escape.jpg").exists()
 
 
@@ -154,7 +154,7 @@ def test_accept_many_aggregates(tmp_path: Path) -> None:
 def test_empty_filename_skipped(tmp_path: Path) -> None:
     out = uploads.accept_one("", io.BytesIO(b"x"), tmp_path)
     assert out.added == []
-    assert out.skipped[0]["reason"] == "文件名为空"
+    assert out.skipped[0]["reason"] == "empty filename"
 
 
 def test_dest_dir_created(tmp_path: Path) -> None:
@@ -165,7 +165,7 @@ def test_dest_dir_created(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# convert_to_png 模式：与 booru 下载共用的 gelbooru.convert_to_png 设置
+# convert_to_png mode: shares the gelbooru.convert_to_png setting with booru downloads
 # ---------------------------------------------------------------------------
 
 
@@ -176,13 +176,13 @@ def test_convert_jpg_renamed_to_png(tmp_path: Path) -> None:
     )
     assert out.added == ["photo.png"]
     assert (tmp_path / "photo.png").exists()
-    # 已重编码为合法 PNG
+    # re-encoded into a valid PNG
     with Image.open(tmp_path / "photo.png") as im:
         assert im.format == "PNG"
 
 
 def test_convert_same_stem_collision_gets_suffix(tmp_path: Path) -> None:
-    """1.png + 1.jpg 同一次上传：第二张转完撞名 → 加 _1 后缀，避免 caption 共用。"""
+    """1.png + 1.jpg uploaded together: the second one collides after conversion -> gets a _1 suffix, avoiding a shared caption."""
     files = [
         ("1.png", io.BytesIO(_png_bytes(color=(0, 0, 0)))),
         ("1.jpg", io.BytesIO(_jpg_bytes(color=(255, 255, 255)))),
@@ -211,7 +211,7 @@ def test_convert_collision_in_zip_gets_suffix(tmp_path: Path) -> None:
 
 
 def test_convert_collision_against_existing_file(tmp_path: Path) -> None:
-    """目标目录已经有 a.png，新上传 a.jpg 在 convert 模式下落 a_1.png（不跳过）。"""
+    """The target dir already has a.png; a newly uploaded a.jpg lands as a_1.png in convert mode (not skipped)."""
     (tmp_path / "a.png").write_bytes(_png_bytes())
     out = uploads.accept_one(
         "a.jpg", io.BytesIO(_jpg_bytes()), tmp_path,
@@ -228,7 +228,7 @@ def test_convert_corrupt_image_skipped(tmp_path: Path) -> None:
     )
     assert out.added == []
     assert len(out.skipped) == 1
-    assert "图片损坏" in out.skipped[0]["reason"]
+    assert "corrupt image" in out.skipped[0]["reason"]
 
 
 def test_convert_remove_alpha_channel_flattens(tmp_path: Path) -> None:
@@ -239,7 +239,7 @@ def test_convert_remove_alpha_channel_flattens(tmp_path: Path) -> None:
     )
     assert out.added == ["rgba.png"]
     with Image.open(tmp_path / "rgba.png") as im:
-        assert im.mode == "RGB"  # alpha 已被白底压平
+        assert im.mode == "RGB"  # alpha has been flattened onto a white background
 
 
 def test_convert_keeps_alpha_when_flag_off(tmp_path: Path) -> None:
@@ -254,7 +254,7 @@ def test_convert_keeps_alpha_when_flag_off(tmp_path: Path) -> None:
 
 
 def test_convert_off_preserves_raw_bytes(tmp_path: Path) -> None:
-    """convert_to_png=False（默认）继续走原扩展名拷贝、目标已存在跳过。"""
+    """convert_to_png=False (default) keeps copying with the original extension, skipping when the target already exists."""
     raw = b"\xff\xd8not-decoded"
     out = uploads.accept_one("photo.jpg", io.BytesIO(raw), tmp_path)
     assert out.added == ["photo.jpg"]
@@ -262,12 +262,12 @@ def test_convert_off_preserves_raw_bytes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# caption 配对（kohya_ss / sd-scripts 风格 .txt sidecar）
+# caption pairing (kohya_ss / sd-scripts style .txt sidecar)
 # ---------------------------------------------------------------------------
 
 
 def test_zip_pairs_txt_caption_with_image(tmp_path: Path) -> None:
-    """zip 内 png + 同 stem .txt → caption 随图落盘。"""
+    """zip contains png + a same-stem .txt -> the caption is written alongside the image."""
     blob = _zip_bytes({"a.png": b"AA", "a.txt": b"1girl, solo"})
     out = uploads.accept_one("pack.zip", io.BytesIO(blob), tmp_path)
     assert sorted(out.added) == ["a.png", "a.txt"]
@@ -277,19 +277,19 @@ def test_zip_pairs_txt_caption_with_image(tmp_path: Path) -> None:
 
 
 def test_zip_orphan_txt_skipped(tmp_path: Path) -> None:
-    """zip 内有图但 .txt stem 对不上 → caption 跳过、不落盘。"""
+    """zip has an image but the .txt stem doesn't match -> the caption is skipped, not written to disk."""
     blob = _zip_bytes({"a.png": b"AA", "other.txt": b"x"})
     out = uploads.accept_one("pack.zip", io.BytesIO(blob), tmp_path)
     assert out.added == ["a.png"]
     assert any(
-        "other.txt" in s["name"] and "无对应图片" in s["reason"]
+        "other.txt" in s["name"] and "no matching image" in s["reason"]
         for s in out.skipped
     )
     assert not (tmp_path / "other.txt").exists()
 
 
 def test_accept_many_pairs_loose_png_and_txt(tmp_path: Path) -> None:
-    """同批拖拽 png + txt（不在同一 zip）也按 stem 配对。"""
+    """png + txt dropped in the same batch (not in the same zip) are also paired by stem."""
     files = [
         ("1.png", io.BytesIO(b"P")),
         ("1.txt", io.BytesIO(b"tag-a, tag-b")),
@@ -301,7 +301,7 @@ def test_accept_many_pairs_loose_png_and_txt(tmp_path: Path) -> None:
 
 
 def test_caption_follows_png_conversion_stem(tmp_path: Path) -> None:
-    """convert_to_png 把 jpg → png 时，caption 跟随落盘后的 stem。"""
+    """When convert_to_png turns jpg into png, the caption follows the stem it was written under."""
     files = [
         ("photo.jpg", io.BytesIO(_jpg_bytes())),
         ("photo.txt", io.BytesIO(b"masterpiece")),
@@ -313,7 +313,7 @@ def test_caption_follows_png_conversion_stem(tmp_path: Path) -> None:
 
 
 def test_ingest_paths_streams_zip_and_pairs_caption(tmp_path: Path) -> None:
-    """ingest_paths（worker 用的流式入口）：zip 内 png+txt → 配对落盘。"""
+    """ingest_paths (the streaming entry point used by the worker): zip's png+txt -> paired and written to disk."""
     src = tmp_path / "src"
     src.mkdir()
     blob = _zip_bytes({"a.png": b"AA", "a.txt": b"tag1, tag2", "b.jpg": b"BB"})
@@ -326,7 +326,7 @@ def test_ingest_paths_streams_zip_and_pairs_caption(tmp_path: Path) -> None:
 
 
 def test_ingest_paths_pairs_loose_files_across_sources(tmp_path: Path) -> None:
-    """散文件路径：1.png + 1.txt 不同源也按 stem 配对。"""
+    """Loose file paths: 1.png + 1.txt from different sources are still paired by stem."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "1.png").write_bytes(b"P")
@@ -343,7 +343,7 @@ def test_ingest_paths_pairs_loose_files_across_sources(tmp_path: Path) -> None:
 
 
 def test_ingest_paths_progress_callback(tmp_path: Path) -> None:
-    """on_progress 收到逐项 + summary 行（worker 接到 stdout 给前端看）。"""
+    """on_progress receives per-item lines plus a summary line (the worker relays stdout to the frontend)."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.png").write_bytes(b"A")
@@ -354,7 +354,7 @@ def test_ingest_paths_progress_callback(tmp_path: Path) -> None:
 
 
 def test_caption_follows_suffixed_collision(tmp_path: Path) -> None:
-    """1.png + 1.jpg + 1.txt（convert 模式）：caption 给先落盘的图，后缀副本不抢。"""
+    """1.png + 1.jpg + 1.txt (convert mode): the caption goes to whichever image was written first; the suffixed copy doesn't take it."""
     files = [
         ("1.png", io.BytesIO(_png_bytes(color=(0, 0, 0)))),
         ("1.jpg", io.BytesIO(_jpg_bytes(color=(255, 255, 255)))),
@@ -362,6 +362,6 @@ def test_caption_follows_suffixed_collision(tmp_path: Path) -> None:
     ]
     out = uploads.accept_many(files, tmp_path, convert_to_png=True)
     assert sorted(out.added) == ["1.png", "1.txt", "1_1.png"]
-    # caption 落到第一张（1.png），后缀化的 1_1.png 没有 caption
+    # caption lands on the first image (1.png); the suffixed 1_1.png has no caption
     assert (tmp_path / "1.txt").read_bytes() == b"caption-for-first"
     assert not (tmp_path / "1_1.txt").exists()

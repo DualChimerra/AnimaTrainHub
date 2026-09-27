@@ -1,8 +1,9 @@
-"""任务日志读取（PR-6 commit 1 从 server.py 抽出）。
+"""Task log reads (extracted from server.py in PR-6 commit 1).
 
-1 route：
-    GET /api/logs/{task_id}    读 tasks/<id>/run.log（老 task fallback
-                               LOGS_DIR/<id>.log），去掉 worker EVENT 行
+1 route:
+    GET /api/logs/{task_id}    reads tasks/<id>/run.log (falls back to
+                               LOGS_DIR/<id>.log for old tasks), stripping
+                               worker EVENT lines
 """
 from __future__ import annotations
 
@@ -16,11 +17,13 @@ router = APIRouter()
 
 
 def read_task_log(task_id: int) -> str:
-    """task 全量日志文本（剥掉 __EVENT__: 协议行）；不存在返回 ""。
+    """Full task log text (with __EVENT__: protocol lines stripped out); returns "" if the file doesn't exist.
 
-    新 task 走 tasks/<id>/run.log；老 task 在 studio_data/logs/<id>.log，
-    不写迁移脚本（DB 里也没记 log 路径，看哪个存在），按存在性 fallback。
-    其他 router（training.py 的 reg 先验回放端点）也复用这个 helper。
+    New tasks use tasks/<id>/run.log; old tasks live at
+    studio_data/logs/<id>.log — there's no migration script (the DB doesn't
+    record a log path either), so we just fall back based on which one
+    exists. Other routers (training.py's reg-prior replay endpoint) reuse
+    this same helper.
     """
     p = task_log_path(task_id)
     if not p.exists():

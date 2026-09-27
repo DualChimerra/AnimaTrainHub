@@ -4,13 +4,18 @@ import { api, type ConfigData } from '../api/client'
 import { useToast } from './Toast'
 
 /**
- * YAML 预览(R4,D3):当前表单 config 经后端 /api/schema/preview-yaml 渲染 ——
- * 与保存后落盘文件走同一条 tolerant + 裁剪 + safe_dump 序列化路径,预览与
- * 落盘物理一致(历史上前端 pruneInactiveConfig + configToYaml 双镜像靠注释
- * 纪律「声称一致」,已删除)。300ms debounce 跟手;请求失败保留上次文本。
- * Presets 页包在居中 modal 里,Train 页作为右栏预览抽屉的 tab。
- * 高度由外层控制:className 传 flex 布局类,<pre> 自己滚动;长行不折行、
- * 横向滚动(路径等长值折行后完全没法读)。
+ * YAML preview (R4,D3): the current form config is rendered through the backend
+ * /api/schema/preview-yaml -- it goes through the same tolerant + pruning +
+ * safe_dump serialization path as the file written to disk on save, so the
+ * preview is physically identical to what lands on disk (previously the
+ * frontend had a pruneInactiveConfig + configToYaml double mirror that only
+ * stayed "in sync" by comment discipline; that's been removed). 300ms debounce
+ * to stay responsive; keeps the previous text if a request fails.
+ * The Presets page wraps this in a centered modal; the Train page uses it as a
+ * tab in the right-column preview drawer.
+ * Height is controlled by the parent: pass flex layout classes via className,
+ * <pre> scrolls on its own; long lines don't wrap and scroll horizontally
+ * instead (wrapping long values like paths makes them completely unreadable).
  */
 export default function ConfigYamlPanel({
   config,
@@ -19,9 +24,9 @@ export default function ConfigYamlPanel({
   className,
 }: {
   config: ConfigData
-  /** 落盘文件语境,如 `config.yaml` / `my-preset.yaml`。 */
+  /** File-on-disk context, e.g. `config.yaml` / `my-preset.yaml`. */
   fileLabel: string
-  /** 顶部警示条(如「包含未保存修改」),缺省不显示。 */
+  /** Top warning strip (e.g. "contains unsaved changes"), hidden by default. */
   hint?: string
   className?: string
 }) {
@@ -34,12 +39,13 @@ export default function ConfigYamlPanel({
     const timer = setTimeout(() => {
       api.previewConfigYaml(config)
         .then((r) => { if (alive) setYamlText(r.yaml) })
-        .catch(() => { /* 网络抖动保留上次文本;下次变更会重试 */ })
+        .catch(() => { /* keep previous text on a network hiccup; the next change retries */ })
     }, 300)
     return () => { alive = false; clearTimeout(timer) }
   }, [config])
 
-  // safe_dump 顶级键顶格 —— 行首非空白即一个落盘字段(多行字符串续行有缩进)
+  // safe_dump top-level keys start at column 0 -- a non-whitespace line start is
+  // one field written to disk (continuation lines of multi-line strings are indented)
   const fieldCount = yamlText
     ? yamlText.split('\n').filter((l) => /^[^\s#]/.test(l)).length
     : 0

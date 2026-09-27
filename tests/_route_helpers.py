@@ -1,16 +1,16 @@
-"""共享 route 内省 helper —— 兼容 FastAPI 0.137+ 把 include_router 包装成
-`_IncludedRouter` 的内部表示。
+"""Shared route introspection helper -- compatible with FastAPI 0.137+ wrapping
+include_router into the internal `_IncludedRouter` representation.
 
-行为变化（不是应用 bug，只影响 introspection 测试）：
+Behavior change (not an application bug, only affects introspection tests):
 
-  0.136 及之前：
-    app.include_router(sub) → sub 的每个 APIRoute 直接 append 到 app.routes
-  0.137 起：
-    app.include_router(sub) → app.routes 多 1 个 `_IncludedRouter(original_router=sub)`
-    wrapper；要拿底层 APIRoute 必须走 `wrapper.original_router.routes` 递归
+  0.136 and earlier:
+    app.include_router(sub) -> each APIRoute of sub is appended directly to app.routes
+  0.137 onward:
+    app.include_router(sub) -> app.routes gains 1 extra `_IncludedRouter(original_router=sub)`
+    wrapper; to get the underlying APIRoute you must recurse through `wrapper.original_router.routes`
 
-HTTP routing dispatch 在两版上都正常（已用 TestClient 验证）。变化只影响
-直接遍历 `app.routes` 拿 APIRoute 实例的代码 —— 主要是测试。
+HTTP routing dispatch works normally on both versions (verified with TestClient). The change only
+affects code that walks `app.routes` directly to get APIRoute instances -- mainly tests.
 """
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ from typing import Any, Iterator
 
 
 def iter_leaf_routes(routes: list[Any]) -> Iterator[Any]:
-    """递归展开 `_IncludedRouter` wrapper，产出 APIRoute / Mount / etc 叶子。
+    """Recursively unwrap `_IncludedRouter` wrappers, yielding APIRoute / Mount / etc leaves.
 
-    跨 fastapi 版本兼容：
-    - 0.136：顶层即叶子（else 分支直接 yield）
-    - 0.137+：遇 wrapper 走 `original_router.routes` 再下钻
-    - 嵌套 include_router 也能正确展开
+    Compatible across fastapi versions:
+    - 0.136: top level is already a leaf (else branch yields directly)
+    - 0.137+: when a wrapper is found, recurse through `original_router.routes`
+    - Nested include_router also unwraps correctly
     """
     for r in routes:
         if hasattr(r, "original_router") and hasattr(r.original_router, "routes"):

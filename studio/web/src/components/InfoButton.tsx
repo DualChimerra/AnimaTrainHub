@@ -2,18 +2,19 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 /**
- * click-toggle 弹层。给字段名 / section title / 卡片角加帮助说明，不在主流
- * UI 占空间，用户需要时才显示。
+ * Click-toggle popover. Attaches help text to a field name / section title /
+ * card corner without taking up space in the main UI; only shows when the user needs it.
  *
- * 行为：
- * - 点 trigger 切换；点外部 / Esc 关
- * - aria-expanded 给屏幕阅读器；trigger 自带 aria-label
- * - trigger 是 SVG i-in-circle 图标（之前用 Unicode ⓘ 字符在不同字体里
- *   垂直位置不一致跟相邻文字基线对不齐；SVG 用固定 viewBox 严格居中）
+ * Behavior:
+ * - Clicking the trigger toggles it; clicking outside / Esc closes it
+ * - aria-expanded for screen readers; the trigger carries its own aria-label
+ * - The trigger is an SVG i-in-circle icon (previously used the Unicode ⓘ
+ *   character, whose vertical position was inconsistent across fonts and
+ *   didn't align with the baseline of adjacent text; SVG with a fixed viewBox centers it precisely)
  *
- * 不做的事（YAGNI；将来真有别的 trigger 需求再扩）：
- * - 不支持 hover 触发（手机不友好）
- * - 不动态计算 placement（统一 bottom-left；视口溢出靠 max-width 收）
+ * Deliberately not done (YAGNI; extend later if another trigger need shows up):
+ * - No hover trigger support (not mobile-friendly)
+ * - No dynamic placement calculation (always bottom-left; viewport overflow handled via max-width)
  */
 interface InfoButtonProps {
   children: ReactNode
@@ -68,7 +69,7 @@ export function InfoButton({ children, ariaLabel }: InfoButtonProps) {
         type="button"
         className="info-btn-trigger"
         onClick={(e) => {
-          // stopPropagation：避免放在 <summary> / clickable row 里触发外层 toggle
+          // stopPropagation: avoids triggering the outer toggle when placed inside a <summary> / clickable row
           e.stopPropagation()
           setOpen((v) => !v)
         }}

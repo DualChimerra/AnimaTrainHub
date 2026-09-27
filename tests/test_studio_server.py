@@ -1,9 +1,3 @@
-"""Studio FastAPI 守护进程的端点冒烟测试（P1 范围）。
-
-测试只覆盖 server.py 暴露的 5 个端点。每个用例通过 monkeypatch 把
-`studio.server` 模块里指向运行时数据的路径常量改写到 tmp_path，
-避免污染仓库真实目录。
-"""
 from __future__ import annotations
 
 import json
@@ -18,19 +12,13 @@ from studio import server
 
 @pytest.fixture
 def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    """把 server 模块里的路径全部指向 tmp_path 下的隔离目录。
-
-    PR-6 commit 1：/samples / / 等 routes 搬到 api/routers/，监控 OUTPUT_DIR /
-    WEB_DIST 的真实绑名在新模块。新位置和 server.py 同时 patch，保 old
-    `server.OUTPUT_DIR` patch 不丢、新 handler 也能看到 fake 值。
-    """
     from studio import db
     from studio.api.routers import root as _root_router
     from studio.api.routers import samples as _samples_router
     from studio.services.projects import projects
     output = tmp_path / "output"
     samples_dir = output / "samples"
-    web_dist = tmp_path / "web_dist"  # 不创建即模拟未构建
+    web_dist = tmp_path / "web_dist"
     samples_dir.mkdir(parents=True)
 
     dbfile = tmp_path / "studio.db"
@@ -71,12 +59,6 @@ def test_health_returns_ok(client: TestClient) -> None:
 def test_generate_sample_response_is_not_browser_cached(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """加密磁盘 cache 读路径：put PNG → GET /api/generate/{tid}/sample/{fn} →
-    解密后 no-store 返回。
-
-    本 fork：显式 init disk_cache —— 上游此处依赖其它测试触发过 lifespan init
-    的执行顺序副作用（那些 system 路由测试已随 updater 移除）。
-    """
     from studio.services.inference import disk_cache as generate_cache
 
     generate_cache.init(isolated_paths["tmp"] / ".cache" / "generate")
@@ -98,7 +80,6 @@ def test_generate_sample_response_is_not_browser_cached(
 def test_torch_status_proxies_service(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """GET /api/torch/status 把 torch_setup.current_status() 透传给前端。"""
     from studio.services.runtime import torch as torch_setup
     monkeypatch.setattr(torch_setup, "current_status", lambda: {
         "installed": True,
@@ -121,7 +102,6 @@ def test_torch_status_proxies_service(
 def test_torch_reinstall_registers_marker_returns_pending(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """POST /api/torch/reinstall 不真装，写 marker 返回 pending。"""
     from studio.services.runtime import pending_install, torch as torch_setup
     monkeypatch.setattr(pending_install, "STUDIO_DATA", tmp_path)
     monkeypatch.setattr(pending_install, "PENDING_MARKER", tmp_path / ".pending-pip-install.json")
@@ -134,7 +114,6 @@ def test_torch_reinstall_registers_marker_returns_pending(
     assert body["tag"] == "cu128"
     assert body["target"] == "auto"
     assert "studio.bat" in body["message"]
-    # marker 文件已写
     assert (tmp_path / ".pending-pip-install.json").exists()
 
 
@@ -144,7 +123,7 @@ def test_torch_reinstall_invalid_target_returns_400(
     from studio.services.runtime import torch as torch_setup
     monkeypatch.setattr(
         torch_setup, "_decide_target_tag",
-        lambda t: (_ for _ in ()).throw(ValueError(f"非法 target: {t!r}")),
+        lambda t: (_ for _ in ()).throw(ValueError(f"invalid target: {t!r}")),
     )
     resp = client.post("/api/torch/reinstall", json={"target": "xpu"})
     assert resp.status_code == 400
@@ -156,7 +135,6 @@ def test_torch_reinstall_invalid_target_returns_400(
 def test_flash_attention_status_returns_env_and_candidates(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """GET /api/flash-attention/status 应返回 status + env + slim candidates + fetch_error。"""
     from studio.services.runtime import flash_attention as flash_attention_setup
     monkeypatch.setattr(flash_attention_setup, "current_status", lambda: {
         "installed": True, "version": "2.8.3"
@@ -169,10 +147,10 @@ def test_flash_attention_status_returns_env_and_candidates(
         {
             "url": "https://x/wheel.whl",
             "name": "flash_attn-2.8.3+cu128torch2.5-cp311-cp311-win_amd64.whl",
-            "score": 40,  # 应被剥掉
+            "score": 40,
             "notes": [],
             "usable": True,
-            "tags": {"cuda": "cu128"},  # 应被剥掉
+            "tags": {"cuda": "cu128"},
         },
     ], None))
 
@@ -182,7 +160,6 @@ def test_flash_attention_status_returns_env_and_candidates(
     assert body["installed"] is True
     assert body["version"] == "2.8.3"
     assert body["env"]["platform"] == "win_amd64"
-    # candidates 只保留 url/name/notes/usable —— score / tags 不暴露给前端
     assert len(body["candidates"]) == 1
     c = body["candidates"][0]
     assert set(c.keys()) == {"url", "name", "notes", "usable"}
@@ -192,7 +169,6 @@ def test_flash_attention_status_returns_env_and_candidates(
 def test_flash_attention_status_passes_fetch_error_through(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """GitHub 限流 / 网络异常时 fetch_error 透传给 UI。"""
     from studio.services.runtime import flash_attention as flash_attention_setup
     monkeypatch.setattr(flash_attention_setup, "current_status", lambda: {
         "installed": False, "version": None,
@@ -203,7 +179,7 @@ def test_flash_attention_status_passes_fetch_error_through(
     })
     monkeypatch.setattr(
         flash_attention_setup, "find_candidates",
-        lambda _env: ([], "GitHub API 错误: API rate limit exceeded"),
+        lambda _env: ([], "GitHub API error: API rate limit exceeded"),
     )
     resp = client.get("/api/flash-attention/status")
     assert resp.status_code == 200
@@ -239,7 +215,6 @@ def test_flash_attention_install_success(
 def test_flash_attention_install_url_null_uses_auto(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """前端不传 url（或显式 null）→ service 收到 None，走自动匹配。"""
     from studio.services.runtime import flash_attention as flash_attention_setup
     captured: dict = {}
 
@@ -260,7 +235,7 @@ def test_flash_attention_install_failure_returns_500(
     from studio.services.runtime import flash_attention as flash_attention_setup
 
     def boom(_url):
-        raise RuntimeError("pip install 失败:\nERROR: bad wheel")
+        raise RuntimeError("pip install failed:\nERROR: bad wheel")
 
     monkeypatch.setattr(flash_attention_setup, "install", boom)
     resp = client.post("/api/flash-attention/install", json={"url": "https://x/bad.whl"})
@@ -269,7 +244,6 @@ def test_flash_attention_install_failure_returns_500(
 
 
 def test_state_missing_returns_empty(client: TestClient, isolated_paths: dict[str, Path]) -> None:
-    """没有 task_id 也没有 running 任务时返回空状态。"""
     resp = client.get("/api/state")
     assert resp.status_code == 200
     body = resp.json()
@@ -283,7 +257,6 @@ def test_state_missing_returns_empty(client: TestClient, isolated_paths: dict[st
 def _make_task_with_state(
     isolated_paths: dict[str, Path], payload: dict | str | None
 ) -> int:
-    """建一个 task 并写 state 文件，返回 task_id。payload=None 表示不写文件。"""
     from studio import db as _db
     state_dir = isolated_paths["tmp"] / "states"
     state_dir.mkdir(exist_ok=True)
@@ -378,7 +351,6 @@ def test_state_unknown_task_returns_empty(
 def test_state_running_task_used_when_no_task_id(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """没给 task_id → 默认拉当前 running 的 task。"""
     payload = {"losses": [], "lr_history": [], "epoch": 0, "step": 7,
                "total_steps": 0, "speed": 0.0, "samples": [],
                "start_time": None, "config": {}}
@@ -393,7 +365,6 @@ def test_state_running_task_used_when_no_task_id(
 def test_state_max_points_downsamples_losses(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """PR #37：/api/state 兑现 max_points，losses/lr 长度超过时均匀降采样。"""
     losses = [{"step": i, "loss": 1.0 / (i + 1), "time": float(i)} for i in range(5000)]
     lr_history = [{"step": i, "lr": 1e-4} for i in range(5000)]
     optimizer_metrics_history = [{"step": i, "actual_lr": 1e-4, "d": 1e-4} for i in range(5000)]
@@ -406,17 +377,14 @@ def test_state_max_points_downsamples_losses(
     }
     tid = _make_task_with_state(isolated_paths, payload)
 
-    # max_points=500 → 都被压到 500
     resp = client.get(f"/api/state?task_id={tid}&max_points=500")
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["losses"]) == 500
     assert len(body["lr_history"]) == 500
     assert len(body["optimizer_metrics_history"]) == 500
-    # 首尾保留
     assert body["losses"][0]["step"] == 0
     assert body["losses"][-1]["step"] == 4999
-    # 其他字段透传
     assert body["step"] == 4999
     assert body["total_steps"] == 5000
 
@@ -424,7 +392,6 @@ def test_state_max_points_downsamples_losses(
 def test_state_max_points_zero_disables_downsample(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """max_points=0 (无穷) → 不降采样，原样返回。"""
     losses = [{"step": i, "loss": 0.0} for i in range(100)]
     payload = {"losses": losses, "lr_history": [], "epoch": 0, "step": 99,
                "total_steps": 100, "speed": 0.0, "samples": [],
@@ -438,11 +405,6 @@ def test_state_max_points_zero_disables_downsample(
 def test_state_default_returns_full_payload(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """新默认（PR #43）：不传 max_points 等价于 max_points=0，返回全量历史。
-
-    10k 步训练 cold start 时用户能拿到完整数据；想降采样的 caller 必须显式
-    传具体数字。
-    """
     losses = [{"step": i, "loss": 0.1} for i in range(10000)]
     payload = {
         "losses": losses, "lr_history": [], "epoch": 0, "step": 9999,
@@ -450,7 +412,6 @@ def test_state_default_returns_full_payload(
         "start_time": None, "config": {},
     }
     tid = _make_task_with_state(isolated_paths, payload)
-    # 不传 max_points 任何参数
     resp = client.get(f"/api/state?task_id={tid}")
     assert resp.status_code == 200
     assert len(resp.json()["losses"]) == 10000
@@ -475,18 +436,13 @@ def test_sample_returns_file(client: TestClient, isolated_paths: dict[str, Path]
 
 @pytest.mark.parametrize("bad", ["../secret.txt", "..\\secret.txt", "sub/dir.png", "sub\\dir.png"])
 def test_sample_blocks_traversal(client: TestClient, bad: str) -> None:
-    """`/samples/{name}` 不允许斜杠 / 反斜杠 / 上级路径。"""
     resp = client.get(f"/samples/{bad}")
-    # 含 `/` 或 `\` 的会被路由层拆成多段（404），含 `..` 的被显式 400 拒绝；
-    # 任何一种都不应该 200。
     assert resp.status_code != 200
 
 
 def test_sample_with_task_id_finds_in_output_samples(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """回归 Q4：anima_train 把 sample 写到 `output_dir/samples/`，端点应在
-    `monitor_state_path 同级 output/samples/` 也能命中（之前只查了同级 samples/）。"""
     from studio import db as _db
     state_path = isolated_paths["tmp"] / "v1" / "monitor_state.json"
     state_path.parent.mkdir(parents=True)
@@ -507,7 +463,6 @@ def test_sample_with_task_id_finds_in_output_samples(
 def test_sample_with_task_id_finds_in_state_dir_samples(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """旧约定路径（monitor_state.json 同级 samples/）仍兼容。"""
     from studio import db as _db
     state_path = isolated_paths["tmp"] / "v2" / "monitor_state.json"
     state_path.parent.mkdir(parents=True)
@@ -532,7 +487,6 @@ def test_sample_with_task_id_finds_in_state_dir_samples(
 def test_root_serves_index_when_built(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """ADR 0012：前端 dist 存在时，/ 直接吐 index.html，不再重定向。"""
     web_dist = isolated_paths["web_dist"]
     web_dist.mkdir(parents=True, exist_ok=True)
     (web_dist / "index.html").write_text("<!doctype html><title>anima</title>", encoding="utf-8")
@@ -545,7 +499,6 @@ def test_root_serves_index_when_built(
 def test_root_fallback_when_no_dist(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """前端未构建时返回 JSON 提示，而不是 404 / 跳转。"""
     assert not isolated_paths["web_dist"].exists()
     resp = client.get("/", follow_redirects=False)
     assert resp.status_code == 200
@@ -556,11 +509,9 @@ def test_root_fallback_when_no_dist(
 def test_legacy_studio_path_redirects_to_root(
     client: TestClient, isolated_paths: dict[str, Path]
 ) -> None:
-    """ADR 0012 legacy：老 /studio/... 链接一次性 307 跳到根路径，保留 query。"""
     resp = client.get("/studio/projects/1?tab=log", follow_redirects=False)
     assert resp.status_code == 307
     assert resp.headers["location"] == "/projects/1?tab=log"
-    # 裸 /studio → /
     resp = client.get("/studio", follow_redirects=False)
     assert resp.status_code == 307
     assert resp.headers["location"] == "/"
@@ -573,13 +524,6 @@ def test_legacy_studio_path_redirects_to_root(
 def test_uvicorn_run_bounds_graceful_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """main() 必须给 uvicorn 传 timeout_graceful_shutdown 上限。
-
-    浏览器开着时 /api/events 的 SSE 长连接不主动断，graceful shutdown 默认
-    无限等 →「Waiting for connections to close」卡死；且 py3.12+ 的
-    asyncio.Server.wait_closed() 等全部活跃连接，二次 Ctrl+C 设 force_exit
-    也解不开。没有这个上限，终端 Ctrl+C 永远关不掉 server。
-    """
     import uvicorn
 
     from studio.api import main as main_mod
@@ -593,9 +537,6 @@ def test_uvicorn_run_bounds_graceful_shutdown(
 
 
 def test_cancelled_asgi_noise_filter_scope() -> None:
-    """shutdown 超时取消 SSE 连接时，uvicorn 把 CancelledError 按
-    「Exception in ASGI application」打 ERROR traceback —— 主动取消不是
-    应用错误，应被过滤；其它 ASGI 异常 / 其它 message 必须照常放行。"""
     import asyncio
 
     from studio.api.lifespan import _CancelledAsgiNoiseFilter
@@ -609,15 +550,12 @@ def test_cancelled_asgi_noise_filter_scope() -> None:
             exc_info=(type(exc), exc, None) if exc is not None else None,
         )
 
-    # 目标噪声：吞
     assert not f.filter(
         record("Exception in ASGI application\n", asyncio.CancelledError())
     )
-    # 真实应用异常：放行
     assert f.filter(
         record("Exception in ASGI application\n", RuntimeError("boom"))
     )
-    # 无异常信息 / 其它 message：放行
     assert f.filter(record("Exception in ASGI application\n", None))
     assert f.filter(record("Cancel 2 running task(s)", asyncio.CancelledError()))
 

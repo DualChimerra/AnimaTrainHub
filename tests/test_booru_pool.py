@@ -1,7 +1,7 @@
-"""PP9 — BooruClient 池子：token bucket 分离 / 并发 worker / 429 退避。
+"""PP9 -- the BooruClient pool: separated token buckets / concurrent workers / 429 backoff.
 
-不真发 HTTP；用 monkeypatch 替 booru_api.search_posts / download_image 验证
-路由（API/CDN 桶）+ 计时 + 429 自适应。
+No real HTTP is sent; monkeypatch replaces booru_api.search_posts /
+download_image to verify routing (API/CDN buckets) + timing + 429 adaptation.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from studio.services.booru import api as booru_api, pool as booru_pool
 
 
 # ---------------------------------------------------------------------------
-# host 分类
+# host classification
 # ---------------------------------------------------------------------------
 
 
@@ -42,14 +42,14 @@ def test_is_cdn_host_classifies_correctly(url: str, is_cdn: bool) -> None:
 
 
 def test_token_bucket_enforces_minimum_interval() -> None:
-    """rate=10/s → 连续两次 acquire 间隔 ≥ 0.1s。"""
+    """rate=10/s -> two consecutive acquire calls are spaced >= 0.1s apart."""
     bucket = booru_pool.TokenBucket(rate_per_sec=10.0)
-    bucket.acquire()  # 第一次零等待（next_time=0）
+    bucket.acquire()  # the first call waits zero time (next_time=0)
     t0 = time.monotonic()
     bucket.acquire()
     bucket.acquire()
     elapsed = time.monotonic() - t0
-    # 两次后续 acquire 各等 0.1s
+    # each of the two subsequent acquire calls waits 0.1s
     assert elapsed >= 0.18, f"expected >= 0.18s, got {elapsed:.3f}s"
 
 
@@ -66,18 +66,18 @@ def test_token_bucket_set_rate_takes_effect() -> None:
 
 @pytest.fixture
 def fast_client(monkeypatch: pytest.MonkeyPatch):
-    """高速桶 + mock booru_api，避免真等真发请求。"""
+    """A high-speed bucket + mock booru_api, avoiding real waits and real requests."""
     cfg = booru_pool.BooruPoolConfig(
         parallel_workers=4,
         api_rate_per_sec=100.0,
         cdn_rate_per_sec=100.0,
-        backoff_on_429=0.1,  # 测试加速
+        backoff_on_429=0.1,  # sped up for the test
     )
     return booru_pool.BooruClient(cfg)
 
 
 def test_search_uses_api_bucket(monkeypatch: pytest.MonkeyPatch, fast_client) -> None:
-    """search_posts 调底层 booru_api.search_posts；走 API bucket。"""
+    """search_posts calls the underlying booru_api.search_posts; goes through the API bucket."""
     seen = []
 
     def fake_search(api_source, query, **kw):
@@ -114,7 +114,7 @@ def test_download_uses_cdn_bucket(
 
 
 def test_buckets_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """API rate=1/s + CDN rate=100/s → 100 次拉图 + 1 次 search 总耗时 < 1s（API 没拖慢 CDN）。"""
+    """API rate=1/s + CDN rate=100/s -> 100 image fetches + 1 search take < 1s total (the API doesn't slow down the CDN)."""
     cfg = booru_pool.BooruPoolConfig(
         parallel_workers=4, api_rate_per_sec=1.0, cdn_rate_per_sec=100.0
     )
@@ -124,11 +124,11 @@ def test_buckets_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(booru_api, "download_image", lambda u, p, **k: p.write_bytes(b"x") or p)
 
     t0 = time.monotonic()
-    # 1 个 search（吃掉 API token）+ 5 个并发拉图
+    # 1 search (consumes an API token) + 5 concurrent image fetches
     client.search_posts("gelbooru", "x", user_id="u", api_key="k")
     items = list(range(5))
     paths = [Path(f"/tmp/dummy_{i}.png") for i in items]
-    # 但是 path 用 tmp 目录避免真写到 /tmp
+    # but use a tmp directory for paths to avoid actually writing to /tmp
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         paths = [Path(td) / f"x{i}.png" for i in items]
@@ -142,8 +142,8 @@ def test_buckets_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
             ),
         )
     elapsed = time.monotonic() - t0
-    # API 1/s 限速对 search 单次没影响（第一次零等待）；CDN 100/s 几乎不限
-    assert elapsed < 1.0, f"耗时 {elapsed:.2f}s，桶可能未分离"
+    # a single search isn't affected by the API's 1/s rate limit (the first call waits zero time); CDN's 100/s is barely limiting
+    assert elapsed < 1.0, f"took {elapsed:.2f}s, the buckets may not be separated"
     client.close()
 
 
@@ -156,7 +156,7 @@ def test_429_triggers_backoff_and_halves_rate(monkeypatch: pytest.MonkeyPatch) -
     )
     client = booru_pool.BooruClient(cfg)
 
-    # 模拟一次 search 抛 HTTPError(status=429)
+    # simulate a search raising HTTPError(status=429)
     resp = MagicMock()
     resp.status_code = 429
     err = requests.HTTPError("429"); err.response = resp
@@ -167,10 +167,10 @@ def test_429_triggers_backoff_and_halves_rate(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(booru_api, "search_posts", fake_search)
     with pytest.raises(requests.HTTPError):
         client.search_posts("gelbooru", "x", user_id="u", api_key="k")
-    # 速率应已减半
+    # the rate should now be halved
     assert client.cfg.api_rate_per_sec == pytest.approx(5.0)
     assert client.cfg.cdn_rate_per_sec == pytest.approx(5.0)
-    # 第二次 429 不应再次减半
+    # a second 429 should not halve it again
     with pytest.raises(requests.HTTPError):
         client.search_posts("gelbooru", "x", user_id="u", api_key="k")
     assert client.cfg.api_rate_per_sec == pytest.approx(5.0)
@@ -180,7 +180,7 @@ def test_429_triggers_backoff_and_halves_rate(monkeypatch: pytest.MonkeyPatch) -
 def test_503_triggers_backoff_but_does_not_halve_rate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """503 是服务端瞬时不可用（非「我们太快」）—— 进 sticky 但不减速率。"""
+    """503 means the server is transiently unavailable (not "we're too fast") -- enters sticky mode but doesn't reduce the rate."""
     cfg = booru_pool.BooruPoolConfig(
         parallel_workers=2,
         api_rate_per_sec=10.0,
@@ -205,28 +205,28 @@ def test_503_triggers_backoff_but_does_not_halve_rate(
             convert_to_png=False,
             remove_alpha_channel=False,
         )
-    # 503 不减速
+    # 503 doesn't reduce the rate
     assert client.cfg.api_rate_per_sec == pytest.approx(10.0)
     assert client.cfg.cdn_rate_per_sec == pytest.approx(10.0)
-    # 但 CDN sticky 状态已设
+    # but the CDN sticky state is now set
     assert client._backoff_until["cdn"] > 0
-    # API 侧不受影响（独立 backoff）
+    # the API side is unaffected (independent backoff)
     assert client._backoff_until["api"] == 0.0
     client.close()
 
 
 def test_cdn_backoff_does_not_block_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CDN 503 不该让后续 search（API host）也等 sticky window。"""
+    """A CDN 503 shouldn't make a subsequent search (an API host) wait out the sticky window too."""
     cfg = booru_pool.BooruPoolConfig(
         parallel_workers=2,
         api_rate_per_sec=100.0,
         cdn_rate_per_sec=100.0,
-        backoff_on_429=10.0,  # 故意长，证明 API 不被它拖
+        backoff_on_429=10.0,  # deliberately long, to prove the API isn't dragged by it
         backoff_on_503=10.0,
     )
     client = booru_pool.BooruClient(cfg)
 
-    # CDN 抛 503，触发 cdn sticky 10s
+    # CDN raises 503, triggering a 10s cdn sticky window
     resp = MagicMock(); resp.status_code = 503
     err = requests.HTTPError("503"); err.response = resp
     monkeypatch.setattr(booru_api, "download_image", lambda *_a, **_k: (_ for _ in ()).throw(err))
@@ -239,24 +239,27 @@ def test_cdn_backoff_does_not_block_api(monkeypatch: pytest.MonkeyPatch) -> None
             convert_to_png=False,
             remove_alpha_channel=False,
         )
-    # 后续 API search 应立即返回（不等 10s）
+    # the subsequent API search should return immediately (not wait 10s)
     t0 = time.monotonic()
     client.search_posts("gelbooru", "x", user_id="u", api_key="k")
     elapsed = time.monotonic() - t0
-    assert elapsed < 0.5, f"API 被 CDN backoff 拖住了，耗时 {elapsed:.2f}s"
+    assert elapsed < 0.5, f"the API was dragged down by the CDN backoff, took {elapsed:.2f}s"
     client.close()
 
 
 def test_burst_503_in_same_window_logs_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """同一 backoff window 内多 worker 连发 503 只应 log 1 次（避免刷屏）。
+    """Multiple workers firing 503 back-to-back within the same backoff window should log only once (avoid flooding the log).
 
-    模拟原 bug：4 个 worker 在 sticky window 设置后还在飞中，全部撞 503 回来。
-    这里直接连发 _trigger_backoff 模拟并发；正常下载路径下 _wait_if_backoff
-    会让后续 worker sleep 出窗口再触发，那是真正的「新事件」应当 log。
+    Simulates the original bug: 4 workers still in flight when the sticky
+    window is set, all coming back with 503. This fires _trigger_backoff
+    directly, back-to-back, to simulate concurrency; on the normal download
+    path, _wait_if_backoff makes subsequent workers sleep out the window
+    before triggering again, which is a genuinely "new event" that should
+    be logged.
     """
-    cfg = booru_pool.BooruPoolConfig(backoff_on_503=10.0)  # 窗口足够大
+    cfg = booru_pool.BooruPoolConfig(backoff_on_503=10.0)  # a window large enough
     client = booru_pool.BooruClient(cfg)
     caplog.set_level("WARNING", logger="studio.services.booru.pool")
 
@@ -265,14 +268,14 @@ def test_burst_503_in_same_window_logs_once(
 
     sticky_logs = [r for r in caplog.records if "sticky backoff" in r.message]
     assert len(sticky_logs) == 1, (
-        f"同一 window 内 503 应仅 log 1 次，实际 {len(sticky_logs)} 次："
+        f"503 within the same window should log only once, got {len(sticky_logs)}: "
         f"{[r.message for r in sticky_logs]}"
     )
     client.close()
 
 
 def test_parallel_download_respects_workers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """parallel_workers=2 → 同时活动的 fn 调用数 ≤ 2。"""
+    """parallel_workers=2 -> the number of concurrently active fn calls is <= 2."""
     cfg = booru_pool.BooruPoolConfig(
         parallel_workers=2, api_rate_per_sec=100.0, cdn_rate_per_sec=100.0
     )
@@ -294,7 +297,7 @@ def test_parallel_download_respects_workers(monkeypatch: pytest.MonkeyPatch) -> 
 
     out = client.parallel_download(list(range(10)), slow_fn)
     assert len(out) == 10
-    assert all(r[2] is None for r in out)  # 没有异常
+    assert all(r[2] is None for r in out)  # no exceptions
     assert max_active <= 2
     client.close()
 
@@ -314,7 +317,7 @@ def test_parallel_download_cancel_event(monkeypatch: pytest.MonkeyPatch) -> None
         return item
 
     out = client.parallel_download(list(range(10)), fn, cancel_event=cancel)
-    # 至少前几个会跑；后面被 cancel 拦下
+    # at least the first few run; the rest get caught by cancel
     canceled = [r for r in out if isinstance(r[2], RuntimeError)]
     assert len(canceled) > 0
     client.close()
@@ -324,12 +327,12 @@ def test_context_manager_closes_resources() -> None:
     cfg = booru_pool.BooruPoolConfig(parallel_workers=2)
     with booru_pool.BooruClient(cfg) as client:
         assert client._executor is not None
-    # 关闭后调用 close 应幂等
+    # calling close again after it's already closed should be idempotent
     client.close()
 
 
 def test_external_session_not_owned() -> None:
-    """传入外部 session 时，client.close 不应关掉它。"""
+    """When an external session is passed in, client.close should not close it."""
     sess = requests.Session()
     closed = []
 
@@ -342,5 +345,5 @@ def test_external_session_not_owned() -> None:
     sess.close = track_close  # type: ignore[method-assign]
     client = booru_pool.BooruClient(session=sess)
     client.close()
-    assert closed == [], "外部 session 不应被关闭"
+    assert closed == [], "an external session should not be closed"
     sess.close = real_close  # type: ignore[method-assign]

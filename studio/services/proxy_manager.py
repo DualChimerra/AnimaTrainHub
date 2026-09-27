@@ -1,11 +1,11 @@
-"""全局 HTTP/HTTPS 代理 helpers。
+"""Global HTTP/HTTPS proxy helpers.
 
-读 `secrets.proxy` 配置，组装 requests 库要的 proxies dict + 给现有
-`requests.Session` 注入 proxies。当前只覆盖 booru 下载链路；对
-`huggingface_hub` 的 transport-level 代理注入需要单独的 monkeypatch，
-不在本模块范围内（PR #162 原版本里的 `setup_global_httpx_client` 用了
-`huggingface_hub.set_client_factory` —— 该符号在 huggingface_hub 内不存在，
-import 时直接 ImportError；本 hotfix 一并删除该 dead 函数）。
+Reads the `secrets.proxy` config, builds the proxies dict expected by the requests library, and
+injects proxies into an existing `requests.Session`. Currently only covers the booru download path;
+transport-level proxy injection for `huggingface_hub` needs a separate monkeypatch, which is out of
+scope for this module (the original `setup_global_httpx_client` from PR #162 used
+`huggingface_hub.set_client_factory` -- that symbol doesn't exist in huggingface_hub, so it raised
+ImportError on import; this hotfix removes that dead function too).
 """
 from typing import Dict, Optional
 import logging
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_proxy_dict() -> Optional[Dict[str, str]]:
-    """从 secrets 读代理设置，返回 requests 库要的字典格式；未启用返 None。"""
+    """Read proxy settings from secrets, returning the dict format the requests library expects; returns None if disabled."""
     try:
         cfg = secrets.load().proxy
         if not cfg.enabled:
@@ -25,14 +25,14 @@ def get_proxy_dict() -> Optional[Dict[str, str]]:
         proxies: Dict[str, str] = {}
         http_p = (cfg.http_proxy or "").strip()
         https_p = (cfg.https_proxy or "").strip()
-        # 任一字段留空 → 回退到另一个。本地代理（clash / v2ray / socks5 …）通常
-        # 单个端口同时转发 http 与 https 目标流量，用户往往只填一个字段。这也兑现
-        # 设置页 tips3「HTTPS 留空回退用 HTTP 代理」的承诺。
+        # If either field is blank, fall back to the other. Local proxies (clash / v2ray / socks5 etc.) usually
+        # forward both http and https traffic through a single port, so users often only fill in one field. This also
+        # honors the Settings page tip3 promise: "if HTTPS is blank, fall back to the HTTP proxy".
         #
-        # 旧逻辑只在 `http_proxy` 显式以 socks5:// 开头时才镜像到 https；明文 HTTP
-        # 代理只填 http_proxy 时 proxies["https"] 不设 → 所有 booru（全 https）请求
-        # 直连 → 超时。这里对所有 scheme 统一回退，socks5 特例被此逻辑吸收；两字段
-        # 都显式填写时各自尊重，不再互相覆盖。
+        # The old logic only mirrored to https when `http_proxy` explicitly started with socks5://; a plain HTTP
+        # proxy with only http_proxy set left proxies["https"] unset -> all booru (all-https) requests went
+        # direct -> timeout. Now we fall back uniformly for all schemes; the socks5 special case is absorbed by
+        # this logic, and when both fields are explicitly set, each is respected without overriding the other.
         if http_p and not https_p:
             https_p = http_p
         elif https_p and not http_p:
@@ -50,7 +50,7 @@ def get_proxy_dict() -> Optional[Dict[str, str]]:
 
 
 def get_no_proxy_list() -> list[str]:
-    """`no_proxy` 字段拆成 host 列表。"""
+    """Split the `no_proxy` field into a host list."""
     try:
         proxy_cfg = secrets.load().proxy
         if not proxy_cfg.no_proxy:
@@ -61,7 +61,7 @@ def get_no_proxy_list() -> list[str]:
 
 
 def patch_requests_session(session):
-    """给已有 requests.Session 注入 proxies；未启用代理则原样返回。"""
+    """Inject proxies into an existing requests.Session; returns it unchanged if proxying is disabled."""
     proxies = get_proxy_dict()
     if proxies:
         session.proxies.update(proxies)

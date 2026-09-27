@@ -1,9 +1,11 @@
-/** Autocomplete 候选列表 — Portal + caret-anchored fixed positioning。
+/** Autocomplete suggestion list -- Portal + caret-anchored fixed positioning.
  *
- * 老版用 absolute + align="top|bottom" 锚定到 input 容器，textarea 高时
- * popover 会甩到屏幕顶/底栏外。新版：用 mirror-div 算法拿 caret 在 input/textarea
- * 内的像素坐标，portal 到 body 后用 fixed 定位到光标正下方；视口底部不够时
- * 自动翻到光标上方。
+ * The old version anchored to the input container with absolute +
+ * align="top|bottom"; for a tall textarea the popover could fly off the top
+ * or bottom of the screen. New version: use the mirror-div algorithm to get
+ * the caret's pixel coordinates inside the input/textarea, portal to body,
+ * and position it fixed right below the cursor; flips to above the cursor
+ * automatically when there isn't enough room at the bottom of the viewport.
  */
 import { useLayoutEffect, useState } from 'react'
 import type { RefObject } from 'react'
@@ -19,16 +21,16 @@ interface Props {
   onPick: (s: TagSuggestion) => void
   onHover: (idx: number) => void
   inputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>
-  /** 把光标位置传进来当 dep；不传也行（按需补 dep）。 */
+  /** Pass the cursor position in as a dep; optional (add deps as needed). */
   cursor?: number
-  /** 触发位置重新计算的额外依赖（比如 value 字符串），改变就重新量 caret。 */
+  /** Extra dependency that triggers a position recompute (e.g. the value string); re-measures the caret when it changes. */
   positionDeps?: ReadonlyArray<unknown>
 }
 
 interface Position {
   top: number
   left: number
-  /** 翻到光标上方时为 true（popover 底部对齐 caret 顶部）。 */
+  /** True when flipped above the cursor (the popover's bottom aligns with the caret's top). */
   flipUp: boolean
 }
 
@@ -47,22 +49,22 @@ export function TagSuggestList({
     const caret = getCaretCoordinates(el, cursorPos)
     const rect = el.getBoundingClientRect()
 
-    // caret 在视口坐标中的 y/x
+    // caret's y/x in viewport coordinates
     const caretTopVp = rect.top + caret.top - el.scrollTop
     const caretLeftVp = rect.left + caret.left - el.scrollLeft
 
-    // popover 估算高度（每条 ~26px + 8px padding，上限 260）
+    // estimated popover height (~26px per row + 8px padding, capped at 260)
     const POPOVER_H = Math.min(260, suggestions.length * 26 + 8)
     const SPACE_BELOW = window.innerHeight - (caretTopVp + caret.height) - 8
     const SPACE_ABOVE = caretTopVp - 8
     const flipUp = SPACE_BELOW < POPOVER_H && SPACE_ABOVE > SPACE_BELOW
 
     const top = flipUp ? caretTopVp - POPOVER_H - 4 : caretTopVp + caret.height + 4
-    // 不让 popover 跨右边界（粗略：保 200px 最小宽度内）
+    // keep the popover from crossing the right edge (rough: stay within a 200px minimum width)
     const left = Math.min(caretLeftVp, window.innerWidth - 220)
 
     setPos({ top, left: Math.max(8, left), flipUp })
-    // 依赖列表：open / suggestions count / cursor / value 任何一个变就重算
+    // dependency list: recompute whenever any of open / suggestions count / cursor / value changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, suggestions.length, cursor, ...positionDeps])
 
@@ -80,7 +82,7 @@ export function TagSuggestList({
           role="option"
           aria-selected={i === activeIdx}
           onMouseEnter={() => onHover(i)}
-          // onMouseDown + preventDefault：input 不丢 focus
+          // onMouseDown + preventDefault: keeps the input from losing focus
           onMouseDown={(e) => { e.preventDefault(); onPick(s) }}
           className={
             'px-2.5 py-1 text-xs font-mono cursor-pointer rounded-sm flex items-center gap-2 ' +
@@ -88,9 +90,6 @@ export function TagSuggestList({
           }
         >
           <span>{s.tag}</span>
-          {s.zh.length > 0 && (
-            <span className="text-fg-tertiary truncate">{s.zh.join(' ')}</span>
-          )}
         </li>
       ))}
     </ul>,

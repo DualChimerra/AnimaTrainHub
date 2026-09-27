@@ -3,15 +3,16 @@ import type { ReactNode } from 'react'
 interface Props {
   title: string
   subtitle?: string
-  /** 小标题上方的 caption（mono、大写、灰）。如 "GENERATE" / "STEP 5 · …"。 */
+  /** Caption above the title (mono, uppercase, gray). E.g. "GENERATE" / "STEP 5 · …". */
   eyebrow?: string
-  /** eyebrow 用强调色而非灰色（突出当前步骤等）。 */
+  /** Renders the eyebrow in the accent color instead of gray (e.g. to highlight the current step). */
   accentEyebrow?: boolean
-  /** Tab 导航条；如果传了 tabs 则 subtitle 不渲染（tab 取代 description 位置）。 */
+  /** Tab nav bar; when tabs is passed, subtitle is not rendered (tabs take the description's place). */
   tabs?: ReactNode
   actions?: ReactNode
-  /** 右上角 slot —— 跟 title 顶部对齐的独立位置（脱离 actions 行）。
-   *  专用于 PhaseHeaderNav 等"位置必须固定在右上"的辅助导航。 */
+  /** Top-right slot -- a standalone position aligned with the top of the
+   *  title (outside the actions row). For auxiliary nav like PhaseHeaderNav
+   *  that must stay pinned to the top-right. */
   topRight?: ReactNode
   sticky?: boolean
 }
@@ -28,7 +29,7 @@ export default function PageHeader({ title, subtitle, eyebrow, accentEyebrow, ta
             <div className={`caption mb-1 ${accentEyebrow ? 'text-accent' : ''}`}>{eyebrow}</div>
           )}
           <h1 className="m-0 text-2xl font-semibold tracking-[-0.025em] leading-8">{title}</h1>
-          {/* tabs 在主标题下方取代 subtitle 位置；两者互斥（tabs 优先）。 */}
+          {/* tabs sit below the main title in place of subtitle; the two are mutually exclusive (tabs win). */}
           {tabs ? (
             <div className="mt-3">{tabs}</div>
           ) : (

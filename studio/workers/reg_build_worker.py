@@ -1,27 +1,28 @@
-"""正则集构建 worker（PP5 + PP5.1 + PP5.5）。
+"""Regularization set build worker (PP5 + PP5.1 + PP5.5).
 
-`python -m studio.workers.reg_build_worker --job-id N`。读 `project_jobs.params`：
+`python -m studio.workers.reg_build_worker --job-id N`. Reads `project_jobs.params`:
     {
       "version_id": int,
-      "target_count": int | null,        # null = 用 train 总图数
+      "target_count": int | null,        # null = use train's total image count
       "excluded_tags": [str, ...],
       "auto_tag": bool,
-      "api_source": "gelbooru" | "danbooru",  # 可选，默认 gelbooru
-      "incremental": bool,                    # PP5.1，可选，默认 False
+      "api_source": "gelbooru" | "danbooru",  # optional, default gelbooru
+      "incremental": bool,                    # PP5.1, optional, default False
     }
 
-凭据从 `secrets.gelbooru` / `secrets.danbooru` 拉。
+Credentials are pulled from `secrets.gelbooru` / `secrets.danbooru`.
 
-工作流：
-1. reg_builder.build(opts) 落图 + 写 meta.json（auto_tagged=False，postprocessed_at=None）
-2. PP5.5 — reg_postprocess.postprocess(reg_dir) 分辨率聚类 + smart resize 到统一分辨率
-   - 失败 / 找不到满足 max_crop 的 K → catch，meta.postprocessed_at 仍 None；reg 集保留
-3. 若 auto_tag，内联调 WD14 给 reg/ 全图打标
-4. 失败 catch → meta.auto_tagged 仍 false；reg 集本体保留
+Workflow:
+1. reg_builder.build(opts) downloads images + writes meta.json (auto_tagged=False, postprocessed_at=None)
+2. PP5.5 -- reg_postprocess.postprocess(reg_dir) clusters by resolution + smart-resizes to a uniform resolution
+   - failure / no K found that satisfies max_crop -> caught, meta.postprocessed_at stays None; reg set is kept
+3. if auto_tag, calls WD14 inline to tag every image in reg/
+4. failure caught -> meta.auto_tagged stays false; the reg set itself is kept
 
-不开子进程：把 WD14 / postprocess 直接 import 进来，progress 走同一 log_path。
+No subprocess spawned: WD14 / postprocess are imported directly, progress goes through the
+same log_path.
 
-日志只走 stdout：见 `download_worker.py` 顶部的说明。
+Logging goes through stdout only: see the note at the top of `download_worker.py`.
 """
 from __future__ import annotations
 
@@ -30,13 +31,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
-# PR-1 C4: setup_logging 内已统一调 reconfigure_console_utf8。
+# PR-1 C4: setup_logging already calls reconfigure_console_utf8 uniformly.
 
 logger = logging.getLogger(__name__)
 
-# PP9.5 — 必须在任何 `import onnxruntime` 之前 import 本模块，触发顶层 preload。
-# auto_tag 路径会内联调 wd14_tagger（line ~105 `get_tagger("wd14")`），worker 是独立
-# subprocess，必须自己 import；否则 CUDA EP 静默降级到 CPU，用户看不到任何信号。
+# PP9.5 -- must be imported before any `import onnxruntime`, to trigger the top-level preload.
+# The auto_tag path calls wd14_tagger inline (line ~105 `get_tagger("wd14")`); the worker
+# is an independent subprocess and must import it itself -- otherwise the CUDA EP silently
+# falls back to CPU with no signal visible to the user.
 from studio.services.runtime import onnxruntime as onnxruntime_setup  # noqa: F401
 
 from studio import db, secrets
@@ -51,7 +53,7 @@ from studio.services.dataset import tagedit
 
 
 def _collect_reg_images(reg_dir: Path) -> list[Path]:
-    """递归收 reg 目录下所有图片（含子文件夹镜像）。"""
+    """Recursively collect all images under the reg directory (including mirrored subfolders)."""
     if not reg_dir.exists():
         return []
     out: list[Path] = []
@@ -65,7 +67,7 @@ def _run_postprocess(
     reg_dir: Path, progress, cancel_event,
     *, method: str = "smart", max_crop_ratio: float = 0.1,
 ) -> None:
-    """PP5.5 — 分辨率聚类后处理。失败不算 fatal；meta 字段反映结果。"""
+    """PP5.5 -- resolution clustering post-process. A failure isn't fatal; meta fields reflect the result."""
     import time as _time
     try:
         result = reg_postprocess.postprocess(
@@ -76,14 +78,14 @@ def _run_postprocess(
             cancel_event=cancel_event,
         )
     except Exception as exc:
-        progress(f"[postprocess] 失败: {exc}")
+        progress(f"[postprocess] failed: {exc}")
         progress(traceback.format_exc())
         reg_builder.update_meta_postprocess(
             reg_dir, when=None, clusters=None, method=None, max_crop_ratio=None
         )
         return
     if result.get("clusters") is None:
-        # 找不到满足 max_crop 的 K → 不动文件
+        # no K found that satisfies max_crop -> leave files untouched
         reg_builder.update_meta_postprocess(
             reg_dir, when=None, clusters=None,
             method=result.get("method"),
@@ -100,22 +102,23 @@ def _run_postprocess(
 
 
 def _run_auto_tag(reg_dir: Path, progress, kind: str = "wd14") -> bool:
-    """内联跑 tagger 给 reg 集打标，失败返回 False。
+    """Runs a tagger inline to tag the reg set, returns False on failure.
 
-    A3 — `kind` 走 `studio.services.tagging.base.get_tagger`；目前 UI 暴露
-    wd14 / cltagger，但底层支持 VALID_TAGGER_NAMES 全集。LLM / JoyCaption 后续
-    PR 加，注意它们对 reg 图量（可能比 train 大）的体感是慢/贵。
+    A3 -- `kind` goes through `studio.services.tagging.base.get_tagger`; the UI currently
+    exposes wd14 / cltagger, but the underlying layer supports the full VALID_TAGGER_NAMES
+    set. LLM / JoyCaption will be added in a later PR; note their cost/latency against the
+    reg image count (which can be larger than train) will feel slow/expensive.
     """
     images = _collect_reg_images(reg_dir)
     if not images:
-        progress("[auto-tag] 没有图，跳过")
+        progress("[auto-tag] no images, skipping")
         return False
-    progress(f"[auto-tag] 启动 {kind}，{len(images)} 张图")
+    progress(f"[auto-tag] starting {kind}, {len(images)} images")
     try:
         from studio.services.tagging.base import get_tagger
         tagger = get_tagger(kind)
         tagger.prepare()
-        progress(f"[auto-tag] {kind} 模型就绪")
+        progress(f"[auto-tag] {kind} model ready")
         ok = 0
         errs = 0
         for r in tagger.tag(
@@ -131,7 +134,7 @@ def _run_auto_tag(reg_dir: Path, progress, kind: str = "wd14") -> bool:
         progress(f"[auto-tag] done {ok}/{len(images)} (errors={errs})")
         return ok > 0
     except Exception as exc:
-        progress(f"[auto-tag] 失败: {exc}")
+        progress(f"[auto-tag] failed: {exc}")
         progress(traceback.format_exc())
         return False
 
@@ -148,7 +151,7 @@ def run(job_id: int) -> int:
 
     params: dict[str, Any] = job.get("params_decoded") or {}
 
-    cancel_event = threading.Event()  # supervisor 走 SIGTERM；这里只为 API 完整性
+    cancel_event = threading.Event()  # supervisor cancels via SIGTERM; kept here only for API completeness
 
     def progress(line: str) -> None:
         print(line, flush=True)
@@ -165,7 +168,7 @@ def run(job_id: int) -> int:
 
         vdir = versions.version_dir(p["id"], p["slug"], v["label"])
         train_dir = vdir / "train"
-        output_dir = vdir / "reg"  # 与源脚本一致：直接镜像 train 子文件夹
+        output_dir = vdir / "reg"  # consistent with the original script: mirrors train's subfolders directly
 
         sec = secrets.load()
         api_source = str(params.get("api_source", "gelbooru"))
@@ -173,7 +176,7 @@ def run(job_id: int) -> int:
             user_id = ""
             username = sec.danbooru.username
             api_key = sec.danbooru.api_key
-            # account_type 影响 max_search_tags 上限
+            # account_type affects the max_search_tags ceiling
             account_type = (sec.danbooru.account_type or "free").lower()
             max_search_tags = {
                 "free": 2, "gold": 6, "platinum": 12,
@@ -182,7 +185,7 @@ def run(job_id: int) -> int:
             user_id = sec.gelbooru.user_id
             username = ""
             api_key = sec.gelbooru.api_key
-            max_search_tags = 20  # gelbooru 默认 20
+            max_search_tags = 20  # gelbooru default is 20
 
         opts = reg_builder.RegBuildOptions(
             train_dir=train_dir,
@@ -191,10 +194,11 @@ def run(job_id: int) -> int:
             user_id=user_id,
             api_key=api_key,
             username=username,
-            target_count=params.get("target_count"),  # B1: None = 用 train 总数 / mirror 模式忽略
+            target_count=params.get("target_count"),  # B1: None = use train's total count / ignored in mirror mode
             max_search_tags=max_search_tags,
-            # batch_size = 搜索循环内部「每批下多少张后重算缺失 tag」，
-            # 与 train 子文件夹镜像无关；走源脚本默认 5，UI 不暴露
+            # batch_size = "how many images per batch before recomputing missing tags"
+            # inside the search loop, unrelated to mirroring train's subfolders; uses the
+            # original script's default of 5, not exposed in the UI
             skip_similar=bool(params.get("skip_similar", True)),
             aspect_ratio_filter_enabled=bool(
                 params.get("aspect_ratio_filter_enabled", False)
@@ -222,10 +226,10 @@ def run(job_id: int) -> int:
             f"pp={pp_method}/{pp_max_crop}"
         )
 
-        # full mode：先清掉 reg/（图、子文件夹、meta、.deleted_ids.json），
-        # 用户语义是「从零开始」。incremental mode 保留所有已有内容。
+        # full mode: clears reg/ first (images, subfolders, meta, .deleted_ids.json) --
+        # the user's intent is "start from zero". incremental mode keeps all existing content.
         if not incremental and output_dir.exists():
-            progress("[start] full mode：清空 reg/ 已有内容")
+            progress("[start] full mode: clearing existing contents of reg/")
             reg_builder.clear_reg_dir(output_dir)
 
         meta = reg_builder.build(
@@ -236,30 +240,31 @@ def run(job_id: int) -> int:
         )
         progress(f"[reg-done] actual={meta.actual_count}/{meta.target_count}")
 
-        # A4 — auto_dedup：build 后扫重复 → 每组留 1 张其余删 → 不够则
-        # incremental 补足。最多 MAX_DEDUP_ROUNDS 轮，每轮删数为 0 提前退出。
+        # A4 -- auto_dedup: after build, scan for duplicates -> keep 1 per group, delete
+        # the rest -> if that leaves a shortfall, top up incrementally. At most
+        # MAX_DEDUP_ROUNDS rounds, exits early once a round deletes 0.
         if opts.auto_dedup and meta.actual_count > 0:
             MAX_DEDUP_ROUNDS = 3
             for r in range(MAX_DEDUP_ROUNDS):
                 if cancel_event.is_set():
-                    progress("[dedup] 用户中止")
+                    progress("[dedup] aborted by user")
                     break
-                progress(f"[dedup r{r + 1}/{MAX_DEDUP_ROUNDS}] 扫描重复…")
+                progress(f"[dedup r{r + 1}/{MAX_DEDUP_ROUNDS}] scanning for duplicates...")
                 to_delete = reg_dedup.scan_for_dedup(output_dir)
                 if not to_delete:
-                    progress(f"[dedup r{r + 1}] 无可删项，结束")
+                    progress(f"[dedup r{r + 1}] nothing to delete, done")
                     break
                 purged = reg_dedup.purge_paths(output_dir, to_delete)
-                progress(f"[dedup r{r + 1}] 删 {purged['count']} 张")
+                progress(f"[dedup r{r + 1}] deleted {purged['count']} images")
                 if purged["count"] == 0:
-                    break  # scan 给了但全部 unlink 失败 / 不存在 → 防死循环
+                    break  # scan found candidates but every unlink failed / was already gone -> avoid an infinite loop
                 meta = reg_builder.read_meta(output_dir) or meta
                 shortfall = meta.target_count - meta.actual_count
                 if shortfall <= 0:
-                    progress(f"[dedup r{r + 1}] 已达目标，结束")
+                    progress(f"[dedup r{r + 1}] target already reached, done")
                     break
                 progress(
-                    f"[dedup r{r + 1}] 缺 {shortfall} 张，自动 incremental 补足"
+                    f"[dedup r{r + 1}] short {shortfall} images, topping up incrementally"
                 )
                 meta = reg_builder.build(
                     opts,
@@ -268,18 +273,19 @@ def run(job_id: int) -> int:
                     incremental=True,
                 )
                 progress(
-                    f"[dedup r{r + 1}] 补足后 actual={meta.actual_count}/{meta.target_count}"
+                    f"[dedup r{r + 1}] after top-up actual={meta.actual_count}/{meta.target_count}"
                 )
 
-        # PP5.5 — 分辨率聚类后处理（auto_tag 之前，因为打标基于最终图）。
-        # A4 顺序：必须在 dedup 之后 —— postprocess 会 resize 图，phash 会变。
+        # PP5.5 -- resolution clustering post-process (before auto_tag, since tagging
+        # works on the final images). A4 ordering: must run after dedup -- postprocess
+        # resizes images, which changes their phash.
         if meta.actual_count > 0:
             _run_postprocess(
                 output_dir, progress, cancel_event,
                 method=pp_method, max_crop_ratio=pp_max_crop,
             )
 
-        # auto_tag：拉完 + 后处理后内联跑选定 tagger
+        # auto_tag: run the selected tagger inline after the download + post-process are done
         auto_ok = False
         if opts.auto_tag and meta.actual_count > 0:
             auto_ok = _run_auto_tag(output_dir, progress, kind=opts.auto_tag_kind)
@@ -289,8 +295,8 @@ def run(job_id: int) -> int:
 
         return 0 if meta.actual_count > 0 else 1
     except Exception as exc:
-        # PR-1 C7: 同 tag_worker — logger.exception 带 trace_id 进 stderr，
-        # progress 给人读短摘要。
+        # PR-1 C7: same as tag_worker -- logger.exception carries the trace_id into
+        # stderr, progress gives the human-readable short summary.
         logger.exception("reg_build worker crashed (job_id=%s)", job_id)
         progress(f"[error] {exc}")
         return 1

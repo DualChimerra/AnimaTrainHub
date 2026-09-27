@@ -1,10 +1,11 @@
-/** 数据任务视图（队列页「数据任务」，= light + io 档）。
+/** Data-tasks view (the Queue page's "Data tasks", = the light + io tiers).
  *
- *  R-5 台账合并终态：与 GPU 视图**同源** —— 读 /api/queue（resource_class=data）
- *  的 tasks 行，单一 ID 空间；行点击 → /queue/{id} 统一详情页；取消走
- *  /api/queue/{id}/cancel。kind 过滤 / 项目名搜索由 Queue 页 header 漏斗下发。
+ *  R-5 ledger-merge final state: **shares its source** with the GPU view -- reads task rows from
+ *  /api/queue (resource_class=data), a single ID space; a row click → the unified /queue/{id}
+ *  detail page; cancel goes through /api/queue/{id}/cancel. kind filtering / project-name search
+ *  are pushed down from the Queue page header's filter funnel.
  *
- *  视图形态（分区/行样式/操作 icon/分页底栏）自 P-G 定稿后不变（用户感知锚点）。
+ *  The view's shape (sections/row style/action icons/pagination footer) has stayed unchanged since P-G was finalized (a user-perception anchor).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -22,15 +23,15 @@ import {
 export default function DataJobsPanel({
   kind, q, historyPage, pageSize, onHistoryTotal, refreshToken,
 }: {
-  /** kind 过滤（Queue 页 header 漏斗下发；null = 全部数据档）。 */
+  /** kind filter (pushed down from the Queue page header's filter funnel; null = all data tiers). */
   kind: TaskType | null
-  /** 项目 title/slug 搜索（已防抖；undefined = 不过滤）。 */
+  /** Project title/slug search (already debounced; undefined = no filter). */
   q?: string
-  /** 历史分页（分页底栏在 Queue 页，与 GPU 视图同款；total 经 onHistoryTotal 回报）。 */
+  /** History pagination (the pagination footer lives on the Queue page, same as the GPU view; total is reported back via onHistoryTotal). */
   historyPage: number
   pageSize: number
   onHistoryTotal: (total: number) => void
-  /** 递增触发重拉（Queue 页 header 刷新按钮）。 */
+  /** Incrementing this triggers a refetch (the Queue page header's refresh button). */
   refreshToken: number
 }) {
   const { t } = useTranslation()
@@ -67,7 +68,7 @@ export default function DataJobsPanel({
 
   useEffect(() => { void reload() }, [reload, refreshToken])
 
-  // 项目名映射（行上显示项目标题；拿不到就回落 #pid）。
+  // Project-name mapping (shows the project title on the row; falls back to #pid if unavailable).
   useEffect(() => {
     api.listProjects()
       .then((items) => setProjectTitles(
@@ -77,7 +78,7 @@ export default function DataJobsPanel({
   }, [])
 
   useEventStream((evt) => {
-    // R-5 过渡期作业仍发 job_* 事件；task_* 也听，双保险（防抖合并）。
+    // During the R-5 transition, jobs still emit job_* events; task_* is also listened to as a double safety net (merged with debouncing).
     if (evt.type === 'job_state_changed' || evt.type === 'task_state_changed') {
       if (reloadTimer.current) return
       reloadTimer.current = window.setTimeout(() => {
@@ -167,7 +168,7 @@ export default function DataJobsPanel({
               </>
             ) : '—'}
           </span>
-          {/* action 列：取消（live）+ 跳转原生页，icon 化 hover 显文字（既有范式） */}
+          {/* action column: cancel (live) + jump to the native page, iconified with hover text (existing pattern) */}
           <div className="flex items-center justify-end gap-1.5">
             {isLive && (
               <button

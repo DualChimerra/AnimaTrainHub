@@ -1,16 +1,21 @@
-"""``Block.forward(packed_tokens=True)`` 派发契约（NaViT 打包路径的钩子前提）。
+"""Dispatch contract for ``Block.forward(packed_tokens=True)`` (the hook precondition
+for the NaViT packed path).
 
-block swap 把权重取回/放开挂在 nn.Module 的四个钩子上，而钩子**只在
-``__call__`` 上触发**。所以打包循环必须走 ``blk(..., packed_tokens=True)``，
-不能直接调 ``blk.forward_tokens(...)``——后者会让换出层拿着槽里残留的别层权重
-静默算下去（全在卡上，不报错、不 NaN）。
+Block swap hangs weight fetch/release off nn.Module's four hooks, and those hooks
+**only fire on ``__call__``**. So the packing loop must go through
+``blk(..., packed_tokens=True)`` and must never call ``blk.forward_tokens(...)``
+directly -- the latter would let a swapped-out layer silently compute with another
+layer's leftover weights still in the slot (fully on-device, no error, no NaN).
 
-本文件锁两件事，都不需要 CUDA / xformers：
-1. 派发本身：``packed_tokens=True`` 的输出 == 直接调 ``forward_tokens``，且钩子触发；
-2. 源码不变式：``forward_packed_navit`` 的 block 循环里不出现直调。
+This file pins down two things, neither needing CUDA / xformers:
+1. Dispatch itself: the output of ``packed_tokens=True`` == calling ``forward_tokens``
+   directly, and the hooks fire;
+2. A source invariant: the block loop inside ``forward_packed_navit`` never calls
+   ``forward_tokens`` directly.
 
-数值等价（swap 开/关逐值一致）由 tests/test_block_swap_anima.py 的
-``test_navit_packed_forward_backward_matches_without_swap`` 在 GPU 上把关。
+Numerical equivalence (swap on/off matching value-for-value) is guarded on GPU by
+``test_navit_packed_forward_backward_matches_without_swap`` in
+tests/test_block_swap_anima.py.
 """
 from __future__ import annotations
 
@@ -32,7 +37,7 @@ def _block() -> Block:
     return Block(
         x_dim=D, context_dim=CTX, num_heads=2,
         use_adaln_lora=True, adaln_lora_dim=8,
-        # 与 MiniTrainDIT 的 atten_backend 一致；transformer_engine 后端在 CPU/CI 上不可用
+        # matches MiniTrainDIT's atten_backend; the transformer_engine backend isn't available on CPU/CI
         self_attention_backend="torch", cross_attention_backend="torch",
     ).eval()
 
@@ -50,7 +55,7 @@ def _packed_inputs():
 
 
 def test_packed_dispatch_matches_direct_forward_tokens():
-    """``blk(..., packed_tokens=True)`` ≡ ``blk.forward_tokens(...)``（逐值）。"""
+    """``blk(..., packed_tokens=True)`` is value-for-value equivalent to ``blk.forward_tokens(...)``."""
     blk = _block()
     x, emb, cross, lora, mod_index = _packed_inputs()
     kwargs = dict(token_wise_mod=True, mod_index=mod_index)
@@ -63,7 +68,7 @@ def test_packed_dispatch_matches_direct_forward_tokens():
 
 
 def test_packed_dispatch_fires_module_hooks():
-    """派发路径触发 forward pre/post 钩子——block swap 的取回/放开就挂在这儿。"""
+    """The dispatch path fires the forward pre/post hooks -- this is exactly where block swap's fetch/release hangs."""
     blk = _block()
     x, emb, cross, lora, mod_index = _packed_inputs()
     fired: list[str] = []
@@ -80,7 +85,8 @@ def test_packed_dispatch_fires_module_hooks():
 
 
 def test_packed_dispatch_backward_hooks_fire():
-    """反向钩子同理：少了它梯度会静默算错（attach() 文档，实测偏差 300× 噪声底）。"""
+    """Same for the backward hooks: without them gradients get silently computed wrong
+    (see attach()'s docstring; measured error was ~300x the noise floor)."""
     blk = _block()
     x, emb, cross, lora, mod_index = _packed_inputs()
     fired: list[str] = []
@@ -97,7 +103,7 @@ def test_packed_dispatch_backward_hooks_fire():
 
 
 def test_dense_path_still_rejects_unknown_kwargs():
-    """``**packed_kwargs`` 不能把稠密路径的拼写错误吞掉。"""
+    """``**packed_kwargs`` must not swallow a typo'd kwarg on the dense path."""
     blk = _block()
     with pytest.raises(TypeError, match="unexpected keyword"):
         blk(torch.randn(1, 1, 2, 2, D), torch.randn(1, 1, D), torch.randn(1, 4, CTX),
@@ -105,14 +111,15 @@ def test_dense_path_still_rejects_unknown_kwargs():
 
 
 def test_packed_loop_routes_through_call():
-    """源码不变式：打包循环不得直调 blk.forward_tokens（钩子会静默失效）。"""
+    """Source invariant: the packing loop must not call blk.forward_tokens directly
+    (the hooks would silently stop firing)."""
     src = inspect.getsource(MiniTrainDIT.forward_packed_navit)
-    # 只看代码行：注释里提到 blk.forward_tokens(...) 是在解释为什么不能那么写
+    # only look at code lines: the comment mentioning blk.forward_tokens(...) is explaining why it must not be written that way
     code = "\n".join(
         line for line in src.splitlines() if not line.lstrip().startswith("#")
     )
     assert "blk.forward_tokens(" not in code, (
-        "forward_packed_navit 的 block 循环必须走 blk(..., packed_tokens=True)："
-        "直调 forward_tokens 会跳过 nn.Module 钩子，block swap 静默用错权重"
+        "forward_packed_navit's block loop must go through blk(..., packed_tokens=True): "
+        "calling forward_tokens directly skips the nn.Module hooks, so block swap silently uses the wrong weights"
     )
     assert "packed_tokens=True" in code

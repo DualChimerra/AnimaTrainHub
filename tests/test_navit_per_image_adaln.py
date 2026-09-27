@@ -65,8 +65,8 @@ def _block(use_adaln_lora, dtype=torch.float32):
 
 
 def _assert_block_equiv(use_adaln_lora):
-    # block-diagonal varlen attention 只有 fp16/bf16 kernel（新架构如 RTX 5090
-    # sm_120 无 fp32 varlen），且 navit 实际以 bf16/fp16 跑——用 bf16 反映真实运行。
+    # block-diagonal varlen attention only has fp16/bf16 kernels (newer archs like RTX 5090
+    # sm_120 have no fp32 varlen), and navit actually runs in bf16/fp16 -- use bf16 to reflect real usage.
     dtype = torch.bfloat16
     blk = _block(use_adaln_lora, dtype)
     (x, cross, emb_G, lora_G, emb_tok, lora_tok,

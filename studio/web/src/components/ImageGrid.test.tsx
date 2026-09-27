@@ -2,10 +2,11 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
-// jsdom 没有真实 layout（getBoundingClientRect / ResizeObserver 都不工作），
-// VirtuosoGrid 会判断容器 0 高度 → 一个 cell 都不渲染。这里 mock 成「无脑全
-// 渲」：测试要的是选择 / 点击 / 空态语义，不是虚拟化本身（虚拟化属于 Virtuoso
-// 库职责，他们自己测过）。生产路径 import 真组件不受影响。
+// jsdom has no real layout (getBoundingClientRect / ResizeObserver don't work), so
+// VirtuosoGrid sees a 0-height container and renders zero cells. Mock it to render
+// everything unconditionally: the test cares about selection / click / empty-state
+// semantics, not virtualization itself (that's Virtuoso's own responsibility, already
+// tested upstream). The production import path is unaffected.
 vi.mock('react-virtuoso', () => ({
   VirtuosoGrid: ({
     totalCount,
@@ -134,7 +135,7 @@ describe('ImageGrid (PP3)', () => {
         clickMode="activate"
       />
     )
-    await user.click(screen.getByRole('button', { name: '选择 a.png' }))
+    await user.click(screen.getByRole('button', { name: 'Select a.png' }))
     expect(onSelect).toHaveBeenCalledWith(
       'a.png',
       expect.objectContaining({ shiftKey: false })
@@ -144,21 +145,23 @@ describe('ImageGrid (PP3)', () => {
 
   it('shows empty hint', () => {
     render(
-      <ImageGrid items={[]} selected={new Set()} onSelect={() => {}} emptyHint="空空" />
+      <ImageGrid items={[]} selected={new Set()} onSelect={() => {}} emptyHint="nothing here" />
     )
-    expect(screen.getByText('空空')).toBeInTheDocument()
+    expect(screen.getByText('nothing here')).toBeInTheDocument()
   })
 
-  // 切路由 / 滚出 overscan 时 cell unmount，浏览器不会自动取消半途的 <img>
-  // 下载 —— 几十张 thumb 占满同源 6 连接会饿死新页面的 fetch。Cell 在
-  // unmount cleanup 里把 src 置空主动 abort。注意 cleanup 跑的时候 React 已
-  // 把 ref 置 null，必须在 effect body 抓元素 —— 这个测试同时锁住该时序。
+  // When a cell unmounts (route change / scrolled out of overscan), the browser won't
+  // auto-cancel an in-flight <img> download - dozens of thumbs can exhaust the 6
+  // same-origin connections and starve a new page's fetches. The cell clears src in its
+  // unmount cleanup to actively abort it. Note React has already nulled the ref by the
+  // time cleanup runs, so the element must be grabbed in the effect body - this test
+  // also pins down that ordering.
   it('aborts in-flight image load on unmount (src cleared)', () => {
     const { unmount } = render(
       <ImageGrid items={items} selected={new Set()} onSelect={() => {}} />
     )
     const imgs = screen.getAllByRole('img')
-    // jsdom 不真正加载图片，complete 恒为 false == 永远"半途"，正好覆盖取消分支
+    // jsdom never actually loads images, so complete is always false == forever "in flight", which is exactly the abort branch
     expect(imgs[0]).toHaveAttribute('src', '/a')
     unmount()
     for (const img of imgs) expect(img).toHaveAttribute('src', '')
@@ -169,7 +172,7 @@ describe('ImageGrid (PP3)', () => {
       <ImageGrid items={items.slice(0, 1)} selected={new Set()} onSelect={() => {}} />
     )
     const img = screen.getByRole('img') as HTMLImageElement
-    // jsdom 的 complete 是 getter，defineProperty 模拟"已加载完"
+    // jsdom's complete is a getter; defineProperty simulates "already loaded"
     Object.defineProperty(img, 'complete', { value: true })
     unmount()
     expect(img).toHaveAttribute('src', '/a')

@@ -1,4 +1,4 @@
-"""目录浏览端点测试。"""
+"""Directory browse endpoint tests."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,7 +25,7 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _setup_tree(fake)
     monkeypatch.setattr(server, "REPO_ROOT", fake)
     monkeypatch.setattr(browse, "REPO_ROOT", fake)
-    # PR-5 /api/browse 搬到 api/routers/browse.py，handler 用自己 import 的 REPO_ROOT
+    # PR-5 moved /api/browse to api/routers/browse.py; the handler uses its own imported REPO_ROOT
     from studio.api.routers import browse as _browse_router
     monkeypatch.setattr(_browse_router, "REPO_ROOT", fake)
     return fake
@@ -34,7 +34,7 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_list_dir_returns_sorted_entries(fake_repo: Path) -> None:
     result = browse.list_dir(fake_repo)
     names = [e["name"] for e in result["entries"]]
-    # 目录排在文件前
+    # directories sort before files
     assert names == ["configs", "models", "README.md"]
     types = [e["type"] for e in result["entries"]]
     assert types == ["dir", "dir", "file"]
@@ -42,14 +42,14 @@ def test_list_dir_returns_sorted_entries(fake_repo: Path) -> None:
 
 
 def test_list_dir_returns_posix_paths(fake_repo: Path) -> None:
-    """path / parent 始终用 forward slash，避免与前端拼接混用 Windows 反斜杠。"""
+    """path / parent always use forward slashes, to avoid mixing in Windows backslashes when concatenated on the frontend."""
     result = browse.list_dir(fake_repo / "models")
     assert "\\" not in result["path"]
     assert result["path"].endswith("/repo/models")
 
 
 def test_list_dir_rejects_outside_repo(fake_repo: Path, tmp_path: Path) -> None:
-    """lib 层默认仍然挡外部路径；server 端显式 opt-in 才放行。"""
+    """The lib layer still blocks outside paths by default; the server side only allows them with an explicit opt-in."""
     outside = tmp_path / "outside"
     outside.mkdir()
     with pytest.raises(InvalidPathError, match="Invalid path"):
@@ -69,7 +69,7 @@ def test_list_dir_missing_path(fake_repo: Path) -> None:
 
 
 def test_list_dir_file_path_falls_back_to_parent(fake_repo: Path) -> None:
-    """传入文件路径时回退到父目录，并通过 selected 字段告诉前端高亮。"""
+    """When given a file path, falls back to the parent directory and tells the frontend what to highlight via the selected field."""
     result = browse.list_dir(fake_repo / "models" / "anima.safetensors")
     assert result["path"].endswith("/repo/models")
     assert result["selected"] == "anima.safetensors"
@@ -86,7 +86,7 @@ def test_api_browse_default(fake_repo: Path) -> None:
     client = TestClient(server.app)
     resp = client.get("/api/browse")
     assert resp.status_code == 200
-    # 返回路径统一 POSIX 风格（不含反斜杠）
+    # returned paths are consistently POSIX-style (no backslashes)
     assert "\\" not in resp.json()["path"]
     assert resp.json()["path"].endswith("/repo")
     names = [e["name"] for e in resp.json()["entries"]]
@@ -102,7 +102,7 @@ def test_api_browse_relative_path(fake_repo: Path) -> None:
 
 
 def test_api_browse_allows_outside(fake_repo: Path, tmp_path: Path) -> None:
-    """PathPicker 允许浏览外部绝对路径（设置页/预设页选数据盘上的模型）。"""
+    """PathPicker allows browsing outside absolute paths (used on the settings/preset pages to pick a model on a data drive)."""
     client = TestClient(server.app)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -114,7 +114,7 @@ def test_api_browse_allows_outside(fake_repo: Path, tmp_path: Path) -> None:
 
 
 def test_api_browse_file_path_falls_back(fake_repo: Path) -> None:
-    """传入文件路径不再 404，回退到父目录并设置 selected。"""
+    """Passing a file path no longer 404s; it falls back to the parent directory and sets selected."""
     client = TestClient(server.app)
     target = fake_repo / "models" / "anima.safetensors"
     resp = client.get(f"/api/browse?path={target}")

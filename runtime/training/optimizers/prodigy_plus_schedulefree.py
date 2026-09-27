@@ -1,14 +1,16 @@
-"""ProdigyPlusScheduleFree optimizer build wrapper（ADR 0003 PR-C）。
+"""ProdigyPlusScheduleFree optimizer build wrapper (ADR 0003 PR-C).
 
-PPSF 是 Schedule-Free 系：内置 LR 调度，跟外部 LR scheduler 互斥。
-本模块同时暴露 validate(args) 给 PR-C registry 在启动期跑兼容性检查。
+PPSF belongs to the schedule-free family: it has a built-in LR schedule that
+is mutually exclusive with an external LR scheduler.
+This module also exposes validate(args) for the PR-C registry to run a
+startup compatibility check.
 """
 
 from __future__ import annotations
 
 
 def validate(args) -> None:
-    """启动期兼容性检查：lr_scheduler 必须 none，否则直接 SystemExit。"""
+    """Startup compatibility check: lr_scheduler must be none, otherwise SystemExit."""
     lr_sched_cfg = (getattr(args, "lr_scheduler", "none") or "none").lower()
     if lr_sched_cfg != "none":
         raise SystemExit(
@@ -20,7 +22,7 @@ def validate(args) -> None:
 
 
 def build(args, params, lr: float, weight_decay: float):
-    """实例化 PPSF，读 7 个 ppsf_* 参数 + betas override。"""
+    """Build a PPSF instance; reads the 7 ppsf_* args plus the betas override."""
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(

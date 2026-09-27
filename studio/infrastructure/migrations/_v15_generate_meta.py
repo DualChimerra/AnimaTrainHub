@@ -1,16 +1,20 @@
-"""v13 → v14: tasks 加 generate_params / generate_cover（0.17 P-I forward-write）。
+"""v13 -> v14: adds generate_params / generate_cover to tasks (0.17 P-I forward-write).
 
-为未来「纯 DB 出图时间线」铺路：从现在起每次 generate 把参数快照 + 封面图地址落 DB，
-前端**暂不读**（右栏仍走 live 队列 ∪ cache/disk 扫盘）。等切到 DB 驱动时数据现成、
-无需数据迁移。
+Paves the way for a future "pure-DB generation timeline": from now on every generate writes
+a params snapshot + cover image location to the DB, though the frontend **doesn't read it
+yet** (the right panel still uses the live queue union cache/disk scanning). Once it switches
+to DB-driven, the data will already be there, no data migration needed.
 
-- generate_params：enqueue 时写的 params_snapshot（含 mode/prompt/lora/... JSON），
-  未来时间线回填 + 展示用。
-- generate_cover：出图完成时写的**封面图地址**——落盘走磁盘 PNG url（持久），temp 走
-  cache 引用（会话级）。未来时间线据此定位图 + 判存在（在=显示、不在=已释放）。
+- generate_params: the params_snapshot written at enqueue time (JSON with mode/prompt/lora/...),
+  used to backfill + display the future timeline.
+- generate_cover: the **cover image location** written when generation finishes -- a disk write
+  uses the persistent PNG url, a temp result uses a cache reference (session-scoped). The future
+  timeline uses this to locate the image and check whether it still exists (present = show,
+  gone = already released).
 
-全部 NULLABLE，不需要 backfill；老 generate task（及所有非 generate task）保持 NULL。
-老 generate 图没 task_id 无法回填，本就只能向前生效（见 0.17 讨论）。
+All NULLABLE, no backfill needed; old generate tasks (and every non-generate task) stay NULL.
+Old generate images have no task_id so they can't be backfilled -- this is inherently forward-
+only (see the 0.17 discussion).
 """
 from __future__ import annotations
 

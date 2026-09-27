@@ -1,11 +1,11 @@
-"""onnxruntime-gpu 静默降级 CPU 诊断 — 在跑这个 PR 的分支后，
-跑一次打标遇到「CUDA EP 静默降级到 CPU」warning 后用本脚本定位根因。
+"""onnxruntime-gpu silent-downgrade-to-CPU diagnostics -- after running on this PR's branch,
+if tagging produces a "CUDA EP silently downgraded to CPU" warning, use this script to find the root cause.
 
-用法（在 studio 同一个 venv 里）：
+Usage (from the studio venv):
 
     python tools/diagnose_onnx_gpu.py
 
-把整段 stdout 贴回 PR 评论 / issue。
+Paste the whole stdout back into the PR comment / issue.
 """
 from __future__ import annotations
 
@@ -32,25 +32,26 @@ def main() -> None:
     try:
         from studio.services.runtime import onnxruntime as o
     except ImportError as exc:
-        print("studio import 失败 — 是不是没在 studio 仓库根目录跑？")
-        print("原因:", exc)
+        print("studio import failed -- are you running this from the studio repo root?")
+        print("reason:", exc)
         return
     rt = o.current_runtime()
     print(json.dumps(rt, indent=2, ensure_ascii=False, default=str))
     if rt.get("ort_cuda_major_mismatch"):
-        print(">>> 警告：已装 ORT 的 CUDA 大版本与 torch 不一致 —— "
-              "重装时按 torch 的 major 选 cu12(<1.26) 或 cu13(>=1.26) build")
+        print(">>> Warning: the installed ORT's CUDA major version doesn't match torch's -- "
+              "when reinstalling, pick cu12(<1.26) or cu13(>=1.26) build based on torch's major version")
 
-    section("系统 CUDA 检测（决定 preload 是否被 skip + ORT 走 cu12 还是 cu13）")
+    section("System CUDA detection (decides whether preload is skipped and whether ORT uses cu12 or cu13)")
     print("CUDA_HOME:", os.environ.get("CUDA_HOME"))
     print("CUDA_PATH:", os.environ.get("CUDA_PATH"))
-    print("/usr/local/cuda/lib64 存在:", os.path.isdir("/usr/local/cuda/lib64"))
+    print("/usr/local/cuda/lib64 exists:", os.path.isdir("/usr/local/cuda/lib64"))
     import ctypes.util
-    print("ld 路径里 cublas:", ctypes.util.find_library("cublas"))
-    print("ld 路径里 cudnn:", ctypes.util.find_library("cudnn"))
+    print("cublas on ld path:", ctypes.util.find_library("cublas"))
+    print("cudnn on ld path:", ctypes.util.find_library("cudnn"))
     print("_has_system_cuda_libs():", o._has_system_cuda_libs())
-    # ORT build 的 CUDA 大版本锚点（= torch.version.cuda major）；装 onnxruntime-gpu
-    # 必须跟它同 major，否则 import 期 dlopen 挂 libcudart.so.13（cu128 torch → 12）
+    # Anchor CUDA major version for the ORT build (= torch.version.cuda major); the installed
+    # onnxruntime-gpu must match its major, otherwise dlopen fails on libcudart.so.13 at import
+    # time (cu128 torch -> 12)
     print("_resolve_cuda_major():", o._resolve_cuda_major())
 
     section("torch")
@@ -63,9 +64,9 @@ def main() -> None:
             print("device_name:", torch.cuda.get_device_name(0))
             print("cudnn_version:", torch.backends.cudnn.version())
     except Exception as exc:  # noqa: BLE001
-        print("torch import 失败:", exc)
+        print("torch import failed:", exc)
 
-    section("nvidia CUDA wheels（torch wheel preload 来源）+ onnxruntime")
+    section("nvidia CUDA wheels (source of torch wheel preload) + onnxruntime")
     out = subprocess.run(
         [sys.executable, "-m", "pip", "list"],
         capture_output=True, text=True,
@@ -86,11 +87,11 @@ def main() -> None:
         print("stdout:", nv.stdout.strip())
         print("stderr:", nv.stderr.strip())
     except FileNotFoundError:
-        print("nvidia-smi 不在 PATH（云机器可能在 docker 里没暴露）")
+        print("nvidia-smi not on PATH (cloud machines running in docker may not expose it)")
     except Exception as exc:  # noqa: BLE001
-        print("nvidia-smi 跑失败:", exc)
+        print("nvidia-smi failed to run:", exc)
 
-    section("尝试真创 InferenceSession（用 onnxruntime 内置 test model 或现有 wd14 模型）")
+    section("Try actually creating an InferenceSession (using onnxruntime's built-in test model or an existing wd14 model)")
     try:
         import onnxruntime as ort
         print("ort.__version__:", ort.__version__)
@@ -101,21 +102,21 @@ def main() -> None:
             + glob.glob("models/cltagger/**/*.onnx", recursive=True)
         )
         if not candidates:
-            print("没找到本地 onnx 模型，跳过 session 创建测试")
+            print("No local onnx model found, skipping session creation test")
             return
         path = candidates[0]
-        print("用模型:", path)
+        print("using model:", path)
         sess = ort.InferenceSession(
             path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
         )
         actual = sess.get_providers()
-        print("实际 session.get_providers():", actual)
+        print("actual session.get_providers():", actual)
         if "CUDAExecutionProvider" not in actual:
-            print(">>> 确认静默降级：请求过 CUDA 但 session 用的是", actual)
+            print(">>> Confirmed silent downgrade: CUDA was requested but the session is using", actual)
         else:
-            print(">>> CUDA EP 真生效")
+            print(">>> CUDA EP is genuinely active")
     except Exception as exc:  # noqa: BLE001
-        print("session 创建抛异常:", exc)
+        print("session creation raised an exception:", exc)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def build(args, optimizer, total_steps: Optional[int]):
     if total_steps is None:
-        logger.warning("cosine_with_warmup 调度器需要已知 total_steps，回退到 none")
+        logger.warning("cosine_with_warmup scheduler needs a known total_steps, falling back to none")
         return None
 
     import torch
@@ -21,13 +21,13 @@ def build(args, optimizer, total_steps: Optional[int]):
     warmup_steps = int(getattr(args, "lr_scheduler_warmup_steps", 100) or 0)
     eta_min = max(0.0, float(getattr(args, "lr_scheduler_eta_min", 0.0) or 0.0))
     if total_steps <= 0:
-        logger.warning("cosine_with_warmup 调度器 total_steps<=0，回退到 none")
+        logger.warning("cosine_with_warmup scheduler has total_steps<=0, falling back to none")
         return None
     warmup_steps = max(0, min(warmup_steps, total_steps))
     if total_steps <= warmup_steps:
         logger.warning(
-            "cosine_with_warmup: total_steps(%s) <= warmup_steps(%s)，"
-            "整个训练只跑 warmup，没有 cosine 衰减段",
+            "cosine_with_warmup: total_steps(%s) <= warmup_steps(%s), "
+            "the whole run will just be warmup with no cosine decay phase",
             total_steps, warmup_steps,
         )
 
@@ -35,8 +35,8 @@ def build(args, optimizer, total_steps: Optional[int]):
         min_factor = eta_min / base_lr if base_lr > 0 else 0.0
 
         def lr_lambda(step: int) -> float:
-            # warmup: step / warmup_steps  (对齐 transformers /
-            # diffusers / PEFT / sd-scripts 全社区约定，step 0-indexed)
+            # warmup: step / warmup_steps (matches the transformers /
+            # diffusers / PEFT / sd-scripts community convention, step 0-indexed)
             if warmup_steps > 0 and step < warmup_steps:
                 return float(step) / float(warmup_steps)
             decay_steps = max(1, total_steps - warmup_steps)
@@ -51,7 +51,7 @@ def build(args, optimizer, total_steps: Optional[int]):
         lr_lambda=[make_lambda(group["lr"]) for group in optimizer.param_groups],
     )
     logger.info(
-        "学习率调度: cosine_with_warmup (total_steps=%s, warmup_steps=%s, eta_min=%s)",
+        "LR schedule: cosine_with_warmup (total_steps=%s, warmup_steps=%s, eta_min=%s)",
         total_steps,
         warmup_steps,
         eta_min,

@@ -1,11 +1,11 @@
-"""WD14 ONNX 打标（PP4）。
+"""WD14 ONNX tagging (PP4).
 
-模型解析顺序：
-    1. models/wd14/{model_id}/ 存在 → 用本地
-    2. 否则 huggingface_hub.snapshot_download 拉到 models/wd14/{model_id}/
+Model resolution order:
+    1. if models/wd14/{model_id}/ exists -> use the local copy
+    2. otherwise, pull it via huggingface_hub.snapshot_download to models/wd14/{model_id}/
 
-依赖：onnxruntime（CPU 默认；GPU 请用户自行装 onnxruntime-gpu）+
-huggingface_hub + Pillow + numpy。
+Dependencies: onnxruntime (CPU by default; for GPU, the user installs onnxruntime-gpu themselves) +
+huggingface_hub + Pillow + numpy.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .onnx_base import OnnxTaggerBase
 
 
 def _blacklist_key(tag: str) -> str:
-    """blacklist 比对归一键：下划线↔空格、大小写、首尾空格都不敏感。"""
+    """Normalization key for blacklist matching: insensitive to underscore/space, case, and leading/trailing whitespace."""
     return tag.replace("_", " ").strip().lower()
 
 
@@ -29,22 +29,22 @@ class WD14Tagger(OnnxTaggerBase):
     name = "wd14"
 
     def __init__(self, overrides: dict | None = None) -> None:
-        """`overrides` 是本次打标的临时覆盖（仅内存生效）。
+        """`overrides` are a temporary override for this tagging run only (in-memory effect only).
 
-        合并自 `secrets.WD14Config` 的同名字段（`threshold_general` /
-        `threshold_character` / `model_id` / `blacklist_tags`）；
-        值为 None 的项沿用全局 settings，不影响 secrets.json 文件。
+        Merged from the same-named fields on `secrets.WD14Config` (`threshold_general` /
+        `threshold_character` / `model_id` / `blacklist_tags`);
+        a field set to None falls back to the global settings, and none of this touches the secrets.json file.
         """
         super().__init__()
         self._overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
         self._tags: list[str] = []
         self._tag_categories: list[int] = []  # 0=general, 4=character, 9=rating
-        self._input_size: int = 448  # 默认；prepare 时覆盖
+        self._input_size: int = 448  # default; overwritten during prepare
 
     # -------------------- config --------------------
 
     def _cfg(self) -> "secrets.WD14Config":
-        """全局 secrets + 本次 overrides 合并出本次生效的配置。"""
+        """Merges global secrets + this run's overrides into the effective config for this run."""
         base = secrets.load().wd14.model_dump()
         for k, v in self._overrides.items():
             if k in base:
@@ -89,15 +89,15 @@ class WD14Tagger(OnnxTaggerBase):
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         if ok:
-            return True, f"模型: {d.name}"
-        return False, f"需下载模型: {d.name}"
+            return True, f"Model: {d.name}"
+        return False, f"Model needs downloading: {d.name}"
 
     def prepare(self) -> None:
         if self._session is not None:
             return
         model_dir = self._resolve_model_dir()
         self._create_session(model_dir / "model.onnx")
-        # 输入：通常 [N, H, W, C]；H==W；动态符号 fallback 到默认 448
+        # Input: usually [N, H, W, C]; H==W; a dynamic symbol falls back to the default 448
         assert self._session is not None
         ish = self._session.get_inputs()[0].shape
         for dim in ish[1:]:
@@ -108,40 +108,41 @@ class WD14Tagger(OnnxTaggerBase):
         with open(model_dir / "selected_tags.csv", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # SmilingWolf 模型用 underscore，UI 习惯空格
+                # SmilingWolf models use underscores; the UI is used to spaces
                 self._tags.append(row["name"].replace("_", " "))
                 self._tag_categories.append(int(row.get("category", 0)))
 
     def known_tags(self) -> list[str]:
-        """模型词表（空格小写前的空格形式）；`prepare()` 后可用。
-        eval tag-recall 用它过滤「WD14 认识的」prompt tag。"""
+        """The model's vocabulary (in space-lowercased form); usable after `prepare()`.
+        eval tag-recall uses it to filter prompt tags "WD14 recognizes".
+        """
         return list(self._tags)
 
     # -------------------- inference --------------------
 
     def _preprocess(self, img: Image.Image) -> np.ndarray:
-        """单图 → [H, W, 3] BGR float32。batch 推理时调用方负责 stack 成 [N, H, W, 3]。"""
+        """A single image -> [H, W, 3] BGR float32. When batch inferencing, the caller is responsible for stacking into [N, H, W, 3]."""
         size = self._input_size
         img = ImageOps.exif_transpose(img) or img
         if img.mode != "RGB":
             img = img.convert("RGB")
-        # 等比缩到 size，长边 == size，再用白色 pad 成正方形
+        # Scale proportionally to size so the long edge == size, then pad to a square with white
         img.thumbnail((size, size), Image.Resampling.LANCZOS)
         canvas = Image.new("RGB", (size, size), (255, 255, 255))
         canvas.paste(img, ((size - img.size[0]) // 2, (size - img.size[1]) // 2))
         arr = np.asarray(canvas, dtype=np.float32)
-        # WD14 训练用 BGR
+        # WD14 was trained with BGR
         arr = arr[..., ::-1]
         return arr
 
     def _postprocess_one(
         self, scores: np.ndarray
     ) -> tuple[list[str], dict[str, float]]:
-        """单张图的概率向量 → (sorted_tags, raw_scores_dict)。"""
+        """A single image's probability vector -> (sorted_tags, raw_scores_dict)."""
         cfg = self._cfg()
         out: list[tuple[str, float]] = []
-        # blacklist 比对归一：下划线↔空格、大小写、首尾空格都不敏感
-        # （cat girl / cat_girl / Cat_Girl 等价）。self._tags 已是空格小写形式。
+        # Blacklist matching normalization: insensitive to underscore/space, case, and leading/trailing whitespace
+        # (cat girl / cat_girl / Cat_Girl are equivalent). self._tags is already in space-lowercased form.
         blacklist = {_blacklist_key(b) for b in cfg.blacklist_tags}
         for i, p in enumerate(scores):
             if i >= len(self._tags):
@@ -149,7 +150,7 @@ class WD14Tagger(OnnxTaggerBase):
             tag, cat = self._tags[i], self._tag_categories[i]
             if _blacklist_key(tag) in blacklist:
                 continue
-            # category: 9=rating（不参与阈值，丢弃）；4=character；其余按 general
+            # category: 9=rating (doesn't participate in thresholding, discarded); 4=character; everything else follows general
             if cat == 9:
                 continue
             thr = cfg.threshold_character if cat == 4 else cfg.threshold_general

@@ -1,6 +1,6 @@
-"""dataset_phase：build datasets + dataloader + VAE roundtrip 自检。
+"""dataset_phase: build datasets + dataloader + VAE roundtrip self-check.
 
-抽自 main() L257-342（ADR 0003 PR-B）。
+Extracted from main() L257-342 (ADR 0003 PR-B).
 """
 
 from __future__ import annotations
@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 
 
 def _as_resolutions(value) -> list[int]:
-    """把 config 的 resolution 归一成 list[int]。
+    """Normalize the config's resolution into a list[int].
 
-    schema 标量、schema 列表、手写 YAML 标量都可能出现（merge_yaml_into_namespace
-    是裸 setattr、不过 pydantic validator），这里统一兜底成非空 list。
+    A schema scalar, a schema list, or a hand-written YAML scalar can all show up
+    (merge_yaml_into_namespace is a bare setattr and doesn't go through the
+    pydantic validator), so we fall back here to always producing a non-empty list.
     """
     if isinstance(value, (list, tuple)):
         out = [int(v) for v in value]
@@ -42,10 +43,12 @@ def _as_resolutions(value) -> list[int]:
 
 
 def _rope_max_side_tokens(ctx) -> int:
-    """模型 RoPE 单边可寻址的 patch-token 上限（= max_img_h // patch_spatial）。
+    """The model's RoPE addressable patch-token ceiling per side (= max_img_h // patch_spatial).
 
-    NaViT 原生定尺寸据此在数据层封顶单边，避免超 ``_packed_rope_from_grid`` 的前向 fail-fast
-    （白白浪费一次全量 VAE 缓存）。取不到（如无模型的单测）→ 0（不早封顶，仍由前向 fail-fast 兜底）。
+    NaViT native-resolution mode uses this to cap each side at the data layer,
+    avoiding a forward-pass fail-fast in ``_packed_rope_from_grid`` (which would
+    waste a whole VAE cache pass for nothing). If unavailable (e.g. a unit test
+    with no model) -> 0 (no early cap; the forward-pass fail-fast still backstops it).
     """
     pe = getattr(getattr(ctx, "model", None), "pos_embedder", None)
     try:
@@ -55,7 +58,7 @@ def _rope_max_side_tokens(ctx) -> int:
 
 
 def _native_dataset_kwargs(args, ctx) -> dict:
-    """navit_native_resolution 开启时给 ImageDataset 的原生定尺寸参数；关闭 → 空 dict（行为中立）。"""
+    """Native-resolution kwargs for ImageDataset when navit_native_resolution is on; off -> empty dict (no behavior change)."""
     navit_packing = bool(getattr(args, "navit_packing", False))
     if not (navit_packing and bool(getattr(args, "navit_native_resolution", False))):
         return {}
@@ -66,49 +69,53 @@ def _native_dataset_kwargs(args, ctx) -> dict:
         native_max_side_tokens=_rope_max_side_tokens(ctx),
     )
     logger.info(
-        "[navit-native] 原生定尺寸已启用：单图 floor 对齐 16px、零 padding，绕过 ARB 桶量化；"
-        "超预算策略=%s，token 预算=%d，RoPE 单边上限=%s tokens。",
+        "[navit-native] native resolution enabled: per-image floor-aligned to 16px, zero padding, "
+        "bypasses ARB bucket quantization; over-budget strategy=%s, token budget=%d, "
+        "RoPE per-side cap=%s tokens.",
         kwargs["native_over_budget"], kwargs["native_token_budget"],
-        kwargs["native_max_side_tokens"] or "不限",
+        kwargs["native_max_side_tokens"] or "unlimited",
     )
     return kwargs
 
 
 def run(ctx: TrainingContext) -> None:
     """
-    - 主数据集 / 正则数据集 + per-folder repeat
-    - cache_latents 包 CachedLatentDataset
-    - MergedDataset 串联主集 + 正则集
-    - Windows num_workers > 0 兜底为 0（多进程 spawn 易崩）
+    - Main dataset / regularization dataset + per-folder repeat
+    - cache_latents wraps CachedLatentDataset
+    - MergedDataset chains the main set + regularization set
+    - Windows num_workers > 0 falls back to 0 (multiprocess spawn crashes easily)
     - BucketBatchSampler / DataLoader
-    - VAE encode-decode 循环自检（vae_roundtrip.png）
+    - VAE encode-decode roundtrip self-check (vae_roundtrip.png)
     """
     args = ctx.args
 
-    # 多分辨率：args.resolution 可能是标量或列表（手写 YAML 也可能是标量），统一归一成
-    # list；base 档取第一项，其它档的 BucketManager 由 ImageDataset 按需建。
+    # Multi-resolution: args.resolution can be a scalar or a list (hand-written YAML can
+    # also be a scalar), normalized here into a list; the base tier takes the first item,
+    # BucketManagers for other tiers are built by ImageDataset as needed.
     res_list = _as_resolutions(args.resolution)
     ar_limit = float(getattr(args, "aspect_ratio_limit", 2.0))
     base_reso = res_list[0]
 
-    # NaViT 原生定尺寸参数（navit_native_resolution）；关闭时为空 dict → 行为中立。
+    # NaViT native-resolution kwargs (navit_native_resolution); off -> empty dict, no behavior change.
     native_kwargs = _native_dataset_kwargs(args, ctx)
 
-    # masked loss（B2）：开关开启时数据层加载与图同目录的 {stem}.mask sidecar。
-    # NaViT 打包路径第一版不支持（逐图打包 loss 无批量网格，§5 决策）——警告并
-    # 关闭，避免 npz 白写 mask 键。
+    # masked loss (B2): when enabled, the data layer loads a {stem}.mask sidecar next to
+    # each image. The first version of the NaViT packing path doesn't support this (a
+    # per-image packed loss has no batch grid, see SS5 decision) -- warn and disable it,
+    # to avoid writing mask keys into the npz for nothing.
     load_masks = bool(getattr(args, "masked_loss", False))
     if load_masks and bool(getattr(args, "navit_packing", False)):
         logger.warning(
-            "[masked-loss] NaViT 打包路径暂不支持 masked loss：本次训练忽略 mask"
+            "[masked-loss] NaViT packing path doesn't support masked loss yet: masks ignored for this run"
         )
         load_masks = False
         args.masked_loss = False
 
-    # 数据集
-    # 本 fork：bucket_min_reso / bucket_max_reso / bucket_step 可在训练配置里显式
-    # 指定（None = 按 base_reso 自动推导，与上游一致）。显式 512/2048/64 时与
-    # 老版 fork 的 ARB 桶集合逐字节一致（crop 页 trainBuckets.ts 预测依赖此稳定性）。
+    # Dataset
+    # This fork: bucket_min_reso / bucket_max_reso / bucket_step can be set explicitly in
+    # the training config (None = auto-derived from base_reso, matching upstream). When
+    # explicitly 512/2048/64, this matches the old fork's ARB bucket set byte-for-byte
+    # (the crop page's trainBuckets.ts prediction depends on this stability).
     _bucket_kwargs = {}
     for _cfg_key, _kw in (
         ("bucket_min_reso", "min_reso"),
@@ -136,30 +143,30 @@ def run(ctx: TrainingContext) -> None:
     ctx.dataset = ctx.base_dataset
 
     if load_masks:
-        # 统计有 mask 的图数（决策 5：开关开但零 mask 只 log 不报错）
+        # Count how many images have a mask (decision 5: switch on but zero masks just logs, doesn't error)
         n_masked = sum(
             1 for s in ctx.base_dataset.samples
             if ctx.base_dataset._mask_path_for(s["image"]).is_file()
         )
         if n_masked > 0:
             logger.info(
-                "[masked-loss] 已启用：%d/%d 张图带 mask（其余全图正常学习）",
+                "[masked-loss] enabled: %d/%d images have a mask (the rest learn on the full image as usual)",
                 n_masked, len(ctx.base_dataset.samples),
             )
         else:
             logger.info(
-                "[masked-loss] 开关已开但训练集没有任何 mask 文件（无 .mask sidecar）"
-                "——本次训练等效于未开启"
+                "[masked-loss] switch is on but the training set has no mask files at all (no .mask sidecar) "
+                "-- this run is effectively as if it were off"
             )
 
-    # 正则数据集（Kohya 风格，防过拟合）
+    # Regularization dataset (Kohya-style, anti-overfitting)
     reg_data_dir = getattr(args, "reg_data_dir", "") or ""
     ctx.reg_dataset = None
     if reg_data_dir:
         if not Path(reg_data_dir).exists():
-            logger.warning(f"正则数据集路径不存在，已跳过: {reg_data_dir}")
+            logger.warning(f"regularization dataset path doesn't exist, skipped: {reg_data_dir}")
         elif len(ctx.base_dataset) == 0:
-            logger.warning("主数据集为空，正则集已跳过")
+            logger.warning("main dataset is empty, regularization set skipped")
         else:
             reg_caption = (getattr(args, "reg_caption", "") or "").strip()
             reg_base = ImageDataset(
@@ -167,7 +174,7 @@ def run(ctx: TrainingContext) -> None:
                 shuffle_caption=args.shuffle_caption,
                 keep_tokens=args.keep_tokens,
                 flip_augment=args.flip_augment,
-                tag_dropout=0.0,  # 正则集通常不用 dropout
+                tag_dropout=0.0,  # regularization sets usually don't use dropout
                 prefer_json=args.prefer_json,
                 caption_override=reg_caption if reg_caption else None,
                 resolutions=res_list,
@@ -175,20 +182,21 @@ def run(ctx: TrainingContext) -> None:
                 **native_kwargs,
             )
             if len(reg_base) == 0:
-                # 空正则集不接线：包 CachedLatentDataset 会打出"所有 0 张图像已
-                # 缓存"迷惑日志，进 MergedDataset 也是纯空转。
-                logger.info(f"正则数据集为空（无有效图片），已跳过: {reg_data_dir}")
+                # Don't wire in an empty regularization set: wrapping it in CachedLatentDataset
+                # would print a confusing "all 0 images cached" log, and it's a pure no-op in
+                # MergedDataset anyway.
+                logger.info(f"regularization dataset is empty (no valid images), skipped: {reg_data_dir}")
             else:
                 ctx.reg_dataset = reg_base
                 reg_weight = float(getattr(args, "reg_weight", 1.0) or 1.0)
                 cap_preview = f", caption=\"{reg_caption[:50]}{'...' if len(reg_caption) > 50 else ''}\"" if reg_caption else ""
                 weight_info = f", weight={reg_weight}" if reg_weight != 1.0 else ""
-                logger.info(f"正则数据集: {reg_data_dir} ({len(reg_base)} 样本, per-folder repeat{weight_info}){cap_preview}")
+                logger.info(f"regularization dataset: {reg_data_dir} ({len(reg_base)} samples, per-folder repeat{weight_info}){cap_preview}")
 
-    # 缓存 VAE latents（在 repeat 之前）
+    # Cache VAE latents (before repeat)
     ctx.use_cached = getattr(args, "cache_latents", False)
     if ctx.use_cached:
-        # 0 = 跟随训练 batch size（对齐 kohya GUI 的 VAE batch size 语义）
+        # 0 = follow the training batch size (matches kohya GUI's VAE batch size semantics)
         cache_batch_size = int(getattr(args, "vae_cache_batch_size", 0) or 0)
         if cache_batch_size <= 0:
             cache_batch_size = int(getattr(args, "batch_size", 1) or 1)
@@ -199,7 +207,7 @@ def run(ctx: TrainingContext) -> None:
             encode_tile_px=getattr(args, "cache_encode_tile_px", 1024),
             encode_tile_overlap=getattr(args, "cache_encode_tile_overlap", 128),
             encode_max_pixels=getattr(args, "cache_encode_max_pixels", 0),
-            label="训练集",
+            label="training set",
         )
     if ctx.reg_dataset is not None and ctx.use_cached:
         ctx.reg_dataset = CachedLatentDataset(
@@ -209,21 +217,23 @@ def run(ctx: TrainingContext) -> None:
             encode_tile_px=getattr(args, "cache_encode_tile_px", 1024),
             encode_tile_overlap=getattr(args, "cache_encode_tile_overlap", 128),
             encode_max_pixels=getattr(args, "cache_encode_max_pixels", 0),
-            label="正则集",
+            label="regularization set",
         )
 
-    # repeat: 主数据集和正则数据集均通过文件夹名 Kohya 风格 repeat（如 5_concept），无需全局 repeat
+    # repeat: both the main and regularization datasets use Kohya-style per-folder-name repeat
+    # (e.g. 5_concept), so no global repeat is needed
     if ctx.reg_dataset is not None:
         reg_weight = float(getattr(args, "reg_weight", 1.0) or 1.0)
         ctx.dataset = MergedDataset(ctx.dataset, ctx.reg_dataset, reg_weight=reg_weight)
 
     if args.num_workers > 0 and os.name == "nt":
-        logger.warning("num_workers > 0 在 Windows 上容易崩溃：已强制设为 0（避免多进程 spawn 问题）")
+        logger.warning("num_workers > 0 crashes easily on Windows: forced to 0 (avoids multiprocess spawn issues)")
         args.num_workers = 0
 
     if getattr(args, "navit_packing", False):
-        # NaViT / Patch-n-Pack 块对角打包：按 token 预算把多张不同尺寸的图拼进
-        # 一个训练序列（零 padding），替代 ARB 固定桶分批。需配合 cache_latents。
+        # NaViT / Patch-n-Pack block-diagonal packing: fits multiple differently-sized images
+        # into one training sequence within a token budget (zero padding), replacing ARB
+        # fixed-bucket batching. Requires cache_latents.
         batch_sampler = NavitPackBatchSampler(
             ctx.dataset,
             token_budget=int(getattr(args, "navit_token_budget", 16384) or 16384),
@@ -232,7 +242,7 @@ def run(ctx: TrainingContext) -> None:
             seed=getattr(args, "seed", 42),
             drop_last=getattr(args, "navit_drop_last", False),
             strategy=getattr(args, "navit_pack_strategy", "next_fit"),
-            # 不用 `or 256`：0 是合法值（全局 FFD，每 epoch 包固定），会被 falsy 吞掉。
+            # Not `or 256`: 0 is a valid value (global FFD, fixed packs per epoch), which `or` would swallow as falsy.
             ffd_window=int(getattr(args, "navit_pack_ffd_window", 256)),
         )
         ctx.dataloader = DataLoader(
@@ -241,9 +251,10 @@ def run(ctx: TrainingContext) -> None:
             num_workers=args.num_workers,
         )
     elif ctx.use_cached:
-        # drop_last=False：桶尾不足 batch_size 出短 batch 而非丢图。
-        # 对齐 kohya sd-scripts / ostris ai-toolkit；diffusion 用 LayerNorm/GroupNorm，
-        # 对动态 batch 不敏感，loop.py 也按 latents.shape[0] 动态读 bs。
+        # drop_last=False: a bucket's leftover tail shorter than batch_size becomes a short
+        # batch instead of dropped images. Matches kohya sd-scripts / ostris ai-toolkit;
+        # diffusion uses LayerNorm/GroupNorm, which is insensitive to dynamic batch sizes,
+        # and loop.py also reads bs dynamically from latents.shape[0].
         batch_sampler = BucketBatchSampler(
             ctx.dataset, batch_size=args.batch_size,
             drop_last=False, shuffle=True,
@@ -255,10 +266,12 @@ def run(ctx: TrainingContext) -> None:
             num_workers=args.num_workers,
         )
     else:
-        # 非缓存路径也必须按桶分批：collate_fn 用 torch.stack 拼 pixel_values，一个 batch
-        # 混入不同桶尺寸（ARB 下不同长宽比 → 不同 H×W）会 RuntimeError。BucketBatchSampler
-        # 靠 ImageDataset.bucket_for_index 把同尺寸样本分进同一 batch（缓存路径早已这么做，
-        # 非缓存路径此前漏了 → bs>1 必崩）。drop_last=False 与缓存路径一致。
+        # The non-cached path must also batch by bucket: collate_fn uses torch.stack to
+        # combine pixel_values, and mixing different bucket sizes in one batch (different
+        # aspect ratios under ARB -> different H x W) raises RuntimeError. BucketBatchSampler
+        # relies on ImageDataset.bucket_for_index to group same-size samples into the same
+        # batch (the cached path already did this; the non-cached path used to miss it ->
+        # guaranteed crash at bs>1). drop_last=False matches the cached path.
         batch_sampler = BucketBatchSampler(
             ctx.dataset, batch_size=args.batch_size,
             drop_last=False, shuffle=True,
@@ -270,19 +283,20 @@ def run(ctx: TrainingContext) -> None:
             num_workers=args.num_workers,
         )
 
-    # 训练前自检：VAE encode->decode 循环（快速排除 VAE/scale/shape 问题）
+    # Pre-training self-check: VAE encode->decode roundtrip (quickly rules out VAE/scale/shape issues)
     try:
         if len(ctx.base_dataset) > 0:
             from PIL import Image
             item0 = ctx.base_dataset[0]
             pixels0 = item0["pixel_values"].unsqueeze(0).to(ctx.device, dtype=ctx.dtype)  # [1,3,H,W]
             with torch.no_grad():
-                # encode/decode 均走 VAEWrapper（含 auto/on 分块），避免大图整图 op 触发系统内存回退卡死
+                # Both encode/decode go through VAEWrapper (with auto/on tiling), avoiding a
+                # whole-image op on large images triggering a system-memory fallback hang.
                 z0 = ctx.vae.encode(pixels0.unsqueeze(2))                        # [1,16,1,h,w]
                 recon0 = ctx.vae.decode(z0).squeeze(2)                           # [1,3,H,W]
                 recon0 = (recon0.clamp(-1, 1) + 1) / 2
             arr0 = (recon0[0].permute(1, 2, 0).detach().cpu().float().numpy() * 255).clip(0, 255).astype("uint8")
             Image.fromarray(arr0).save(ctx.sample_dir / "vae_roundtrip.png")
-            logger.info("VAE roundtrip 自检已保存: samples/vae_roundtrip.png")
+            logger.info("VAE roundtrip self-check saved: samples/vae_roundtrip.png")
     except Exception as e:
-        logger.warning(f"VAE roundtrip 自检失败（若 sample 仍是噪点，请优先修这个）: {e}")
+        logger.warning(f"VAE roundtrip self-check failed (if samples are still noise, fix this first): {e}")

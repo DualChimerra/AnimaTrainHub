@@ -1,10 +1,10 @@
-"""队列任务备注（v20 tasks.note）+ 每任务采样图清单端点。
+"""Queue task notes (v20 tasks.note) + per-task sample image listing endpoint.
 
-两个端点服务同一个 UI 改动：队列列表里每行能直接翻采样图（点开灯箱），
-右键能给任务贴一句备注，备注在任务详情页也看得见 / 改得了。
+Both endpoints serve the same UI change: each row in the queue list can flip through its sample images directly (opening a lightbox),
+and right-click lets you attach a note to the task, which is also visible / editable on the task detail page.
 
-复用 tests/test_studio_queue_endpoints.py 的隔离手法（tmp db + stub supervisor，
-不跑 lifespan）。
+Reuses the isolation approach from tests/test_studio_queue_endpoints.py (tmp db + stub supervisor,
+no lifespan run).
 """
 from __future__ import annotations
 
@@ -63,10 +63,10 @@ def test_set_and_read_note(client: TestClient) -> None:
     resp = client.put(f"/api/queue/{tid}/note", json={"note": "alpha=16, dataset v3"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["note"] == "alpha=16, dataset v3"
-    # 列表行也带上（右键写完队列页不刷新也能读到）
+    # the list row also carries it (readable even without refreshing the queue page after writing via right-click)
     items = client.get("/api/queue").json()["items"]
     assert [i["note"] for i in items] == ["alpha=16, dataset v3"]
-    # 详情行同理
+    # same for the detail row
     assert client.get(f"/api/queue/{tid}").json()["note"] == "alpha=16, dataset v3"
 
 
@@ -90,7 +90,7 @@ def test_note_missing_task_404(client: TestClient) -> None:
 
 
 def test_note_survives_status_change(client: TestClient) -> None:
-    """备注是 UI 元数据，跟 task 状态无关：跑完的历史任务也能补备注。"""
+    """A note is UI metadata unrelated to task state: a note can still be added to a finished historical task."""
     tid = _enqueue(client)
     with db.connection_for() as conn:
         db.update_task(conn, tid, status="done", finished_at=time.time())
@@ -100,13 +100,13 @@ def test_note_survives_status_change(client: TestClient) -> None:
     assert resp.json()["status"] == "done"
 
 
-# ── samples 清单 ────────────────────────────────────────────────────────────
+# -- samples listing --------------------------------------------------------
 
 
 def _make_task_with_samples(
     tmp_path: Path, filenames: list[str], sub: str = "samples"
 ) -> int:
-    """建一个带 monitor_state_path 的 task，并在 state 文件同级铺几张采样图。"""
+    """Create a task with a monitor_state_path, and lay out a few sample images alongside the state file."""
     monitor_dir = tmp_path / "monitor"
     (monitor_dir / sub).mkdir(parents=True, exist_ok=True)
     state = monitor_dir / "monitor_state.json"
@@ -117,7 +117,7 @@ def _make_task_with_samples(
     for i, fn in enumerate(filenames):
         f = monitor_dir / sub / fn
         f.write_bytes(b"png")
-        # mtime 递增 → 清单顺序可预测（与训练时间轴一致）
+        # mtime increases -> listing order is predictable (matches the training timeline)
         ts = 1_700_000_000 + i
         import os
         os.utime(f, (ts, ts))
@@ -125,7 +125,7 @@ def _make_task_with_samples(
 
 
 def test_samples_empty_without_monitor_path(client: TestClient) -> None:
-    """非训练任务 / 还没开跑 → 空清单而不是 404（队列页逐行请求，不刷红控制台）。"""
+    """Non-training task / not yet started -> an empty listing instead of 404 (the queue page requests per-row and shouldn't flood the console with red errors)."""
     tid = _enqueue(client)
     resp = client.get(f"/api/queue/{tid}/samples")
     assert resp.status_code == 200
@@ -160,14 +160,14 @@ def test_samples_skip_non_images(client: TestClient, isolated: Path) -> None:
 
 
 def test_samples_find_legacy_output_layout(client: TestClient, isolated: Path) -> None:
-    """pre-PP6.1 布局：图在 monitor 同级 output/samples/。"""
+    """Pre-PP6.1 layout: images live in output/samples/ alongside the monitor."""
     tid = _make_task_with_samples(isolated, ["epoch_1.png"], sub="output/samples")
     items = client.get(f"/api/queue/{tid}/samples").json()["items"]
     assert [i["filename"] for i in items] == ["epoch_1.png"]
 
 
 def test_samples_served_by_image_route(client: TestClient, isolated: Path) -> None:
-    """清单里的 filename 直接喂 /samples/{filename}?task_id= 能取到图。"""
+    """A filename from the listing can be fed straight into /samples/{filename}?task_id= to fetch the image."""
     tid = _make_task_with_samples(isolated, ["epoch_1.png"])
     fn = client.get(f"/api/queue/{tid}/samples").json()["items"][0]["filename"]
     assert client.get(f"/samples/{fn}?task_id={tid}").status_code == 200

@@ -2,20 +2,20 @@ import { useEffect, useState } from 'react'
 import { api } from '../../../api/client'
 import type { ProjectLora } from './types'
 
-/** 启动一次拉取所有项目下的 LoRA 版本（含训练中）。
+/** Fetches every project's LoRA versions once at startup (including ones still training).
  *
- * 之前的实现过滤 `if (!v.output_lora_path) continue` —— 但 output_lora_path
- * 只在训练完成（status=done）时回填，训练中的 version 该字段是 null。
- * 实际磁盘上 anima_train 已经在 versions/{label}/output/ 写了 step ckpt
- * （_step1500.safetensors 等），picker 该把它们也列出来。
+ * The previous implementation filtered with `if (!v.output_lora_path) continue` -- but
+ * output_lora_path is only backfilled once training completes (status=done); for a version
+ * still training, that field is null. On disk, anima_train has already written step
+ * checkpoints (_step1500.safetensors etc.) under versions/{label}/output/, so the picker should list those too.
  *
- * 当前策略：
- *   1. v.output_lora_path 优先（已完成训练，path = _final.safetensors）
- *   2. fallback：fetch listVersionLoraCkpts 取 latest（最新 step / epoch ckpt）
- *   3. 都没 → version output/ 没任何 ckpt，跳过
+ * Current strategy:
+ *   1. Prefer v.output_lora_path (training finished, path = _final.safetensors)
+ *   2. Fallback: fetch listVersionLoraCkpts and take the latest (most recent step / epoch checkpoint)
+ *   3. Neither → version's output/ has no checkpoint at all, skip it
  *
- * 失败不抛 —— 用户走「外部文件…」PathPicker 兜底。N+1 调用：用户场景下
- * project < 20 可接受；启动加载一次，picker 不实时刷新（用户预期）。
+ * Doesn't throw on failure -- the user falls back to the "External file..." PathPicker. This is
+ * an N+1 call: acceptable for the typical user's project count (< 20); loaded once at startup, and the picker doesn't refresh live (matches user expectations).
  */
 export function useProjectLoras(): ProjectLora[] {
   const [items, setItems] = useState<ProjectLora[]>([])
@@ -27,7 +27,7 @@ export function useProjectLoras(): ProjectLora[] {
           projects.map((p) => api.getProject(p.id).catch(() => null))
         )
 
-        // 第一阶段：从 v.output_lora_path 直接构造（已完成的）+ 收集需要 fallback 的
+        // Phase 1: build directly from v.output_lora_path (already-finished ones) + collect ones needing fallback
         const out: ProjectLora[] = []
         const fallbacks: Array<{ pid: number; vid: number; meta: ProjectLora }> = []
 
@@ -45,7 +45,7 @@ export function useProjectLoras(): ProjectLora[] {
                 createdAt: v.created_at,
               })
             } else {
-              // 训练中或没 final → 尝试用最新 step/epoch ckpt
+              // Still training or no final yet → try the latest step/epoch checkpoint
               fallbacks.push({
                 pid: d.id, vid: v.id,
                 meta: {
@@ -54,7 +54,7 @@ export function useProjectLoras(): ProjectLora[] {
                   versionId: v.id,
                   versionLabel: v.label,
                   status: v.status,
-                  path: '',  // 由 fallback 填
+                  path: '',  // filled in by the fallback
                   createdAt: v.created_at,
                 },
               })
@@ -62,7 +62,7 @@ export function useProjectLoras(): ProjectLora[] {
           }
         }
 
-        // 第二阶段：并发拉所有需要 fallback 的 ckpt 列表，取 latest
+        // Phase 2: concurrently fetch the checkpoint lists for everything needing a fallback, take the latest
         const fbResults = await Promise.all(
           fallbacks.map(async (fb) => {
             try {
@@ -81,7 +81,7 @@ export function useProjectLoras(): ProjectLora[] {
         out.sort((a, b) => b.createdAt - a.createdAt)
         setItems(out)
       } catch {
-        /* 启动失败不阻塞 */
+        /* a startup failure shouldn't block anything */
       }
     })()
   }, [])

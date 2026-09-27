@@ -1,12 +1,14 @@
-"""block swap 的预算护栏（docs/design/block-swap.md §3.2 ① / 刀 3）。
+"""Budget guardrails for block swap (docs/design/block-swap.md §3.2 ① / knife 3).
 
-两条独立的预算，语义不同、不能互相复用：
-- ``check_load_budget`` 的显存侧：换出层**永不上卡**，必须折扣，否则小显存卡
-  开满 swap 会被按「完整模型装不下」误拒。
-- ``check_pinned_budget``：换出层锁定在内存里、``trim_working_set`` 对它无效，
-  按可用物理内存的安全比例把关。
+Two independent budgets with different semantics that cannot substitute for each other:
+- ``check_load_budget``'s VRAM side: swapped-out layers **never go on the GPU**, so they
+  must be discounted -- otherwise a small-VRAM card with swap fully enabled would be
+  wrongly rejected as if "the full model doesn't fit."
+- ``check_pinned_budget``: swapped-out layers are locked in RAM, where
+  ``trim_working_set`` has no effect on them; gated by a safe fraction of available
+  physical memory.
 
-不需要 CUDA（纯预算算术 + 猴补查询函数）。
+Doesn't need CUDA (pure budget arithmetic + monkeypatched query functions).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ _GIB = 1024 ** 3
 
 @pytest.fixture
 def fake_env(monkeypatch):
-    """把 RAM / VRAM 查询与文件大小都换成可控值。"""
+    """Replace the RAM / VRAM queries and file size with controllable values."""
 
     def _apply(*, ram_gb: float, vram_gb: float, file_gb: float):
         monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: int(ram_gb * _GIB))
@@ -41,74 +43,78 @@ def fake_env(monkeypatch):
 
 
 def test_vram_discount_lets_small_card_pass(fake_env):
-    """16GB 卡 + 25.8GB bf16 模型 + 换出 94.8% → 应放行（这正是 B12 的场景）。
+    """16GB card + 25.8GB bf16 model + 94.8% swapped out -> should pass (this is exactly B12's scenario).
 
-    不折扣的话按完整模型算需 25.8+3=28.8GB，会被误拒。
+    Without the discount, the full-model calculation needs 25.8+3=28.8GB and would be wrongly rejected.
     """
     fake_env(ram_gb=64, vram_gb=15.0, file_gb=25.8)
 
-    # 不折扣：拒绝
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
-        sysmem.check_load_budget(True, weight_paths=["x"], stage="测试")
+    # no discount: rejected
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
+        sysmem.check_load_budget(True, weight_paths=["x"], stage="test")
 
-    # 折扣掉换出的 94.8%（28 层全换）：常驻 1.3GB + 基底 3GB < 15GB，放行
+    # discount the 94.8% swapped out (all 28 layers swapped): resident 1.3GB + base 3GB < 15GB, passes
     sysmem.check_load_budget(
-        True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.9482,
+        True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
     )
 
 
 def test_vram_discount_is_ratio_so_fp8_is_not_over_discounted(fake_env):
-    """**回归**：折扣必须按比例，不能按计算 dtype 的字节数。
+    """**Regression**: the discount must be proportional, not based on the compute dtype's byte count.
 
-    fp8 checkpoint 文件只有 bf16 的一半（13GB）。若折扣按 bf16 估的字节数
-    （22.64GB）去减，vram_need 会被压到 0 —— 护栏对 fp8 完全失效。
-    按比例则 fp8 常驻 = 13 × (1-0.948) = 0.7GB，与实际相符。
+    An fp8 checkpoint file is only half the size of bf16 (13GB). If the discount
+    subtracted the bf16-estimated byte count (22.64GB), vram_need would be pushed to 0 --
+    the guardrail would be completely ineffective for fp8. Proportionally, fp8 resident
+    = 13 x (1-0.948) = 0.7GB, matching reality.
     """
-    fake_env(ram_gb=64, vram_gb=3.0, file_gb=13.0)  # fp8 文件 13GB，卡只剩 3.0GB
+    fake_env(ram_gb=64, vram_gb=3.0, file_gb=13.0)  # fp8 file is 13GB, the card only has 3.0GB left
 
-    # 比例折扣：需 0.7+3=3.7GB > 3.0GB 可用 → 正确拒绝
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
+    # proportional discount: needs 0.7+3=3.7GB > 3.0GB available -> correctly rejected
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.9482,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
         )
-    # 比例被 clamp 到 [0,1]，不会因传入异常值把护栏折扣穿
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
+    # the ratio is clamped to [0,1], so a bogus input value can't blow the guardrail's discount through
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=-5.0,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=-5.0,
         )
 
 
 def test_vram_discount_still_rejects_when_genuinely_short(fake_env):
-    """折扣不是免死金牌：常驻部分仍装不下时照样拒。"""
+    """The discount isn't a free pass: it still rejects when the resident part alone doesn't fit."""
     fake_env(ram_gb=64, vram_gb=4.0, file_gb=25.8)
-    with pytest.raises(RuntimeError, match="GPU 空闲显存不足"):
+    with pytest.raises(RuntimeError, match="Not enough free GPU VRAM"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.5,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=0.5,
         )
 
 
 def test_vram_discount_does_not_relax_ram_side(fake_env):
-    """折扣只作用于显存侧 —— 换出层仍要占内存，RAM 预算照算。"""
+    """The discount only applies to the VRAM side -- swapped-out layers still occupy RAM, so the RAM budget is computed as usual."""
     fake_env(ram_gb=8, vram_gb=80, file_gb=25.8)
-    with pytest.raises(RuntimeError, match="系统可用内存不足"):
+    with pytest.raises(RuntimeError, match="Not enough available system RAM"):
         sysmem.check_load_budget(
-            True, weight_paths=["x"], stage="测试", vram_discount_ratio=0.9482,
+            True, weight_paths=["x"], stage="test", vram_discount_ratio=0.9482,
         )
 
 
 def test_swapped_bytes_use_checkpoint_dtype_not_compute_dtype(tmp_path):
-    """**回归**：pinned 预算必须按 checkpoint 实际 dtype 算，不能按计算 dtype。
+    """**Regression**: the pinned budget must be computed from the checkpoint's
+    actual dtype, not the compute dtype.
 
-    fp8 checkpoint 只有 bf16 的一半。按 bf16 估会把 28 层算成两倍，在内存
-    充足的机器上撞 60% 安全线被**误拒** —— 恰好挡死 B12 的目标配置。
-    高估在这里不是保守，是假阴性。
+    An fp8 checkpoint is only half the size of bf16. Estimating from bf16
+    would count 28 layers as double, hitting the 60% safety line on a
+    machine with plenty of RAM and being **wrongly rejected** -- exactly
+    blocking B12's target config. Overestimating here isn't conservative,
+    it's a false negative.
     """
     import torch
     from safetensors.torch import save_file
 
     from training.families.krea2 import loader as L
 
-    # 造一个 fp8 与一个 bf16 的迷你 checkpoint，键名带 blocks.N. 前缀
+    # build one fp8 and one bf16 mini checkpoint whose keys carry a blocks.N. prefix
     n2s = {}
     fp8_t, bf16_t = {}, {}
     for i in range(4):
@@ -121,17 +127,17 @@ def test_swapped_bytes_use_checkpoint_dtype_not_compute_dtype(tmp_path):
     save_file(fp8_t, str(fp8_path))
     save_file(bf16_t, str(bf16_path))
 
-    prefixes = ("blocks.2.", "blocks.3.")  # 末尾 2 层
+    prefixes = ("blocks.2.", "blocks.3.")  # trailing 2 layers
     fp8_bytes = L._swapped_bytes_from_checkpoint(fp8_path, prefixes, n2s)
     bf16_bytes = L._swapped_bytes_from_checkpoint(bf16_path, prefixes, n2s)
 
     assert fp8_bytes == 2 * 256 * 256 * 1
     assert bf16_bytes == 2 * 256 * 256 * 2
-    assert bf16_bytes == 2 * fp8_bytes  # 正是被搞错的那个倍数
+    assert bf16_bytes == 2 * fp8_bytes  # exactly the factor that was being miscalculated
 
 
 def test_swapped_bytes_falls_back_when_header_unreadable(tmp_path):
-    """header 读不出时返回 0，由调用方回退到按计算 dtype 估（不静默放行）。"""
+    """When the header can't be read, returns 0 so the caller falls back to estimating from the compute dtype (never silently passes)."""
     from training.families.krea2 import loader as L
 
     bogus = tmp_path / "not-a-safetensors.bin"
@@ -140,51 +146,52 @@ def test_swapped_bytes_falls_back_when_header_unreadable(tmp_path):
 
 
 def test_pinned_budget_rejects_over_safe_fraction(monkeypatch):
-    """大内存机器：80% 比例是生效的那一侧。"""
+    """Large-RAM machine: the 80% ratio is the side that governs."""
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 40 * _GIB)
-    # 安全上限 = min(40 × 0.8, 40 - 4) = min(32, 36) = 32GB
+    # safe cap = min(40 x 0.8, 40 - 4) = min(32, 36) = 32GB
     sysmem.check_pinned_budget(int(31 * _GIB), blocks=28)
-    with pytest.raises(RuntimeError, match="内存不足以换出"):
+    with pytest.raises(RuntimeError, match="Not enough memory to swap out"):
         sysmem.check_pinned_budget(int(33 * _GIB), blocks=28)
 
 
 def test_pinned_budget_absolute_floor_protects_small_ram(monkeypatch):
-    """**小内存机器**：4GB 绝对下限是生效的那一侧，纯比例会把机器压垮。
+    """**Small-RAM machine**: the 4GB absolute floor is the side that governs; a pure ratio would crush the machine.
 
-    可用 10GB 时纯 80% 允许 pin 8GB，只剩 2GB 给训练进程自身的非 pinned 部分
-    （基底 ≈4GB）→ 换页。取 min 后上限是 6GB。
+    With 10GB available, a pure 80% would allow pinning 8GB, leaving only
+    2GB for the training process's own non-pinned part (base ~4GB) ->
+    paging. Taking the min gives a 6GB cap.
     """
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 10 * _GIB)
-    # 安全上限 = min(10 × 0.8, 10 - 4) = min(8, 6) = 6GB
+    # safe cap = min(10 x 0.8, 10 - 4) = min(8, 6) = 6GB
     sysmem.check_pinned_budget(int(5.5 * _GIB), blocks=14)
-    with pytest.raises(RuntimeError, match="内存不足以换出"):
+    with pytest.raises(RuntimeError, match="Not enough memory to swap out"):
         sysmem.check_pinned_budget(int(7 * _GIB), blocks=14)
 
 
 def test_pinned_budget_real_scenario_fp8_28_layers(monkeypatch):
-    """用户真机场景回归：37.5GB 可用 + fp8 28 层（11.3GB）应放行。
+    """Regression from a real user machine: 37.5GB available + fp8 28 layers (11.3GB) should pass.
 
-    旧口径（60% + 按 bf16 估的 22.6GB）在这里误拒，两处都修完才通过。
+    The old rule (60% + a bf16-estimated 22.6GB) wrongly rejected this; only passes once both are fixed.
     """
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: int(37.5 * _GIB))
     sysmem.check_pinned_budget(int(11.32 * _GIB), blocks=28)
-    # bf16 28 层 22.65GB 在同一台机器上现在也放行（上限 30GB）
+    # bf16 28 layers at 22.65GB now also passes on the same machine (cap 30GB)
     sysmem.check_pinned_budget(int(22.65 * _GIB), blocks=28)
 
 
 def test_pinned_budget_message_is_actionable(monkeypatch):
-    """B6：报错不静默降级，且文案要能指导操作。"""
+    """B6: the error doesn't silently degrade, and the message should tell the user what to do."""
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: 8 * _GIB)
     with pytest.raises(RuntimeError) as exc:
         sysmem.check_pinned_budget(int(20 * _GIB), blocks=28)
     msg = str(exc.value)
     assert "28" in msg
     assert "blocks_to_swap" in msg
-    assert "锁定" in msg
+    assert "pinned" in msg
 
 
 def test_pinned_budget_silent_when_query_fails(monkeypatch):
-    """查询失败静默放行（与既有护栏口径一致，不因探测不到就挡住训练）。"""
+    """A failed query silently passes (consistent with the other guards' rule -- never block training just because probing failed)."""
     monkeypatch.setattr(sysmem, "available_ram_bytes", lambda: None)
     sysmem.check_pinned_budget(int(999 * _GIB), blocks=28)
 

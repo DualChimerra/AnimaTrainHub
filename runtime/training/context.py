@@ -1,15 +1,19 @@
-"""TrainingContext：所有 phase 共享的状态包（ADR 0003 PR-B）。
+"""TrainingContext: the shared state bundle used by all phases (ADR 0003 PR-B).
 
-把原 runtime/anima_train.py 793 行 main() 里的所有 local 变量收到一个 dataclass，
-让 phase 函数能 take ctx → mutate → return None 这种风格走流水线。
+Collects every local variable from the original 793-line main() in
+runtime/anima_train.py into one dataclass, so phase functions can follow a
+pipeline style of take ctx -> mutate -> return None.
 
-设计原则：
-- 字段类型清晰；late-populated 的用 `Optional[X] = None` 显示
-- 进度展示、信号处理等带闭包的逻辑收到本类的方法上（emit / handle_interrupt /
-  get_next_sample_prompt），避免 main() 里的 nonlocal 闭包
-- 不持有 args 之外的"输入"——任何 yaml / cli 行为都先 merge 进 args，再开始 phase
+Design principles:
+- Field types are explicit; late-populated fields use `Optional[X] = None`
+- Logic with closures (progress display, signal handling, etc.) is collected
+  into methods on this class (emit / handle_interrupt / get_next_sample_prompt),
+  avoiding the nonlocal closures that main() used
+- Holds no "input" beyond args -- any yaml / cli behavior is merged into args
+  first, before any phase starts
 
-每个 phase 函数签名：`def run(ctx: TrainingContext) -> None`（in-place mutate）。
+Every phase function has the signature: `def run(ctx: TrainingContext) -> None`
+(in-place mutation).
 """
 
 from __future__ import annotations
@@ -27,45 +31,53 @@ if TYPE_CHECKING:
 
 @dataclass
 class TrainingContext:
-    # ─── bootstrap_phase 填充 ───
+    # --- filled by bootstrap_phase ---
     args: Any  # argparse.Namespace
-    family: Any = None  # ModelFamily（多模型 PR-2b；resolve_family(args) 产物）
+    family: Any = None  # ModelFamily (multi-model PR-2b; produced by resolve_family(args))
     config_path: Optional[Path] = None
     config_dir: Optional[Path] = None
     device: str = "cpu"
     dtype: torch.dtype = torch.float32
-    # VAE 工作精度，独立于训练 dtype。fp16 训练时 VAE 仍走 fp32：V100/Turing 等需要
-    # fp16 的卡没有 bf16，而 fp16 VAE encode/decode 易溢出成 NaN（黑图 / latent 全 NaN
-    # → 训练步全跳）。bootstrap 据 dtype 推导；对齐 ComfyUI vae_dtype() 与出图侧 vae_precision。
+    # VAE working precision, independent of the training dtype. Even in fp16
+    # training the VAE still runs in fp32: cards that need fp16 (V100/Turing
+    # etc.) have no bf16, and fp16 VAE encode/decode overflows to NaN easily
+    # (black image / all-NaN latent -> the whole training step gets skipped).
+    # bootstrap derives it from dtype; kept aligned with ComfyUI's vae_dtype()
+    # and the generation side's vae_precision.
     vae_dtype: torch.dtype = torch.float32
     output_dir: Optional[Path] = None
     sample_dir: Optional[Path] = None
     wandb_monitor: Any = None         # observability.WandBMonitor
-    monitor_server: Optional[bool] = None  # 旧名兼容：True=monitor_state.json 写入活跃
-    # supervisor 启动训练时通过 env LORA_TASK_ID 注入 queue task id；CLI 直接跑
-    # 时 env 不存在 → None → state_dir() fallback 到 task_unknown 子目录。
-    # 注意：跟 progress bar 的 task_id 字段（line ~80）是两回事，故意起不同名字。
+    monitor_server: Optional[bool] = None  # legacy name kept for compat: True = monitor_state.json writes are active
+    # The supervisor injects the queue task id via env LORA_TASK_ID when it
+    # starts training; when run straight from the CLI the env var is absent
+    # -> None -> state_dir() falls back to a task_unknown subdirectory.
+    # Note: this is unrelated to the progress bar's task_id field (~line 80);
+    # deliberately named differently to avoid confusion.
     lora_task_id: Optional[int] = None
-    # task 档案根（studio_data/tasks/<id>/）。bootstrap 从 --monitor-state-file
-    # 上跳两层推出；纯 CLI 没传 → None。samples/ state/ 和 prompt 文本缓存
-    # （.text-cache/）都挂在这个根下。
+    # Root of the task archive (studio_data/tasks/<id>/). bootstrap derives it
+    # by going up two levels from --monitor-state-file; plain CLI runs that
+    # don't pass it get None. samples/, state/ and the prompt text cache
+    # (.text-cache/) all live under this root.
     task_archive_dir: Optional[Path] = None
-    # ADR 0006 Addendum 2：auto_epoch_state.pt 落 task 档案（studio_data/tasks/
-    # <id>/state/）。bootstrap 从 --monitor-state-file 推出档案根后填充（跟
-    # sample_dir 同一约定）；纯 CLI 没传 → None → auto_state_dir() fallback
-    # 到 state_dir()。
+    # ADR 0006 Addendum 2: auto_epoch_state.pt lives in the task archive
+    # (studio_data/tasks/<id>/state/). bootstrap fills this in after deriving
+    # the archive root from --monitor-state-file (same convention as
+    # sample_dir); plain CLI runs without it get None -> auto_state_dir()
+    # falls back to state_dir().
     task_archive_state_dir: Optional[Path] = None
 
-    # ─── models_phase 填充 ───
+    # --- filled by models_phase ---
     repo_root: Optional[Path] = None
     model: Any = None
     vae: Any = None
-    # 文本编码器持有物（family 私有结构，Anima=(qwen_model, qwen_tok, t5_tok)；
-    # 对循环 opaque —— 多模型 PR-2b D15，替代原 qwen_model/qwen_tok/t5_tok 三字段）
+    # Text encoder holder (family-private structure; for Anima it's
+    # (qwen_model, qwen_tok, t5_tok)); opaque to the loop -- multi-model
+    # PR-2b D15, replaces the original three separate qwen_model/qwen_tok/t5_tok fields
     text_stack: Any = None
     injector: Any = None
 
-    # ─── dataset_phase 填充 ───
+    # --- filled by dataset_phase ---
     bucket_mgr: Any = None
     base_dataset: Any = None
     dataset: Any = None
@@ -73,7 +85,7 @@ class TrainingContext:
     use_cached: bool = False
     dataloader: Any = None
 
-    # ─── optimizer_phase 填充 ───
+    # --- filled by optimizer_phase ---
     weight_decay: float = 0.0
     optimizer: Any = None
     optimizer_type: str = "adamw"
@@ -81,8 +93,10 @@ class TrainingContext:
     trainable_params: list = field(default_factory=list)
     steps_per_epoch: Optional[int] = None
     total_steps: Optional[int] = None
-    # 进度显示专用：每 epoch 按实际包数修正的总步数（navit 打包下 total_steps 是
-    # epoch-0 快照会漂移）。只喂 monitor/CLI 进度，scheduler/adapter 仍用 total_steps。
+    # For progress display only: total steps corrected per-epoch from the
+    # actual number of packed batches (under navit packing, total_steps is an
+    # epoch-0 snapshot that can drift). Only feeds monitor/CLI progress;
+    # scheduler/adapter still use total_steps.
     total_steps_display: Optional[int] = None
     scheduler: Any = None
     timestep_sampler: Any = None    # training.timestep_samplers.TimestepSamplerProtocol
@@ -91,7 +105,7 @@ class TrainingContext:
     block_swap: Any = None          # training.block_swap.PinnedBlockSwap (optional)
     ema: Any = None                 # training.ema.AdapterEma (optional)
 
-    # ─── resume_phase 填充 ───
+    # --- filled by resume_phase ---
     global_step: int = 0
     start_epoch: int = 0
     current_epoch: int = 0
@@ -106,22 +120,26 @@ class TrainingContext:
     sample_prompt_idx: int = 0
     interrupted: bool = False
 
-    # ─── loop.py epoch backup（ADR 0006 Addendum 1 方案 Δ）───
-    # 每 epoch 末尾覆盖式写 auto_epoch_state.pt 后填充这两个字段。
-    # handle_interrupt 读它们 emit pause_state event；None 表示首 epoch 还没结束
-    # → supervisor 标 canceled 而非 paused（无可恢复进度）。
+    # --- loop.py epoch backup (ADR 0006 Addendum 1, option Delta) ---
+    # These two fields are filled after auto_epoch_state.pt is overwritten at
+    # the end of each epoch. handle_interrupt reads them to emit the
+    # pause_state event; None means the first epoch hasn't finished yet ->
+    # the supervisor marks the task canceled rather than paused (no
+    # resumable progress).
     last_auto_epoch_state_path: Optional[Path] = None
     last_auto_epoch_config_path: Optional[Path] = None
-    scaler: Any = None  # torch.cuda.amp.GradScaler，仅 fp16 时非 None
+    scaler: Any = None  # torch.cuda.amp.GradScaler, non-None only in fp16
 
-    # ─── 共用方法 ───
+    # --- shared methods ---
 
     def state_dir(self) -> Path:
-        """用户周期 save（save_state_every*）写 state 的目录，per-task 隔离。
+        """Directory where the user's periodic saves (save_state_every*)
+        write state, isolated per task.
 
-        ADR 0006 §5.3：同一 version 下多 task 跑 state 文件互相覆盖是 latent
-        bug，加 task_id 子目录隔离。env LORA_TASK_ID 没设（CLI 直接跑）时
-        fallback 到 task_unknown/。
+        ADR 0006 SS5.3: multiple tasks running under the same version
+        overwriting each other's state files was a latent bug; a task_id
+        subdirectory was added to isolate them. When env LORA_TASK_ID isn't
+        set (plain CLI run), falls back to task_unknown/.
         """
         assert self.output_dir is not None, "state_dir() called before bootstrap_phase"
         tid = self.lora_task_id if self.lora_task_id is not None else "unknown"
@@ -130,15 +148,19 @@ class TrainingContext:
         return d
 
     def auto_state_dir(self) -> Path:
-        """auto_epoch_state.pt（系统级恢复点）的落盘目录（ADR 0006 Addendum 2）。
+        """Directory where auto_epoch_state.pt (the system-level recovery
+        point) is written (ADR 0006 Addendum 2).
 
-        跟用户周期 save 分家：auto backup 是 task 档案的一部分（同 run.log /
-        monitor/ / samples/），落 `studio_data/tasks/<id>/state/` —— 生命周期
-        跟 task 行绑定（删 task 一并清），且服务端可从 task id 直接推算路径。
-        用户周期 save 是用户产物，留在 state_dir()（version output 树，
-        ResumeFieldPicker 按 version 扫得到）。
+        Kept separate from the user's periodic saves: the auto backup is part
+        of the task archive (alongside run.log / monitor/ / samples/), living
+        under `studio_data/tasks/<id>/state/` -- its lifecycle is tied to the
+        task row (deleting the task cleans it up too), and the server can
+        derive the path directly from the task id. The user's periodic saves
+        are user output and stay in state_dir() (the version output tree,
+        which ResumeFieldPicker scans by version).
 
-        纯 CLI（没传 --monitor-state-file）fallback 到 state_dir()，行为不变。
+        Plain CLI runs (without --monitor-state-file) fall back to
+        state_dir(), unchanged behavior.
         """
         if self.task_archive_state_dir is not None:
             self.task_archive_state_dir.mkdir(parents=True, exist_ok=True)
@@ -146,9 +168,11 @@ class TrainingContext:
         return self.state_dir()
 
     def emit(self, msg: str) -> None:
-        """打印一条 user-facing 消息，按当前进度显示模式分流。
+        """Print a user-facing message, routed by the current progress
+        display mode.
 
-        移植自原 main() 内 emit 闭包；行为完全一致。
+        Ported from the emit closure in the original main(); behavior is
+        identical.
         """
         if self.use_plain:
             print()
@@ -160,7 +184,8 @@ class TrainingContext:
             print(msg)
 
     def get_next_sample_prompt(self) -> str:
-        """取下一个采样提示词（轮换；sample_prompts 为空则返回默认）。"""
+        """Get the next sampling prompt (round-robin; returns a default if
+        sample_prompts is empty)."""
         if not self.sample_prompts:
             return "1girl, masterpiece"
         prompt = self.sample_prompts[self.sample_prompt_idx % len(self.sample_prompts)]
@@ -168,49 +193,53 @@ class TrainingContext:
         return prompt
 
     def handle_interrupt(self, sig, frame) -> None:
-        """Pause / Ctrl+C 信号处理（ADR 0006 Addendum 1 方案 Δ）：Pause = Cancel + 立即释放 GPU。
+        """Pause / Ctrl+C signal handler (ADR 0006 Addendum 1, option Delta):
+        Pause = Cancel + release the GPU immediately.
 
-        信号来源：
-          - CLI Ctrl+C：POSIX SIGINT / Windows SIGBREAK（由 resume phase 注册）
-          - Supervisor pause：Windows CTRL_BREAK_EVENT / POSIX SIGINT
+        Signal sources:
+          - CLI Ctrl+C: POSIX SIGINT / Windows SIGBREAK (registered by the resume phase)
+          - Supervisor pause: Windows CTRL_BREAK_EVENT / POSIX SIGINT
 
-        新流程（不再 mid-epoch save）：
-          1. wandb finish（让 supervisor 读到事件时一切 IO 已完成）
-          2. emit __EVENT__:pause_state，state_path 指向**最近一次 epoch 末** auto_epoch_state.pt
-             （由 loop.py 每 epoch 末尾覆盖式写盘，ctx.last_auto_epoch_state_path 字段维护）
-          3. 首 epoch 内（last_auto_epoch_state_path is None）→ emit state_path=None，
-             supervisor 据此走 cancel 分支（ADR 0006 Addendum 1 决策第 3 条）
+        New flow (no more mid-epoch save):
+          1. wandb finish (so all I/O is done by the time the supervisor reads the event)
+          2. emit __EVENT__:pause_state, with state_path pointing at the **most
+             recent end-of-epoch** auto_epoch_state.pt (overwritten at the end
+             of every epoch by loop.py, tracked via ctx.last_auto_epoch_state_path)
+          3. During the first epoch (last_auto_epoch_state_path is None) ->
+             emit state_path=None, so the supervisor takes the cancel branch
+             (ADR 0006 Addendum 1, decision point 3)
           4. sys.exit(0)
 
-        放弃 mid-epoch save 的理由（详见 ADR Addendum 1 三方 audit）：
-          - grad_accum 周期未守 → partial backward grad 悬挂
-          - dataloader 进度不存 → resume 5% double-train（Prodigy d 估计偏）
-          - current_epoch 语义二义性（mid-epoch 路径保 epoch / epoch-end 路径保 epoch+1）
-          - InfoNoise / cosine restart T_cur 漂移
-          - 真正符合"暂停 = 立即释放 GPU"产品语义
+        Why mid-epoch save was dropped (see the three-way audit in the ADR
+        Addendum 1 for details):
+          - grad_accum boundaries aren't respected -> partial backward grads left dangling
+          - dataloader progress isn't saved -> resuming double-trains the first 5% (skews the Prodigy d estimate)
+          - current_epoch semantics become ambiguous (mid-epoch path keeps epoch / epoch-end path keeps epoch+1)
+          - InfoNoise / cosine restart T_cur drifts
+          - This is what actually matches the product semantics of "pause = release the GPU immediately"
 
-        重复触发（已 interrupted 状态再来一次）= 强退。
+        Triggering it again while already interrupted = hard exit.
         """
-        # 延迟 import 避免循环依赖
+        # Deferred import to avoid a circular dependency
         from training.snapshot import emit_event
 
         if self.interrupted:
-            self.emit("强制退出...")
+            self.emit("Force quitting...")
             sys.exit(1)
         self.interrupted = True
-        self.emit("\n检测到暂停信号，正在退出（保留最近一次 epoch 备份用于 resume）...")
+        self.emit("\nPause signal detected, exiting (keeping the most recent epoch backup for resume)...")
         try:
             self.wandb_monitor.finish()
         except Exception:
             pass
-        # emit 在 wandb finish 后 — 让 supervisor 读到事件时一切 IO 已完成。
+        # emit happens after wandb finish -- so all I/O is done by the time the supervisor reads the event.
         emit_event("pause_state", {
             "state_path": str(self.last_auto_epoch_state_path) if self.last_auto_epoch_state_path else None,
             "config_path": str(self.last_auto_epoch_config_path) if self.last_auto_epoch_config_path else None,
             "step": self.global_step,
         })
         if self.last_auto_epoch_state_path:
-            self.emit(f"已暂停！恢复点: {self.last_auto_epoch_state_path}")
+            self.emit(f"Paused! Resume point: {self.last_auto_epoch_state_path}")
         else:
-            self.emit("首个 epoch 未完成，无 auto 备份可恢复 → 任务将标 canceled。")
+            self.emit("The first epoch never finished, no auto backup to resume from -> the task will be marked canceled.")
         sys.exit(0)

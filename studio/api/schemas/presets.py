@@ -1,4 +1,4 @@
-"""/api/presets/* 请求 BaseModel（PR-5 从 server.py inline 抽出）。"""
+"""/api/presets/* request BaseModels (extracted from server.py inline models in PR-5)."""
 from __future__ import annotations
 
 from typing import Any

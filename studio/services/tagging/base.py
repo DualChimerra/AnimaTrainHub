@@ -1,11 +1,11 @@
-"""Tagger 抽象 + 工厂（PP4）。
+"""Tagger abstraction + factory (PP4).
 
-每个 tagger 是一个独立类，按 `Tagger` 协议暴露相同接口：
+Each tagger is its own class exposing the same interface via the `Tagger` protocol:
     name / requires_service / is_available / prepare / tag
 
-worker 拿到 name 后调 `get_tagger(name)` 取实例，跑 `prepare()` → 流式
-`tag()` 拿结果。所有真实 IO（onnx 推理 / HTTP 调 vLLM）放在子类里，
-本模块只定义协议和工厂，便于 mock 测试。
+The worker gets a name, calls `get_tagger(name)` for an instance, runs `prepare()`, then streams
+`tag()` for results. All real I/O (onnx inference / HTTP calls to vLLM) lives in the subclasses;
+this module only defines the protocol and factory, to keep mocking easy for tests.
 """
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ ProgressFn = Callable[[int, int], None]  # (done, total)
 
 class TagResult(TypedDict, total=False):
     image: Path
-    tags: list[str]                # 排序好的（按概率降）
-    caption: str                   # 可选：渲染后的完整 caption 文本
-    caption_json: dict             # 可选：结构化 JSON caption
-    raw_scores: dict[str, float]   # 可选：每 tag 的概率
-    error: str                     # 失败时填
+    tags: list[str]                # sorted (descending probability)
+    caption: str                   # optional: rendered full caption text
+    caption_json: dict             # optional: structured JSON caption
+    raw_scores: dict[str, float]   # optional: per-tag probability
+    error: str                     # set on failure
 
 
 @runtime_checkable
@@ -31,23 +31,23 @@ class Tagger(Protocol):
     requires_service: bool
 
     def is_available(self) -> tuple[bool, str]:
-        """快速检查是否可跑。返回 (ok, 状态描述)。前端 status 条用。"""
+        """Quick check whether this tagger can run. Returns (ok, status description). Used by the frontend status bar."""
 
     def prepare(self) -> None:
-        """耗时初始化（如 WD14 加载 ONNX；JoyCaption 调 /v1/models）。
-        worker 启动一次。"""
+        """Expensive init (e.g. WD14 loading ONNX; JoyCaption calling /v1/models).
+        Called once by the worker."""
 
     def tag(
         self,
         image_paths: list[Path],
         on_progress: ProgressFn = lambda d, t: None,
     ) -> Iterator[TagResult]:
-        """流式：每张图 yield 一次 TagResult；失败时 result 含 'error' 字段。"""
+        """Stream: yield one TagResult per image; on failure, result carries an 'error' field."""
 
 
-# tagger 名 → (模块路径, 类名, 是否吃 overrides 参数)
-# 加新 tagger 在这里加一行；server.py 的 TagJobRequest 同步加 `<name>_overrides`
-# 字段（如果支持本次任务覆盖）即可。worker 走通用 `params.get(f"{name}_overrides")`。
+# tagger name -> (module path, class name, whether it takes an overrides argument)
+# Add a new tagger by adding a line here; keep server.py's TagJobRequest in sync by adding a `<name>_overrides`
+# field (if per-job overrides are supported). The worker reads it generically via `params.get(f"{name}_overrides")`.
 _TAGGER_SPEC: dict[str, tuple[str, str, bool]] = {
     "wd14": ("studio.services.tagging.wd14", "WD14Tagger", True),
     "cltagger": ("studio.services.tagging.cltagger", "CLTagger", True),
@@ -57,10 +57,10 @@ _TAGGER_SPEC: dict[str, tuple[str, str, bool]] = {
 
 
 def get_tagger(name: str, overrides: dict | None = None) -> Tagger:
-    """工厂：按 `_TAGGER_SPEC` 懒加载实现并实例化。
+    """Factory: lazily import the implementation from `_TAGGER_SPEC` and instantiate it.
 
-    `overrides` 仅本地 ONNX tagger 当前消费 —— 本次打标参数覆盖，不影响全局
-    secrets.json；不接 overrides 的 tagger（如 joycaption）会忽略。
+    `overrides` is currently only consumed by local ONNX taggers -- per-job tagging overrides that don't
+    touch global secrets.json; taggers that don't accept overrides (e.g. joycaption) ignore it.
     """
     spec = _TAGGER_SPEC.get(name)
     if spec is None:

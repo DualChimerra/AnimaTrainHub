@@ -1,9 +1,9 @@
-"""训练噪声生成：基础高斯 + noise_offset + pyramid 多尺度低频。
+"""Training noise generation: base Gaussian + noise_offset + pyramid multi-scale low frequency.
 
-抽自原 runtime/anima_train.py L1848-1896（ADR 0003 PR-A）。
+Extracted from the original runtime/anima_train.py L1848-1896 (ADR 0003 PR-A).
 
-参数化的纯数学函数，未来加新 noise scheme（如 fp_offset_v2）直接在本文件
-增 if 分支即可，不需要 plugin subfolder。
+Parameterized pure math functions; a new noise scheme (e.g. fp_offset_v2) can
+just add an if branch in this file, no plugin subfolder needed.
 """
 
 from __future__ import annotations
@@ -18,15 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 def noise_params_from_args(args) -> tuple[float, int, float]:
-    """按 noise_enhancement_type 分派生效的噪声增强参数 → (offset, iters, discount)。
+    """Dispatch on noise_enhancement_type to the active noise-enhancement params -> (offset, iters, discount).
 
-    schema 是「type 单选 + 两组参数」;历史实现直接读原始参数值、type 在
-    runtime 侧零参与 —— 两组参数同时非零时 offset 与 pyramid 静默叠加(设计
-    文档 §10.1 审计 #3)。yaml/CLI 主路径的互斥由 migrate_noise_enhancement_type
-    在配置层清零(R1 后 trainer 同走该路径);本函数是 runtime 纵深防御,兜住
-    绕过配置构造的 args 来源(pause snapshot 旧格式 / 程序内手构 namespace),
-    并让「type 才是开关」的契约在消费端成立。loop 标准路径与 navit 打包路径
-    共用本函数,勿再直接读 args.noise_offset / pyramid_*。
+    The schema is "one type choice + two parameter groups"; the historical
+    implementation read the raw parameter values directly, with `type` having
+    zero involvement on the runtime side -- when both groups were non-zero,
+    offset and pyramid would silently stack (design doc Sec 10.1 audit #3).
+    The yaml/CLI main path's mutual exclusion is enforced by
+    migrate_noise_enhancement_type at the config layer (post-R1 the trainer
+    goes through that same path too); this function is runtime defense in
+    depth, guarding against args sources that bypass config construction
+    (old-format pause snapshots / hand-built in-process namespaces), and
+    making the "type is the only switch" contract hold at the consumer end.
+    Both the standard loop path and the navit packing path share this
+    function -- don't read args.noise_offset / pyramid_* directly elsewhere.
     """
     ne_type = str(getattr(args, "noise_enhancement_type", "none") or "none")
     offset = (
@@ -45,11 +50,13 @@ def make_noise(
     pyramid_iters: int = 0,
     pyramid_discount: float = 0.35,
 ) -> torch.Tensor:
-    """生成训练噪声，可叠加低频扰动。
+    """Generate training noise, optionally stacking low-frequency perturbations.
 
-    noise_offset   — 给每样本/通道加低频偏移，缓解亮度均值偏差（SDXL 思路）
-    pyramid_iters  — 叠加多尺度低频噪声，帮助模型快速学习全局光照/构图；
-                     bilinear 插值避免 nearest 的块状结构干扰
+    noise_offset   -- adds a per-sample/channel low-frequency offset, mitigating
+                     brightness-mean bias (the SDXL trick)
+    pyramid_iters  -- stacks multi-scale low-frequency noise, helping the model
+                     learn global lighting/composition faster; bilinear
+                     interpolation avoids the blocky artifacts of nearest
     """
     noise = torch.randn_like(latents)
 
@@ -84,6 +91,6 @@ def make_noise(
                     break
             noise = cur / cur.std().clamp(min=1e-6)
         except Exception as exc:
-            logger.warning(f"pyramid_noise 失败，回退标准噪声: {exc}")
+            logger.warning(f"pyramid_noise failed, falling back to standard noise: {exc}")
 
     return noise

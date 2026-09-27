@@ -1,20 +1,24 @@
-"""Gelbooru / Danbooru 下载库（pp2 + pp9）。
+"""Gelbooru / Danbooru download library (pp2 + pp9).
 
-由原 `danbooru_downloader.py` 库化而来：去掉 input() / json 配置文件，全部
-参数走 `DownloadOptions`；进度通过 `on_progress(line)` 推回调用方（worker
-转写到日志 + bus.publish）。
+Turned into a library from the original `danbooru_downloader.py`: dropped
+input() / JSON config files, all parameters now go through `DownloadOptions`;
+progress is pushed back to the caller via `on_progress(line)` (the worker
+forwards it to logs + bus.publish).
 
-PP9 改造：
-- 拉图阶段并发，走 `BooruClient`（双 token bucket：API 2 / CDN 5 req/s 默认）
-- 删每图 0.5s 硬 sleep，速率改由 token bucket 控
-- 保留 `page_delay`（每页之间 1s 礼貌等待）
+PP9 rework:
+- Image fetching is now concurrent, going through `BooruClient` (dual token
+  bucket: API 2 / CDN 5 req/s by default)
+- Removed the hard 0.5s sleep per image; rate is now controlled by the token
+  bucket instead
+- Kept `page_delay` (a polite 1s wait between pages)
 
-设计：
-- `download(opts, dest_dir, on_progress, on_image_saved, cancel_event, client)` 阻塞
-  式下载，返回成功保存的图片数。
-- 失败重试 3 次（指数退避 1s/2s/4s），timeout 60s。
-- 取消：`cancel_event.is_set()` 在每图 / 每分页前检测，触发后立即返回当前
-  已保存数量；不抛异常。
+Design:
+- `download(opts, dest_dir, on_progress, on_image_saved, cancel_event, client)`
+  downloads in blocking mode, returns the number of images successfully saved.
+- Retries on failure 3 times (exponential backoff 1s/2s/4s), timeout 60s.
+- Cancellation: `cancel_event.is_set()` is checked before every image / every
+  page; once triggered, it returns the current saved count immediately, with
+  no exception raised.
 """
 from __future__ import annotations
 
@@ -42,13 +46,13 @@ class DownloadOptions:
     convert_to_png: bool = True
     remove_alpha_channel: bool = False
     skip_existing: bool = True
-    # gelbooru 凭据
+    # gelbooru credentials
     user_id: str = ""
-    # danbooru 凭据
+    # danbooru credentials
     username: str = ""
-    # 通用 api key（gelbooru / danbooru 都用 .api_key）
+    # shared api key (both gelbooru / danbooru use .api_key)
     api_key: str = ""
-    # 全局排除 tag（搜索时自动追加 -tag）；来自 secrets.download.exclude_tags
+    # global excluded tags (auto-appended as -tag when searching); from secrets.download.exclude_tags
     exclude_tags: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -59,7 +63,7 @@ class DownloadOptions:
         return booru_api.default_base_url(self.api_source)
 
     def effective_tag_query(self) -> str:
-        """`tag` 后面拼上 -excluded（gelbooru / danbooru 语法一致）。"""
+        """Append -excluded after `tag` (same syntax for gelbooru / danbooru)."""
         parts = [self.tag.strip()]
         for ex in self.exclude_tags:
             ex = ex.strip().lstrip("-")
@@ -85,14 +89,16 @@ def download(
     page_delay: float = 1.0,
     max_retries: int = 3,
 ) -> int:
-    """阻塞式下载到 dest_dir。
+    """Blocking download into dest_dir.
 
-    返回本次新增保存的图片数（不含 skip）。中断（cancel_event 触发）时
-    返回当前已保存的数量，不抛错。
+    Returns the number of newly saved images this call (excludes skips). If
+    interrupted (cancel_event triggered), returns the current saved count
+    with no error raised.
 
-    PP9: 拉图阶段并发（默认 4 worker）；速率由 BooruClient 的 token bucket
-    控（API 2 / CDN 5 req/s）。`session=` 仍接受外部 session（旧 test 用），
-    内部用 `client.search_posts/download_image` 包装。
+    PP9: image fetching is concurrent (4 workers by default); rate is
+    controlled by BooruClient's token bucket (API 2 / CDN 5 req/s).
+    `session=` still accepts an external session (used by legacy tests);
+    internally it's wrapped via `client.search_posts/download_image`.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     if not opts.tag.strip():
@@ -104,14 +110,17 @@ def download(
             "gelbooru needs user_id + api_key (set secrets.gelbooru in Settings)"
         )
     if opts.api_source == "danbooru" and not (opts.username and opts.api_key):
-        # hotfix: danbooru 挂 Cloudflare 后匿名 UA 已不可靠（即使我们带应用 UA，
-        # CF 仍可能随时收紧）；强制绑定账户让 UA 带 (by username)，CF 拦匿名
-        # 时不会一锅端，danbooru 端也按账户配速率限制（标准 2 req/s）。
+        # hotfix: since danbooru went behind Cloudflare, an anonymous UA is no
+        # longer reliable (even with our app UA, CF could tighten up at any
+        # time); force binding an account so the UA carries (by username) —
+        # when CF blocks anonymous requests we won't get swept in, and
+        # danbooru also rate-limits per account (standard 2 req/s).
         raise ValueError(
             "danbooru needs username + api_key (set secrets.danbooru in Settings)"
         )
 
-    # 没传 client 就建一个临时的（按 secrets.download.* 调速）；session 优先
+    # If no client was passed, build a temporary one (rate-tuned via
+    # secrets.download.*); session takes priority
     owns_client = False
     if client is None:
         try:
@@ -157,8 +166,9 @@ def _download_with_client(
     failed = 0
     page = 1
     api_limit = 100 if opts.api_source == "gelbooru" else 200
-    # 跨 worker 线程共享的「已 emit」计数器，仅供 _fetch_one 实时打 [N/count] 用。
-    # 与主线程的 `saved` 在正常路径会一致；retry / 失败时 emitted 不增。
+    # An "emitted" counter shared across worker threads, only used by
+    # _fetch_one to print live [N/count] progress. Matches the main thread's
+    # `saved` on the normal path; not incremented on retry / failure.
     emit_lock = threading.Lock()
     emit_state = {"n": 0}
 
@@ -184,7 +194,7 @@ def _download_with_client(
             on_progress("[done] no more posts (server returned empty page)")
             break
 
-        # 收集本页所有「待下载」候选；并发拉图
+        # Collect all "to-download" candidates on this page; fetch them concurrently
         candidates: list[tuple[str, str, str, Optional[str], Path]] = []
         page_valid = 0
         for post in posts:
@@ -204,7 +214,7 @@ def _download_with_client(
                 continue
             candidates.append((post_id, file_url, file_ext, tags_str, target))
 
-        # 拉图函数（含失败重试）；每张独立调度到 worker pool
+        # Image fetch function (with retry on failure); each image is scheduled independently to the worker pool
         referer = opts.base_url() + "/"
 
         def _fetch_one(item: tuple[str, str, str, Optional[str], Path]) -> Path:
@@ -222,9 +232,11 @@ def _download_with_client(
                         referer=referer,
                         username=opts.username,
                     )
-                    # 实时进度（worker 线程内）：每张拉完立即 emit，让 LogTailer
-                    # 把 SSE 推到前端。否则 parallel_download 会一直阻塞，整段
-                    # 下载阶段没有日志，前端看上去像「卡住」。
+                    # Live progress (inside the worker thread): emit immediately
+                    # after each image finishes, so LogTailer can push SSE to
+                    # the frontend. Otherwise parallel_download would just
+                    # block the whole time, with no logs during the entire
+                    # download phase, making the frontend look "stuck".
                     with emit_lock:
                         emit_state["n"] += 1
                         n = emit_state["n"]
@@ -249,8 +261,9 @@ def _download_with_client(
                 on_progress("[cancel] user requested stop")
                 return saved
             if exc is not None:
-                # 取消引发的 RuntimeError("canceled") 在 _fetch_one 里抛出，
-                # 不当成「下载失败」report，否则用户取消会看到一堆 [err]。
+                # A RuntimeError("canceled") raised from _fetch_one due to
+                # cancellation isn't reported as a "download failed" —
+                # otherwise the user would see a pile of [err] on cancel.
                 if isinstance(exc, RuntimeError) and "canceled" in str(exc):
                     continue
                 on_progress(f"[err] {target.name}: {exc}")
@@ -264,7 +277,8 @@ def _download_with_client(
             if on_image_saved:
                 on_image_saved(final)
             saved += 1
-            # 进度行已在 _fetch_one 内实时 emit，这里只做账面计数 / 提前 break。
+            # The progress line was already emitted live inside _fetch_one;
+            # here we just do the bookkeeping count / break early.
             if saved >= opts.count:
                 break
 
@@ -289,13 +303,16 @@ def _download_with_client(
 
 
 def estimate(opts: DownloadOptions) -> int:
-    """轻量调用 API 估算 tag（含 exclude）命中量；失败返回 -1（未知）。
+    """Lightweight API call estimating a tag's (including exclude) hit count;
+    returns -1 (unknown) on failure.
 
-    v0.5.2 hotfix 漏修：search_posts 已经走 booru_api 的 UA / Accept 头过 CF，
-    但 estimate 这条单独的"轻量"路径仍是裸 requests.get（默认 UA
-    python-requests/X.Y.Z）→ danbooru 的 CF 把它当 bot 拦掉 → 抛异常 →
-    永远返回 -1（未知）。修：复用 booru_api._api_headers 同款 UA；danbooru
-    端有 basic auth 时一并带上让 rate limit 按账户算。
+    v0.5.2 hotfix gap: search_posts already goes through booru_api's UA /
+    Accept headers to get past CF, but this separate "lightweight" estimate
+    path was still a bare requests.get (default UA python-requests/X.Y.Z)
+    -> danbooru's CF treats it as a bot and blocks it -> raises an exception
+    -> always returns -1 (unknown). Fix: reuse the same UA as
+    booru_api._api_headers; also pass basic auth when available on the
+    danbooru side so rate limiting is counted per account.
     """
     query = opts.effective_tag_query()
     proxies = get_proxy_dict()

@@ -1,27 +1,30 @@
 import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 
-// 测试环境里默认 locale = zh：上游测试断言中文字面量。本 fork 应用默认 'en'，
-// import 后同步切到 zh（import 会被 hoist，localStorage 预写没用）。
+// Test environment default locale = en: tests assert English literals.
+// Explicitly force it after import (import gets hoisted, so pre-writing
+// localStorage wouldn't help) so the suite doesn't depend on init()'s default.
 import i18n, { i18nReady } from '../i18n'
 // Both calls are asynchronous and both had to be awaited. `void`-ing
 // `changeLanguage` left the locale wherever `init()` put it (the app default,
 // 'en'), and awaiting only `changeLanguage` was still not enough: `init()`
-// applies its own `lng` when it settles, overwriting an earlier switch. So the
-// 26 tests asserting Chinese labels were reading an English UI.
+// applies its own `lng` when it settles, overwriting an earlier switch.
 await i18nReady
-await i18n.changeLanguage('zh')
+await i18n.changeLanguage('en')
 
-// jsdom 装的 fetch 会真去打网络。tagDict store / 其他 mount-time 请求在测试态下
-// 打 404 是预期分支，但 `network error` 会让 React 报 act() warning。给 fetch 装
-// 默认 stub：所有未显式 mock 的请求都返 404。具体测试可在自己的 beforeEach 里
-// vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(...) 覆盖。
+// jsdom's fetch actually hits the network. tagDict store / other mount-time
+// requests getting a 404 in test mode is an expected branch, but a
+// `network error` makes React log an act() warning. Install a default fetch
+// stub: any request not explicitly mocked returns 404. Individual tests can
+// override this in their own beforeEach with
+// vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(...).
 if (typeof globalThis.fetch === 'function') {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 404 })))
 }
 
-// jsdom 没有 ResizeObserver（useAutoGrowTextarea 等会 new 它撑高 textarea）；装个
-// no-op，避免组件 mount 时抛错。测试不校验自动撑高，回调不触发即可。
+// jsdom has no ResizeObserver (useAutoGrowTextarea etc. `new` it to grow the
+// textarea); install a no-op so components don't throw on mount. Tests don't
+// verify auto-grow, so the callback never firing is fine.
 if (typeof globalThis.ResizeObserver === 'undefined') {
   globalThis.ResizeObserver = class {
     observe() {}
@@ -30,8 +33,9 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
   } as unknown as typeof ResizeObserver
 }
 
-// 把 tagDict store 预热到 'empty' 状态：useTagDict 的 useEffect 看到非 idle 就
-// 跳过 loadDict，避免组件 mount 时触发异步 fetch + act() warning。需要看 dict
-// ready 状态的具体测试可以 __setStateForTest 覆盖。
+// Pre-warm the tagDict store to the 'empty' state: useTagDict's useEffect
+// skips loadDict when the status isn't idle, avoiding an async fetch + act()
+// warning on component mount. Tests that need to see a ready dict state can
+// override this with __setStateForTest.
 import { __setStateForTest } from '../tagDict/store'
 __setStateForTest({ status: 'empty' })

@@ -1,21 +1,21 @@
-"""Phase 推进 / 完成校验 — ADR-0007 §11.5-A / §11.5-B。
+"""Phase advancement / completion validation -- ADR-0007 sections 11.5-A / 11.5-B.
 
-Phase enum 见 ``versions.VersionPhase``：
-``curating → tagging → editing → regularizing → ready``。
+Phase enum, see ``versions.VersionPhase``:
+``curating -> tagging -> editing -> regularizing -> ready``.
 
-完成判定（§11.5-B）：
-- ``curating``: ``train/ ≥ 1`` 张图
-- ``tagging``: caption 100% 覆盖（每张 train 图都有同名 .txt）
-- ``editing``: 同 tagging（兜底，防 user 删了 caption）
-- ``regularizing``: 无 reg_build job 处于 pending/running（可跳过，§11.5-A SKIPPABLE）
-- ``ready``: training config 文件存在 + schema 校验通过
+Completion criteria (section 11.5-B):
+- ``curating``: at least 1 image in ``train/``
+- ``tagging``: 100% caption coverage (every train image has a same-named .txt)
+- ``editing``: same as tagging (fallback, in case the user deleted a caption)
+- ``regularizing``: no reg_build job pending/running (skippable, section 11.5-A SKIPPABLE)
+- ``ready``: training config file exists + schema validation passes
 
-cursor 推进规则（§11.5-A）：
-- 单向（只前进）
-- header "下一步" 按钮永远可点；校验失败给用户提示
-- 必经 phase 校验失败 → 不推进
-- 可跳过 phase 校验 = 无 concurrent job（regularizing 无 confirm dialog）
-- cursor 不主动回退（§11.5-C；user 删数据后下次 next 校验时才提示）
+Cursor advancement rules (section 11.5-A):
+- one-directional (forward only)
+- the header "Next" button is always clickable; validation failures show the user a hint
+- a mandatory phase failing validation -> does not advance
+- a skippable phase's validation = no concurrent job (regularizing has no confirm dialog)
+- the cursor never moves backward on its own (section 11.5-C; only prompted on the next `next` check after the user deletes data)
 """
 from __future__ import annotations
 
@@ -30,47 +30,47 @@ from .. import version_config as _version_config
 
 @dataclass(frozen=True)
 class CheckResult:
-    """Phase 校验结果。ok=True 时 reason 可空；ok=False 时 reason 是 user 可读提示。"""
+    """Phase validation result. When ok=True, reason may be empty; when ok=False, reason is a user-readable message."""
     ok: bool
     reason: str = ""
 
 
 # ---------------------------------------------------------------------------
-# 单 phase 校验函数（参数取最小所需，便于 unit test 隔离）
+# Per-phase validation functions (take the minimal args needed, for easy unit-test isolation)
 # ---------------------------------------------------------------------------
 
 
 def check_curating(stats: dict[str, Any]) -> CheckResult:
-    """train/ ≥ 1 张图（§11.5-B）。"""
+    """At least 1 image in train/ (section 11.5-B)."""
     if stats.get("train_image_count", 0) < 1:
-        return CheckResult(False, "训练集为空，请先选择训练图")
+        return CheckResult(False, "Training set is empty, please select training images first")
     return CheckResult(True)
 
 
 def check_tagging(stats: dict[str, Any]) -> CheckResult:
-    """caption 100% 覆盖（§11.5-B）。"""
+    """100% caption coverage (section 11.5-B)."""
     total = int(stats.get("train_image_count", 0))
     tagged = int(stats.get("tagged_image_count", 0))
     if total < 1:
-        return CheckResult(False, "训练集为空，请先选择训练图")
+        return CheckResult(False, "Training set is empty, please select training images first")
     if tagged < total:
         missing = total - tagged
-        return CheckResult(False, f"还有 {missing} 张未生成 caption，请重跑或删除")
+        return CheckResult(False, f"{missing} image(s) still have no caption generated; please rerun or delete them")
     return CheckResult(True)
 
 
 def check_editing(stats: dict[str, Any]) -> CheckResult:
-    """editing 同 tagging（兜底，§11.5-B；大多数情况自动通过）。"""
+    """editing is the same as tagging (fallback, section 11.5-B; passes automatically in most cases)."""
     return check_tagging(stats)
 
 
 def check_regularizing(
     conn: sqlite3.Connection, version_id: int
 ) -> CheckResult:
-    """无 reg_build 作业处于 pending/running（§11.5-B；可跳过 = 不强求正则集非空）。"""
+    """No reg_build job pending/running (section 11.5-B; skippable = doesn't require a non-empty reg set)."""
     from . import jobs as project_jobs
     if project_jobs.count_active(conn, version_id=version_id, kind="reg_build") > 0:
-        return CheckResult(False, "正则任务进行中，请等待完成")
+        return CheckResult(False, "A regularization task is in progress, please wait for it to finish")
     return CheckResult(True)
 
 
@@ -79,43 +79,43 @@ def check_regularizing(
 def check_preprocessing(
     conn: sqlite3.Connection, version_id: int
 ) -> CheckResult:
-    """无 preprocess job 处于 pending/running（ADR 0010；可跳过 = 不强求处理过）。
+    """No preprocess job pending/running (ADR 0010; skippable = doesn't require everything to be processed).
 
-    跟 `check_regularizing` 同 pattern——预处理是可选 phase（upscale / crop /
-    去重等都可跳过，接受训练时默认放大算法）；校验仅防 concurrent job 撞车。
+    Same pattern as `check_regularizing` -- preprocessing is an optional phase (upscale / crop /
+    dedup etc. can all be skipped, falling back to the default upscale algorithm at training time); this check only guards against a concurrent job collision.
     """
     from . import jobs as project_jobs
     if project_jobs.count_active(conn, version_id=version_id, kind="preprocess") > 0:
-        return CheckResult(False, "预处理任务进行中，请等待完成")
+        return CheckResult(False, "A preprocessing task is in progress, please wait for it to finish")
     return CheckResult(True)
 
 
 def check_ready(
     project: dict[str, Any], version: dict[str, Any]
 ) -> CheckResult:
-    """training config 存在 + schema 校验通过（§11.5-B）。"""
+    """training config exists + schema validation passes (section 11.5-B)."""
     try:
         _version_config.read_version_config(project, version)
     except _version_config.VersionConfigError as exc:
-        return CheckResult(False, f"请先完成训练配置：{exc}")
+        return CheckResult(False, f"Please finish the training config first: {exc}")
     return CheckResult(True)
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher + 推进
+# Dispatcher + advancement
 # ---------------------------------------------------------------------------
 
 
 def check_phase(
     conn: sqlite3.Connection, version_id: int, phase: str
 ) -> CheckResult:
-    """根据 phase 选择对应 check 函数；version / project 不存在也以 CheckResult 返回。"""
+    """Selects the matching check function for the phase; returns a CheckResult even if the version / project doesn't exist."""
     v = _versions.get_version(conn, version_id)
     if not v:
-        return CheckResult(False, "版本不存在")
+        return CheckResult(False, "Version does not exist")
     p = _projects.get_project(conn, int(v["project_id"]))
     if not p:
-        return CheckResult(False, "项目不存在")
+        return CheckResult(False, "Project does not exist")
 
     P = _versions.VersionPhase
     if phase == P.CURATING:
@@ -128,40 +128,40 @@ def check_phase(
         return check_regularizing(conn, version_id)
     if phase == P.READY:
         return check_ready(p, v)
-    return CheckResult(False, f"未知 phase: {phase}")
+    return CheckResult(False, f"Unknown phase: {phase}")
 
 
 def advance_phase(
     conn: sqlite3.Connection, version_id: int
 ) -> tuple[bool, CheckResult, Optional[str]]:
-    """尝试推进 phase cursor 到下一个（必经/可跳过都走这个）。
+    """Attempts to advance the phase cursor to the next phase (used for both mandatory and skippable phases).
 
-    返回 ``(advanced, result, new_phase)``:
-    - ``advanced=True``: cursor 已推进；``new_phase`` 是新 phase 名
-    - ``advanced=False``: ``result.reason`` 含失败原因；``new_phase=None``
+    Returns ``(advanced, result, new_phase)``:
+    - ``advanced=True``: the cursor advanced; ``new_phase`` is the new phase name
+    - ``advanced=False``: ``result.reason`` holds the failure reason; ``new_phase=None``
 
-    ``ready`` 是最后一个 phase — 调用方收到 ``(False, ok-but-end, None)`` 后
-    应转入 status: ``preparing → training`` + submit task（即 enqueue 训练）。
+    ``ready`` is the last phase -- after the caller receives ``(False, ok-but-end, None)``,
+    it should transition status: ``preparing -> training`` + submit a task (i.e. enqueue training).
     """
     v = _versions.get_version(conn, version_id)
     if not v:
-        return False, CheckResult(False, "版本不存在"), None
+        return False, CheckResult(False, "Version does not exist"), None
 
     current_phase = _versions.get_phase(v)
     order = _versions.VersionPhase.ORDER
 
-    # phase 不在已知集合 → fallback 拒绝
+    # phase not in the known set -> reject via fallback
     if current_phase not in order:
-        return False, CheckResult(False, f"未知 phase: {current_phase}"), None
+        return False, CheckResult(False, f"Unknown phase: {current_phase}"), None
 
-    # 已到最后 phase（ready）→ phase 不再推进；由调用方触发 status 转换
+    # already at the last phase (ready) -> phase no longer advances; the caller triggers the status transition
     idx = order.index(current_phase)
     if idx >= len(order) - 1:
         result = check_phase(conn, version_id, current_phase)
-        # 即使到 ready 也跑一次校验，让调用方决定是否进 training
+        # even at ready, run a validation pass so the caller can decide whether to move into training
         return False, result, None
 
-    # 走校验
+    # run validation
     result = check_phase(conn, version_id, current_phase)
     if not result.ok:
         return False, result, None
@@ -174,22 +174,22 @@ def advance_phase(
 def skip_phase(
     conn: sqlite3.Connection, version_id: int
 ) -> tuple[bool, CheckResult, Optional[str]]:
-    """跳过当前 phase（仅 ``SKIPPABLE`` 集合允许；当前 = preprocessing /
-    tagging / regularizing）。
+    """Skips the current phase (only allowed for the ``SKIPPABLE`` set; currently = preprocessing /
+    tagging / regularizing).
 
-    与 ``advance_phase`` 区别：不要求"完成条件"满足（如不要求生成正则集 /
-    不要求每张图都预处理过 / 不要求每张图都有 caption），仅校验"无 concurrent
-    job"防止状态错乱。
+    Difference from ``advance_phase``: doesn't require the "completion condition" to be met (e.g. doesn't require
+    generating a reg set / doesn't require every image to be preprocessed / doesn't require every image to have a caption); it only checks "no concurrent
+    job" to prevent state corruption.
     """
     v = _versions.get_version(conn, version_id)
     if not v:
-        return False, CheckResult(False, "版本不存在"), None
+        return False, CheckResult(False, "Version does not exist"), None
 
     current_phase = _versions.get_phase(v)
     if current_phase not in _versions.VersionPhase.SKIPPABLE:
-        return False, CheckResult(False, f"phase {current_phase} 不可跳过"), None
+        return False, CheckResult(False, f"phase {current_phase} cannot be skipped"), None
 
-    # skip 时仍校验"无 concurrent job"防止状态错乱
+    # even when skipping, still check "no concurrent job" to prevent state corruption
     if current_phase == _versions.VersionPhase.REGULARIZING:
         result = check_regularizing(conn, version_id)
         if not result.ok:
@@ -202,7 +202,7 @@ def skip_phase(
     order = _versions.VersionPhase.ORDER
     idx = order.index(current_phase)
     if idx >= len(order) - 1:
-        return False, CheckResult(False, "已到最后 phase"), None
+        return False, CheckResult(False, "Already at the last phase"), None
     next_phase = order[idx + 1]
     _versions.update_version(conn, version_id, phase=next_phase)
     return True, CheckResult(True), next_phase

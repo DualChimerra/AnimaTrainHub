@@ -1,15 +1,17 @@
-"""v9 → v10: tasks 加 request_trace_id 列（ADR-0009 PR-1 C6 trace_id 跨进程贯穿）。
+"""v9 -> v10: adds a request_trace_id column to tasks (ADR-0009 PR-1 C6, trace_id threaded across processes).
 
-API endpoint 入 task 时写 contextvar trace_id（HTTP 请求那一刻的 ID）；
-supervisor dispatcher 拉起 task 时读这个列 → env 注入 worker 子进程 →
-worker bootstrap bind contextvar。
+When an API endpoint enqueues a task, it writes the contextvar trace_id (the ID at the moment
+of the HTTP request); when the supervisor dispatcher picks the task up, it reads this column ->
+injects it into the worker subprocess's env -> the worker bootstrap binds the contextvar.
 
-不是这样做的话：用户点"开始训练"那一刻的 trace_id 跟 dispatcher 后台
-spawn 那一刻的 trace_id 是两个不同 ID，trace_id 链路在 spawn 那一步断开。
-用户截图 toast 的 trace 跟 worker log 里的 trace 对不上 — PR-1 C5 引入
-trace_id 的价值就废了。
+Without this: the trace_id at the moment the user clicked "start training" and the trace_id at
+the moment the dispatcher spawns it in the background would be two different IDs, and the
+trace_id chain would break right at the spawn step. The trace in the user's screenshot/toast
+wouldn't match the trace in the worker log -- defeating the whole point of introducing trace_id
+in PR-1 C5.
 
-A round2 §4.4 强调："必须并入 PR-LOG-3 否则 trace_id 链路是断的"。
+Round 2 review SS4.4 stressed: "this must land together with PR-LOG-3 or the trace_id chain
+is broken".
 """
 from __future__ import annotations
 
@@ -21,5 +23,5 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN request_trace_id TEXT")
         conn.commit()
     except sqlite3.OperationalError:
-        # 列已存在（migration 容错）。
+        # Column already exists (migration is tolerant of this).
         pass

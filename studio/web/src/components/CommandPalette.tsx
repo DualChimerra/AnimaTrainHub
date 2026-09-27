@@ -16,9 +16,9 @@ interface Item {
   group: string
   kind: Kind
   icon: IconKey
-  /** 路由跳转。跟 action 二选一。 */
+  /** Route navigation. Mutually exclusive with action. */
   path?: string
-  /** 自定义动作（如打开抽屉）。优先于 path。 */
+  /** Custom action (e.g. opening a drawer). Takes priority over path. */
   action?: () => void
 }
 
@@ -28,7 +28,7 @@ const SEARCH_ICON = (
   </svg>
 )
 
-/** 每个结果左侧的小图标（prototype CommandPalette：icon + label + sub + chevron）。 */
+/** Small icon on the left of each result (prototype CommandPalette: icon + label + sub + chevron). */
 const ITEM_ICONS: Record<IconKey, React.ReactNode> = {
   folder:  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>,
   queue:   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h16M4 12h10M4 18h16"/><circle cx="18" cy="12" r="2" fill="currentColor"/></svg>,

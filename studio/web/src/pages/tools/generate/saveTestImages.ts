@@ -1,17 +1,18 @@
-/** 测试出图自动落盘（Settings → testing → save_test_images 开启时）。
+/** Auto-save test-generated images to disk (when Settings → testing → save_test_images is on).
  *
- * 路径：
+ * Paths:
  *  - single: `studio_data/test/<YYYY-MM-DD>/single/single image N.png`
  *  - xy:     `studio_data/test/<YYYY-MM-DD>/xy/xy plot N/{xy plot.png + cell x{xi} y{yi}.png ...}`
  *
- * single 每张 sample 单独上传（一图一 POST）；
- * xy 一次 multipart 发：composite + N 张 cell + cells_manifest（按 cell
- * 物化的 single-snapshot），server 端落到同一文件夹下，atomic 整个 commit。
+ * single: each sample is uploaded separately (one image per POST);
+ * xy: sent in one multipart request: composite + N cells + cells_manifest (a per-cell
+ * materialized single-snapshot); the server writes them all into the same folder, atomic across the whole commit.
  *
- * 上传时附 params JSON（GenerateParamsSnapshot）：后端写进 PNG `anima_params`
- * tEXt + single 写 a1111 `parameters` 块，供历史栏回看 / 用户拷走 PNG 复用参数。
+ * The upload includes the params JSON (GenerateParamsSnapshot): the backend writes it into the
+ * PNG's `anima_params` tEXt chunk, and for single also writes the a1111 `parameters` block, for
+ * the history rail to look back at / for the user to copy the PNG and reuse its parameters.
  *
- * 失败 / 后端 403（开关被关）都静默吞掉 —— 不打扰用户主流程。
+ * Failure / a backend 403 (the toggle is off) are both swallowed silently -- doesn't interrupt the user's main flow.
  */
 import { api } from '../../../api/client'
 import { composeXYMatrix, type ExportInput } from './exportXY'
@@ -30,8 +31,8 @@ interface XYSaveResult {
   cells: string[]
 }
 
-/** 落盘 single 模式所有 sample。返回每张图的 server path（与 filenames 同序，
- *  失败的位置为 null）。调用者用第 0 张的 path 作为 entry.diskPath（去重 key）。 */
+/** Saves every sample in single mode to disk. Returns each image's server path (same order as
+ *  filenames; a failed slot is null). The caller uses the 0th path as entry.diskPath (a dedup key). */
 export async function saveSingleSamples(
   taskId: number,
   filenames: string[],
@@ -47,8 +48,9 @@ export async function saveSingleSamples(
       fd.append('mode', 'single')
       fd.append('image', blob, 'single.png')
       fd.append('params', JSON.stringify(params))
-      // 0.17 item3：带上 task_id，server enrich 进 PNG anima_params，`?task=` 深链
-      // 回看才能按 task_id 命中该磁盘条目（此前漏发 → 落盘图都无 task_id → 回看失败）。
+      // 0.17 item3: include task_id so the server enriches it into the PNG's anima_params; only
+      // then can the `?task=` deep link look-back match this disk entry by task_id (previously
+      // omitted → saved images had no task_id → look-back failed).
       fd.append('task_id', String(taskId))
       const r = await fetch('/api/generate/save', { method: 'POST', body: fd })
       if (!r.ok) { paths.push(null); continue }
@@ -61,8 +63,8 @@ export async function saveSingleSamples(
   return paths
 }
 
-/** 落盘 xy 文件夹（composite + 每 cell 原图）。返回 server 端文件夹路径（失败为 null）。
- *  `xySnapshot.mode` 必须是 'xy'；本函数会派生 per-cell single-snapshot。 */
+/** Saves an xy folder to disk (composite + each cell's original image). Returns the server-side
+ *  folder path (null on failure). `xySnapshot.mode` must be 'xy'; this function derives the per-cell single-snapshot. */
 export async function saveXYMatrix(
   input: ExportInput,
   xySnapshot: GenerateParamsSnapshot,
@@ -72,7 +74,7 @@ export async function saveXYMatrix(
     const xLoraIndex = xySnapshot.xy_draft?.x.loraIndex ?? null
     const yLoraIndex = xySnapshot.xy_draft?.y?.loraIndex ?? null
 
-    // 1) 拉所有 cell PNG bytes + 构 per-cell single-snapshot
+    // 1) Fetch every cell's PNG bytes + build a per-cell single-snapshot
     type CellEntry = { xi: number; yi: number; blob: Blob; params: GenerateParamsSnapshot }
     const cellEntries: CellEntry[] = []
     for (const s of samples) {
@@ -90,20 +92,20 @@ export async function saveXYMatrix(
         })
         cellEntries.push({ xi: s.xy.xi, yi: s.xy.yi, blob, params: cellParams })
       } catch {
-        // 单 cell 拉失败跳过；server 会按 manifest 校验，缺 cell 就不发送
+        // A single cell's fetch failed, skip it; the server validates against the manifest, and a missing cell just isn't sent
       }
     }
     if (cellEntries.length === 0) return null
 
-    // 2) composite 大图（沿用现成 composeXYMatrix）
+    // 2) Composite the full image (reuse the existing composeXYMatrix)
     const composite = await composeXYMatrix(input)
 
-    // 3) multipart 一次发：composite + N 张 cell + cells_manifest
+    // 3) Send everything in one multipart request: composite + N cells + cells_manifest
     const fd = new FormData()
     fd.append('mode', 'xy')
     fd.append('image', composite, 'xy plot.png')
     fd.append('params', JSON.stringify(xySnapshot))
-    fd.append('task_id', String(taskId))  // 0.17 item3：同 single，供 ?task= 深链回看命中
+    fd.append('task_id', String(taskId))  // 0.17 item3: same as single, so `?task=` deep-link look-back matches
     const manifest = cellEntries.map(({ xi, yi, params }) => ({ xi, yi, params }))
     fd.append('cells_manifest', JSON.stringify(manifest))
     for (const { xi, yi, blob } of cellEntries) {

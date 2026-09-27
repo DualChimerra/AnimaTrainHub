@@ -1,12 +1,12 @@
-"""Version 私有 config（PP6.2）。
+"""Version private config (PP6.2).
 
-每个 version 自己有一份 yaml 训练配置，存在
-`studio_data/projects/{id}-{slug}/versions/{label}/config.yaml`。
-和全局 `studio_data/presets/{name}.yaml` **完全独立** —— 用户「换预设」时
-从全局复制一份进来，「保存为预设」时反向导出去；私有 config 修改不会回流到
-预设池。
+Each version has its own yaml training config, stored at
+`studio_data/projects/{id}-{slug}/versions/{label}/config.yaml`.
+This is **completely independent** from the global `studio_data/presets/{name}.yaml` -- when the user "switches preset",
+it's copied in from the global one, and "save as preset" exports it back out the other way; edits to the private config never flow back into
+the preset pool.
 
-Schema 校验沿用 `TrainingConfig`（与 preset 同一 model）。
+Schema validation reuses `TrainingConfig` (the same model as presets).
 """
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ from studio.domain.errors import DomainError
 
 
 class VersionConfigError(DomainError):
-    """version 私有 config I/O 错误。
+    """version private config I/O error.
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    PR-2 C3 added a DomainError base -- the handler auto-translates it into the dual-write envelope.
     """
     default_code = "version_config.error"
 
@@ -37,7 +37,7 @@ CONFIG_FILENAME = "config.yaml"
 
 
 # ---------------------------------------------------------------------------
-# 项目特定字段（PP6 spec §关键约定）
+# Project-specific fields (PP6 spec section on key conventions)
 # ---------------------------------------------------------------------------
 
 PROJECT_SPECIFIC_FIELDS: frozenset[str] = frozenset({
@@ -50,11 +50,11 @@ PROJECT_SPECIFIC_FIELDS: frozenset[str] = frozenset({
     "trigger_word",
 })
 
-# 续训字段。跟其余 PROJECT_SPECIFIC_FIELDS 不同：那些是**派生**的（由 project +
-# version 唯一确定，任何时候重算都得同一个值），这两个是**用户显式设的**，重算
-# 只能得到 None。fork preset / 从源 version 复制时该清空（防路径跨项目泄漏），
-# 但幂等回写（入队时同步全局模型路径）必须留住 —— 否则用户刚设的接续起点会在
-# 点「开始训练」的瞬间被抹掉，且不报错，训练静默地从零开始。
+# Resume fields. Different from the rest of PROJECT_SPECIFIC_FIELDS: those are **derived** (uniquely determined by
+# project + version, always recomputing to the same value), while these two are **explicitly set by the user**, and recomputing
+# can only get None. They should be cleared on fork preset / copy from a source version (to prevent paths leaking across projects),
+# but must be preserved on an idempotent write-back (syncing global model paths at enqueue time) -- otherwise the resume point the user just set would be
+# wiped the instant they click "start training", with no error, and training would silently start from scratch.
 RESUME_FIELDS: frozenset[str] = frozenset({
     "resume_lora",
     "resume_state",
@@ -65,14 +65,14 @@ def project_specific_overrides(
     project: dict[str, Any], version: dict[str, Any], *,
     reset_resume: bool = True,
 ) -> dict[str, Any]:
-    """根据 project + version 算出项目特定字段的值。
+    """Computes project-specific field values from project + version.
 
-    `data_dir` / `output_dir` / `output_name` 永远确定地填上；
-    `reg_data_dir` 只有 reg 集存在（meta.json）才填，否则空（让 trainer 走默认）。
-    `resume_lora` / `resume_state` 默认空 —— 用户要接续训练时显式 PUT 改写；
-    `reset_resume=False` 时不返回这两个键，调用方保留 config 里的现值。
-    `trigger_word` 来自 version 表（Step 4 Tagging 写入），保证 yaml 与 caption
-    同源，runtime bootstrap_phase 会据此把 trigger 注入 sample_prompt。
+    `data_dir` / `output_dir` / `output_name` are always deterministically filled in;
+    `reg_data_dir` is only filled when the reg set exists (meta.json), otherwise empty (letting the trainer use its default).
+    `resume_lora` / `resume_state` default to empty -- the user explicitly PUTs to change them when resuming training;
+    when `reset_resume=False`, these two keys aren't returned, so the caller keeps the current value in config.
+    `trigger_word` comes from the version table (written by Step 4 Tagging), keeping the yaml and caption
+    in sync; the runtime's bootstrap_phase injects the trigger into sample_prompt based on it.
     """
     pid = int(project["id"])
     slug = str(project["slug"])
@@ -98,7 +98,7 @@ def project_specific_overrides(
 
 
 # ---------------------------------------------------------------------------
-# 文件路径
+# File paths
 # ---------------------------------------------------------------------------
 
 
@@ -114,14 +114,14 @@ def has_version_config(project: dict[str, Any], version: dict[str, Any]) -> bool
 
 
 # ---------------------------------------------------------------------------
-# 读 / 写
+# Read / write
 # ---------------------------------------------------------------------------
 
 
 def read_version_config(
     project: dict[str, Any], version: dict[str, Any]
 ) -> dict[str, Any]:
-    """读 version 私有 config；不存在抛 VersionConfigError。"""
+    """Reads the version's private config; raises VersionConfigError if it doesn't exist."""
     cfg, _, _ = read_version_config_with_warnings(project, version)
     return cfg
 
@@ -129,11 +129,11 @@ def read_version_config(
 def read_version_config_with_warnings(
     project: dict[str, Any], version: dict[str, Any]
 ) -> tuple[dict[str, Any], list[str], list[str]]:
-    """读 version 私有 config 同时返回容错校验产出的 (dropped, defaulted) 字段列表。
+    """Reads the version's private config, also returning the (dropped, defaulted) field lists produced by tolerant validation.
 
-    用于 GET 端点把 compat 信息透传给前端（顶部 banner 提示）。InfoNoise 老 config
-    互斥被 _tolerant_validate 自动关 InfoNoise 时，"infonoise_enabled" 会出现在
-    defaulted 里。
+    Used by the GET endpoint to pass compat info through to the frontend (the top banner hint). When InfoNoise's old config
+    mutual-exclusion is auto-turned-off by _tolerant_validate, "infonoise_enabled" shows up in
+    defaulted.
     """
     p = version_config_path(project, version)
     if not p.exists():
@@ -148,26 +148,26 @@ def read_version_config_with_warnings(
             code="version.config_invalid",
         )
     cfg, dropped, defaulted = _tolerant_validate(raw)
-    # overlay 在 absolutize 之前——覆盖值与 yaml 值走同一套路径归一
+    # overlay runs before absolutize -- override values and yaml values go through the same path-normalization pipeline
     data = apply_global_path_overlay(cfg.model_dump(mode="python"))
     return _absolutize_model_paths(data), dropped, defaulted
 
 
-#: auto_sync_paths=ON 时由全局设置管理的 4 个模型路径字段（Train 页对应
-#: 字段锁定并标「自动 · 全局设置」——读取出口 overlay 让徽标语义成立：
-#: 全局 selected / selected_te 变化后，已有 version 的显示与派生链
-#: （训练入队 / reg / eval）即时跟随，而非停留在创建时的快照）
+#: The 4 model path fields managed by the global settings when auto_sync_paths=ON (the Train page's corresponding
+#: fields are locked and marked "Auto - global settings" -- this read-path overlay is what makes that badge true:
+#: after the global selected / selected_te changes, an existing version's display and derived chain
+#: (training enqueue / reg / eval) follow immediately, instead of staying frozen at the creation-time snapshot).
 GLOBAL_MODEL_PATH_FIELDS = (
     "transformer_path", "vae_path", "text_encoder_path", "t5_tokenizer_path",
 )
 
 
 def apply_global_path_overlay(data: dict[str, Any]) -> dict[str, Any]:
-    """auto_sync_paths=ON 时用当前全局设置覆盖 4 个模型路径字段。
+    """Overrides the 4 model path fields with the current global settings when auto_sync_paths=ON.
 
-    与 fork / save_preset / bundle 导入的「写入时覆盖」同一语义的读取面；
-    OFF（独立模型用户）原样返回。失败静默返回原值（读取不因 secrets /
-    catalog 异常而失败）。
+    The same read-path semantics as the "override on write" used by fork / save_preset / bundle import;
+    when OFF (a standalone-model user), returns as-is. Fails silently, returning the original value (a read shouldn't fail
+    just because secrets / catalog raised an exception).
     """
     try:
         from . import models as model_downloader
@@ -186,13 +186,13 @@ def write_version_config(
     project: dict[str, Any], version: dict[str, Any], data: dict[str, Any],
     *, force_project_overrides: bool = True, reset_resume: bool = True,
 ) -> Path:
-    """写 version 私有 config。
+    """Writes the version's private config.
 
-    `force_project_overrides=True`（默认）：用 `project_specific_overrides`
-    强制覆盖 PROJECT_SPECIFIC_FIELDS，防止用户绕过前端 disabled 改路径。
+    `force_project_overrides=True` (default): uses `project_specific_overrides` to
+    forcibly override PROJECT_SPECIFIC_FIELDS, preventing the user from bypassing the frontend's disabled state to change paths.
 
-    `reset_resume=False`：路径字段照常强制刷新，但 RESUME_FIELDS 保留 `data`
-    里的现值 —— 给「读出来再写回去」的幂等同步用（见 enqueue_version_training）。
+    `reset_resume=False`: path fields are still force-refreshed as usual, but RESUME_FIELDS keeps the
+    current value from `data` -- used for the idempotent "read it back out then write it back in" sync (see enqueue_version_training).
     """
     payload = dict(data)
     if force_project_overrides:
@@ -200,12 +200,12 @@ def write_version_config(
             project_specific_overrides(project, version, reset_resume=reset_resume)
         )
     cfg, _, _ = _tolerant_validate(payload)
-    # 落盘前裁掉 show_when 为假的字段（UI 不可见 = 不生效），读取时 pydantic
-    # 会把缺失字段补回 schema 默认值，GET 返回给前端的仍是完整 config。
+    # Fields whose show_when is false are trimmed before writing to disk (invisible in the UI = doesn't take effect); on read, pydantic
+    # fills missing fields back in with the schema defaults, so the API still returns a complete config to the frontend.
     dumped = prune_inactive_fields(cfg.model_dump(mode="python"))
     p = version_config_path(project, version)
     p.parent.mkdir(parents=True, exist_ok=True)
-    # 序列化出口统一 render_config_yaml —— 预览端点与落盘同一条路径(R4)
+    # The serialization exit point is unified as render_config_yaml -- the preview endpoint and disk writes share the same path (R4)
     from .presets.io import render_config_yaml
 
     p.write_text(render_config_yaml(dumped), encoding="utf-8")
@@ -215,7 +215,7 @@ def write_version_config(
 def delete_version_config(
     project: dict[str, Any], version: dict[str, Any]
 ) -> bool:
-    """删除 version 私有 config。已删返回 True，本来就没有返回 False。"""
+    """Deletes the version's private config. Returns True if it was deleted, False if there was none to begin with."""
     p = version_config_path(project, version)
     if p.exists():
         p.unlink()
@@ -224,14 +224,14 @@ def delete_version_config(
 
 
 # ---------------------------------------------------------------------------
-# 工具
+# Utilities
 # ---------------------------------------------------------------------------
 
 
 def get_project_and_version(
     conn, project_id: int, version_id: int
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """便捷：从 db 读 project + version；版本不属当前项目时抛 VersionConfigError。"""
+    """Convenience: reads project + version from the db; raises VersionConfigError if the version doesn't belong to this project."""
     from ..services.projects import versions as _versions
     p = _projects.get_project(conn, project_id)
     if not p:

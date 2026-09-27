@@ -1,7 +1,7 @@
-"""projects/ 子包共用 helpers（PR-6.5 从 server.py 抽出）。
+"""Shared helpers for the projects/ subpackage (PR-6.5, extracted from server.py).
 
-只服务 projects 子包内部的各 sub-router；非 projects domain 的 router
-不应该 import 这里（避免反向 / 横向耦合）。
+Only serves sub-routers inside the projects subpackage; routers outside the projects
+domain should not import from here (avoids reverse / lateral coupling).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from ....services import version_config
 
 
 def _project_payload(p: dict[str, Any]) -> dict[str, Any]:
-    """对外详情 payload：项目本身 + versions[] 含 stats + download stats。"""
+    """External detail payload: the project itself + versions[] including stats + download stats."""
     out = dict(p)
     out.update(projects.stats_for_project(p))
     with db.connection_for() as conn:
@@ -56,7 +56,7 @@ def _publish_job_state(job: dict[str, Any]) -> None:
 
 
 def _version_dir_or_404(pid: int, vid: int) -> tuple[dict[str, Any], dict[str, Any], Path]:
-    """返回 (project, version, version_dir)。"""
+    """Returns (project, version, version_dir)."""
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         if not v or v["project_id"] != pid:
@@ -70,7 +70,7 @@ def _version_dir_or_404(pid: int, vid: int) -> tuple[dict[str, Any], dict[str, A
 
 
 def _version_train_dir_or_404(pid: int, vid: int) -> tuple[dict[str, Any], dict[str, Any], Path]:
-    """返回 (project, version, version_dir/train)。"""
+    """Returns (project, version, version_dir/train)."""
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
         if not v or v["project_id"] != pid:
@@ -86,15 +86,16 @@ def _version_train_dir_or_404(pid: int, vid: int) -> tuple[dict[str, Any], dict[
 def _project_and_version_or_404(
     pid: int, vid: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """version_config domain 的双对象解析。
+    """Resolves the (project, version) pair for the version_config domain.
 
-    VersionConfigError（project/version not_found，已带 code + http_status=404）
-    直接冒泡到全局 DomainError handler。
+    VersionConfigError (project/version not_found, already carrying code +
+    http_status=404) bubbles straight up to the global DomainError handler.
     """
     with db.connection_for() as conn:
         return version_config.get_project_and_version(conn, pid, vid)
 
 
 def _reg_dir(vdir: Path) -> Path:
-    """reg 根目录 — 子目录直接镜像 train 子文件夹（与源脚本一致，无 1_general 中间层）。"""
+    """reg root directory -- subfolders directly mirror the train subfolder (matches the
+    source script, no 1_general intermediate layer)."""
     return vdir / "reg"

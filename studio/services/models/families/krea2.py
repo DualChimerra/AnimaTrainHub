@@ -1,8 +1,9 @@
-"""Krea 2 族资产清单。
+"""Krea 2 family asset manifest.
 
-Raw / Turbo 主权重使用 Krea 官方仓库提供的单文件 checkpoint；文本编码器
-使用完整 Qwen3-VL-4B-Instruct transformers 目录。Krea 2 与 Anima 共享同一
-Qwen-Image VAE，因此不创建第二份 VAE 资产或磁盘副本。
+The Raw / Turbo main weights use the single-file checkpoint provided by Krea's
+official repos; the text encoder uses the full Qwen3-VL-4B-Instruct
+transformers directory. Krea 2 shares the same Qwen-Image VAE as Anima, so no
+second VAE asset or on-disk copy is created.
 """
 from __future__ import annotations
 
@@ -23,10 +24,12 @@ KREA2_VARIANTS: dict[str, dict[str, Any]] = {
         "purpose": "training",
         "size_estimate": 26_300_000_000,
     },
-    # Comfy-Org 官方量化管线的 fp8_scaled Raw：训练（fp8_base，权重显存
-    # 25.6→13.1GB，24GB 卡可训）与推理（fp8 出图链）双用途。purpose 维持
-    # training——is_distilled_path 按 purpose=inference 判 Turbo 蒸馏，
-    # 本文件是 Raw（非蒸馏）不能标 inference。
+    # fp8_scaled Raw from Comfy-Org's official quantization pipeline: dual
+    # purpose, training (fp8_base, weight VRAM 25.6->13.1GB, trainable on a
+    # 24GB card) and inference (fp8 generation chain). purpose stays
+    # "training" -- is_distilled_path judges Turbo distillation by
+    # purpose=inference, and this file is Raw (not distilled), so it can't be
+    # tagged inference.
     "raw_fp8": {
         "repo": "Comfy-Org/Krea-2",
         "subpath": "diffusion_models/krea2_raw_fp8_scaled.safetensors",
@@ -45,9 +48,11 @@ KREA2_VARIANTS: dict[str, dict[str, Any]] = {
         "purpose": "inference",
         "size_estimate": 26_300_000_000,
     },
-    # Comfy-Org 官方 fp8_scaled Turbo：TDM 蒸馏推理靶子的量化版（8 步 /
-    # 无 CFG，与 raw_fp8 同管线）。purpose=inference → is_distilled_path
-    # 判蒸馏，测试页选中自动应用蒸馏采样默认。
+    # fp8_scaled Turbo from Comfy-Org's official pipeline: the quantized
+    # version of the TDM-distilled inference target (8 steps / no CFG, same
+    # pipeline as raw_fp8). purpose=inference -> is_distilled_path judges it as
+    # distilled, so selecting it on the test page auto-applies the distilled
+    # sampling defaults.
     "turbo_fp8": {
         "repo": "Comfy-Org/Krea-2",
         "subpath": "diffusion_models/krea2_turbo_fp8_scaled.safetensors",
@@ -79,10 +84,12 @@ QWEN3_VL_FILES = [
     "video_preprocessor_config.json",
     "vocab.json",
 ]
-# Comfy-Org 官方 fp8_scaled 单文件 TE（5.24GB vs bf16 8.88GB）。权重键是
-# HF 命名（text 侧差一个 language_model. 前缀，loader 做映射）；config /
-# tokenizer 等小文件单文件里没有，从 Qwen 官方 repo 一并下到同目录
-# （= QWEN3_VL_FILES 去掉三份权重分片/索引）。
+# The official single-file fp8_scaled TE from Comfy-Org (5.24GB vs bf16's
+# 8.88GB). The weight keys use HF naming (the text side is missing a
+# language_model. prefix, which the loader maps); the single file has no
+# config / tokenizer etc., so those small files are downloaded from Qwen's
+# official repo into the same directory (= QWEN3_VL_FILES minus the three
+# weight shards/index).
 QWEN3_VL_FP8_REPO = "Comfy-Org/Krea-2"
 QWEN3_VL_FP8_SUBPATH = "text_encoders/qwen3vl_4b_fp8_scaled.safetensors"
 QWEN3_VL_FP8_FILE = "qwen3vl_4b_fp8_scaled.safetensors"
@@ -103,21 +110,22 @@ def krea2_main_target(root: Path, variant: str) -> Path:
 
 
 def qwen3_vl_dir(root: Path) -> Path:
-    """Krea 2 文本编码器目录；与 Anima 的 legacy 扁平目录隔离。"""
+    """Krea 2's text encoder directory; isolated from Anima's legacy flat directory."""
     return root / "text_encoders" / safe_dir_name(QWEN3_VL_REPO)
 
 
 def qwen3_vl_fp8_dir(root: Path) -> Path:
-    """官方 fp8_scaled 单文件 TE 的目录（含 config/tokenizer 小文件）。"""
+    """Directory for the official single-file fp8_scaled TE (includes small config/tokenizer files)."""
     return root / "text_encoders" / "qwen3vl-4b-fp8"
 
 
-#: TE variant → 目录解析（bf16 在前 = 默认与 UI 顺序）
+#: TE variant -> directory resolution (bf16 first = default and UI order)
 QWEN3_VL_TE_VARIANTS = ("bf16", "fp8")
 
 
 def selected_te_variant() -> str:
-    """当前选中的 krea2 官方 TE variant；缺失/非法（含本地目录）回退 bf16。"""
+    """The currently selected krea2 official TE variant; falls back to bf16 when
+    missing/invalid (including a local directory)."""
     try:
         variant = secrets.load().models.selected_te.get("krea2")
     except Exception:
@@ -130,11 +138,13 @@ def qwen3_vl_dir_for(root: Path, variant: str) -> Path:
 
 
 def selected_text_encoder_dir(root: Path) -> Path:
-    """训练 / 出图实际使用的 TE 目录：本地注册目录优先，否则官方 variant。
+    """The TE directory actually used for training / generation: a
+    locally-registered directory takes priority, otherwise the official variant.
 
-    `selected_te["krea2"]` 同时承载官方 variant key（bf16/fp8）与用户注册的
-    本地编码器目录绝对路径；本地目录失效时回退官方（bf16 兜底），绝不返回
-    不存在的死路径。
+    `selected_te["krea2"]` carries both the official variant key (bf16/fp8) and
+    a user-registered local encoder directory's absolute path; when the local
+    directory has gone stale, falls back to official (bf16 as the ultimate
+    fallback), never returning a dead path that doesn't exist.
     """
     custom = custom_text_encoder_dir("krea2")
     if custom is not None:
@@ -151,7 +161,8 @@ def selected_krea2_variant() -> str:
 
 
 def selected_krea2_transformer_path() -> str:
-    """返回设置页选中的 Krea2 官方 variant 或有效本地模型路径。"""
+    """Returns the Krea2 official variant selected in Settings, or a valid local
+    model path."""
     try:
         selected = secrets.load().models.selected.get("krea2")
     except Exception:
@@ -183,13 +194,17 @@ def _training_variant() -> str:
 
 
 def _training_default_transformer_path() -> str:
-    """新建训练 version 的默认主权重：官方 variant 必须是 training 用途。
+    """Default main weight for a new training version: the official variant must
+    have training purpose.
 
-    Settings 的 selected 是训练 / 推理共用的一个选择——用户为 Generate 页
-    选中 Turbo（purpose=inference，TDM 蒸馏推理模型）时，新训练 version 不
-    静默跟随，落回 training variant（Raw）。用户注册的本地 custom 路径
-    （社区微调等）无 purpose 元数据，尊重用户选择不加白名单；显式传
-    base_model（含显式选 turbo）同样尊重，不经过本函数。
+    Settings' `selected` is a single choice shared by training and inference --
+    when the user has selected Turbo on the Generate page (purpose=inference, the
+    TDM-distilled inference model), a new training version doesn't silently
+    follow it, and falls back to the training variant (Raw) instead. A
+    user-registered local custom path (community finetune etc.) carries no
+    purpose metadata, so the user's choice is respected with no whitelist;
+    explicitly passing base_model (including an explicit turbo selection) is
+    likewise respected and doesn't go through this function.
     """
     try:
         selected = secrets.load().models.selected.get("krea2")
@@ -206,7 +221,7 @@ def _training_default_transformer_path() -> str:
 
 
 def default_paths_for_new_version(base_model: Optional[str] = None) -> dict[str, str]:
-    """返回 Krea 2 新 version 应使用的本地资产路径。"""
+    """Returns the local asset paths a new Krea 2 version should use."""
     root = models_root()
     transformer = (
         krea2_transformer_path_for(base_model)
@@ -215,21 +230,26 @@ def default_paths_for_new_version(base_model: Optional[str] = None) -> dict[str,
     )
     return {
         "transformer_path": transformer,
-        # VAE 跟随全局选中（本地自定义优先，失效回退官方落点）。
+        # VAE follows the global selection (local custom takes priority, falls back to official when stale).
         "vae_path": resolve_vae_path(root),
-        # TE 按选中值（本地注册目录 / bf16 目录 / 官方 fp8 单文件目录）；
-        # 训练与测试出图共用该默认。fp8 训练=文本缓存指纹自动区分（-tefp8）。
+        # TE follows the selected value (local registered directory / bf16
+        # directory / official fp8 single-file directory); training and test
+        # generation share this default. fp8 training gets automatically
+        # distinguished via the text-cache fingerprint (-tefp8).
         "text_encoder_path": str(selected_text_encoder_dir(root)),
         "t5_tokenizer_path": "",
     }
 
 
 def is_distilled_path(path: str) -> bool:
-    """transformer 路径是否为官方 Turbo（TDM 蒸馏推理）variant。
+    """Whether the transformer path is the official Turbo (TDM-distilled inference)
+    variant.
 
-    Turbo 与 Raw 结构全等（430 键同形状），loader 指纹物理上无法区分——
-    只能按 catalog variant 的文件名判。用户注册的 custom 权重无 purpose
-    元数据，一律按非蒸馏处理（A1：不加白名单，采样参数由用户控制）。
+    Turbo and Raw have identical structure (430 keys, same shapes), so a loader
+    fingerprint physically cannot tell them apart -- this can only be decided by
+    matching the catalog variant's filename. User-registered custom weights
+    carry no purpose metadata, so they're always treated as non-distilled (A1:
+    no whitelist, sampling parameters stay under user control).
     """
     if not path:
         return False
@@ -249,10 +269,12 @@ def _file_status(path: Path) -> dict[str, Any]:
 
 
 def text_encoder_presets(root: Path) -> list[dict[str, Any]]:
-    """本族官方 TE 候选（catalog `krea2_te` domain 的 preset 行）。
+    """This family's official TE candidates (the preset rows for the catalog's
+    `krea2_te` domain).
 
-    value 与 `selected_te["krea2"]` 同语义：官方 variant key（bf16/fp8）。
-    用户注册的本地编码器目录以绝对路径入列（catalog 侧统一拼装）。
+    value has the same semantics as `selected_te["krea2"]`: an official variant
+    key (bf16/fp8). User-registered local encoder directories are listed by
+    absolute path (assembled uniformly on the catalog side).
     """
     bf16_dir = qwen3_vl_dir(root)
     fp8_dir = qwen3_vl_fp8_dir(root)
@@ -309,8 +331,10 @@ def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
 
     text_dir = qwen3_vl_dir(root)
     fp8_dir = qwen3_vl_fp8_dir(root)
-    # 选中 TE：官方 variant key 原样；本地注册目录原样回显绝对路径（前端
-    # 据此显示「自定义」并停用官方 radio）；其余非法值归一 bf16。
+    # Selected TE: an official variant key is passed through as-is; a
+    # local-registered directory is echoed back as its absolute path (the
+    # frontend uses this to show "Custom" and disable the official radio);
+    # any other invalid value normalizes to bf16.
     te_selected = str(
         (getattr(models_cfg, "selected_te", None) or {}).get("krea2") or "")
     if te_selected not in QWEN3_VL_TE_VARIANTS and not secrets.is_abs_path(
@@ -320,10 +344,11 @@ def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
     return {
         "krea2_main": {
             "id": "krea2_main",
-            "name": "Krea 2 主模型",
+            "name": "Krea 2 main model",
             "description": (
-                "Raw 训练底模 / Turbo 推理底模，各有 bf16（26.3 GB）与"
-                "官方 fp8（13.1 GB，权重显存减半）两版"
+                "Raw training base model / Turbo inference base model, each "
+                "available in bf16 (26.3 GB) and official fp8 (13.1 GB, half "
+                "the weight VRAM) versions"
             ),
             "repo": "krea/Krea-2-{Raw,Turbo}",
             "variants": variants,
@@ -335,12 +360,12 @@ def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
         },
         "krea2_text_encoder": {
             "id": "krea2_text_encoder",
-            "name": "Krea 2 · Qwen3-VL-4B-Instruct",
-            "description": "自然语言文本编码器（约 8.89 GB）",
+            "name": "Krea 2 - Qwen3-VL-4B-Instruct",
+            "description": "Natural-language text encoder (approx. 8.89 GB)",
             "repo": QWEN3_VL_REPO,
             "target_dir": str(text_dir),
-            # 选中的 TE variant（bf16/fp8）——前端 TE 卡 radio 与测试页
-            # TE 下拉的默认值都读这里
+            # The selected TE variant (bf16/fp8) -- both the frontend's TE card
+            # radio and the test page's TE dropdown read their default from here
             "selected": te_selected,
             "files": [
                 {"name": filename, **_file_status(text_dir / filename)}
@@ -349,8 +374,8 @@ def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
         },
         "krea2_text_encoder_fp8": {
             "id": "krea2_text_encoder_fp8",
-            "name": "Krea 2 · Qwen3-VL fp8",
-            "description": "官方 fp8 量化文本编码器（约 5.24 GB，测试出图可选）",
+            "name": "Krea 2 - Qwen3-VL fp8",
+            "description": "Official fp8-quantized text encoder (approx. 5.24 GB, optional for test generation)",
             "repo": QWEN3_VL_FP8_REPO,
             "target_dir": str(fp8_dir),
             "files": [
@@ -364,7 +389,7 @@ def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
 class _Krea2Assets:
     family_id = "krea2"
     display_name = "Krea 2"
-    #: 注销 custom 时 selected 的回退目标（最新官方 variant key）
+    #: Fallback target for `selected` when unregistering a custom path (the latest official variant key)
     latest = LATEST_KREA2
 
     default_paths_for_new_version = staticmethod(default_paths_for_new_version)

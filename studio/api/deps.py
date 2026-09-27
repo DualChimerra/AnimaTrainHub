@@ -1,8 +1,9 @@
-"""共享 dependency helpers（PR-6 起从 server.py 抽出）。
+"""Shared dependency helpers (extracted from server.py starting with PR-6).
 
-跨 router 共用的 helper：拿 Supervisor 实例、版本 / 项目记录验证等。
-未来会改 FastAPI `Depends(...)` 形式，本次先维持「直接调函数」风格保
-零行为变更。
+Helpers shared across routers: getting the Supervisor instance, validating
+version / project records, etc. These will eventually move to FastAPI's
+`Depends(...)` style, but for now they stay as plain function calls to keep
+this change behavior-neutral.
 """
 from __future__ import annotations
 
@@ -13,13 +14,16 @@ from ..supervisor import Supervisor
 
 
 def _check_no_running_tasks() -> None:
-    """重启 / 迁移 / 删资产前置：所有 task 必须 done / failed / canceled / pending。
+    """Precondition for restart / migration / asset deletion: every task must
+    be done / failed / canceled / pending.
 
-    有 running 直接 422 + task 列表，让前端给用户友好的提示（"先暂停以下任务"）。
-    本 fork：原上游放在 routers/system.py（自更新 router，本 fork 移除），
-    迁到 deps.py 供 models_storage / studio_data 共用。
+    If any task is running, raise 422 immediately with the task list, so the
+    frontend can show the user a friendly prompt ("pause the following tasks
+    first"). This fork: upstream originally kept this in routers/system.py
+    (the self-update router, removed in this fork); it has been moved to
+    deps.py to be shared by models_storage / studio_data.
     """
-    from .. import db  # noqa: PLC0415 — late import 避免循环
+    from .. import db  # noqa: PLC0415 — late import to avoid a circular import
     with db.connection_for() as conn:
         running = db.list_tasks(conn, status="running")
     if running:
@@ -41,11 +45,14 @@ def _check_no_running_tasks() -> None:
 
 
 def _supervisor() -> Supervisor:
-    """从 app.state 取 Supervisor。lifespan startup 还没跑完时返 503。
+    """Get the Supervisor from app.state. Returns 503 if lifespan startup
+    hasn't finished yet.
 
-    本 helper 内做 late import 避免 `api/app.py ↔ api/routers/* ↔ api/deps.py`
-    三方循环——routers 在 app.py include 时还在初始化，此时 import api.app
-    虽然拿得到 `app`（`app = FastAPI(...)` 已执行）但循环关系不健康。
+    This helper does a late import to avoid a three-way circular import
+    between `api/app.py`, `api/routers/*`, and `api/deps.py` — routers are
+    still initializing when app.py includes them, so importing api.app at
+    that point would technically get `app` (since `app = FastAPI(...)` has
+    already executed), but the circular relationship isn't healthy.
     """
     from .app import app
     sup: Optional[Supervisor] = getattr(app.state, "supervisor", None)
@@ -60,17 +67,24 @@ def _supervisor() -> Supervisor:
 def _resolve_model_paths(
     base_model: Optional[str] = None, *, family: str = "anima"
 ) -> dict[str, str]:
-    """解析 base 模型默认路径（先验生成 / 测试出图共用）。
+    """Resolve default base-model paths (shared by prior generation / test
+    image generation).
 
-    与新建训练 version 用的同一套解析（`default_paths_for_new_version`）：用户在
-    Settings → 模型 切换选中底模（官方 variant 或注册的本地 custom
-    `.safetensors`）即同时影响这里的主权重路径——所以能「在微调权重上测试出图」。
+    Uses the same resolution logic as creating a new training version
+    (`default_paths_for_new_version`): when the user switches the selected
+    base model under Settings -> Models (an official variant or a registered
+    local custom `.safetensors`), it also affects the primary weights path
+    used here — which is what makes "test-generate on a fine-tuned checkpoint"
+    possible.
 
-    `base_model` 非空 → 本次请求临时覆盖底模（先验生成 / 测试页面的「底模」
-    下拉选了非默认值时），只换 transformer 权重，其余路径仍跟随全局设置。
+    A non-empty `base_model` overrides the base model for this request only
+    (e.g. when the "base model" dropdown on the prior generation / test page
+    is set to something other than the default) — only the transformer
+    weights are swapped, all other paths still follow the global settings.
 
-    `family` 由调用方从请求 / config 取；generate 侧请求 schema 加 model_family
-    后（P4-4）本函数更名去 anima 前缀。
+    `family` is taken by the caller from the request / config; after the
+    generate-side request schema gained model_family (P4-4), this function
+    was renamed to drop the anima prefix.
     """
     from ..services.models import default_paths_for_new_version
     return default_paths_for_new_version(base_model, family=family)

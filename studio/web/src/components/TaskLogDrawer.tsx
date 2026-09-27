@@ -10,18 +10,18 @@ export type LogSourceStatus =
   | 'paused'
   | 'scheduled'
 
-/** 一条可回放的任务日志流（job / task / 前端合成日志通吃）。 */
+/** A replayable task log stream (works for job / task / frontend-synthesized logs alike). */
 export interface LogSource {
   key: string
   label: string
   status: LogSourceStatus
   lines: string[]
-  /** 秒级 epoch；多 source 都终态时按它选「最近」，也用于条上的耗时显示。 */
+  /** Epoch in seconds; when multiple sources are all in a terminal state, this picks the "most recent" one, and is also used for the elapsed-time display on the bar. */
   startedAt?: number | null
   finishedAt?: number | null
-  /** 缺省 = 不可取消（如去重扫描的前端合成日志）。 */
+  /** Default = not cancelable (e.g. a frontend-synthesized log for a dedup scan). */
   onCancel?: () => void
-  /** failed 时 header 右侧显示重试按钮；缺省 = 不可重试。 */
+  /** Shows a retry button on the header's right side when failed; default = not retryable. */
   onRetry?: () => void
 }
 
@@ -38,8 +38,8 @@ const STATUS_BADGE: Record<LogSourceStatus, string> = {
 
 const isLiveStatus = (s: LogSourceStatus) => s === 'pending' || s === 'running'
 
-/** 多 source 单显（issue #251 拍板）：活着的优先，否则最近启动的。
- *  旧任务的产物已被新任务覆盖，历史日志不提供多入口。 */
+/** Picking one source to display among several (per issue #251): a live one wins, otherwise the most recently started.
+ *  An old task's artifacts have already been superseded by the new task, so historical logs don't get multiple entry points. */
 function pickActive(sources: LogSource[]): LogSource | null {
   if (sources.length === 0) return null
   const live = sources.find((s) => isLiveStatus(s.status))
@@ -48,19 +48,19 @@ function pickActive(sources: LogSource[]): LogSource | null {
 }
 
 /**
- * 任务日志抽屉 —— 全 app 统一的任务进度/日志 UI（issue #251）。
+ * Task log drawer -- the app-wide unified task progress/log UI (issue #251).
  *
- * 形态：页面级 footer。收起时一行 header 全宽贴在页面最底（status 徽标 +
- * 最后一行日志 + 耗时）；点击后日志面板从 header 下方升起（200ms 高度动画，
- * overlay 不挤压页面布局），header 骑在面板顶上充当与内容区的分隔条。
+ * Shape: a page-level footer. Collapsed, a single full-width header sticks to the bottom of the page (status badge +
+ * last log line + elapsed time); clicking it raises the log panel from below the header (a 200ms height animation,
+ * an overlay that doesn't squeeze the page layout), with the header sitting on top of the panel as a divider from the content area.
  *
- * 开合状态机（手动开合随时生效）：
- * - 进入 live（含挂载即 running 的回放场景）→ 自动展开
- * - 任务结束**不**自动收起 —— 用户要回看结果/错误；只有切页（组件卸载）
- *   或手动点击才收
- * - 挂载即终态（历史回放）→ 默认收起
+ * Open/close state machine (manual toggling always takes effect):
+ * - Entering live (including a replay scenario that's already running on mount) -> auto-expands
+ * - Task finishing does **not** auto-collapse -- the user needs to look back at the result/error; only switching
+ *   pages (component unmount) or a manual click collapses it
+ * - Mounted already in a terminal state (historical replay) -> collapsed by default
  *
- * 由 StepShell 统一挂载（`logSources` prop），页面只声明 source。
+ * Mounted uniformly by StepShell (the `logSources` prop); pages only declare the source.
  */
 export default function TaskLogDrawer({
   sources,
@@ -85,7 +85,7 @@ export default function TaskLogDrawer({
     prevRef.current = { key: activeKey, status: activeStatus }
   }, [activeKey, activeStatus])
 
-  // live 时 1s tick 刷新耗时显示（同原 JobProgress）
+  // Ticks every 1s while live to refresh the elapsed-time display (same as the old JobProgress)
   const live = !!activeStatus && isLiveStatus(activeStatus)
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -94,7 +94,7 @@ export default function TaskLogDrawer({
     return () => window.clearInterval(id)
   }, [live])
 
-  // 展开时跟随日志滚到底
+  // Scrolls to follow the log to the bottom while expanded
   const lineCount = active?.lines.length ?? 0
   useEffect(() => {
     if (expanded && preRef.current) {
@@ -111,10 +111,10 @@ export default function TaskLogDrawer({
 
   return (
     <>
-      {/* 占位：与 footer header 同高，让页面内容不被贴底的 header 盖住 */}
+      {/* Placeholder: same height as the footer header, so page content isn't hidden behind the bottom-anchored header */}
       <div className="shrink-0" style={{ height: 34 }} aria-hidden />
-      {/* footer 抽屉本体：贴页面底、全宽、无圆角无 margin；anchored bottom，
-          body 高度动画 0 ↔ 40vh 时 header 随抽屉上升，充当内容/日志分隔条 */}
+      {/* The footer drawer itself: stuck to the page bottom, full width, no rounding or margin; anchored bottom,
+          when the body height animates 0 <-> 40vh the header rides up with the drawer, acting as the divider between content and log */}
       <div
         className={`absolute bottom-0 inset-x-0 z-30 flex flex-col ${expanded ? 'shadow-2xl' : ''}`}
       >

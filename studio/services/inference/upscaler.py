@@ -1,24 +1,27 @@
-"""图片放大服务（预处理阶段）。
+"""Image upscaling service (preprocessing stage).
 
-把 spandrel + tiled inference 包成单文件 API：
+Wraps spandrel + tiled inference into a single-file API:
 
-- `load_model(path)`：缓存式加载 ESRGAN/RRDB 权重（spandrel 自动识别架构）
-- `tiled_inference(model, img, *, scale, tile_size, tile_pad)`：分块前向 +
-  overlap 拼接，保证 VRAM 上界跟 tile_size 线性相关
-- `upscale_file(src, dst, *, model_path, ...)`：完整文件级 API，自动处理
-  Pillow 解码、设备选择、产物写盘；**返回元数据 dict，不写 sidecar**
-  （状态由 preprocess_manifest 在 worker 入口统一记录，见 ADR 0004）
+- `load_model(path)`: cached loading of ESRGAN/RRDB weights (spandrel auto-detects the architecture)
+- `tiled_inference(model, img, *, scale, tile_size, tile_pad)`: tiled forward
+  pass + overlap stitching, keeping the VRAM ceiling linear in tile_size
+- `upscale_file(src, dst, *, model_path, ...)`: the full file-level API,
+  handling Pillow decoding, device selection, and writing the output;
+  **returns a metadata dict, doesn't write a sidecar** (status is recorded
+  centrally by preprocess_manifest at the worker entry point, see ADR 0004)
 
-设计：
-- 模型只在第一次调用 load_model 时实例化；二次调相同 path 直接复用缓存
-  （进程级 dict，跟 wd14_tagger 同思路）
-- 设备策略：device='auto' → 有 cuda 用 cuda，否则 cpu；显式 'cuda' 但无 GPU
-  时自动降级到 cpu 并 log warning（避免子进程直接崩）
-- tile_size 单位是 **输入像素**；4x 模型 tile=256 → 输出 1024×1024 一块。
-  VRAM 峰值约 `tile**2 * scale**2 * 4byte * batch * 7倍中间张量`，256 时
-  大约 2-3GB
-- tile_pad 是为了消除拼接边界，默认 16 像素重叠（spandrel 推荐值）
-- 单测用 stub model 走通整条流水线，不需要真权重
+Design:
+- the model is only instantiated on the first call to load_model; subsequent
+  calls with the same path reuse the cache (a process-level dict, same
+  approach as wd14_tagger)
+- device strategy: device='auto' -> cuda if available, else cpu; an explicit
+  'cuda' with no GPU auto-downgrades to cpu with a log warning (avoids
+  crashing the subprocess outright)
+- tile_size is in **input pixels**; a 4x model with tile=256 -> a 1024x1024 output tile.
+  Peak VRAM is roughly `tile**2 * scale**2 * 4 bytes * batch * ~7x for intermediate tensors`,
+  around 2-3GB at 256
+- tile_pad removes stitching seams, default 16px overlap (spandrel's recommended value)
+- unit tests exercise the full pipeline with a stub model, no real weights needed
 """
 from __future__ import annotations
 
@@ -33,19 +36,21 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# spandrel `ImageModelDescriptor` 的最小协议：我们只用到 `.model` 和 `.scale`。
-# 缓存键 = 绝对路径字符串。注意：换模型权重文件而保留同名时缓存会脏 —
-# 实际场景里下载完不会动权重文件，可接受。需要清缓存就调 `clear_cache()`。
+# The minimal protocol we need from spandrel's `ImageModelDescriptor`: only
+# `.model` and `.scale`. Cache key = absolute path string. Note: swapping the
+# weights file while keeping the same name leaves a stale cache entry - in
+# practice weight files don't change after download, so this is acceptable.
+# Call `clear_cache()` if you need to invalidate it.
 _MODEL_CACHE: dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------
-# 设备与模型加载
+# device & model loading
 # ---------------------------------------------------------------------------
 
 
 def resolve_device(device: str = "auto") -> torch.device:
-    """device='auto' → cuda 可用就用 cuda，否则 cpu。显式 'cuda' 无 GPU 时降级。"""
+    """device='auto' -> cuda if available, else cpu. Explicit 'cuda' with no GPU downgrades."""
     if device == "cpu":
         return torch.device("cpu")
     if device == "cuda":
@@ -58,11 +63,12 @@ def resolve_device(device: str = "auto") -> torch.device:
 
 
 def resolve_dtype(precision: str, device: torch.device) -> torch.dtype:
-    """precision='auto' → cuda 上 fp16，cpu 上 fp32。
+    """precision='auto' -> fp16 on cuda, fp32 on cpu.
 
-    fp16 对 ESRGAN/RRDB 这类 CNN 视觉模型几乎无肉眼差异，但 GPU 上速度
-    通常 1.6-2× ；ComfyUI 默认也走 fp16。
-    bf16 在 sm_80+ (Ampere 及以后) 可用，对数值范围更友好但 RTX 20 / Tesla 不支持。
+    fp16 is visually indistinguishable for CNN-based vision models like
+    ESRGAN/RRDB, but is usually 1.6-2x faster on GPU; ComfyUI also defaults
+    to fp16. bf16 is available on sm_80+ (Ampere and later) and is friendlier
+    to numeric range, but unsupported on RTX 20 series / Tesla.
     """
     if precision == "fp32":
         return torch.float32
@@ -82,14 +88,14 @@ def load_model(
     device: Optional[torch.device] = None,
     dtype: Optional[torch.dtype] = None,
 ) -> Any:
-    """加载 spandrel ImageModelDescriptor，进程级缓存。
+    """Load a spandrel ImageModelDescriptor, cached per process.
 
-    描述符暴露：
-        .model — torch.nn.Module，可直接前向
-        .scale — 整数放大倍率（4x-AnimeSharp 是 4）
-        .input_channels / .output_channels — 通常 3
+    The descriptor exposes:
+        .model - torch.nn.Module, can be called directly
+        .scale - integer upscale factor (4x-AnimeSharp is 4)
+        .input_channels / .output_channels - usually 3
 
-    传 dtype 时把模型权重 cast 过去（fp16 在 GPU 上典型 1.6-2× 提速）。
+    Passing dtype casts the model's weights to it (fp16 typically gives a 1.6-2x speedup on GPU).
     """
     if not model_path.exists():
         raise FileNotFoundError(f"The model weights do not exist: {model_path}")
@@ -121,7 +127,7 @@ def load_model(
 
 
 def clear_cache() -> None:
-    """清空模型缓存（测试 / 切换 device 时用）。"""
+    """Clear the model cache (used by tests / when switching device)."""
     _MODEL_CACHE.clear()
 
 
@@ -131,10 +137,11 @@ def clear_cache() -> None:
 
 
 def resize_to_area(img: Image.Image, target_area: int) -> Image.Image:
-    """保 aspect ratio 缩放到 `~target_area` 像素的 LANCZOS resize。
+    """LANCZOS resize to `~target_area` pixels, preserving aspect ratio.
 
-    new_W * new_H ≈ target_area；保留 W/H 比。不 snap 到 64 倍数 — Kohya 内部
-    还要按桶再缩 / 裁，提前 snap 只会减档限制。返回新的 PIL Image。
+    new_W * new_H ~= target_area, keeping the W/H ratio. Not snapped to a
+    multiple of 64 - Kohya will resize/crop again per-bucket internally, so
+    snapping early would only limit which bucket it lands in. Returns a new PIL Image.
     """
     w, h = img.size
     if w <= 0 or h <= 0 or target_area <= 0:
@@ -147,15 +154,18 @@ def resize_to_area(img: Image.Image, target_area: int) -> Image.Image:
     return img.resize((new_w, new_h), Image.LANCZOS)
 
 
-# 已够大「跳过模型」的下限：面积 >= target_area × SKIP_RATIO 时直接 LANCZOS 缩。
-# 0.95 = 容忍 5% 像素缺口走纯 LANCZOS（轻微上采样）— 视觉差别看不出，省掉
-# 一次模型推理（贵）。再低就该走模型保细节了。
+# Lower bound for "already big enough, skip the model": when area >=
+# target_area x SKIP_RATIO, just LANCZOS-resize directly. 0.95 = tolerate a
+# 5% pixel shortfall via plain LANCZOS (a slight upsample) - the visual
+# difference is imperceptible, and it saves a (costly) model inference pass.
+# Below this threshold, the model is worth it for detail preservation.
 SKIP_MODEL_RATIO = 0.95
 
 
 def _img_to_tensor(img: Image.Image) -> torch.Tensor:
-    """PIL → float32 BCHW [0,1]。RGBA 转 RGB（alpha 直接丢，4x-AnimeSharp 不
-    处理透明通道；上游若需要保留 alpha 应改先 composite 到白底）。"""
+    """PIL -> float32 BCHW [0,1]. RGBA is converted to RGB (alpha is simply
+    dropped - 4x-AnimeSharp doesn't handle a transparency channel; if the
+    caller needs to preserve alpha, composite onto white first)."""
     if img.mode != "RGB":
         img = img.convert("RGB")
     import numpy as np
@@ -166,12 +176,12 @@ def _img_to_tensor(img: Image.Image) -> torch.Tensor:
 
 
 def _tensor_to_img(t: torch.Tensor) -> Image.Image:
-    """1CHW 或 CHW float[0,1] → PIL RGB。fp16/bf16 自动 cast 回 fp32 再转 numpy。"""
+    """1CHW or CHW float[0,1] -> PIL RGB. fp16/bf16 is cast back to fp32 before converting to numpy."""
     import numpy as np
 
     if t.dim() == 4:
         t = t.squeeze(0)
-    # numpy 不直接支持 bf16；fp16 能直接转但乘 255 时精度不够 — 统一回 fp32
+    # numpy has no direct bf16 support; fp16 converts but loses precision when multiplied by 255 - always cast back to fp32
     arr = t.clamp(0, 1).permute(1, 2, 0).float().cpu().numpy()  # HWC
     arr = (arr * 255.0 + 0.5).astype(np.uint8)
     return Image.fromarray(arr)
@@ -185,12 +195,12 @@ def tiled_inference(
     tile_size: int = 256,
     tile_pad: int = 16,
 ) -> torch.Tensor:
-    """分块前向：每块 `tile_size+2*tile_pad` 输入，输出去掉 pad 部分后拼回。
+    """Tiled forward pass: each tile's input is `tile_size+2*tile_pad`, and the padded region is trimmed off the output before stitching.
 
-    img: 1CHW float[0,1] tensor（已在目标 device）
-    返回 1CHW float tensor，HW 都 ×scale。
+    img: 1CHW float[0,1] tensor (already on the target device)
+    Returns a 1CHW float tensor, with H and W both x scale.
 
-    无 tile（tile_size <= 0）走单次整图前向（小图 / 显存够时省 IO 开销）。
+    With no tiling (tile_size <= 0), does a single full-image forward pass (saves IO overhead for small images / when VRAM allows).
     """
     if tile_size <= 0:
         with torch.inference_mode():
@@ -201,7 +211,7 @@ def tiled_inference(
     out_h, out_w = h * scale, w * scale
     output = torch.zeros((1, c, out_h, out_w), dtype=img.dtype, device=img.device)
 
-    # tile 网格按 tile_size 步进；边界 tile 不足时截断
+    # tile grid steps by tile_size; edge tiles are truncated when short
     n_y = (h + tile_size - 1) // tile_size
     n_x = (w + tile_size - 1) // tile_size
 
@@ -213,7 +223,7 @@ def tiled_inference(
                 y1 = min(y0 + tile_size, h)
                 x1 = min(x0 + tile_size, w)
 
-                # pad 区域（用于消除拼接边界）
+                # padded region (used to remove stitching seams)
                 py0 = max(y0 - tile_pad, 0)
                 px0 = max(x0 - tile_pad, 0)
                 py1 = min(y1 + tile_pad, h)
@@ -222,7 +232,7 @@ def tiled_inference(
                 tile = img[:, :, py0:py1, px0:px1]
                 up = model(tile)
 
-                # 在放大后坐标系里，把 pad 部分裁掉，只保留 tile 实际范围
+                # in the upscaled coordinate space, trim off the padded region, keeping only the tile's actual extent
                 cut_top = (y0 - py0) * scale
                 cut_left = (x0 - px0) * scale
                 cut_bot = cut_top + (y1 - y0) * scale
@@ -240,7 +250,7 @@ def tiled_inference(
 
 
 # ---------------------------------------------------------------------------
-# 文件级 API
+# file-level API
 # ---------------------------------------------------------------------------
 
 
@@ -259,31 +269,33 @@ def upscale_file(
     prewarm_thumb_sizes: Optional[list[int]] = None,
     save_kwargs: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """读 src → 智能放大 → 写 dst（PNG）。返回元数据 dict。
+    """Read src -> upscale intelligently -> write dst (PNG). Returns a metadata dict.
 
-    target_area 控制行为（LoRA 训练面向的"够用即可"）：
-      - target_area=None：纯 4× 模型放大（兼容老路径）
-      - target_area=N，src 面积 ≥ N×SKIP_MODEL_RATIO：跳过模型，直接 LANCZOS 缩到 ~N
-      - target_area=N，src 面积 < N×SKIP_MODEL_RATIO：模型 4× → LANCZOS 缩到 ~N
+    target_area controls behavior (aimed at "just good enough" for LoRA training):
+      - target_area=None: pure 4x model upscale (compatible with the old path)
+      - target_area=N, src area >= N x SKIP_MODEL_RATIO: skip the model, LANCZOS-resize straight to ~N
+      - target_area=N, src area < N x SKIP_MODEL_RATIO: model 4x -> LANCZOS-resize to ~N
 
-    跳过模型那一路是"大图直接缩"，几百毫秒；走模型那一路才是几十秒的开销。
-    大部分训练集图片像素都够 1024²/1536²，预处理实际只对少数小图调模型。
+    The skip-model path is "just resize the big image", a few hundred ms; the
+    model path is the tens-of-seconds-costly one. Most training set images
+    are already big enough for 1024^2/1536^2, so preprocessing only actually
+    invokes the model on a minority of small images.
 
-    返回元数据（worker 拿去写 manifest，见 ADR 0004）：
+    Returns metadata (picked up by the worker to write into the manifest, see ADR 0004):
         {source, model, scale, action, target_area, tile_size, tile_pad,
          device, dtype, src_size, dst_size, elapsed_seconds, mtime}
     action: 'resize' | 'upscale' | 'upscale+resize'
 
-    `device='cuda'` 但 GPU 不可用时静默降级 cpu。
+    Silently downgrades to cpu when `device='cuda'` but no GPU is available.
     """
     t_start = time.monotonic()
 
-    # 1) 先读图判断走哪条路（避免无谓的模型加载）
+    # 1) read the image first to decide which path to take (avoids loading the model needlessly)
     with Image.open(src) as raw:
         raw.load()
         if raw.mode != "RGB":
             raw = raw.convert("RGB")
-        src_img = raw.copy()  # 离开 with 块后还要用
+        src_img = raw.copy()  # still needed after leaving the with block
     src_size = src_img.size  # (W, H)
     src_area = src_img.width * src_img.height
     skip_model = (
@@ -292,14 +304,14 @@ def upscale_file(
     )
 
     if skip_model:
-        # 已够大 — 直接 LANCZOS 缩到目标面积，绕过模型
+        # already big enough - LANCZOS-resize straight to the target area, bypassing the model
         out_img = resize_to_area(src_img, int(target_area))  # type: ignore[arg-type]
         action = "resize"
-        scale = 1  # 这条路径没经过模型，记 1 表示未放大
+        scale = 1  # this path never touched the model, recorded as 1 = not upscaled
         dev = resolve_device(device)
         dtype = resolve_dtype(precision, dev)
     else:
-        # 走模型放大
+        # go through the model upscale
         dev = resolve_device(device)
         dtype = resolve_dtype(precision, dev)
         descriptor = load_model(model_path, device=dev, dtype=dtype)
@@ -320,10 +332,12 @@ def upscale_file(
             action = "upscale"
 
     dst.parent.mkdir(parents=True, exist_ok=True)
-    # `save_kwargs` 决定输出格式（默认 PNG 无压缩，跟历史行为兼容）。worker 按
-    # src 扩展名传相应 format 以保留 caption/dataset_config 对扩展名的依赖
-    # （ADR 0010 fixup：不改扩展名）。in-place 覆盖（src == dst）走 tmp+rename
-    # 防 partial write 让训练框架读到半文件。
+    # `save_kwargs` decides the output format (defaults to lossless PNG,
+    # matching historical behavior). The worker passes the format matching
+    # src's extension, to preserve caption/dataset_config's dependency on the
+    # extension (ADR 0010 fixup: never change the extension). An in-place
+    # overwrite (src == dst) goes through tmp+rename to avoid a partial write
+    # the training framework could read mid-write.
     final_save_kwargs: dict[str, Any] = (
         {"format": "PNG", "optimize": False}
         if save_kwargs is None
@@ -334,15 +348,17 @@ def upscale_file(
     import os as _os
     _os.replace(tmp, dst)
 
-    # 趁内存里还有 PIL Image，把缩略图预生成进缓存。
-    # 不预热的话用户首次浏览 grid 时会逐张解码 PNG（一张 1-3s，200 张要等几分钟），
-    # 而 worker 这里已经付过解码代价了，多花零点几秒生成 thumb 摊到批处理里几乎无感。
+    # While the PIL Image is still in memory, pre-generate its thumbnail into the cache.
+    # Without this, a user's first grid view decodes each PNG one at a time
+    # (1-3s each, minutes for 200 images), whereas the worker has already
+    # paid the decode cost here - spending a fraction of a second more to
+    # generate the thumb is nearly free spread across the batch.
     if prewarm_thumb_sizes:
         try:
             from ..dataset import thumb_cache
             thumb_cache.prewarm_from_image(dst, out_img, prewarm_thumb_sizes)
-        except Exception as exc:  # noqa: BLE001 — 缩略图预热失败不影响放大本体
-            on_log(f"   ⚠ thumb prewarm failed: {exc}")
+        except Exception as exc:  # noqa: BLE001 - a thumb prewarm failure shouldn't affect the upscale itself
+            on_log(f"   warning: thumb prewarm failed: {exc}")
 
     elapsed = time.monotonic() - t_start
 
@@ -362,8 +378,8 @@ def upscale_file(
         "mtime": time.time(),
     }
     on_log(
-        f"   ✓ [{action}] {src.name} → {dst.name}  "
-        f"{src_size[0]}×{src_size[1]} → {out_img.size[0]}×{out_img.size[1]}  "
+        f"   OK [{action}] {src.name} -> {dst.name}  "
+        f"{src_size[0]}x{src_size[1]} -> {out_img.size[0]}x{out_img.size[1]}  "
         f"({elapsed:.1f}s)"
     )
     return meta

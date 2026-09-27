@@ -1,11 +1,14 @@
-"""grad_accum 尾组处理回归（runtime/training/loop.py::_accumulation_step）。
+"""Regression test for grad_accum tail-group handling (runtime/training/loop.py::_accumulation_step).
 
-修复：epoch 最后一个 batch 即使凑不满 grad_accum 也 step（对齐 kohya-ss / HF
-Trainer）—— 否则尾部 `len % ga` 个 batch 的梯度被丢（单 epoch）或泄漏进下一 epoch
-第一个 step（多 epoch）；不满的尾组按实际 micro-batch 数归一。
+Fix: the last batch of an epoch now steps even if it doesn't fill a full
+grad_accum group (matching kohya-ss / HF Trainer) -- otherwise the gradients
+of the trailing `len % ga` batches were dropped (single epoch) or leaked into
+the first step of the next epoch (multi-epoch); an incomplete tail group is
+normalized by its actual micro-batch count.
 
-用 AST 抽函数独立执行（_accumulation_step 是纯函数、无依赖），避免 import 整个
-training 栈（torch + 模型）。同 test_find_diffusion_pipe_root 的轻量做法。
+Extracts the function via AST and runs it standalone (_accumulation_step is a
+pure function with no dependencies), avoiding importing the whole training
+stack (torch + model). Same lightweight approach as test_find_diffusion_pipe_root.
 """
 from __future__ import annotations
 
@@ -38,21 +41,21 @@ def _step_idxs(plan):
 
 
 def test_divisible_unchanged():
-    # 8 batch / ga4：两组满，在 idx3/idx7 step，group_size 恒 4（行为不变）
+    # 8 batches / ga4: two full groups, step at idx3/idx7, group_size always 4 (behavior unchanged)
     plan = _plan(8, 4)
     assert _step_idxs(plan) == [3, 7]
     assert all(gs == 4 for gs, _ in plan)
 
 
 def test_tail_steps_and_normalizes_by_actual_size():
-    # 7 batch / ga4：idx3 step(满组4) + idx6 step(尾组3) —— 尾批不再被丢
+    # 7 batches / ga4: idx3 steps (full group of 4) + idx6 steps (tail group of 3) -- tail batches are no longer dropped
     plan = _plan(7, 4)
     assert _step_idxs(plan) == [3, 6]
     assert [gs for gs, _ in plan] == [4, 4, 4, 4, 3, 3, 3]
 
 
 def test_fewer_batches_than_ga_still_trains():
-    # 3 batch / ga4：旧 floor=0 步（完全不训练！）；现 1 步、group_size=3
+    # 3 batches / ga4: old floor=0 steps (no training at all!); now 1 step, group_size=3
     plan = _plan(3, 4)
     assert _step_idxs(plan) == [2]
     assert all(gs == 3 for gs, _ in plan)
@@ -65,7 +68,7 @@ def test_ga_one_steps_every_batch():
 
 
 def test_no_len_falls_back_to_old_behavior():
-    # dl_len=None：恒 grad_accum，仅整除处 step（不知末批，无法尾处理）
+    # dl_len=None: always grad_accum, steps only on exact multiples (last batch is unknown, tail handling not possible)
     assert _accumulation_step(3, None, 4) == (4, True)
     assert _accumulation_step(4, None, 4) == (4, False)
-    assert _accumulation_step(6, None, 4) == (4, False)  # 尾批但无 len → 旧行为不 step
+    assert _accumulation_step(6, None, 4) == (4, False)  # tail batch but no len -> old behavior, no step

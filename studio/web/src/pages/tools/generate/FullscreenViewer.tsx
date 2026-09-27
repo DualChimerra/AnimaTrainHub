@@ -2,13 +2,13 @@ import { useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import ZoomableImage from '../../../components/ZoomableImage'
 
-/** 全屏图片 modal：双击 grid cell / cell action 触发。
+/** Fullscreen image modal: triggered by double-clicking a grid cell / a cell action.
  *
- * - 背景半透明遮罩，视口内滚轮缩放 / 拖拽平移 / 双击 fit↔100% 切换（useZoomPan）
- * - ESC / 点击遮罩关闭
- * - 不开新窗口（之前是 window.open，频繁评测时切换 tab 麻烦）
- * - 方向键 + 屏上箭头切换邻居（PR #64 + P1-G）：caller 喂 hasX / onX；
- *   shortcutHint 不传时按当前可用方向动态拼接（避免在单行 / 单列 / 角落格上撒谎）
+ * - Semi-transparent background overlay, in-viewport scroll-to-zoom / drag-to-pan / double-click fit<->100% (useZoomPan)
+ * - ESC / clicking the overlay closes it
+ * - Doesn't open a new window (used to be window.open, annoying to tab-switch during frequent review)
+ * - Arrow keys + on-screen arrows cycle through neighbors (PR #64 + P1-G): the caller feeds hasX / onX;
+ *   shortcutHint, when omitted, is assembled dynamically from the currently available directions (so it doesn't lie on a single row / column / corner cell)
  */
 export default function FullscreenViewer({
   src, alt, caption, index, total, onClose,
@@ -19,7 +19,7 @@ export default function FullscreenViewer({
   src: string
   alt?: string
   caption?: string
-  /** 列表中的 0-based 位置；与 total 同传时底部显示 "index+1 / total" 计数。 */
+  /** 0-based position in the list; shown as an "index+1 / total" counter at the bottom when passed alongside total. */
   index?: number
   total?: number
   onClose: () => void
@@ -36,8 +36,8 @@ export default function FullscreenViewer({
   const { t } = useTranslation()
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // P3：方向键在 input / textarea / contenteditable 内不抢焦点，
-      // 当前组件不带这些元素，纯防御性（未来加 caption 编辑时也安全）
+      // P3: arrow keys don't steal focus from input / textarea / contenteditable,
+      // this component doesn't include any of those, purely defensive (also safe if caption editing is added later)
       const t = e.target as HTMLElement | null
       if (t) {
         const tag = t.tagName

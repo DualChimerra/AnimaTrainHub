@@ -42,7 +42,7 @@ def test_split_tops_up_to_target_then_noop(tmp_path: Path) -> None:
     first = eval_validation.ensure_validation_split(vdir, ratio=0.3, seed=1)
     assert first["moved"] == 3 and first["validation"] == 3
 
-    # 再跑同比例：已达目标 → 不再移动
+    # Run again with the same ratio: target already met -> no more moves
     again = eval_validation.ensure_validation_split(vdir, ratio=0.3, seed=1)
     assert again["moved"] == 0 and again["validation"] == 3
     assert eval_validation.count_images(vdir / "train") == 7
@@ -54,7 +54,7 @@ def test_split_never_moves_back_when_ratio_lowered(tmp_path: Path) -> None:
     eval_validation.ensure_validation_split(vdir, ratio=0.3, seed=1)  # val=3
 
     lowered = eval_validation.ensure_validation_split(vdir, ratio=0.1, seed=1)
-    assert lowered["moved"] == 0 and lowered["validation"] == 3  # 不移回
+    assert lowered["moved"] == 0 and lowered["validation"] == 3  # never moves back
 
 
 def test_ratio_zero_is_noop(tmp_path: Path) -> None:
@@ -79,13 +79,13 @@ def test_split_seed_is_reproducible(tmp_path: Path) -> None:
 def test_manual_validation_images_count_toward_target(tmp_path: Path) -> None:
     vdir = tmp_path / "v"
     _make_dataset(vdir, 10)
-    # 用户手动往 validation/ 放了 2 张
+    # User manually put 2 images into validation/
     manual = vdir / "validation" / "1_data"
     manual.mkdir(parents=True, exist_ok=True)
     (manual / "manual0.png").write_bytes(b"png")
     (manual / "manual1.png").write_bytes(b"png")
 
-    # total=12, ratio 0.25 → target=3；已有 2 → 只补 1
+    # total=12, ratio 0.25 -> target=3; already have 2 -> only top up 1
     summary = eval_validation.ensure_validation_split(vdir, ratio=0.25, seed=3)
     assert summary["target"] == 3
     assert summary["moved"] == 1

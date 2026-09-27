@@ -1,4 +1,4 @@
-"""tools/bump_version.py（ADR 0013）：release post 校验 + CHANGELOG 派生 + 版本号同步。"""
+"""tools/bump_version.py (ADR 0013): release post validation + CHANGELOG rendering + version sync."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import bump_version as bv  # noqa: E402
 
 
-def _post(version: str, date: str, *, title: str | None = None, body: str = "正文",
+def _post(version: str, date: str, *, title: str | None = None, body: str = "Body",
           filename: str | None = None) -> "bv.ReleasePost":
     return bv.ReleasePost(
         version=version, date=date, title=title if title is not None else f"v{version}",
@@ -20,7 +20,7 @@ def _post(version: str, date: str, *, title: str | None = None, body: str = "正
     )
 
 
-def _write_release(d: Path, version: str, date: str, body: str = "正文") -> None:
+def _write_release(d: Path, version: str, date: str, body: str = "Body") -> None:
     (d / f"{date}-v{version}.md").write_text(
         f'---\ndate: {date}\ntag: release\ntitle: v{version}\nversion: "{version}"\n---\n{body}\n',
         encoding="utf-8",
@@ -49,7 +49,7 @@ def test_validate_bad_date() -> None:
 
 def test_validate_duplicate_version() -> None:
     r = bv.validate([_post("0.2.0", "2026-02-01"), _post("0.2.0", "2026-01-01", filename="b.md")])
-    assert r.has_errors and any("重复版本" in i.message for i in r.issues)
+    assert r.has_errors and any("duplicate version" in i.message for i in r.issues)
 
 
 def test_validate_missing_title_is_error() -> None:
@@ -69,21 +69,21 @@ def test_load_release_posts_filters_and_sorts(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(bv, "ANNOUNCEMENTS_DIR", tmp_path)
     _write_release(tmp_path, "0.1.0", "2026-01-01")
     _write_release(tmp_path, "0.2.0", "2026-02-01")
-    # 非 release tag + README 都应被忽略
+    # Non-release tags and README are ignored
     (tmp_path / "2026-03-01-note.md").write_text(
         "---\ndate: 2026-03-01\ntag: notice\ntitle: n\n---\nb\n", encoding="utf-8")
-    (tmp_path / "README.md").write_text("# 指南\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Guide\n", encoding="utf-8")
     posts = bv.load_release_posts()
-    assert [p.version for p in posts] == ["0.2.0", "0.1.0"]  # semver 降序
+    assert [p.version for p in posts] == ["0.2.0", "0.1.0"]  # semver, descending
 
 
 # ---- render_changelog -----------------------------------------------------
 
 def test_render_changelog_has_header_and_versions() -> None:
-    out = bv.render_changelog([_post("0.2.0", "2026-02-01", body="新版正文")])
+    out = bv.render_changelog([_post("0.2.0", "2026-02-01", body="New release body")])
     assert out.startswith("# Changelog")
     assert "## v0.2.0 — 2026-02-01" in out
-    assert "新版正文" in out
+    assert "New release body" in out
 
 
 # ---- verify-versions ------------------------------------------------------

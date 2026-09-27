@@ -1,12 +1,12 @@
-"""LoRA adapter plugin registry（ADR 0003 PR-C）。
+"""LoRA adapter plugin registry (ADR 0003 PR-C).
 
-加新变体的步骤（参考 ADR 0003 Case 2-5 落地案例）：
-1. 写 training/adapters/{variant}.py 含 `build(args, *, preset) -> AdapterProtocol`
-2. 本文件 BUILDERS 字典加一行
-3. studio/schema.py 的 `lora_type: Literal[...]` 加一个枚举值 + 该变体专属字段
-4. 完。phases/models.py / loop.py / main() 0 改动。
+Steps to add a new variant (see ADR 0003 Case 2-5 for worked examples):
+1. Write training/adapters/{variant}.py containing `build(args, *, preset) -> AdapterProtocol`
+2. Add one line to the BUILDERS dict in this file
+3. Add an enum value + that variant's dedicated fields to `lora_type: Literal[...]` in studio/schema.py
+4. Done. Zero changes needed in phases/models.py / loop.py / main().
 
-删变体：相反顺序，3 步删完。
+Removing a variant: reverse order, 3 steps and you're done.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ __all__ = ["AdapterProtocol", "StepContext", "BUILDERS", "build_adapter",
            "validate_schema_consistency"]
 
 
-# 单一 truth source：所有 adapter 工厂的注册表
+# Single source of truth: the registry of all adapter factories
 BUILDERS: dict[str, Callable[..., AdapterProtocol]] = {
     "lokr": lycoris.build,
     "loha": lycoris.build,
@@ -31,19 +31,20 @@ BUILDERS: dict[str, Callable[..., AdapterProtocol]] = {
 
 
 def build_adapter(args, *, preset: dict[str, Any]) -> AdapterProtocol:
-    """按 args.lora_type 派发，并显式注入当前模型族的 target preset。"""
+    """Dispatch by args.lora_type, explicitly injecting the current model family's target preset."""
     lora_type = args.lora_type
     if lora_type not in BUILDERS:
         raise ValueError(
-            f"未知 lora_type={lora_type!r}；已注册: {sorted(BUILDERS)}"
+            f"Unknown lora_type={lora_type!r}; registered: {sorted(BUILDERS)}"
         )
     return BUILDERS[lora_type](args, preset=preset)
 
 
 def validate_schema_consistency() -> None:
-    """启动期校验：TrainingConfig.lora_type Literal 集合 == BUILDERS keys。
+    """Startup-time check: TrainingConfig.lora_type Literal set == BUILDERS keys.
 
-    失配通常意味着加了新变体但漏改了一处（schema 或 registry）。早 fail 早修。
+    A mismatch usually means a new variant was added but one spot (schema or registry)
+    was missed. Fail early, fix early.
     """
     from studio.schema import TrainingConfig
 
@@ -52,7 +53,7 @@ def validate_schema_consistency() -> None:
     registered = set(BUILDERS)
     if schema_options != registered:
         raise RuntimeError(
-            f"adapter 注册与 schema 不同步（PR-C registry）：\n"
-            f"  schema 有但未注册: {schema_options - registered}\n"
-            f"  注册但 schema 没列: {registered - schema_options}"
+            f"Adapter registry is out of sync with schema (PR-C registry):\n"
+            f"  in schema but not registered: {schema_options - registered}\n"
+            f"  registered but not listed in schema: {registered - schema_options}"
         )

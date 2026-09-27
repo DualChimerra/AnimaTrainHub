@@ -1,17 +1,20 @@
-"""模型族文本条件缓存的共享存储基建（多模型 Phase 2）。
+"""Shared storage infrastructure for model-family text-conditioning caches (multi-model Phase 2).
 
-本模块只负责缓存协议与磁盘 I/O，不知道 tokenizer / text encoder，也不 import
-任何 family：编码行为仍由 ``ModelFamily.prepare_text_cache`` 自治。
+This module only handles the cache protocol and disk I/O; it knows nothing
+about tokenizers / text encoders and doesn't import any family -- encoding
+behavior is still owned by ``ModelFamily.prepare_text_cache``.
 
-协议（docs/design/multi-model/04-synthesis.md D19）：
+Protocol (docs/design/multi-model/04-synthesis.md D19):
 
-- 图片 caption 缓存与图片同目录，使用 ``<完整图片名>.text.safetensors`` sidecar；
-- key 由最终 caption、TE 指纹和格式版本共同决定；
-- tensor 保留可变 token 长度，不 pad 到 512；
-- sample / negative prompt 聚合到 task 档案根（``tasks/<id>/.text-cache/``）的
-  一个 safetensors 文件——不落数据集 train/，避免被数据集扫描当 concept
-  文件夹误触（D19 修订）；
-- 写入使用 sibling tmp + ``os.replace``，训练中断不会留下半文件。
+- Image caption caches sit next to the image, as a ``<full image name>.text.safetensors`` sidecar;
+- the key is derived from the final caption, the TE fingerprint, and the format version;
+- tensors keep their variable token length, not padded to 512;
+- sample / negative prompts are aggregated into a single safetensors file
+  under the task profile root (``tasks/<id>/.text-cache/``) -- not inside the
+  dataset's train/, to avoid being mistaken for a concept folder during
+  dataset scanning (D19 revision);
+- writes use a sibling tmp file + ``os.replace``, so an interrupted run never
+  leaves a half-written file.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ _TENSOR_SEPARATOR = "::"
 
 @dataclass(frozen=True)
 class TextCacheEntry:
-    """一张图片的最终 caption 与其 sidecar 位置。"""
+    """An image's final caption and the location of its sidecar."""
 
     image_path: Path
     caption: str
@@ -50,7 +53,7 @@ class TextCacheEntry:
 
 
 def caption_sha256(caption: str) -> str:
-    """最终 caption 内容 hash（D3/D19 的独立失效分量）。"""
+    """Hash of the final caption content (an independent invalidation component, D3/D19)."""
 
     return hashlib.sha256(str(caption).encode("utf-8")).hexdigest()
 
@@ -61,7 +64,7 @@ def text_cache_key(
     *,
     format_version: int = TEXT_CACHE_FORMAT_VERSION,
 ) -> str:
-    """返回 caption + TE 指纹 + 格式版本的稳定内容键。"""
+    """Return a stable content key derived from caption + TE fingerprint + format version."""
 
     payload = (
         f"text-cache-v{int(format_version)}\0{text_fingerprint}\0{caption}"
@@ -70,17 +73,17 @@ def text_cache_key(
 
 
 def caption_sidecar_path(image_path) -> Path:
-    """图片 caption sidecar；保留原扩展名，避免 ``a.jpg``/``a.png`` 冲突。"""
+    """The image caption sidecar path; keeps the original extension to avoid ``a.jpg``/``a.png`` collisions."""
 
     image = Path(image_path)
     return image.with_name(image.name + _SIDECAR_SUFFIX)
 
 
 def prompt_cache_path(root, text_fingerprint: str) -> Path:
-    """sample/negative prompt 聚合缓存路径（按 TE 指纹隔离）。
+    """Path to the aggregated sample/negative prompt cache (isolated by TE fingerprint).
 
-    ``root`` 由调用方决定——训练里传 task 档案根（``tasks/<id>/``），聚合
-    文件落 ``<root>/.text-cache/``。
+    ``root`` is decided by the caller -- training passes the task profile root
+    (``tasks/<id>/``), and the aggregate file lands under ``<root>/.text-cache/``.
     """
 
     fp_short = hashlib.sha256(str(text_fingerprint).encode("utf-8")).hexdigest()[:12]
@@ -95,14 +98,14 @@ def _normalise_tensors(tensors: Mapping[str, object]) -> dict:
     import torch
 
     if not tensors:
-        raise ValueError("文本缓存至少需要一个 tensor")
+        raise ValueError("text cache needs at least one tensor")
     out = {}
     for name, value in tensors.items():
         key = str(name)
         if not key or _TENSOR_SEPARATOR in key:
-            raise ValueError(f"非法文本缓存 tensor 名: {name!r}")
+            raise ValueError(f"invalid text cache tensor name: {name!r}")
         if not isinstance(value, torch.Tensor):
-            raise TypeError(f"文本缓存值必须是 torch.Tensor: {key}")
+            raise TypeError(f"text cache value must be a torch.Tensor: {key}")
         out[key] = value.detach().cpu().contiguous()
     return out
 
@@ -113,8 +116,10 @@ def _atomic_save(
     from safetensors.torch import save_file
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 同一数据集允许两个训练 task 并发预缓存：tmp 名带 pid/thread，最终文件仍由
-    # os.replace 竞争为任一完整版本，不会互相截断临时文件。
+    # The same dataset may be pre-cached concurrently by two training tasks:
+    # the tmp name includes pid/thread, and os.replace still resolves the
+    # final file to whichever complete version wins the race, without either
+    # one truncating the other's temp file.
     tmp_path = path.with_name(
         f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
@@ -137,7 +142,7 @@ def _load(path: Path) -> tuple[dict, dict[str, str]]:
 
 
 class TextCacheStore:
-    """绑定一个 TE 指纹的 sidecar / prompt bundle 读写器。"""
+    """Reads/writes sidecars / prompt bundles for one bound TE fingerprint."""
 
     def __init__(
         self,
@@ -147,7 +152,7 @@ class TextCacheStore:
     ) -> None:
         fingerprint = str(text_fingerprint).strip()
         if not fingerprint:
-            raise ValueError("text_fingerprint 不能为空")
+            raise ValueError("text_fingerprint must not be empty")
         self.text_fingerprint = fingerprint
         self.format_version = int(format_version)
 
@@ -170,7 +175,7 @@ class TextCacheStore:
         _atomic_save(payload, metadata, entry.cache_path)
 
     def read_caption(self, entry: TextCacheEntry) -> Optional[dict]:
-        """命中返回 CPU tensors；缺失、损坏或任一指纹失配返回 ``None``。"""
+        """Returns CPU tensors on a hit; returns ``None`` if missing, corrupt, or any fingerprint mismatches."""
 
         if not entry.cache_path.is_file():
             return None
@@ -194,7 +199,7 @@ class TextCacheStore:
         entry: TextCacheEntry,
         encoder: Callable[[str], Mapping[str, object]],
     ) -> tuple[dict, bool]:
-        """读取 sidecar；miss 时编码并原子覆盖。返回 ``(tensors, was_hit)``。"""
+        """Reads the sidecar; on a miss, encodes and atomically overwrites it. Returns ``(tensors, was_hit)``."""
 
         cached = self.read_caption(entry)
         if cached is not None:
@@ -208,7 +213,7 @@ class TextCacheStore:
         root,
         encoded: Mapping[str, Mapping[str, object]],
     ) -> Path:
-        """原子覆盖 sample/negative prompt 聚合缓存，tensor 可各自不同长度。"""
+        """Atomically overwrite the aggregated sample/negative prompt cache; tensors may each have a different length."""
 
         payload = {}
         metadata = {
@@ -235,7 +240,7 @@ class TextCacheStore:
         captions,
         encoder: Callable[[str], Mapping[str, object]],
     ) -> tuple[dict[str, dict], int]:
-        """批量读取聚合缓存并编码 misses；返回 ``(caption→tensors, hit 数)``。"""
+        """Batch-reads the aggregate cache and encodes misses; returns ``(caption -> tensors, hit_count)``."""
 
         unique = list(dict.fromkeys(str(caption) for caption in captions))
         encoded: dict[str, dict] = {}

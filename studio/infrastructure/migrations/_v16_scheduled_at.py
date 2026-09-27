@@ -1,14 +1,15 @@
-"""v14 → v15: tasks 加 scheduled_at（0.17 P-B 计划任务）。
+"""v14 -> v15: adds scheduled_at to tasks (0.17 P-B scheduled tasks).
 
-计划任务 = 独立 `scheduled` 状态（不是 pending 的子集）：入队时带未来时间 →
-status='scheduled' + scheduled_at；supervisor 每秒 tick 到点把它提升为 pending，
-之后走既有调度（等槽 → running → terminal）。dispatcher 只看 pending，
-scheduled 对派活天然不可见，无需改 next_pending / _next_pending_task_in。
+A scheduled task = a distinct `scheduled` status (not a subset of pending): enqueuing with a
+future time -> status='scheduled' + scheduled_at; the supervisor's per-second tick promotes it
+to pending once due, after which it follows the existing scheduling path (wait for a slot ->
+running -> terminal). The dispatcher only looks at pending, so scheduled tasks are naturally
+invisible to dispatch -- no change needed to next_pending / _next_pending_task_in.
 
-- scheduled_at：计划开始时间（unix 秒）。提升为 pending 后保留作记录
-  （「原计划 3:00，实际手动提前」可追溯）。
+- scheduled_at: planned start time (unix seconds). Kept as a record after promotion to pending
+  (so "originally scheduled for 3:00, actually started early by hand" stays traceable).
 
-NULLABLE，不需要 backfill；非计划任务恒 NULL。
+NULLABLE, no backfill needed; non-scheduled tasks are always NULL.
 """
 from __future__ import annotations
 

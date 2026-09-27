@@ -1,8 +1,8 @@
 /**
  * MonitorDashboard — native React training monitor
  * Replaces the monitor_smooth.html iframe.
- * Data source: GET /api/state?task_id=N 拉降采样快照 + SSE monitor_progress
- * 走 useMonitorProgress hook 做 delta merge（PR #37 增量协议）。
+ * Data source: GET /api/state?task_id=N fetches a downsampled snapshot + SSE monitor_progress
+ * goes through the useMonitorProgress hook for delta merging (PR #37's incremental protocol).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, type EvalJobInfo, type EvalMetricResult, type EvalMetricState, type LoraCkpt, type MonitorState } from '../api/client'
@@ -63,7 +63,7 @@ function StatCard({ label, value, sub, tone }: {
 }
 
 // ── SmoothControl ──────────────────────────────────────────────────────────
-// EMA slider；alpha = 1 表示"不平滑"（SeriesChart 内部据此跳过 EMA）。
+// EMA slider; alpha = 1 means "no smoothing" (SeriesChart skips EMA internally based on this).
 
 function SmoothControl({ alpha, setAlpha, min, max, step }: {
   alpha: number
@@ -88,9 +88,9 @@ function SmoothControl({ alpha, setAlpha, min, max, step }: {
 }
 
 // ── SeriesChart (pure SVG) ─────────────────────────────────────────────────
-// 通用的 step×value 折线图：raw + EMA smooth 双线 + xy 轴 tick。
-// loss / lr / d 都复用：传 rawColor/smoothColor 自定义配色，传 yFormat 控制
-// y 轴数字格式（科学计数法 vs 定点）。
+// Generic step-by-value line chart: raw + EMA-smoothed dual lines + xy axis ticks.
+// Shared by loss / lr / d: pass rawColor/smoothColor for custom coloring, pass yFormat to control
+// the y-axis number format (scientific notation vs. fixed point).
 
 function SeriesChart({ data, rawColor, smoothColor, fillColor, emaAlpha, yFormat, height, minHeight, axes = true, refLine }: {
   data: Array<{ step: number; value: number }>
@@ -99,17 +99,17 @@ function SeriesChart({ data, rawColor, smoothColor, fillColor, emaAlpha, yFormat
   fillColor?: string
   emaAlpha: number
   yFormat: (v: number) => string
-  /** 固定像素高度（用于次要图，e.g. d value） */
+  /** Fixed pixel height (used for secondary charts, e.g. d value) */
   height?: number
-  /** flex 模式下的最低像素高度；视口足够高时随父高度自动拉伸（用于主图，e.g. loss / lr） */
+  /** Minimum pixel height in flex mode; stretches with the parent height when the viewport is tall enough (used for the main charts, e.g. loss / lr) */
   minHeight?: number
-  /** 是否绘制坐标轴 + tick label + 网格线；false 时退化为纯 sparkline 适合小高度图（d value） */
+  /** Whether to draw axes + tick labels + gridlines; false degrades to a plain sparkline suited to short charts (d value) */
   axes?: boolean
-  /** 可选的水平参考线（eval：纯底模 baseline 值）；y 范围会纳入它。 */
+  /** Optional horizontal reference line (eval: the pure-base-model baseline value); the y range accounts for it. */
   refLine?: number
 }) {
-  // ResizeObserver 测真实像素尺寸，viewBox 用真实尺寸 → SVG 1:1 渲染，
-  // 文本/线宽不会被 preserveAspectRatio 非等比缩放扭曲。
+  // ResizeObserver measures the real pixel size, the viewBox uses that real size -> the SVG renders 1:1,
+  // so text/line widths aren't distorted by preserveAspectRatio's non-uniform scaling.
   const wrapperRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState<{ w: number; h: number } | null>(null)
 
@@ -174,21 +174,21 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
 }) {
   const pts = downsample(data, 600)
   const raw = pts.map((p) => p.value)
-  // alpha = 1 → 跳过 EMA，纯 raw（avoid 双重曲线视觉冗余）
+  // alpha = 1 -> skip EMA, pure raw (avoids redundant visual double-lines)
   const smooth = emaAlpha >= 0.999 ? raw : calcEMA(raw, emaAlpha)
   const steps = pts.map((p) => p.step)
 
-  // sparkline 模式（axes=false）省掉 y label 左侧空间，path 填满；
-  // 带 axes 时 PX 留 48 给 y tick（13pt 字宽约 7-8px × "0.0796" 6字 ≈ 46）；
-  // PY 留 18 给 x tick（13pt 字高 ≈ 14，再留 4px 呼吸）。
+  // Sparkline mode (axes=false) drops the left-side space reserved for y labels so the path fills the width;
+  // with axes, PX reserves 48px for y ticks (13pt char width ~7-8px x "0.0796"'s 6 chars ~= 46);
+  // PY reserves 18px for x ticks (13pt char height ~14, plus 4px breathing room).
   const PX = axes ? 48 : 0
   const PY = axes ? 18 : 2
-  const RX = axes ? 8 : 0  // 右侧留白
-  // y 范围按 smooth 算（无 smooth 时退化为 raw）—— raw 尖刺超出顶部会被裁掉，
-  // 这是有意的：换取 smooth 信号占满高度、趋势可读。原 LossChart 同款行为。
+  const RX = axes ? 8 : 0  // right-side padding
+  // y range is computed from smooth (degrades to raw when there's no smoothing) -- raw spikes above the top get
+  // clipped, and that's intentional: it trades that for the smooth signal filling the height so the trend stays readable. Same behavior as the old LossChart.
   const refVals = emaAlpha >= 0.999 ? raw : smooth
   const hasRef = typeof refLine === 'number' && Number.isFinite(refLine)
-  // y 范围纳入 baseline 参考线，保证它落在可视区（曲线在 base 线上/下方一目了然）。
+  // The y range accounts for the baseline reference line so it's always visible in the chart (whether the curve is above or below the base line at a glance).
   const minV = Math.min(...refVals, ...(hasRef ? [refLine as number] : []))
   const maxV = Math.max(...refVals, ...(hasRef ? [refLine as number] : []))
   const range = maxV - minV || Math.max(Math.abs(maxV), 1e-9) * 1e-3 || 1e-9
@@ -204,8 +204,8 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
   const yTicks = [minV, (minV + maxV) / 2, maxV].map((v) => ({
     v, y: y(v), label: yFormat(v),
   }))
-  // 点少时（eval 只有几个 checkpoint）5 个分位会 round 到重复索引（如 3 点 →
-  // 0,1,1,2,2），导致标签 "20 20 40 40" 叠在同一 x 上重叠。按索引去重。
+  // With few points (eval only has a handful of checkpoints), rounding 5 quantiles can collide on the same index (e.g. 3 points ->
+  // 0,1,1,2,2), causing labels like "20 20 40 40" to overlap at the same x. Dedupe by index.
   const xTicks = [...new Set(
     [0, 0.25, 0.5, 0.75, 1].map((t) => Math.round(t * Math.max(1, pts.length - 1))),
   )].map((i) => ({ i, x: x(i), label: String(steps[i] ?? '') }))
@@ -213,8 +213,8 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
   const lastY = y(smooth[smooth.length - 1])
   const showSmoothLayer = emaAlpha < 0.999
 
-  // viewBox 与真实尺寸 1:1，省掉 preserveAspectRatio="none" 的非等比缩放——
-  // 文字/线宽在真实像素下渲染，不再被父容器宽高比扭曲。
+  // viewBox matches the real size 1:1, skipping preserveAspectRatio="none"'s non-uniform scaling --
+  // text/line widths render at real pixel size, no longer distorted by the parent's aspect ratio.
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: '100%', display: 'block' }}>
       {axes && (
@@ -231,7 +231,7 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
       )}
       {/* area (smooth fill, optional) */}
       {areaPath && <path d={areaPath} fill={fillColor} opacity="0.5" />}
-      {/* raw —— smooth 模式下淡显，无 smooth 模式下当主线 */}
+      {/* raw -- dimmed when smooth is shown, the main line when there's no smoothing */}
       <path
         d={rawPath}
         stroke={showSmoothLayer ? rawColor : smoothColor}
@@ -247,7 +247,7 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
       )}
       {/* last point */}
       <circle cx={x(smooth.length - 1)} cy={lastY} r="4" fill={smoothColor} stroke="var(--bg-surface)" strokeWidth="2" />
-      {/* baseline 参考线（纯底模）+ "base" 标注：曲线在它上方=优于底模，下方=不如底模 */}
+      {/* Baseline reference line (pure base model) + a "base" label: curve above it = better than base, below = worse than base */}
       {hasRef && (
         <>
           <line
@@ -262,13 +262,13 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
       )}
       {axes && (
         <>
-          {/* y axis labels —— y offset +4.5 = fontSize/2 + 准基线微调，把字垂直居中到 tick */}
+          {/* y axis labels -- y offset +4.5 = fontSize/2 + a small baseline tweak to vertically center the text on the tick */}
           {yTicks.map(({ v, y: yt, label }) => (
             <text key={v} x={PX - 4} y={yt + 4.5} fontSize="13" fill="var(--fg-tertiary)"
               fontFamily="var(--font-mono)" textAnchor="end">{label}</text>
           ))}
-          {/* x axis labels —— 首/末两 tick 在 SVG 边缘上，middle 锚点会让一半字宽溢出被裁，
-              改 start/end 锚点把字往内推；中间 tick 维持 middle 居中。 */}
+          {/* x axis labels -- the first/last ticks sit right at the SVG edge, a middle anchor would clip half the text;
+              switch to start/end anchors to push the text inward; the middle ticks keep a middle anchor. */}
           {xTicks.map(({ i: idx, x: xt, label }, i, arr) => {
             const anchor = i === 0 ? 'start' : i === arr.length - 1 ? 'end' : 'middle'
             return (
@@ -286,7 +286,7 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
 
 export const EVAL_METRIC_KEYS = ['clip_t', 'clip_i', 'dino_i', 'ccip_i', 'tag_recall'] as const
 export type EvalMetricKey = typeof EVAL_METRIC_KEYS[number]
-// 核心指标常显；动漫域新指标默认关，只在算过（状态非 not_run）时才显示卡片/列。
+// Core metrics are always shown; new anime-domain metrics are off by default and only show a card/column once they've been computed (status != not_run).
 export const CORE_METRIC_KEYS = new Set<EvalMetricKey>(['clip_t', 'clip_i', 'dino_i'])
 
 const EVAL_LABELS: Record<EvalMetricKey, string> = {
@@ -297,7 +297,7 @@ const EVAL_LABELS: Record<EvalMetricKey, string> = {
   tag_recall: 'Tag-Recall',
 }
 
-// 每个指标一种线色（并排区分）。深色背景上高对比、可辨。
+// One line color per metric (to tell them apart side by side). High contrast and distinguishable on a dark background.
 const EVAL_COLORS: Record<EvalMetricKey, string> = {
   clip_t: '#3fb950',
   clip_i: '#58a6ff',
@@ -354,8 +354,8 @@ function toneClass(tone: 'ok' | 'warn' | 'err' | 'muted'): string {
   return 'text-fg-tertiary'
 }
 
-// 一行 checkpoint 的统一进度文案 + 色调（不管 inline/训练后/手动触发，都从同一份
-// run.json/metrics.json 状态推：先出图（sample_run.summary done/total），再算指标。
+// Unified progress copy + tone for a checkpoint row (whether triggered inline/post-training/manually, always
+// derived from the same run.json/metrics.json state: sample generation first (sample_run.summary done/total), then metrics.
 export function evalRowStatus(result: EvalMetricResult): {
   /** i18n key, or null when the raw backend status is the best label we have. */
   key: string | null
@@ -392,7 +392,7 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
   const [payload, setPayload] = useState<Awaited<ReturnType<typeof api.listEvalMetrics>> | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // 训练后/手动评估 job（统一日志区取原始日志用）。
+  // Post-training/manual eval jobs (used to fetch the raw log in the unified log area).
   const [evalJobs, setEvalJobs] = useState<EvalJobInfo[]>([])
 
   const load = useCallback(async (quiet = false) => {
@@ -412,7 +412,7 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
         const ej = await api.listTaskEvalJobs(pid, vid, taskId)
         setEvalJobs(ej.jobs)
       } catch {
-        // 日志关联是辅助信息，拉失败不打扰
+        // The log association is auxiliary info; a failed fetch shouldn't be disruptive
       }
     }
   }, [pid, vid, taskId])
@@ -429,9 +429,9 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
       .sort((a, b) => checkpointSortValue(a, 0) - checkpointSortValue(b, 0))
   }, [payload?.results])
 
-  // baseline run（纯底模对照）不作为 checkpoint 展示——只用来给各 checkpoint 算 Δ
-  // （后端已挂在 result.delta）。每次「运行评估」会自动清空上一轮，所以这里永远只有
-  // 这次 run 的结果，每个 checkpoint 一条，无需跨轮去重。
+  // The baseline run (pure-base-model control) isn't shown as a checkpoint -- it's only used to compute delta
+  // for each checkpoint (the backend already attaches it as result.delta). Each "run evaluation" auto-clears the
+  // previous round, so this always only has this run's results, one per checkpoint, no cross-round dedup needed.
   const displayResults = useMemo(
     () => results.filter((r) => !r.baseline),
     [results],
@@ -446,14 +446,14 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
     )
   }, [results])
 
-  // 还有评估 job 在跑（含「出图」阶段——此时 metric 状态还是 not_run，hasActiveMetric
-  // 抓不到）。重跑评估在已 done 的 task 上时，靠这个让轮询继续，新 run 进度/日志才刷新。
+  // There may still be an eval job running (including the "sample generation" stage -- while metric status is still
+  // not_run, hasActiveMetric can't catch it). When re-running eval on an already-done task, this keeps polling going so the new run's progress/log refreshes.
   const hasActiveJob = useMemo(
     () => evalJobs.some((j) => j.status === 'pending' || j.status === 'running'),
     [evalJobs],
   )
 
-  // 核心指标常显；动漫域新指标默认关，只有算过（状态非 not_run）才显示，避免空卡。
+  // Core metrics are always shown; new anime-domain metrics are off by default and only shown once computed (status != not_run), to avoid empty cards.
   const displayKeys = useMemo<EvalMetricKey[]>(
     () => EVAL_METRIC_KEYS.filter((k) =>
       CORE_METRIC_KEYS.has(k) ||
@@ -465,7 +465,7 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
     [displayResults],
   )
 
-  // 训练结束后评估进度：复用现有 results 聚合「评估中 done/total」，给面板头部用
+  // Post-training eval progress: reuses the existing results to aggregate "evaluating done/total" for the panel header
   const evalAgg = useMemo(() => evalProgressFromResults(results), [results])
 
   useEffect(() => {
@@ -475,7 +475,7 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
     return () => window.clearInterval(id)
   }, [connected, hasActiveMetric, hasActiveJob, load, pid, vid])
 
-  // ── 手动评估：选 checkpoint → POST /eval/run（task-scoped） ──────────────
+  // -- Manual eval: pick a checkpoint -> POST /eval/run (task-scoped) --------------------------
   const [pickerOpen, setPickerOpen] = useState(false)
   const [ckpts, setCkpts] = useState<LoraCkpt[]>([])
   const [ckptsLoading, setCkptsLoading] = useState(false)
@@ -563,8 +563,8 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
     return out
   }, [displayResults])
 
-  // 各指标的纯底模 baseline 值（画成图上的水平参考线）。后端给每条非 baseline 结果
-  // 都挂了相同的 baseline_metrics，取任一即可。
+  // Pure-base-model baseline value for each metric (drawn as a horizontal reference line on the chart). The backend
+  // attaches the same baseline_metrics to every non-baseline result, so any one of them can be used.
   const baselineByKey = useMemo(() => {
     const out: Partial<Record<EvalMetricKey, number>> = {}
     const bm = displayResults.find(
@@ -661,8 +661,8 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
           ) : ckpts.length === 0 ? (
             <div className="text-xs text-fg-tertiary py-1">{t('monitor.noCkpts')}</div>
           ) : (
-            // chip 网格（与测试页 LoRA 选择器同款）：auto-fill 等宽列、+/✓ 标记、
-            // 选中态 accent-soft 高亮。
+            // Chip grid (same style as the test page's LoRA picker): auto-fill equal-width columns, +/checkmark markers,
+            // accent-soft highlight for the selected state.
             <div
               className="grid gap-1.5 overflow-y-auto"
               style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', maxHeight: 200, padding: 2 }}
@@ -825,11 +825,11 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
   )
 }
 
-// ── SampleViewer（单图 + 左右切换） ──────────────────────────────────────
+// -- SampleViewer (single image + prev/next) --------------------------------
 
-// monitor 给每张图都记了触发那一刻的 global_step，所以 step 始终能显示；epoch 只有
-// 按 epoch 采样（文件名 epoch_N.png）的图才有，从文件名解析。两个都返回 → 角标 / 标题
-// 「step 一直显示、ep 有就附加」，不用点开看文件名才知道是第几 epoch。
+// The monitor records the global_step at the moment each image was triggered, so step can always be shown; epoch
+// is only available for images sampled by epoch (filename epoch_N.png), parsed from the filename. When both are
+// present -> badge/title "always show step, append ep if present", so the user doesn't have to open the filename to know the epoch.
 function sampleMarks(s: { path: string; step?: number }): { step: number | null; epoch: number | null } {
   const fn = s.path.split(/[\\/]/).pop() ?? s.path
   const ep = /^epoch_(\d+)/i.exec(fn)
@@ -844,15 +844,15 @@ function SampleViewer({ samples, taskId }: {
   samples: Array<{ path: string; step?: number }>
   taskId: number
 }) {
-  // 按数组原顺序铺（最新在末尾，对应训练时间轴）。多 prompt 同 step 就是相邻
-  // 几个相同 step 的项，下标重复，视觉上自己传达「同一步不同 prompt」。
+  // Laid out in the array's original order (newest last, matching the training timeline). Multiple prompts at the
+  // same step just show up as adjacent items with the same step, repeated indices visually convey "same step, different prompt".
   const list = samples
   const [active, setActive] = useState(list.length - 1)
   const [zoomOpen, setZoomOpen] = useState(false)
   const stripRef = useRef<HTMLDivElement | null>(null)
 
-  // 初次有图 / 新增 sample 时，仅当用户当前选中是「最末或之后」（即跟随末尾）
-  // 才把 active 跟到新末尾；用户回头看早期图时不打断。
+  // When images first appear / a new sample arrives, only follow the new end if the user's current selection was
+  // at "the last item or beyond" (i.e. following the end); doesn't interrupt the user while looking back at earlier images.
   const prevLenRef = useRef(0)
   useEffect(() => {
     if (list.length === 0) {
@@ -866,7 +866,7 @@ function SampleViewer({ samples, taskId }: {
     prevLenRef.current = list.length
   }, [list.length, active])
 
-  // active 变化时把 strip 滚到对应缩略图（仅水平方向，不影响外层）
+  // When active changes, scroll the strip to the matching thumbnail (horizontal only, doesn't affect the outer layout)
   useEffect(() => {
     const strip = stripRef.current
     if (!strip) return
@@ -893,7 +893,7 @@ function SampleViewer({ samples, taskId }: {
 
   return (
     <div className="flex flex-col gap-2.5 w-full flex-1">
-      {/* 顶部缩略图条 —— 横向滚动，按数组原顺序铺 */}
+      {/* Top thumbnail strip -- scrolls horizontally, laid out in the array's original order */}
       <div
         ref={stripRef}
         className="flex gap-1.5 overflow-x-auto pb-1 shrink-0"
@@ -908,7 +908,7 @@ function SampleViewer({ samples, taskId }: {
             m.epoch != null ? `ep ${m.epoch}` : null,
             m.step != null ? `step ${m.step}` : null,
           ].filter(Boolean).join(' · ') || fn
-          // 角标放缩略图下面一行，不压在 64px 小图上（盖住看不清）。
+          // The badge sits on the line below the thumbnail, not overlaid on the 64px thumbnail (would be unreadable).
           const thumbCaption = [
             m.epoch != null ? `ep${m.epoch}` : null,
             m.step != null ? `${m.step}` : null,
@@ -944,10 +944,10 @@ function SampleViewer({ samples, taskId }: {
         })}
       </div>
 
-      {/* 大图 —— 当前选中
-          img 用 absolute inset-0 脱离 flow，避免 sample 图原始分辨率(1024×*)
-          顶起父容器 min-content；letterbox 由 object-contain 处理。
-          minHeight 220 是底线（letterbox 视觉勉强够），父 row 高度够时由 flex-1 撑满。 */}
+      {/* Main image -- currently selected.
+          The img uses absolute inset-0 to escape the flow, so the sample image's native resolution (1024x*)
+          doesn't push the parent container's min-content; letterboxing is handled by object-contain.
+          minHeight 220 is the floor (barely enough for the letterbox look); flex-1 fills the rest when the parent row is tall enough. */}
       <div
         className="bg-sunken rounded-sm overflow-hidden relative flex-1 min-h-0 monitor-sample-main"
         style={{ minHeight: 220 }}
@@ -973,7 +973,7 @@ function SampleViewer({ samples, taskId }: {
         )}
       </div>
 
-      {/* 点击大图放大（参考下载页 ImagePreviewModal）；← / → 在采样序列里前后切 */}
+      {/* Click the main image to zoom (mirrors the download page's ImagePreviewModal); left/right cycle through the sample sequence */}
       {zoomOpen && (
         <ImagePreviewModal
           src={fullUrl}
@@ -996,7 +996,7 @@ function SampleViewer({ samples, taskId }: {
 export default function MonitorDashboard({ taskId }: { taskId: number }) {
   const { state, connected } = useMonitorProgress(taskId)
   const [emaAlpha, setEmaAlpha] = useState(0.02)
-  // LR / d 默认不做 EMA（数据本身已是 EMA 派生量），slider 拉到 < 1 才平滑
+  // LR / d don't get EMA by default (the data is already an EMA-derived quantity); the slider only smooths once pulled below 1
   const [lrAlpha, setLrAlpha] = useState(1)
   const [dAlpha] = useState(1)
 
@@ -1064,7 +1064,7 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
     )
   }
 
-  // 全量 raw series（不再 slice(-60)）— SeriesChart 内部会均匀降采样到 600 渲染
+  // Full raw series (no more slice(-60)) -- SeriesChart downsamples evenly to 600 points internally when rendering
   const lrSeries = lrHistory.map((l) => ({ step: l.step, value: l.lr }))
   const dSeries = optimizerMetricsHistory
     .map((m) => ({ step: m.step, d: m.d }))
@@ -1134,15 +1134,15 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
         <StatCard label="eta" value={eta} sub={speed ? `${speed.toFixed(2)} it/s` : undefined} />
       </div>
 
-      {/* 左：采样图（竖） / 右：loss → LR
-          gridTemplateRows: '1fr' → row 跟随 flex-1 撑满，避免 row 默认 auto 在大屏留空白；
-          右卡 minHeight 形成下界，flex-1 在 row 高度 > 3*min+gap 时均分扩展；
-          总 min 超视口时由外层 overflow-y-auto 滚 */}
+      {/* Left: sample image (vertical) / Right: loss -> LR
+          gridTemplateRows: '1fr' -> the row fills via flex-1, avoiding the default auto row leaving blank space on large screens;
+          the right card's minHeight forms a floor, flex-1 expands evenly once the row height exceeds 3*min+gap;
+          when the total min exceeds the viewport, the outer overflow-y-auto scrolls it */}
       <div
         className="grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-3.5 flex-1 m-grid-1 m-page-scroll"
         style={{ gridTemplateRows: '1fr' }}
       >
-        {/* 左：采样图 */}
+        {/* Left: sample image */}
         <div className="card p-0 overflow-hidden flex flex-col min-h-0">
           <div className="px-3.5 py-2.5 border-b border-subtle flex items-center justify-between shrink-0">
             <span className="text-sm font-semibold">Samples</span>
@@ -1153,11 +1153,11 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
           </div>
         </div>
 
-            {/* 右：loss / lr / d 三卡（d 可选），flex-1 等高平分但夹在 [140, 300] 之间。
-            每张卡同结构：header 单行 + 占满 flex-1 的 chart。LR 不再夹带任何 d 信息
-            （avoid 之前 d-block 作为 LR 内 shrink-0 死成本顶起 LR card min 的问题）。
-            minHeight 140 = 可读下界（再小 chart 不易读，触发外层滚动条而非继续压缩）；
-            maxHeight 300 = 防止 4K / 大屏上卡片被拉到失衡的高度（剩余空间留给左列采样图）。 */}
+            {/* Right: loss / lr / d three cards (d optional), flex-1 splits height evenly but clamped to [140, 300].
+            Same structure per card: a single-line header + a chart filling flex-1. LR no longer carries any d info
+            (avoids the old problem where the d-block, as a shrink-0 dead-weight cost inside LR, pushed up LR card's min).
+            minHeight 140 = readable floor (a smaller chart is hard to read and would trigger the outer scrollbar instead of shrinking further);
+            maxHeight 300 = prevents cards from being stretched to an unbalanced height on 4K/large screens (leaves the remaining space for the left column's samples). */}
         <div className="flex flex-col gap-3.5 min-h-0">
           <div className="card p-4 flex-1 flex flex-col monitor-chart-card" style={{ minHeight: 140, maxHeight: 300 }}>
             <div className="flex items-center justify-between mb-2 shrink-0">

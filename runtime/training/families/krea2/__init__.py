@@ -36,7 +36,7 @@ from ..spec import (
     SamplingDefaults,
     TextSpec,
 )
-# 单源数据（刀 1 / R3）：见 anima/__init__.py 同位注释的依赖方向说明
+# Single source of data (Cut 1 / R3): see the matching comment in anima/__init__.py for the dependency direction
 from studio.domain.common import (
     FAMILY_CAPABILITIES,
     FAMILY_CONFIG_DEFAULTS,
@@ -48,14 +48,14 @@ logger = logging.getLogger(__name__)
 
 
 _GIB = 1024 ** 3
-#: TE 上卡所需：fp16 权重 8.9GB + embed 表 cast fp32 瞬时 ~1.5GB + 缓冲
+#: VRAM needed to move TE onto the GPU: fp16 weights 8.9GB + embed table cast to fp32 transiently ~1.5GB + buffer
 _TE_LOAD_NEED_BYTES = int(11 * _GIB)
-#: 官方 fp8_scaled 单文件 TE：Linear ~5GB + embed 仍 fp16（cast fp32 瞬时不变）
+#: Official fp8_scaled single-file TE: Linear ~5GB + embed still fp16 (fp32 cast transient unchanged)
 _TE_LOAD_NEED_BYTES_FP8 = int(7 * _GIB)
 
 
 def _cuda_free_bytes(device) -> int | None:
-    """目标 CUDA 设备当前空闲显存；非 CUDA / 查询失败返回 None。"""
+    """Currently free VRAM on the target CUDA device; returns None for non-CUDA / a failed query."""
     try:
         dev = torch.device(device)
         if dev.type != "cuda" or not torch.cuda.is_available():
@@ -67,16 +67,18 @@ def _cuda_free_bytes(device) -> int | None:
 
 
 def _sampling_headroom_bytes(height: int, width: int) -> int:
-    # 采样余量粗估不做 per-model 记账（编排方案 D1 用户拍板）：
-    # 2GB 底 + 3GB × 面积比（1024² → 5GB，1536² → 8.75GB）
+    # Sampling headroom is a rough estimate, not per-model accounting (user
+    # decision in orchestration doc D1): 2GB base + 3GB x area ratio
+    # (1024^2 -> 5GB, 1536^2 -> 8.75GB)
     area_ratio = (height * width) / (1024 * 1024)
     return int((2.0 + 3.0 * area_ratio) * _GIB)
 
 
 def _should_yield_dit(policy: str, device,
                       need_bytes: int = _TE_LOAD_NEED_BYTES) -> bool:
-    """编码前 TE 需要搬上 GPU 时，DiT 是否先撤到 CPU（comfy free_memory
-    的「装不下才让位」语义）。``need_bytes`` 按 TE 精度取值（fp8 减半）。"""
+    """Whether DiT should step down to CPU before the TE needs to move onto the
+    GPU for encoding (comfy free_memory's "only yield if it won't fit"
+    semantics). ``need_bytes`` depends on TE precision (halved for fp8)."""
     if policy == "performance":
         return False
     if policy == "save_vram":
@@ -87,15 +89,18 @@ def _should_yield_dit(policy: str, device,
 
 def _should_offload_te(policy: str, device, height: int, width: int,
                        dit_yielded: bool) -> bool:
-    """采样前是否把 TE 卸到 CPU。auto 只在采样余量不足时卸——32GB fp8
-    三者同驻 free 充裕，从此零搬运。"""
+    """Whether to offload the TE to CPU before sampling. auto only offloads
+    when sampling headroom is insufficient -- on 32GB fp8, all three fit
+    resident with plenty of free VRAM, so from then on it's zero moves."""
     if policy == "performance":
         return False
     if policy == "save_vram":
         return True
     if dit_yielded:
-        # DiT 刚让过位 = 显存装不下三者同驻，采样期必须让 DiT 独占；
-        # 且此刻 DiT 还在 CPU，free 虚高不可作判据
+        # DiT already yielded = VRAM can't fit all three resident, so DiT
+        # must have exclusive use during sampling; also, DiT is still on CPU
+        # right now so "free" would read artificially high and can't be used
+        # as a signal
         return True
     free = _cuda_free_bytes(device)
     return free is None or free < _sampling_headroom_bytes(height, width)
@@ -105,7 +110,7 @@ KREA2_SPEC = ModelSpec(
     family_id="krea2",
     display_name="Krea 2",
     objective="rectified_flow",
-    # 与 Anima 共用 Qwen-Image VAE / Wan2.1 latent 空间——引用同一实例（D6）。
+    # Shares the Qwen-Image VAE / Wan2.1 latent space with Anima -- references the same instance (D6).
     latent=WAN21_F8C16,
     text=TextSpec(
         strategy="cached_varlen",
@@ -113,19 +118,22 @@ KREA2_SPEC = ModelSpec(
         fingerprint=KREA2_TEXT_FINGERPRINT,
     ),
     sampling=SamplingDefaults(
-        # 白名单单源 studio/domain/common.py FAMILY_SAMPLING（刀 1 / R3）；
-        # KREA2_SAMPLER 等常量仍归 sampling.py（生成侧 parity 共用），
-        # 与单源数据的一致性由 tests/test_model_family_gating.py 锁死
+        # Allow-list's single source is studio/domain/common.py FAMILY_SAMPLING
+        # (Cut 1 / R3); constants like KREA2_SAMPLER still live in sampling.py
+        # (shared with the generation-side parity code); consistency with the
+        # single-source data is locked down by tests/test_model_family_gating.py
         samplers=FAMILY_SAMPLING["krea2"]["samplers"],
         schedulers=FAMILY_SAMPLING["krea2"]["schedulers"],
         default_sampler=KREA2_SAMPLER,
         default_scheduler=KREA2_SCHEDULER,
         default_steps=KREA2_RAW_STEPS,
         default_cfg=KREA2_RAW_GUIDANCE,
-        # Comfy parity 口径：固定 mu=1.15（ComfyUI ModelSamplingFlux 同款；
-        # 注意本值是 **mu（exp 前）**，与 Anima ConstantShift 的直接因子语义
-        # 不同——shift_policy 语义归 family 解释）。diffusers 的分辨率感知
-        # 动态 mu 保留为 build_krea2_sigmas(dynamic_mu=True) 非默认路径。
+        # Comfy-parity convention: fixed mu=1.15 (matches ComfyUI's
+        # ModelSamplingFlux; note this value is **mu (pre-exp)**, unlike
+        # Anima's ConstantShift, which is a direct factor -- shift_policy's
+        # meaning is up to the family to interpret). diffusers' resolution-
+        # aware dynamic mu is kept as the non-default
+        # build_krea2_sigmas(dynamic_mu=True) path.
         shift_policy=ConstantShift(shift=1.15),
     ),
     capabilities=FAMILY_CAPABILITIES["krea2"],
@@ -144,7 +152,7 @@ class Krea2Family:
 
         if attention_backend != "none":
             logger.info(
-                "Krea2 当前固定使用 PyTorch SDPA；忽略 attention_backend=%s",
+                "Krea2 currently always uses PyTorch SDPA; ignoring attention_backend=%s",
                 attention_backend,
             )
         return load_krea2_model(
@@ -152,13 +160,16 @@ class Krea2Family:
         )
 
     def swappable_blocks(self, *, checkpoint_path: str | None = None) -> int:
-        """可换出的层数上限（= DiT 主干层数）。
+        """Upper bound on the number of swappable layers (= DiT backbone layer count).
 
-        block swap 预检搜索推荐值时需要这个上界。与 ``swapped_param_ratio``
-        一样是 duck-typed 可选方法：族没实现就跳过预检（退化成旧行为）。
+        Needed by the block-swap preflight search when it looks for a
+        recommended value. Like ``swapped_param_ratio``, this is a duck-typed
+        optional method: if a family doesn't implement it, preflight is
+        skipped (falls back to the old behavior).
 
-        ``checkpoint_path`` 是跨族协议参数（anima 的层数由 checkpoint 决定）；
-        krea2 结构唯一（KREA2_CONFIG），不需要。
+        ``checkpoint_path`` is a cross-family protocol parameter (anima's
+        layer count is determined by the checkpoint); krea2's structure is
+        fixed (KREA2_CONFIG), so it's unused here.
         """
         del checkpoint_path
         from modeling.krea2 import KREA2_CONFIG
@@ -167,13 +178,17 @@ class Krea2Family:
 
     def swapped_param_ratio(self, blocks_to_swap: int, *,
                             checkpoint_path: str | None = None) -> float:
-        """换出层占全模型参数的比例（显存预算折扣用；见 loader 同名函数）。
+        """Fraction of the full model's parameters that the swapped-out layers
+        account for (used for the VRAM budget discount; see the same-named
+        function in loader).
 
-        刻意是比例不是字节数 —— fp8 与 bf16 的文件大小差一倍，按字节折扣会在
-        fp8 场景把护栏折扣穿。
+        Deliberately a ratio, not a byte count -- fp8 and bf16 file sizes
+        differ by 2x, and a byte-based discount would blow through the safety
+        margin in the fp8 case.
 
-        ``checkpoint_path`` 是跨族协议参数（anima 靠它区分 28/36 层版本）；
-        krea2 结构唯一（KREA2_CONFIG），不需要。
+        ``checkpoint_path`` is a cross-family protocol parameter (anima uses
+        it to distinguish the 28/36-layer versions); krea2's structure is
+        fixed (KREA2_CONFIG), so it's unused here.
         """
         del checkpoint_path
         from training.families.krea2.loader import swapped_param_ratio
@@ -190,11 +205,13 @@ class Krea2Family:
                   t5_fast: bool = False, purpose: str = "train",
                   cache_enabled: bool = True):
         if purpose == "generate":
-            # Comfy parity（sd.py:258）：生成场景 TE 固定 fp16 存储 + fp32
-            # compute（text_encoder_dtype 默认 fp16 + set_model_compute_dtype
-            # fp32），忽略调用方 dtype——与 TE offload 同款固定行为。
-            # TE 精度由 text_encoder_path 指向的目录形态决定（HF 分片=
-            # bf16→fp16；comfy 单文件=官方 fp8_scaled 原样常驻）。
+            # Comfy parity (sd.py:258): for generation, TE is always fp16
+            # storage + fp32 compute (text_encoder_dtype defaults to fp16 +
+            # set_model_compute_dtype fp32), ignoring the caller's dtype --
+            # the same fixed behavior as TE offload. TE precision is
+            # determined by the directory shape text_encoder_path points to
+            # (HF sharded = bf16 -> fp16; comfy single-file = official
+            # fp8_scaled kept resident as-is).
             return load_krea2_text_stack(
                 text_encoder_path,
                 device=device,
@@ -214,7 +231,7 @@ class Krea2Family:
                            cache_root=None, text=None, device=None,
                            dtype=None) -> None:
         if text is None:
-            raise ValueError("Krea2 prepare_text_cache 需要 Krea2TextStack")
+            raise ValueError("Krea2 prepare_text_cache requires a Krea2TextStack")
         text.prepare_text_cache(
             captions,
             extra_prompts,
@@ -247,9 +264,11 @@ class Krea2Family:
                      device="cuda", dtype=None, step_callback=None,
                      phase_callback=None, seed: int | None = None,
                      vram_policy: str | None = None):
-        # 先按 Raw/Turbo 解析步数与 guidance（steps/cfg 未显式给时用族默认：
-        # Raw 28 步 / 4.5，Turbo 8 步 / 0.0——TDM 蒸馏无 uncond，guidance=0
-        # 时 prepare 不编码 negative、采样跳过 uncond forward）。
+        # First resolve steps and guidance by Raw/Turbo (when steps/cfg aren't
+        # given explicitly, use the family defaults: Raw 28 steps / 4.5, Turbo
+        # 8 steps / 0.0 -- TDM distillation has no uncond, so at guidance=0
+        # prepare skips encoding the negative and sampling skips the uncond
+        # forward pass).
         resolved_steps, guidance = resolve_sampling_settings(
             distilled=distilled,
             steps=steps,
@@ -257,10 +276,12 @@ class Krea2Family:
             sampler_name=sampler_name,
             scheduler=scheduler,
         )
-        # —— 显存编排（vram_policy=None 时维持旧行为，训练预览等调用面
-        # 绝不动 model：优化器状态引用会被 .to() 破坏）。
-        # 按需让位（comfy free_memory 语义）：编码需要把 TE 搬上 GPU 且
-        # 装不下时，DiT 先撤 CPU；prompt 全部命中在线 LRU 则整体跳过。
+        # -- VRAM orchestration (when vram_policy=None, keep the old behavior;
+        # callers like the training preview must never touch model: an
+        # optimizer state reference would be broken by .to()).
+        # Yield on demand (comfy free_memory semantics): if encoding needs to
+        # move the TE onto the GPU and it won't fit, DiT steps down to CPU
+        # first; if all prompts hit the online LRU, this whole step is skipped.
         dit_yielded = False
         if vram_policy is not None:
             needed = [prompt] + ([negative_prompt] if guidance > 0 else [])
@@ -275,7 +296,7 @@ class Krea2Family:
                 else _TE_LOAD_NEED_BYTES
             )
             if need_te_move and _should_yield_dit(vram_policy, device, te_need):
-                logger.info("krea2 显存编排：编码前 DiT 让位到 CPU")
+                logger.info("krea2 VRAM orchestration: DiT yielding to CPU before encoding")
                 model.to("cpu")
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -289,8 +310,9 @@ class Krea2Family:
             dtype=dtype,
             phase_callback=phase_callback,
         )
-        # 采样前 TE 处置：None=旧行为无条件卸（训练缓存模式 no-op）；
-        # auto 只在采样余量不足时卸——显存充裕则同驻，零搬运。
+        # TE handling before sampling: None = old behavior, always offload
+        # (no-op in training cache mode); auto only offloads when sampling
+        # headroom is insufficient -- when VRAM is plentiful, stays resident, zero moves.
         if vram_policy is None or _should_offload_te(
             vram_policy, device, height, width, dit_yielded,
         ):

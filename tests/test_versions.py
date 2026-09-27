@@ -1,4 +1,3 @@
-"""PP1 — versions.py: label 唯一、目录树、fork、active reassign。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -37,10 +36,8 @@ def test_create_version_builds_tree_and_activates(isolated) -> None:
     assert vdir.exists()
     for sub in ("train", "reg", "output"):
         assert (vdir / sub).is_dir()
-    # 采样图归 task 档案（tasks/<id>/samples/），version 树不再预建空 samples/
     assert not (vdir / "samples").exists()
     assert (vdir / "version.json").exists()
-    # 项目里第一个版本自动设为 active
     with db.connection_for(isolated["db"]) as conn:
         p2 = projects.get_project(conn, p["id"])
     assert p2 and p2["active_version_id"] == v["id"]
@@ -49,9 +46,7 @@ def test_create_version_builds_tree_and_activates(isolated) -> None:
 def test_create_version_rejects_invalid_label(isolated) -> None:
     p = _new_project(isolated)
     with db.connection_for(isolated["db"]) as conn:
-        # "." / ".." 单独列出：字符集本身放行点号，但纯点 label 会让
-        # version_dir 解析到 versions/ 之外（".." == project 根）。
-        for bad in ("has space", "../escape", "name/sub", "中文", ".", "..", "..."):
+        for bad in ("has space", "../escape", "name/sub", "тест", ".", "..", "..."):
             with pytest.raises(versions.VersionError, match="label"):
                 versions.create_version(conn, project_id=p["id"], label=bad)
 
@@ -96,8 +91,6 @@ def test_fork_copies_train_tree(isolated) -> None:
 
 
 def test_fork_full_copy_includes_reg_config_unlocked(isolated, monkeypatch) -> None:
-    """PP10.1：fork 时 train/、reg/、config.yaml、.unlocked.json 全量复制；
-    config.yaml 里 data_dir / reg_data_dir / output_dir / output_name 强制刷成新 version 路径。"""
     from studio.services import version_config
     from studio.schema import TrainingConfig
 
@@ -106,22 +99,18 @@ def test_fork_full_copy_includes_reg_config_unlocked(isolated, monkeypatch) -> N
         src = versions.create_version(conn, project_id=p["id"], label="baseline")
     src_vdir = versions.version_dir(p["id"], p["slug"], "baseline")
 
-    # train 内放图
     (src_vdir / "train" / "5_concept").mkdir()
     (src_vdir / "train" / "5_concept" / "001.png").write_bytes(b"trainpng")
 
-    # reg/ 含 meta.json 和图
     (src_vdir / "reg" / "1_data").mkdir(parents=True)
     (src_vdir / "reg" / "meta.json").write_text(
         '{"target": 100}', encoding="utf-8"
     )
     (src_vdir / "reg" / "1_data" / "r.png").write_bytes(b"regpng")
 
-    # 写一份 source config.yaml（路径故意指向 src 自己；fork 后应被刷掉）
     src_cfg = TrainingConfig().model_dump()
     version_config.write_version_config(p, src, src_cfg)
 
-    # .unlocked.json 旁路文件（PP10.4 预留）
     (src_vdir / ".unlocked.json").write_text(
         '{"fields": ["resume_lora"]}', encoding="utf-8"
     )
@@ -135,19 +124,14 @@ def test_fork_full_copy_includes_reg_config_unlocked(isolated, monkeypatch) -> N
         )
     new_vdir = versions.version_dir(p["id"], p["slug"], "forked")
 
-    # train 复制
     assert (new_vdir / "train" / "5_concept" / "001.png").read_bytes() == b"trainpng"
-    # reg 复制
     assert (new_vdir / "reg" / "meta.json").exists()
     assert (new_vdir / "reg" / "1_data" / "r.png").read_bytes() == b"regpng"
-    # config.yaml 复制
     assert (new_vdir / "config.yaml").exists()
-    # .unlocked.json 复制
     assert (new_vdir / ".unlocked.json").read_text(encoding="utf-8") == (
         '{"fields": ["resume_lora"]}'
     )
 
-    # config.yaml 里项目特定字段已重写到新 version 路径
     new_cfg = version_config.read_version_config(p, v2)
     assert new_cfg["data_dir"] == str(new_vdir / "train")
     assert new_cfg["reg_data_dir"] == str(new_vdir / "reg")
@@ -156,8 +140,6 @@ def test_fork_full_copy_includes_reg_config_unlocked(isolated, monkeypatch) -> N
 
 
 def test_fork_stage_done_resets_to_ready(isolated) -> None:
-    """源 stage=done → 新 version 落 ready（重新进入待训练态）。"""
-    # ADR-0007 PR-5: fork 不再继承 stage / phase；新 version 始终 preparing/curating。
     p = _new_project(isolated)
     with db.connection_for(isolated["db"]) as conn:
         src = versions.create_version(conn, project_id=p["id"], label="baseline")
@@ -196,9 +178,7 @@ def test_delete_active_version_reassigns(isolated) -> None:
     with db.connection_for(isolated["db"]) as conn:
         v1 = versions.create_version(conn, project_id=p["id"], label="v1")
         v2 = versions.create_version(conn, project_id=p["id"], label="v2")
-        # active = v1（首次）；切到 v2
         versions.activate_version(conn, v2["id"])
-        # 删 v2 → active 应回到 v1（剩下创建最新的）
         versions.delete_version(conn, v2["id"])
         p2 = projects.get_project(conn, p["id"])
     assert p2 and p2["active_version_id"] == v1["id"]
@@ -233,7 +213,6 @@ def test_stats_for_version_counts_train_and_reg(isolated) -> None:
     with db.connection_for(isolated["db"]) as conn:
         v = versions.create_version(conn, project_id=p["id"], label="v1")
     vdir = versions.version_dir(p["id"], p["slug"], "v1")
-    # 默认 1_data 已存在；这里加一个 5_concept 验证多 folder 计数
     (vdir / "train" / "5_concept").mkdir(parents=True)
     (vdir / "train" / "5_concept" / "a.png").write_bytes(b"x")
     (vdir / "train" / "5_concept" / "b.png").write_bytes(b"x")
@@ -266,7 +245,6 @@ def test_stats_for_version_counts_validation(isolated) -> None:
     stats = versions.stats_for_version(p, v)
     assert stats["validation_image_count"] == 2
     assert stats["validation_tagged_count"] == 1
-    # validation 不掺进训练集计数
     assert stats["train_image_count"] == 0
     assert stats["tagged_image_count"] == 0
 

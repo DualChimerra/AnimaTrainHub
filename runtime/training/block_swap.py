@@ -1,31 +1,46 @@
-"""Block swap —— DiT 的逐层权重换入换出（消费级卡下探 K2 显存门槛）。
+"""Block swap -- per-layer weight swap-in/swap-out for the DiT (pushes the K2 VRAM floor down on consumer cards).
 
-设计与实测：``docs/design/block-swap.md``。一句话：DiT 的 N 个 transformer block
-串行堆叠、任一时刻只算一个，所以把其中若干层的权重常驻 CPU pinned memory、算到
-才搬进显存，可用「约 8ms/block 的固定时间」换回「每层约 0.8GB 显存」（krea2 实测），
-把 K2 LoRA 训练的显存下限从 32GB 拉到 24GB 以下，且不付精度代价。
+Design and measurements: ``docs/design/block-swap.md``. In one sentence: the
+DiT's N transformer blocks are stacked serially and only one is computed at a
+time, so keeping some of those layers' weights resident in CPU pinned memory
+and moving them to VRAM only when needed trades "a fixed cost of about
+8ms/block" for "about 0.8GB of VRAM per layer" (measured on krea2), pulling
+K2 LoRA training's VRAM floor from 32GB down below 24GB with no accuracy cost.
 
-本模块是 **family 无关的机制核心**（doc §9.2 刀 1）：只认一个 ``nn.ModuleList``，
-不认 krea2/anima。接线（哪个 family、哪个循环）在各 family 的行为适配层完成。
+This module is the **family-agnostic mechanism core** (doc SS9.2, cut 1): it
+only knows about a single ``nn.ModuleList``, not krea2/anima. Wiring (which
+family, which loop) happens in each family's behavior adapter layer.
 
-关键实现约束（doc §9.1，务必先读）：
+Key implementation constraints (doc SS9.1, read this first):
 
-- **原地换 ``param.data``，不是 buffer 轮转**。LyCORIS ``apply_to()`` 让 LoRA 模块
-  持有原 Linear 引用并包住其 forward；若前向走另一个 module 实例，会**完全绕过
-  LoRA**，训练静默学不到东西。所以 module 对象自始至终不变，只切换 ``.data`` 指向。
-- 由此**自动正确**处理 fp8：``weight_scale`` 是绑在 module 上的非持久 buffer，module
-  不变则 scale 恒与权重配对；换权重只换 ``.data``，fp8 张量原样搬（dtype 不变）。
-- pinned 主副本**启动时一次性分配**，运行期不再 alloc（分配失败只可能发生在启动、
-  可 fail-fast，doc §8.1）。
+- **Swaps ``param.data`` in place, not a rotating buffer.** LyCORIS's
+  ``apply_to()`` makes the LoRA module hold a reference to the original
+  Linear and wrap its forward; if the forward pass instead goes through a
+  different module instance, it **completely bypasses LoRA**, and training
+  silently learns nothing. So the module object itself never changes across
+  the whole run -- only what ``.data`` points to changes.
+- This **automatically handles fp8 correctly**: ``weight_scale`` is a
+  non-persistent buffer bound to the module; since the module never changes,
+  the scale always stays paired with the weight; swapping weights only swaps
+  ``.data``, and the fp8 tensor moves as-is (dtype unchanged).
+- The pinned master copies are **allocated once at startup**; no further
+  allocation happens at runtime (allocation can only fail at startup, so it
+  can fail-fast, doc SS8.1).
 
-前向/反向的预取时序不在本模块——本模块只提供「把某层权重搬到某个 GPU 槽位」和
-「某层算完、其 GPU 槽位可回收」两个原语，循环编排留给调用方（family 的 forward）。
+The forward/backward prefetch timing does not live in this module -- this
+module only provides two primitives, "move a layer's weights to a GPU slot"
+and "a layer is done computing, its GPU slot can be reclaimed"; loop
+orchestration is left to the caller (the family's forward).
 
-**换出层的权重只在它自己的 forward 窗口内有效。** 一次 pass 结束后，某换出层的
-``param.data`` 仍指向它当时用的 GPU 槽位，而那个槽位早已被后面的层覆盖（双缓冲
-轮转：rel 0 与 rel 2 共用槽 0）。这不是 bug 而是设计的必然结果 —— 窗口外要读或改
-权重（导出、检查、推理侧的 fp8 LoRA merge）**必须先 ``restore_masters()``**，
-CPU pinned 主副本才是持久且完整的那份。tests 里有专门一条钉死这个语义。
+**A swapped-out layer's weights are only valid within its own forward
+window.** After one pass ends, a swapped-out layer's ``param.data`` still
+points at the GPU slot it used at the time, and that slot has long since been
+overwritten by a later layer (double-buffer rotation: rel 0 and rel 2 share
+slot 0). This is not a bug but an inevitable consequence of the design --
+reading or modifying weights outside the window (export, inspection,
+inference-side fp8 LoRA merge) **must call ``restore_masters()`` first**;
+only the CPU pinned master copy is the persistent, complete one. There is a
+dedicated test pinning down this semantics.
 """
 
 from __future__ import annotations
@@ -43,12 +58,12 @@ _GIB = 1024 ** 3
 
 
 def _pow2_ceil(n: int) -> int:
-    """>= n 的最小 2 的幂（n <= 1 → 1）。与 CachingHostAllocator 的取整同口径。"""
+    """The smallest power of 2 >= n (n <= 1 -> 1). Uses the same rounding rule as CachingHostAllocator."""
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
 
 
 def _pow2_decomposition(total: int) -> list[int]:
-    """把 total 拆成若干**互不相同**的 2 的幂（即二进制表示），降序。"""
+    """Decompose total into several **distinct** powers of 2 (i.e. its binary representation), descending."""
     sizes: list[int] = []
     bit = 1
     while total:
@@ -65,52 +80,73 @@ def _alloc_pinned_bytes(nbytes: int) -> torch.Tensor:
 
 
 class PinnedAllocationError(RuntimeError):
-    """pinned（页锁定）内存分配失败（doc §8.1 / B6：报错不静默降级）。
+    """Pinned (page-locked) memory allocation failed (doc SS8.1 / B6: error out, never silently degrade).
 
-    ``cudaHostAlloc`` 失败在 torch 里也报 ``CUDA error: out of memory``，极易被
-    误读成显存不够；这里把「是主机页锁定内存、要锁多少、Windows 上限在哪」说清楚。
+    ``cudaHostAlloc`` failures are also reported by torch as
+    ``CUDA error: out of memory``, which is very easily misread as "not
+    enough VRAM"; this spells out clearly that it's host page-locked memory,
+    how much was being locked, and where the Windows ceiling is.
     """
 
     def __init__(self, nbytes: int, detail: str) -> None:
         self.nbytes = nbytes
         self.detail = detail
         super().__init__(
-            f"pinned（页锁定）内存分配失败：本次要锁定 {nbytes / _GIB:.2f} GB。"
-            f"这不是显存不足 —— 换出层的权重要锁在系统内存里，Windows 对可锁定"
-            f"内存有系统级上限（经验上约为物理内存的一半）。请调小 blocks_to_swap，"
-            f"或关闭其他占内存的应用后重试。底层错误：{detail}"
+            f"pinned (page-locked) memory allocation failed: this attempt needed to lock "
+            f"{nbytes / _GIB:.2f} GB. This is not insufficient VRAM -- swapped-out layers' "
+            f"weights need to be locked in system memory, and Windows imposes a system-level "
+            f"cap on lockable memory (empirically about half of physical RAM). Try lowering "
+            f"blocks_to_swap, or close other memory-hungry applications and retry. "
+            f"Underlying error: {detail}"
         )
 
 
 class PinnedPacker:
-    """把多个张量打包进少数几块 **2 的幂大小** 的 pinned 大块里，再切 view 返回。
+    """Packs multiple tensors into a small number of **power-of-2-sized**
+    pinned chunks, then slices out views to return.
 
-    为什么不能逐张量 ``pin_memory()``：PyTorch 的 host caching allocator 会把**每次**
-    pinned 分配向上取整到 2 的幂（``CachingHostAllocator.h`` ``PowerOf2Ceil``），
-    而 DiT 的权重尺寸恰恰都很吃亏 —— krea2 的 16384×6144 fp8 = 96MB 占 128MB、
-    6144×6144 = 36MB 占 64MB、1536×6144 = 9MB 占 16MB，28 层 11.32GB 的权重实际
-    锁定 **16.63GB**（1.47×）。Windows 对 ``cudaHostAlloc`` 的上限约为物理内存一半，
-    32GB 内存的机器就是在这里撞死的（5080 真机案例），而护栏按 11.32GB 放行。
+    Why per-tensor ``pin_memory()`` doesn't work: PyTorch's host caching
+    allocator rounds up **every** pinned allocation to a power of 2
+    (``CachingHostAllocator.h``'s ``PowerOf2Ceil``), and the DiT's weight
+    sizes happen to be particularly unlucky for this -- krea2's 16384x6144
+    fp8 = 96MB rounds up to occupy 128MB, 6144x6144 = 36MB occupies 64MB,
+    1536x6144 = 9MB occupies 16MB; 28 layers' worth of 11.32GB of weights
+    actually locks **16.63GB** (1.47x). Windows caps ``cudaHostAlloc`` at
+    roughly half of physical RAM, and a 32GB machine hits that ceiling right
+    here (an actual case on a 5080 machine), while the guardrail only checks
+    against the nominal 11.32GB.
 
-    做法：按**总字节数**的二进制分解一次性预分配若干块（8G+2G+1G+256M+…，每块
-    恰为 2 的幂 → allocator 零取整），每个张量按 best-fit 装进某块并 256B 对齐，
-    返回的是块上的 view（``is_pinned()`` 成立、可直接 ``param.data = view``、
-    H2D 拷贝照常）。多族多配置模拟下实际锁定 = 权重字节 × 1.00–1.03。
+    Approach: pre-allocate a handful of chunks in one shot via a binary
+    decomposition of the **total byte count** (8G+2G+1G+256M+..., each chunk
+    is exactly a power of 2 -> zero rounding waste from the allocator); each
+    tensor is packed into some chunk by best-fit and 256B-aligned; the
+    returned value is a view into that chunk (``is_pinned()`` holds, so
+    ``param.data = view`` works directly, and the H2D copy proceeds as
+    normal). Simulated across many family/config combinations, actual locked
+    memory = weight bytes x 1.00-1.03.
 
-    - ``total_bytes`` 是调用方算好的**将要 pin 的精确字节数**（不是估算：高估
-      即白锁）；给 0 则不预分配，退化为按需开块。
-    - 装不进任何已有块的张量（块边界碎片）走溢出路径：单独开一块
-      ``pow2_ceil(nbytes)`` —— 与逐张量 pin 等价，永远不比旧行为差。
-    - 所有分配在**构造时**完成（B6：失败只发生在启动那一刻，fail-fast），失败抛
-      ``PinnedAllocationError``。
-    - 释放跟随张量：所有 view 丢引用后大块回到 host 缓存池，再由
-      ``release_pinned_host_cache`` 真正还给系统（§9.7 不变）。
+    - ``total_bytes`` is the caller's precomputed **exact byte count to be
+      pinned** (not an estimate: overestimating means wasted locked memory);
+      passing 0 skips pre-allocation and degrades to opening chunks on demand.
+    - A tensor that doesn't fit into any existing chunk (a chunk-boundary
+      fragment) takes the overflow path: a chunk of exactly
+      ``pow2_ceil(nbytes)`` is opened just for it -- equivalent to per-tensor
+      pinning, so this is never worse than the old behavior.
+    - All allocation happens at **construction time** (B6: failure can only
+      happen at that one startup moment, fail-fast); failure raises
+      ``PinnedAllocationError``.
+    - Freeing follows the tensors: once all views lose their references, the
+      chunk returns to the host cache pool, and
+      ``release_pinned_host_cache`` is what actually returns it to the OS
+      (SS9.7 invariant).
     """
 
-    #: 总量向上取整的粒度：太粗则小配置（anima 8 层 1GB）白锁一大截，太细则
-    #: 块数变多、边界碎片变多。64MB 在全部真实配置模拟里都在 0.3%–3% 内。
+    #: Rounding granularity for the total: too coarse and a small
+    #: configuration (anima's 8 layers, ~1GB) wastes a big chunk of locked
+    #: memory; too fine and the chunk count and boundary fragmentation grow.
+    #: 64MB stays within 0.3%-3% across every real configuration simulated.
     GRANULARITY = 64 * 1024 ** 2
-    #: 块内偏移对齐（任何 dtype 的 view 都合法，且对 DMA 友好）
+    #: In-chunk offset alignment (any dtype's view is valid, and it's DMA-friendly)
     ALIGN = 256
 
     def __init__(
@@ -123,7 +159,7 @@ class PinnedPacker:
     ) -> None:
         self._align = int(align)
         self._allocate = allocate or _alloc_pinned_bytes
-        # [buffer(uint8 pinned), 已用字节]
+        # [buffer(uint8 pinned), bytes used]
         self._chunks: list[list] = []
         self.packed_bytes = 0
         self.overflow_chunks = 0
@@ -136,15 +172,15 @@ class PinnedPacker:
     def _new_chunk(self, nbytes: int) -> torch.Tensor:
         try:
             buf = self._allocate(nbytes)
-        except RuntimeError as exc:  # cudaHostAlloc 失败（torch.AcceleratorError 亦是其子类）
+        except RuntimeError as exc:  # cudaHostAlloc failed (torch.AcceleratorError is also a subclass of this)
             raise PinnedAllocationError(self.allocated_bytes + nbytes, str(exc)) from exc
         if buf.numel() != nbytes or buf.dtype != torch.uint8:
-            raise RuntimeError("PinnedPacker 的 allocate 必须返回 nbytes 个 uint8")
+            raise RuntimeError("PinnedPacker's allocate must return nbytes worth of uint8")
         return buf
 
     @property
     def allocated_bytes(self) -> int:
-        """实际分配（= 实际锁定）的字节数。"""
+        """Total bytes actually allocated (= actually locked)."""
         return sum(int(buf.numel()) for buf, _used in self._chunks)
 
     @property
@@ -152,8 +188,8 @@ class PinnedPacker:
         return len(self._chunks)
 
     def _reserve(self, nbytes: int) -> tuple[torch.Tensor, int]:
-        """在某块里划出 ``nbytes``（best-fit + 对齐），返回 (块, 起始偏移)。"""
-        best = None  # (剩余, chunk, 起始偏移)
+        """Carve out ``nbytes`` from some chunk (best-fit + alignment), returning (chunk, start offset)."""
+        best = None  # (remaining, chunk, start offset)
         for chunk in self._chunks:
             buf, used = chunk
             offset = -(-used // self._align) * self._align
@@ -172,10 +208,12 @@ class PinnedPacker:
         return chunk[0], offset
 
     def pin(self, tensor: torch.Tensor, *, dtype: torch.dtype | None = None) -> torch.Tensor:
-        """把 ``tensor`` 的内容拷进 pinned 大块，返回同形状的 pinned view。
+        """Copy ``tensor``'s content into a pinned chunk, returning a
+        same-shape pinned view.
 
-        ``dtype`` 给定时顺带 cast（拷贝即转换，省一次中间副本）。``tensor`` 可在
-        任意设备（GPU 张量直接 D2H 进 pinned）。
+        When ``dtype`` is given, casts along the way (the copy doubles as the
+        conversion, saving an intermediate copy). ``tensor`` can be on any
+        device (a GPU tensor is copied D2H straight into pinned memory).
         """
         target_dtype = dtype or tensor.dtype
         nbytes = tensor.numel() * torch.empty(0, dtype=target_dtype).element_size()
@@ -186,23 +224,28 @@ class PinnedPacker:
 
 
 class PinnedBlockSwap:
-    """管理一个 ``nn.ModuleList`` 中末尾 ``num_swap`` 个 block 的权重换入换出。
+    """Manages the swap-in/swap-out of weights for the trailing ``num_swap``
+    blocks of an ``nn.ModuleList``.
 
-    "末尾" 而非任意子集：DiT 前向从 0 到 N-1，把靠后的层换出可让前面的层先跑完、
-    为后面腾出的时间窗口最大（且与 musubi ``blocks_to_swap`` 语义一致——它也是从
-    尾部数）。前 ``N - num_swap`` 个 block 权重常驻 GPU 不受影响。
+    "Trailing" rather than an arbitrary subset: the DiT forward pass runs
+    from 0 to N-1, so swapping out the later layers lets the earlier layers
+    finish first, maximizing the time window freed up for the later ones
+    (and matching musubi's ``blocks_to_swap`` semantics -- it also counts
+    from the tail). The weights of the first ``N - num_swap`` blocks stay
+    resident on GPU, unaffected.
 
-    生命周期：
-        swap = PinnedBlockSwap(blocks, num_swap, device)   # 分配 pinned + GPU 槽
-        # 每步前向：
+    Lifecycle::
+        swap = PinnedBlockSwap(blocks, num_swap, device)   # allocate pinned + GPU slots
+        # each forward step:
         for i, block in enumerate(blocks):
-            swap.ensure_resident(i)      # 换出层 → 确保权重在 GPU（含预取等待）
+            swap.ensure_resident(i)      # swapped-out layer -> ensure weights are on GPU (incl. waiting on prefetch)
             h = block(h, ...)
-            swap.release(i)              # 换出层 → 标记其 GPU 槽可被下一层复用
-        # 反向逆序同理（调用方按 reversed 顺序调 ensure_resident/release）
+            swap.release(i)              # swapped-out layer -> mark its GPU slot reusable by the next layer
+        # backward in reverse order works the same way (caller calls ensure_resident/release in reversed order)
 
-    非换出层（``i < first_swapped``）的 ensure_resident/release 是 no-op，调用方
-    可以无条件调用，不必自己判断边界。
+    ensure_resident/release for a non-swapped layer (``i < first_swapped``)
+    is a no-op, so callers can call them unconditionally without checking the
+    boundary themselves.
     """
 
     def __init__(
@@ -215,58 +258,62 @@ class PinnedBlockSwap:
     ) -> None:
         total = len(blocks)
         if num_swap <= 0:
-            raise ValueError("PinnedBlockSwap 的 num_swap 必须为正（0 = 不该构造本对象）")
+            raise ValueError("PinnedBlockSwap's num_swap must be positive (0 means this object shouldn't be constructed)")
         if num_swap > total:
             raise ValueError(
-                f"num_swap={num_swap} 超过 block 总数 {total}"
+                f"num_swap={num_swap} exceeds the total block count {total}"
             )
         if num_slots < 2:
-            raise ValueError("num_slots 至少为 2（双缓冲：算当前 + 预取下一）")
+            raise ValueError("num_slots must be at least 2 (double buffering: compute current + prefetch next)")
 
         self.device = torch.device(device)
         if self.device.type != "cuda":
             raise ValueError(
-                f"block swap 需要 CUDA 设备，收到 {self.device}"
+                f"block swap requires a CUDA device, got {self.device}"
             )
         self.blocks = blocks
         self.total = total
         self.num_swap = num_swap
-        self.first_swapped = total - num_swap  # 第一个被换出的 block index
+        self.first_swapped = total - num_swap  # index of the first swapped-out block
 
-        # 每个被换出 block 的 CPU pinned 权重主副本：
-        #   [block 相对序号] -> {param 名: pinned CPU tensor}
-        # 用相对序号（0 .. num_swap-1）避免和绝对 index 混淆。
+        # Each swapped-out block's CPU pinned master weight copy:
+        #   [block's relative index] -> {param name: pinned CPU tensor}
+        # Uses a relative index (0 .. num_swap-1) to avoid confusion with the absolute index.
         self._cpu_weights: list[dict[str, torch.Tensor]] = []
-        # 每个 param 的形状/dtype 元信息，用于在 GPU 槽里建对应 buffer
+        # Each param's shape/dtype metadata, used to build the matching buffer in a GPU slot
         self._param_specs: list[list[tuple[str, torch.Size, torch.dtype]]] = []
 
-        # GPU 槽位：num_slots 份，每份能放下任一被换出 block 的全部 param。
-        #   _slot_buffers[slot] = {param 名: GPU tensor}
+        # GPU slots: num_slots of them, each able to hold the full set of
+        # params for any one swapped-out block.
+        #   _slot_buffers[slot] = {param name: GPU tensor}
         self._slot_buffers: list[dict[str, torch.Tensor]] = []
-        # 每个槽当前装着哪个相对序号的 block（-1 = 空）
+        # Which relative block index each slot currently holds (-1 = empty)
         self._slot_holds: list[int] = [-1] * num_slots
         self.num_slots = num_slots
 
         self._copy_stream = torch.cuda.Stream(device=self.device)
-        # ready[slot]：该槽的权重搬运已完成（计算流 wait 它才能读）
+        # ready[slot]: that slot's weight transfer is complete (the compute stream must wait on it before reading)
         self._ready = [torch.cuda.Event() for _ in range(num_slots)]
-        # done[slot]：该槽上一次计算已完成（拷贝流 wait 它才能覆盖，防数据竞争）
+        # done[slot]: that slot's previous computation is complete (the copy stream must wait on it before overwriting, to prevent a data race)
         self._done = [torch.cuda.Event() for _ in range(num_slots)]
 
         self._pinned_bytes = 0
         self._handles: list = []
         self._build(blocks)
 
-    # ------------------------------------------------------------------ 构造
+    # ------------------------------------------------------------------ construction
     def _build(self, blocks: nn.ModuleList) -> None:
-        """把被换出的 block 权重搬到 CPU pinned，并在 GPU 上预留槽位。
+        """Move the swapped-out blocks' weights to CPU pinned memory, and
+        reserve slots on GPU.
 
-        pinned 分配失败在此抛出（启动期，可 fail-fast，doc §8.1）。
+        Pinned allocation failure is raised here (at startup, so it can fail-fast, doc SS8.1).
         """
         try:
-            # 尚未 pinned 的基权重全部经 PinnedPacker 打包（逐张量 pin_memory 会被
-            # host allocator 按 2 的幂取整、白锁最多 1.47×，见 PinnedPacker）。
-            # 先数总量再一次性分配：失败即 fail-fast，不会搬了一半才炸。
+            # All base weights not yet pinned are packed via PinnedPacker
+            # (per-tensor pin_memory would get rounded up to a power of 2 by
+            # the host allocator, wasting up to 1.47x, see PinnedPacker).
+            # Count the total first, then allocate it in one shot: a failure
+            # here fails fast, instead of blowing up after moving half the weights.
             to_pack = 0
             for absolute in range(self.first_swapped, self.total):
                 for param in blocks[absolute].parameters():
@@ -282,14 +329,19 @@ class PinnedBlockSwap:
                 cpu_w: dict[str, torch.Tensor] = {}
                 specs: list[tuple[str, torch.Size, torch.dtype]] = []
                 for name, param in block.named_parameters():
-                    # **只管理冻结的基权重**。可训练参数（LoRA）必须原地不动、
-                    # 常驻 GPU：它们是优化器的目标，被搬走会破坏训练；而且它们
-                    # 相对底模极小，没有换出的价值。
+                    # **Only manages frozen base weights.** Trainable
+                    # parameters (LoRA) must stay put and remain resident on
+                    # GPU: they're the optimizer's target, and moving them
+                    # would break training; also, relative to the base model
+                    # they're tiny, so there's no benefit in swapping them out.
                     if param.requires_grad:
                         continue
-                    # 已在 CPU 且已 pinned 就地接管（loader 可直接把尾部层载到 CPU
-                    # pinned，让 GPU 峰值从不经过完整模型——12/16GB 目标的前提）；
-                    # 否则（CPU 可分页 / 还在 GPU）打包进 pinned 大块。
+                    # If it's already on CPU and already pinned, take it over
+                    # in place (the loader can load the trailing layers
+                    # straight into CPU pinned memory, so GPU peak usage
+                    # never passes through the full model -- the precondition
+                    # for the 12/16GB targets); otherwise (pageable CPU
+                    # memory, or still on GPU) pack it into a pinned chunk.
                     src = param.detach()
                     if src.device.type == "cpu" and src.is_pinned():
                         pinned = src
@@ -298,53 +350,60 @@ class PinnedBlockSwap:
                     cpu_w[name] = pinned
                     specs.append((name, param.shape, param.dtype))
                     self._pinned_bytes += pinned.numel() * pinned.element_size()
-                    # 权重主副本已在 CPU pinned——立即释放 GPU 上的原权重（显存
-                    # 收益所在，否则要到首次 forward rebind 才兑现）。.data 指向
-                    # 这份 pinned CPU 张量（而非 empty(0)）：保留 shape/dtype，
-                    # 让**构造后**才注入的 LyCORIS 能正确读到基权重形状；后续
-                    # ensure_resident 再把 .data 切到 GPU 槽。
+                    # The master copy is now in CPU pinned memory -- release
+                    # the original GPU weight immediately (that's where the
+                    # VRAM savings come from; otherwise it wouldn't be
+                    # realized until the first forward rebind). .data points
+                    # at this pinned CPU tensor (rather than empty(0)):
+                    # keeping shape/dtype lets LyCORIS, which is injected
+                    # **after construction**, correctly read the base
+                    # weight's shape; a later ensure_resident then switches
+                    # .data to the GPU slot.
                     param.data = pinned
                 self._cpu_weights.append(cpu_w)
                 self._param_specs.append(specs)
-            torch.cuda.empty_cache()  # 归还刚释放的原权重段给分配器
+            torch.cuda.empty_cache()  # return the just-freed original weight segments to the allocator
 
-            # 预留 GPU 槽：容量 = 被换出 block 里最大的那个（同构 DiT 里都一样大）
+            # Reserve GPU slots: capacity = the largest of the swapped-out
+            # blocks (they're all the same size in a homogeneous DiT)
             for _slot in range(self.num_slots):
                 buf: dict[str, torch.Tensor] = {}
                 for name, shape, dtype in self._param_specs[0]:
                     buf[name] = torch.empty(shape, dtype=dtype, device=self.device)
                 self._slot_buffers.append(buf)
-        except RuntimeError as exc:  # pinned / GPU 分配失败
+        except RuntimeError as exc:  # pinned / GPU allocation failed
             self._pinned_bytes = 0
             raise BlockSwapAllocationError(
                 self.num_swap, self.first_swapped, str(exc)
             ) from exc
 
         logger.info(
-            "block swap 就绪：换出末尾 %d/%d block，pinned %.2f GB，%d 个 GPU 槽",
+            "block swap ready: swapping out the trailing %d/%d blocks, pinned %.2f GB, %d GPU slots",
             self.num_swap, self.total, self._pinned_bytes / _GIB, self.num_slots,
         )
 
     @property
     def pinned_bytes(self) -> int:
-        """CPU pinned 主副本总字节（护栏预算依据）。"""
+        """Total bytes of the CPU pinned master copies (basis for the guardrail budget)."""
         return self._pinned_bytes
 
-    # ------------------------------------------------------------------ 原语
+    # ------------------------------------------------------------------ primitives
     def _slot_for(self, rel: int) -> int:
-        """相对序号 → 使用的 GPU 槽（双缓冲下 rel 的奇偶）。"""
+        """Relative index -> the GPU slot to use (rel's parity under double buffering)."""
         return rel % self.num_slots
 
     def _fetch(self, rel: int) -> None:
-        """在拷贝流上把第 rel 个换出 block 的权重搬进它的槽（若尚未在位）。"""
+        """On the copy stream, move the rel-th swapped-out block's weights into its slot (if not already resident)."""
         if rel < 0 or rel >= self.num_swap:
             return
         slot = self._slot_for(rel)
         if self._slot_holds[slot] == rel:
-            return  # 已在位（通常是上一步预取命中）
+            return  # already resident (usually a prefetch hit from the previous step)
         with torch.cuda.stream(self._copy_stream):
-            # 该槽上一次计算必须先完成，否则覆盖正在被读的权重（数据竞争）。
-            # 未 record 过的 Event.wait 是 no-op，首轮天然安全。
+            # That slot's previous computation must finish first, or it would
+            # overwrite weights currently being read (a data race). An
+            # Event.wait on an event that was never recorded is a no-op, so
+            # the first round is naturally safe.
             self._copy_stream.wait_event(self._done[slot])
             buf = self._slot_buffers[slot]
             src = self._cpu_weights[rel]
@@ -355,11 +414,13 @@ class PinnedBlockSwap:
         self._rebind(rel, slot)
 
     def _rebind(self, rel: int, slot: int) -> None:
-        """把该 block 的基权重 ``.data`` 指到槽 buffer（原地换，不换 module）。
+        """Point that block's base weights' ``.data`` at the slot buffer (an
+        in-place swap, not a module swap).
 
-        只重绑**构造时登记过的**参数名：构造之后新增的参数（LoRA 注入在
-        block 内建子模块的情形）不归本组件管，遍历 named_parameters() 会
-        撞上它们。
+        Only rebinds parameter names **registered at construction time**:
+        parameters added after construction (the case where LoRA injects new
+        submodules inside the block) are not managed by this component, and
+        iterating named_parameters() would run into them.
         """
         block = self.blocks[self.first_swapped + rel]
         buf = self._slot_buffers[slot]
@@ -370,15 +431,17 @@ class PinnedBlockSwap:
                 param.data = buf[name]
 
     def ensure_resident(self, absolute_index: int, *, prefetch_next: int | None = None) -> None:
-        """确保第 ``absolute_index`` 个 block 的权重已在 GPU 且计算流可安全读取。
+        """Ensure the ``absolute_index``-th block's weights are on GPU and
+        safe for the compute stream to read.
 
-        对非换出层（常驻）是 no-op。``prefetch_next`` 若给出（下一个要用的 block
-        绝对序号），顺带发起它的预取——这是遮蔽传输的关键，调用方应传前向的 i+1
-        或反向的 i-1。
+        A no-op for non-swapped-out (resident) layers. If ``prefetch_next``
+        is given (the absolute index of the next block to be used), also
+        kicks off its prefetch -- this is key to hiding the transfer; the
+        caller should pass i+1 for forward or i-1 for backward.
         """
         rel = absolute_index - self.first_swapped
         if rel < 0:
-            return  # 常驻层
+            return  # resident layer
         self._fetch(rel)
         if prefetch_next is not None:
             nxt = prefetch_next - self.first_swapped
@@ -387,9 +450,11 @@ class PinnedBlockSwap:
         torch.cuda.current_stream().wait_event(self._ready[self._slot_for(rel)])
 
     def release(self, absolute_index: int) -> None:
-        """标记该 block 计算已在计算流上发起完毕，其 GPU 槽可被后续 block 覆盖。
+        """Mark that this block's computation has been issued on the compute
+        stream, so its GPU slot can be overwritten by a later block.
 
-        对非换出层是 no-op。必须在该 block 的 forward 调用之后调用。
+        A no-op for non-swapped-out layers. Must be called after that
+        block's forward call.
         """
         rel = absolute_index - self.first_swapped
         if rel < 0:
@@ -397,23 +462,28 @@ class PinnedBlockSwap:
         self._done[self._slot_for(rel)].record(torch.cuda.current_stream())
 
     def reset(self) -> None:
-        """一步（前向或反向）开始前重置槽占用状态。
+        """Reset slot-occupancy state before one step (forward or backward) begins.
 
-        双缓冲槽在上一步末尾装着最后两层；新的一步从头/尾开始，需要重新预取。
-        不释放显存，只清 hold 标记。
+        The double-buffered slots hold the last two layers from the end of
+        the previous step; a new step starts from the head/tail and needs to
+        prefetch again. Doesn't free any VRAM, just clears the hold markers.
         """
         self._slot_holds = [-1] * self.num_slots
 
     def restore_masters(self) -> None:
-        """把所有被管理的参数 ``.data`` 指回 CPU pinned 主副本。
+        """Point every managed parameter's ``.data`` back at the CPU pinned master copy.
 
-        推理侧必需（doc §9.6）。两个场景：
+        Required on the inference side (doc SS9.6). Two scenarios:
 
-        1. **fp8 LoRA merge**：merge 会写 ``module.weight``。若此刻 ``.data`` 指向
-           GPU 槽，写进去的 delta 会被下一层的换入**直接覆盖** —— merge 静默丢失。
-           先 restore 再 merge，delta 落在主副本上，之后每次换入带的都是 merged 权重。
-        2. **任何要读/改权重的外部操作**（导出、检查、重新量化）：主副本是唯一
-           完整且稳定的那份，GPU 槽只是轮转窗口。
+        1. **fp8 LoRA merge**: merging writes to ``module.weight``. If
+           ``.data`` currently points at a GPU slot, the delta just written
+           gets **directly overwritten** by the next layer's swap-in --
+           the merge is silently lost. Restore first, then merge, so the
+           delta lands on the master copy, and every subsequent swap-in
+           brings in the already-merged weight.
+        2. **Any external operation that reads/modifies weights** (export,
+           inspection, requantization): the master copy is the only complete
+           and stable one; the GPU slots are just a rotating window.
         """
         for rel in range(self.num_swap):
             block = self.blocks[self.first_swapped + rel]
@@ -423,17 +493,20 @@ class PinnedBlockSwap:
                 param = params.get(name)
                 if param is not None:
                     param.data = master[name]
-        # 槽内容已与 param 解绑，标记为空避免下次误判命中
+        # Slot contents are now unbound from any param, mark them empty to avoid a false hit next time
         self._slot_holds = [-1] * self.num_slots
 
     def managed_data_ptrs(self) -> set[int]:
-        """被本组件管理的张量**存储地址**集合（CPU 主副本 + GPU 槽）。
+        """The set of **storage addresses** for tensors managed by this
+        component (CPU master copies + GPU slots).
 
-        给外部的「搬运整个模型」操作用：这些张量**不能**被 ``module.to(device)``
-        之类的一刀切搬上 GPU，否则 block swap 白做（见 ``move_module_excluding``）。
+        For external "move the whole model" operations to use: these tensors
+        **must not** be moved onto GPU by a blanket ``module.to(device)`` or
+        similar, or block swap is wasted (see ``move_module_excluding``).
 
-        用 ``data_ptr()`` 而非 ``id()``：``param.data`` 每次访问都返回**新的**
-        Python 包装对象，``id()`` 不稳定，拿它比对会全部漏判。
+        Uses ``data_ptr()`` rather than ``id()``: every access of
+        ``param.data`` returns a **new** Python wrapper object, so ``id()``
+        is unstable and comparing against it would miss every match.
         """
         ptrs = set()
         for weights in self._cpu_weights:
@@ -443,27 +516,37 @@ class PinnedBlockSwap:
         return ptrs
 
     def attach(self) -> None:
-        """给每个换出 block 注册前向 + 反向钩子，接管换入换出。
+        """Register forward + backward hooks on every swapped-out block, taking over swap-in/swap-out.
 
-        这是**推荐的接线方式**：完全从外部生效，不需要改模型的 forward 循环
-        （krea2 的循环在 parity 敏感的 ``modeling/`` 内，不宜改动，doc §7.1）。
+        This is the **recommended wiring approach**: it takes effect entirely
+        from the outside, without needing to modify the model's forward loop
+        (krea2's loop lives inside the parity-sensitive ``modeling/``, which
+        shouldn't be touched, doc SS7.1).
 
-        **四个钩子缺一不可**（前向 pre/post + 反向 pre/post）：
+        **All four hooks are required** (forward pre/post + backward pre/post):
 
-        - 前向 pre 取回权重、post 放开槽位；
-        - **反向 pre 必须再取一次** —— 前向 post 已经放开了槽位（不放开的话前向
-          期间没有任何 done 事件、双缓冲失去保护），到本 block 反向时槽里装的
-          早已是别的层。
+        - forward pre fetches the weights back, post releases the slot;
+        - **backward pre must fetch again** -- forward post has already
+          released the slot (without releasing it, there would be no done
+          event at all during the forward pass, and double buffering would
+          lose its protection), and by the time this block's backward runs,
+          the slot already holds some other layer.
 
-        曾经以为「开 gradient checkpointing 后反向重算会触发 forward hook，逆序
-        换入自动成立」，**那是错的**：重算的 forward_hook 根本不触发（实测
-        checkpoint 下 pre 触发 2N 次而 post 只 N 次），且重算之后本 block 的反向
-        仍要读权重。少了反向钩子，梯度会**静默**算错 —— 不报错、不 NaN，只是数值
-        不对，真机实测偏差达非确定性噪声底的 300 倍，PPSF 的 d 估计随即炸掉。
-        回归见 ``tests/test_block_swap_grad_fidelity.py``（必须用真实尺寸 +
-        噪声底校准，小张量测试对此完全不敏感）。
+        It was once assumed that "turning on gradient checkpointing means the
+        backward recompute triggers the forward hook, so the reverse-order
+        swap-in happens automatically" -- **that's wrong**: the recomputed
+        forward_hook doesn't fire at all (measured: under checkpointing, pre
+        fires 2N times but post only N times), and even after the recompute,
+        this block's backward still needs to read the weights. Without the
+        backward hook, gradients get computed **silently** wrong -- no error,
+        no NaN, just incorrect numbers; on real hardware the measured
+        deviation reached 300x the noise floor, immediately blowing up PPSF's
+        d estimate. See the regression test
+        ``tests/test_block_swap_grad_fidelity.py`` (must use real-world
+        sizes + noise-floor calibration; small-tensor tests are completely
+        insensitive to this).
 
-        幂等：重复调用不会重复注册。
+        Idempotent: calling it repeatedly does not re-register.
         """
         if self._handles:
             return
@@ -479,11 +562,17 @@ class PinnedBlockSwap:
                 return output
 
             def backward_pre_hook(_module, _gout, idx=absolute):
-                # **反向必须自己把权重取回来。** 前向结束就放开了槽位，到本 block
-                # 反向时槽里装的早已是别的层 —— 少了这一步梯度会**静默**算错
-                # （不报错、不 NaN，只是数值不对；真机实测偏差达噪声底 300 倍，
-                # PPSF 的 d 估计直接炸掉）。开 checkpoint 时紧邻的重算刚把权重
-                # 放好，这里命中直接返回、零额外传输。
+                # **Backward must fetch the weights back itself.** By the
+                # time the forward pass ends the slot is already released,
+                # and by the time this block's backward runs, the slot
+                # already holds some other layer -- skipping this step
+                # would make gradients **silently** wrong (no error, no NaN,
+                # just incorrect numbers; on real hardware the measured
+                # deviation reached 300x the noise floor, immediately
+                # blowing up PPSF's d estimate). With checkpointing on, the
+                # immediately preceding recompute has just put the weights
+                # back in place, so this call hits directly with zero
+                # extra transfer.
                 self.ensure_resident(idx, prefetch_next=idx - 1)
 
             def backward_hook(_module, _gin, _gout, idx=absolute):
@@ -493,32 +582,40 @@ class PinnedBlockSwap:
             self._handles.append(block.register_forward_hook(post_hook))
             self._handles.append(block.register_full_backward_pre_hook(backward_pre_hook))
             self._handles.append(block.register_full_backward_hook(backward_hook))
-        logger.info("block swap 已挂载：%d 个 block 的前向/反向钩子", self.num_swap)
+        logger.info("block swap attached: forward/backward hooks on %d blocks", self.num_swap)
 
     def detach(self) -> None:
-        """移除 attach 注册的钩子（权重不还原，需要时自行 ensure_resident）。"""
+        """Remove the hooks registered by attach (weights are not restored; call ensure_resident yourself if needed)."""
         for handle in self._handles:
             handle.remove()
         self._handles.clear()
 
     def close(self) -> None:
-        """彻底放手：摘钩子 + 把被管理参数指向空张量 + 丢弃主副本与 GPU 槽。
+        """Let go entirely: remove hooks + point managed parameters at empty
+        tensors + discard the master copies and GPU slots.
 
-        （名字刻意不叫 ``release`` —— 那个已经是「某层算完、槽位可复用」的
-        每层原语，语义完全不同。）
+        (Deliberately not named ``release`` -- that name is already used for
+        the per-layer primitive "a layer is done computing, its slot can be
+        reused", a completely different semantics.)
 
-        **调用后模型不可再用**，只在确定用完时调（训练收尾 / 模型卸载）。
+        **The model is unusable after this call**; only call it when you're
+        certain you're done with it (end of training / model unload).
 
-        为什么需要它，而不是「把 model 引用丢掉就行」：pinned 主副本被 param.data
-        引用着，而持有 block 的不只有 `ctx.model` —— LyCORIS injector 持 org_module、
-        optimizer 持参数、hook 闭包也可能持有。真机实测只丢 swap 对象归还 0 字节，
-        丢 model 之后才归还。与其到处找持有者，不如本对象主动把参数指走。
+        Why this is needed, rather than just "drop the reference to model":
+        the pinned master copies are referenced by param.data, and
+        `ctx.model` is not the only thing holding the block -- the LyCORIS
+        injector holds org_module, the optimizer holds the parameters, and
+        hook closures may hold references too. On real hardware, dropping
+        just the swap object returns 0 bytes; only dropping the model
+        afterward returns anything. Rather than hunting down every holder,
+        this object proactively redirects its parameters away.
 
-        注意仍需再调 ``release_pinned_host_cache()`` 才真正还给操作系统（那是
-        host caching allocator 的另一层，doc §9.7）。
+        Note ``release_pinned_host_cache()`` still needs to be called
+        afterward to actually return the memory to the OS (that's another
+        layer, the host caching allocator, doc SS9.7).
         """
         self.detach()
-        for rel in range(min(self.num_swap, len(self._param_specs))):  # 幂等
+        for rel in range(min(self.num_swap, len(self._param_specs))):  # idempotent
             block = self.blocks[self.first_swapped + rel]
             params = dict(block.named_parameters())
             for name, _shape, dtype in self._param_specs[rel]:
@@ -532,10 +629,12 @@ class PinnedBlockSwap:
         self._pinned_bytes = 0
 
     def iter_forward(self) -> Iterator[tuple[int, nn.Module]]:
-        """前向遍历便捷封装：yield (index, block)，自动 ensure_resident+预取+release。
+        """Convenience wrapper for the forward traversal: yields (index,
+        block), automatically doing ensure_resident+prefetch+release.
 
-        调用方：``for i, block in swap.iter_forward(): h = block(h, ...)``
-        注意 release 在 yield 返回后调用，所以调用方必须在循环体内完成 forward。
+        Caller: ``for i, block in swap.iter_forward(): h = block(h, ...)``.
+        Note release is called after the yield returns, so the caller must
+        finish the forward pass within the loop body.
         """
         self.reset()
         for i in range(self.total):
@@ -545,21 +644,29 @@ class PinnedBlockSwap:
 
 
 def release_pinned_host_cache() -> None:
-    """把 pinned（页锁定）内存还给操作系统。
+    """Return pinned (page-locked) memory to the operating system.
 
-    与 ``torch.cuda.empty_cache()`` 是**两件事**：后者只管设备侧。pinned 走
-    PyTorch 独立的 host caching allocator，释放张量只是还给那个缓存池 —— 真机
-    实测 pin 6GB 后 ``del`` + ``gc.collect()`` 归还 **0 字节**，调用本函数才
-    归还 8GB（doc §9.7）。
+    This is a **different thing** from ``torch.cuda.empty_cache()``: the
+    latter only manages the device side. Pinned memory goes through
+    PyTorch's separate host caching allocator, and freeing a tensor just
+    returns it to that cache pool -- on real hardware, pinning 6GB and then
+    ``del`` + ``gc.collect()`` returns **0 bytes**; only calling this
+    function returns the 8GB (doc SS9.7).
 
-    block swap 的主副本可达 11GB+，漏掉这步就是「卸载了但内存没还」，而且页
-    锁定内存连换页都不行，其他程序完全用不到。与 ``_cuda_clearCublasWorkspaces``
-    是同一类问题（C++/分配器层常驻，Python GC 看不见）的 host 侧版本。
+    Block swap's master copies can reach 11GB+; missing this step means
+    "unloaded but memory not returned", and page-locked memory can't even be
+    paged out, so other programs can't use it at all. This is the host-side
+    version of the same class of problem as
+    ``_cuda_clearCublasWorkspaces`` (state resident at the C++/allocator
+    layer, invisible to Python's GC).
 
-    **调用时机**：只在确定不再需要那批权重时（模型卸载 / 训练收尾）。出图或训练
-    过程中绝不能调 —— pinned 里装的就是模型权重本身。
+    **When to call this**: only once you're certain that batch of weights is
+    no longer needed (model unload / end of training). Never call it during
+    image generation or training -- what's in pinned memory is the model
+    weights themselves.
 
-    内部 API，缺失/失败静默跳过（下轮加载会复用缓存，只是内存不还系统）。
+    Internal API; silently skipped if missing/failing (the next load will
+    just reuse the cache, only the memory isn't returned to the system).
     """
     try:
         torch._C._host_emptyCache()
@@ -568,14 +675,17 @@ def release_pinned_host_cache() -> None:
 
 
 def move_module_excluding(module: nn.Module, device, swap: "PinnedBlockSwap | None") -> None:
-    """把 ``module`` 搬到 ``device``，但**跳过 block swap 管理的参数**。
+    """Move ``module`` to ``device``, but **skip the parameters managed by block swap**.
 
-    推理侧的 daemon 会在每个任务前把整个模型搬回 GPU（采样期 offload 之后要搬
-    回来）。那是个一刀切的 ``module.to(device)`` —— 在 block swap 下会把换出层的
-    CPU pinned 主副本一起搬上卡，swap 白做，而且瞬时占用等于完整模型，在 12GB
-    卡上直接 OOM。
+    On the inference side, the daemon moves the whole model back to GPU
+    before each task (after sampling-time offload, it needs to come back).
+    That's a blanket ``module.to(device)`` -- under block swap that would
+    also drag the swapped-out layers' CPU pinned master copies onto the
+    card, wasting the swap entirely, and the instantaneous memory usage
+    would equal the full model, causing an immediate OOM on a 12GB card.
 
-    ``swap`` 为 None 时退化为普通的 ``module.to(device)``（零行为变化）。
+    When ``swap`` is None, this degrades to a plain ``module.to(device)``
+    (zero behavior change).
     """
     if module is None or not hasattr(module, "to"):
         return
@@ -593,16 +703,18 @@ def move_module_excluding(module: nn.Module, device, swap: "PinnedBlockSwap | No
     for _name, buf in module.named_buffers(recurse=True):
         if buf.data_ptr() in managed or buf.device == target:
             continue
-        # buffer 要经所属 module 重新注册才能换实例；直接改 .data 对
-        # 非 Parameter 的 Tensor 同样生效（buffer 存的就是 Tensor）
+        # A buffer needs to be re-registered through its owning module to
+        # swap the instance; directly modifying .data also works for a plain
+        # (non-Parameter) Tensor (which is what a buffer stores)
         buf.data = buf.data.to(target)
 
 
 class BlockSwapAllocationError(RuntimeError):
-    """pinned / GPU 槽分配失败（doc §8.1 / B6：报错不静默降级）。
+    """pinned / GPU slot allocation failed (doc SS8.1 / B6: error out, never silently degrade).
 
-    只可能在启动期 ``PinnedBlockSwap`` 构造时抛出。携带足够上下文让上层给出
-    可操作的用户文案（关掉占内存的应用 / 调小 blocks_to_swap）。
+    Can only be raised during ``PinnedBlockSwap`` construction at startup.
+    Carries enough context for the caller to surface an actionable message
+    to the user (close memory-hungry applications / lower blocks_to_swap).
     """
 
     def __init__(self, num_swap: int, first_swapped: int, detail: str) -> None:
@@ -610,5 +722,5 @@ class BlockSwapAllocationError(RuntimeError):
         self.first_swapped = first_swapped
         self.detail = detail
         super().__init__(
-            f"block swap 预分配失败（换出末尾 {num_swap} 个 block）：{detail}"
+            f"block swap pre-allocation failed (swapping out the trailing {num_swap} blocks): {detail}"
         )

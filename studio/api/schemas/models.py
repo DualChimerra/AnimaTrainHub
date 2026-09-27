@@ -1,4 +1,4 @@
-"""/api/models/* + /api/upscalers/* 请求 BaseModel（PR-6 commit 2 从 server.py 抽出）。"""
+"""/api/models/* + /api/upscalers/* request BaseModels (extracted from server.py in PR-6 commit 2)."""
 from __future__ import annotations
 
 from typing import Optional
@@ -8,20 +8,22 @@ from pydantic import BaseModel, Field
 
 class ModelDownloadRequest(BaseModel):
     model_id: str           # "anima_main" | "anima_vae" | "qwen3" | "t5_tokenizer"
-    variant: Optional[str] = None  # anima_main / krea2_main 使用，其他忽略
+    variant: Optional[str] = None  # used by anima_main / krea2_main, ignored otherwise
 
 
 class FamilySwitchRequest(BaseModel):
-    """训练配置切换模型族的预览计算（多模型 P4-3）。纯计算不落盘。"""
-    target: str          # 目标族 id（"anima" / "krea2"）
-    config: dict         # 当前 config dict（允许部分字段缺失）
+    """Preview computation for switching the model family in a training config (multi-model P4-3).
+    Pure computation, nothing is written to disk."""
+    target: str          # target family id ("anima" / "krea2")
+    config: dict         # current config dict (some fields may be missing)
 
 
 class ModelSourceCandidateRequest(BaseModel):
-    """统一模型来源候选的添加 / 移除请求（docs/design/model-source-unification.md §6）。
+    """Add/remove request for a unified model source candidate (docs/design/model-source-unification.md #6).
 
-    POST 添加：kind=download 需 repo（单文件资产另需 filename）；kind=local 需
-    path。DELETE 移除：只按身份键（download=(repo, filename)，local=path）匹配。
+    POST adds: kind=download needs repo (single-file assets also need filename); kind=local
+    needs path. DELETE removes: matched only by identity key (download=(repo, filename),
+    local=path).
     """
     kind: str                # "download" | "local"
     repo: str = ""
@@ -31,4 +33,4 @@ class ModelSourceCandidateRequest(BaseModel):
 
 
 class UpscalerSelectRequest(BaseModel):
-    label: str   # 预设 key、custom 文件名或本地绝对路径
+    label: str   # preset key, custom filename, or local absolute path

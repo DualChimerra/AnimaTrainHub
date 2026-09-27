@@ -1,16 +1,17 @@
-"""文本编码工具：Qwen 隐藏态 + T5 加权 tokenization + tag 权重解析。
+"""Text-encoding utilities: Qwen hidden states + T5 weighted tokenization + tag weight parsing.
 
-抽自原 runtime/anima_train.py L777-1071（ADR 0003 PR-A）。
+Extracted from the original runtime/anima_train.py L777-1071 (ADR 0003 PR-A).
 
-公开：
-- encode_qwen — Qwen3 文本编码（带空字符串兜底）
-- tokenize_t5_weighted — 参考 ComfyUI anima-kai，按 tag 切分 + 权重 + pad
-- build_comfy_anima_conditioning_inputs — Generate Comfy parity 路径用的
-  raw-Qwen + SDTokenizer-style T5 加权输入
-- tokenize_t5_comfy_literal — 训练 caption 的 Comfy-style 字面 T5 tokenization
-  （批量、不解析权重语法；caption_comfy_encoding=true 时由训练 loop 使用）
+Public:
+- encode_qwen -- Qwen3 text encoding (with an empty-string fallback)
+- tokenize_t5_weighted -- follows ComfyUI anima-kai: split by tag + weight + pad
+- build_comfy_anima_conditioning_inputs -- raw-Qwen + SDTokenizer-style T5
+  weighted inputs for the Generate Comfy-parity path
+- tokenize_t5_comfy_literal -- Comfy-style literal T5 tokenization for training
+  captions (batched, no weight-syntax parsing; used by the training loop when
+  caption_comfy_encoding=true)
 
-内部：
+Internal:
 - _parse_weighted_tag / _build_qwen_text_from_prompt
 """
 
@@ -25,9 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 def encode_qwen(model, tokenizer, texts, device, max_length=512, preserve_empty_text: bool = False):
-    """Qwen 文本编码。"""
-    # Qwen3 tokenizer 对空字符串可能返回 0 tokens（会导致模型内部 reshape 失败）
-    # ComfyUI 的 AnimaTokenizer 设置了 min_length=1，这里做同等兜底。
+    """Qwen text encoding."""
+    # The Qwen3 tokenizer can return 0 tokens for an empty string (which breaks
+    # an internal reshape in the model). ComfyUI's AnimaTokenizer sets
+    # min_length=1; this does the equivalent fallback.
     if isinstance(texts, str):
         texts = [texts]
     if preserve_empty_text:
@@ -45,7 +47,7 @@ def encode_qwen(model, tokenizer, texts, device, max_length=512, preserve_empty_
     )
     uses_comfy_masking = bool(getattr(model, "uses_comfy_clip_masking", False))
 
-    # 仍可能出现空序列（极端 tokenizer 行为），强制塞 1 个 token
+    # An empty sequence can still occur (edge-case tokenizer behavior); force in 1 token
     if inputs["input_ids"].ndim == 2 and inputs["input_ids"].shape[1] == 0:
         pad_id = tokenizer.pad_token_id
         if pad_id is None:
@@ -79,8 +81,8 @@ def encode_qwen(model, tokenizer, texts, device, max_length=512, preserve_empty_
 
 def _parse_weighted_tag(tag: str) -> tuple[str, float]:
     """
-    解析单个 tag 的权重（参考指南"权重控制"）。
-    支持：
+    Parse a single tag's weight (follows the "weight control" convention).
+    Supports:
     - (tag:1.5)
     - (tag) / ((tag))  => 1.1^n
     - [tag]            => 1/1.1
@@ -91,12 +93,12 @@ def _parse_weighted_tag(tag: str) -> tuple[str, float]:
     if not s:
         return "", 1.0
 
-    # 显式 (xxx:1.23)
+    # Explicit (xxx:1.23)
     m = re.fullmatch(r"\(\s*(.+?)\s*:\s*([+-]?\d+(?:\.\d+)?)\s*\)", s)
     if m:
         return m.group(1).strip(), float(m.group(2))
 
-    # 统计外层 () / [] 深度
+    # Count the depth of outer () / []
     w = 1.0
     while True:
         s2 = s.strip()
@@ -113,7 +115,7 @@ def _parse_weighted_tag(tag: str) -> tuple[str, float]:
 
 
 def _build_qwen_text_from_prompt(prompt: str) -> str:
-    # Qwen 通道不传权重，只传"干净标签文本"（参考 ComfyUI anima-kai 的做法）
+    # The Qwen channel doesn't carry weights, just "clean tag text" (follows ComfyUI anima-kai's approach)
     parts = [p.strip() for p in prompt.split(",") if p.strip()]
     clean = []
     for p in parts:
@@ -266,16 +268,18 @@ def build_comfy_anima_conditioning_inputs(t5_tokenizer, prompt: str, max_length=
 
 
 def tokenize_t5_comfy_literal(tokenizer, texts, max_length=512):
-    """Comfy-style 字面 T5 tokenization（训练 caption 用，批量版）。
+    """Comfy-style literal T5 tokenization (used for training captions, batched).
 
-    与 build_comfy_anima_conditioning_inputs 的差异：caption 是数据不是 prompt，
-    整段按字面文本分词——不做权重语法解析、不清洗。booru tag 的括号
-    （`ganyu (genshin impact)`）保持字面字符，等价于 ComfyUI 用户推理时
-    转义 `\\(...\\)` 后 T5 实际看到的 token 序列。
+    Difference from build_comfy_anima_conditioning_inputs: a caption is data,
+    not a prompt, so the whole string is tokenized literally -- no weight-
+    syntax parsing, no cleanup. Booru-tag parentheses (`ganyu (genshin
+    impact)`) are kept literal, equivalent to the token sequence T5 actually
+    sees after a ComfyUI user escapes `\\(...\\)` at inference time.
 
-    返回与 tokenize_t5_weighted 相同的约定：input_ids / attention_mask(1=有效) /
-    token_weights（有效位 1.0），padding 位权重 0.0（下游乘到 LLMAdapter 输出
-    上等于把 padding cross 清零）。
+    Returns the same convention as tokenize_t5_weighted: input_ids /
+    attention_mask (1=valid) / token_weights (1.0 on valid positions), with
+    weight 0.0 on padding positions (multiplying this into the LLMAdapter
+    output downstream zeroes out the padding cross-attention).
     """
     if isinstance(texts, str):
         texts = [texts]
@@ -331,8 +335,9 @@ def apply_t5_token_weights(cross: torch.Tensor, token_weights: torch.Tensor | No
 
 def tokenize_t5_weighted(tokenizer, texts, max_length=512):
     """
-    参考 ComfyUI 的 anima-kai：按逗号切分 tag，逐 tag 分词，并为每个 token 附带权重。
-    返回：input_ids, attention_mask(1=有效), token_weights
+    Follows ComfyUI's anima-kai: split into tags by comma, tokenize each tag,
+    and attach a weight to every token.
+    Returns: input_ids, attention_mask (1=valid), token_weights
     """
     if isinstance(texts, str):
         texts = [texts]
@@ -355,11 +360,11 @@ def tokenize_t5_weighted(tokenizer, texts, max_length=512):
                 ids.append(int(tid))
                 ws.append(float(weight))
 
-        # 末尾补一个 eos（ComfyUI 也是最后加一个终止 token）
+        # Append one eos at the end (ComfyUI also appends one terminator token)
         ids.append(int(eos_id))
         ws.append(1.0)
 
-        # 截断到 max_length（保留最后一个 eos）
+        # Truncate to max_length (keeping the trailing eos)
         if max_length and len(ids) > max_length:
             ids = ids[: max_length - 1] + [int(eos_id)]
             ws = ws[: max_length - 1] + [1.0]
@@ -367,7 +372,7 @@ def tokenize_t5_weighted(tokenizer, texts, max_length=512):
         all_ids.append(torch.tensor(ids, dtype=torch.long))
         all_w.append(torch.tensor(ws, dtype=torch.float32))
 
-    # pad 到 batch 内最长
+    # pad to the longest sequence in the batch
     max_len = max(x.numel() for x in all_ids) if all_ids else 1
     input_ids = torch.full((len(all_ids), max_len), pad_id, dtype=torch.long)
     token_w = torch.zeros((len(all_w), max_len), dtype=torch.float32)

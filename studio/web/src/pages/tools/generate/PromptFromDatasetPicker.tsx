@@ -4,8 +4,8 @@ import { api, type CaptionEntry, type ProjectSummary } from '../../../api/client
 import { useLocalStorageState } from '../../../lib/useLocalStorageState'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
 
-// 命名前缀对齐 useAdvancedMode 的 `studio:` 约定（PR #66 P1-4）。旧的
-// `anima.generate.promptDataset.*` key 在 mount 时 migrate 一次后丢弃。
+// Naming prefix matches useAdvancedMode's `studio:` convention (PR #66 P1-4). The old
+// `anima.generate.promptDataset.*` keys are migrated once on mount, then discarded.
 const LAST_PROJECT_KEY = 'studio:generate:promptDataset:projectId'
 const LAST_VERSION_KEY = 'studio:generate:promptDataset:versionId'
 const LEGACY_PROJECT_KEY = 'anima.generate.promptDataset.projectId'
@@ -26,53 +26,59 @@ function migrateLegacyKey(legacyKey: string, newKey: string): void {
 export interface DatasetPick {
   projectId: number
   versionId: number
-  /** 训练集图片文件名（CaptionEntry.name，例如 "0001.png"） */
+  /** Training-set image filename (CaptionEntry.name, e.g. "0001.png") */
   name: string
   /**
-   * 图片所在子目录（CaptionEntry.folder，例如 "5_concept"）。可选：旧快照
-   * （加这个字段之前序列化的）没有它，缩略图就不渲染，不影响 tags 拼接。
+   * Subfolder the image lives in (CaptionEntry.folder, e.g. "5_concept"). Optional: older
+   * snapshots (serialized before this field existed) lack it, so the thumbnail just doesn't
+   * render -- it doesn't affect tag concatenation.
    */
   folder?: string
-  /** caption 文本拆出的 tag 列表，按训练集原始顺序 */
+  /** Tag list parsed out of the caption text, in the training set's original order */
   tags: string[]
 }
 
-/** 从训练集 caption 里选一条作为生成时的 prompt 后缀（不写入 sidebar 「正向」textarea）。
+/** Pick one caption from the training set to use as a prompt suffix for generation (not written into the sidebar's "positive" textarea).
  *
- * 受控单选：
- * - 父组件控 open / close（× 触发 onClose）；生成不自动关
- * - 选中状态 (DatasetPick) 由父组件持有；**关闭 picker 时父组件应同时清空 value**，
- *   否则 datasetPick.tags 会继续被 handleGenerate 拼到 prompt，用户以为没选还在生效
- * - 点 list 行：未选 → 激活；已选同一行 → 取消（反选）
- * - 选中 caption 的 tags 在底部只读 textarea 展示，不写进上层 prompt 框
+ * Controlled single-select:
+ * - The parent controls open/close (x fires onClose); generating doesn't auto-close it.
+ * - Selection state (DatasetPick) is held by the parent -- **the parent must also clear
+ *   `value` when it closes the picker**, otherwise datasetPick.tags keeps getting appended to
+ *   the prompt by handleGenerate while the user thinks nothing is selected anymore.
+ * - Clicking a list row: unselected -> activates it; already-selected same row -> deselects it.
+ * - The selected caption's tags are shown in a read-only textarea at the bottom, never written into the prompt box above.
  *
- * pid/vid 是「浏览中」的状态，跟 value 解耦 —— 浏览时切别的 project/version 看
- * 不影响 value；用 localStorage 持久化跨 session 记忆浏览位置。
+ * pid/vid represent "currently browsing" state, decoupled from `value` -- browsing to a
+ * different project/version doesn't affect `value`; persisted across sessions via localStorage
+ * to remember the browsing position.
  */
 export default function PromptFromDatasetPicker({
   value, onChange, onClose,
 }: {
-  /** 当前选中 caption（null = 未选） */
+  /** Currently selected caption (null = none) */
   value: DatasetPick | null
   onChange: (next: DatasetPick | null) => void
   onClose: () => void
 }) {
   const { t } = useTranslation()
-  // 一次性 migrate 旧 anima.* key 到 studio: 命名（PR #66 P1-4 约定）；module 顶部
-  // 调用即可，没必要进 useEffect —— 没读 / 写 React state 副作用，只动 localStorage。
+  // One-time migration of the old anima.* keys to the studio: naming (PR #66 P1-4 convention);
+  // calling it at the top of the module body is fine -- it has no React state read/write side
+  // effects, it only touches localStorage, so it doesn't need a useEffect.
   if (typeof window !== 'undefined') {
     migrateLegacyKey(LEGACY_PROJECT_KEY, LAST_PROJECT_KEY)
     migrateLegacyKey(LEGACY_VERSION_KEY, LAST_VERSION_KEY)
   }
 
   const [projects, setProjects] = useState<ProjectSummary[]>([])
-  // useLocalStorageState 默认值仅在 storage 无值时生效；有 value 时用它作初始的"浏览位置"
+  // useLocalStorageState's default only takes effect when storage has no value; when `value` is set, use it as the initial "browsing position"
   const [pid, setPid] = useLocalStorageState<number | null>(LAST_PROJECT_KEY, value?.projectId ?? null)
   const [vid, setVid] = useLocalStorageState<number | null>(LAST_VERSION_KEY, value?.versionId ?? null)
-  // 历史回填：value 切到一个 (projectId, versionId) 时，浏览中的 pid/vid 跟随它
-  // —— 否则 caption 列表停留在用户上次浏览的版本，看不到当前 value.name 行高亮，
-  //    底部 tags 又孤零显示，对不上号。控件外的状态(localStorage)不持久这次切换，
-  //    只更新 in-memory state；用户关掉 picker 再开还会回到他们手选的位置。
+  // History backfill: when value switches to a (projectId, versionId), the browsing pid/vid
+  // follows it -- otherwise the caption list would stay on the version the user last browsed,
+  // never highlight the current value.name row, and show the bottom tags orphaned with nothing
+  // matching them on screen. This doesn't persist to the outside state (localStorage); it only
+  // updates in-memory state, so closing and reopening the picker still returns to wherever the
+  // user last browsed by hand.
   useEffect(() => {
     if (value == null) return
     setPid((cur) => (cur === value.projectId ? cur : value.projectId))
@@ -80,24 +86,28 @@ export default function PromptFromDatasetPicker({
   }, [value?.projectId, value?.versionId])  // eslint-disable-line react-hooks/exhaustive-deps
   const [versions, setVersions] = useState<Array<{ id: number; label: string }>>([])
   const [captions, setCaptions] = useState<CaptionEntry[]>([])
-  // captions 实际所属的 (pid, vid)。行内/预览缩略图 URL 一律用它、不用实时 pid/vid —
-  // 切 project/version 的那一帧旧 captions 仍在渲染，若套实时 pid/vid 就会把旧文件名
-  // 拼到新 project 上整列 404（黑图）。绑到来源后，旧图在被新数据替换前始终用自己的
-  // (pid, vid)，永远指得回真实文件。捕获响应时与 captions 原子写入，二者不会脱节。
+  // The (pid, vid) that `captions` actually belongs to. Row/preview thumbnail URLs always use
+  // this, never the live pid/vid -- during the frame where a project/version switch is in
+  // flight, the old captions are still rendering, and using the live pid/vid would attach stale
+  // filenames to the new project, 404'ing the whole column (black images). Once bound to their
+  // source, old images keep pointing at their own (pid, vid) until replaced by new data, so they
+  // always resolve to a real file. Written atomically with `captions` when the response lands, so the two never drift apart.
   const [loaded, setLoaded] = useState<{ pid: number; vid: number } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  // 鼠标悬停的 caption key，驱动底部大图预览（移开 → 回落到已选 value 的图）
+  // The hovered caption key, driving the bottom large preview (moving away falls back to the selected value's image)
   const [hoveredKey, setHoveredKey] = useState<string | null>(null)
-  // 点击底部大图放大成全屏 modal。存的是点击那一刻预览图的定位快照，而非实时
-  // previewMeta —— 鼠标移进覆盖全屏的 modal 会离开 picker、触发根节点 onMouseLeave 清空
-  // hoveredKey，若跟随实时值放大的图会瞬间消失。快照后与 hover 解耦，稳定显示到手动关闭。
+  // Clicking the bottom large preview zooms it into a fullscreen modal. What's stored is a
+  // snapshot of the preview's location info at click time, not the live previewMeta -- moving
+  // the mouse into the fullscreen-covering modal leaves the picker, triggering the root's
+  // onMouseLeave to clear hoveredKey; an image that tracked the live value would vanish
+  // instantly. Decoupling it into a snapshot keeps it stable until closed manually.
   const [zoomMeta, setZoomMeta] = useState<
     { pid: number; vid: number; name: string; folder?: string } | null
   >(null)
 
-  // 1. 拉项目列表；若上次记的 pid 在新项目列表中不存在则清掉避免幽灵选择
+  // 1. Fetch the project list; if the remembered pid no longer exists in it, clear it to avoid a ghost selection
   useEffect(() => {
     void api.listProjects()
       .then((items) => {
@@ -105,15 +115,16 @@ export default function PromptFromDatasetPicker({
         if (pid != null && !items.some((p) => p.id === pid)) setPid(null)
       })
       .catch((e) => setError(String(e)))
-    // pid 进依赖会触发反复拉项目；mount 一次就够
+    // Putting pid in the deps would trigger repeated refetches; once on mount is enough
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 2. 选项目后拉版本列表；优先复用 vid（如果该版本在新项目里仍存在）
+  // 2. Once a project is picked, fetch its versions; prefer reusing vid if that version still exists in the new project
   useEffect(() => {
     if (!pid) { setVersions([]); setVid(null); return }
-    // 同款 stale-response 守卫：连切 project 时旧 getProject 晚返回会把别的
-    // project 的 versions / 默认 vid 灌进来，间接喂给上面的 captions effect。
+    // Same stale-response guard: rapidly switching projects can let an old getProject call
+    // resolve late and feed another project's versions / default vid in, which would then
+    // indirectly leak into the captions effect below.
     let cancelled = false
     void api.getProject(pid)
       .then((p) => {
@@ -128,17 +139,18 @@ export default function PromptFromDatasetPicker({
       })
       .catch((e) => { if (!cancelled) setError(String(e)) })
     return () => { cancelled = true }
-    // 同上：vid 只在 effect 内部读，不进依赖
+    // Same as above: vid is only read inside the effect, kept out of the deps
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid])
 
-  // 3. 选版本后拉 captions
+  // 3. Once a version is picked, fetch captions
   useEffect(() => {
     if (!pid || !vid) { setCaptions([]); setLoaded(null); return }
-    // stale-response 守卫：快速切 project/version 时旧请求可能晚于新请求返回，
-    // 没守卫就会把旧 captions 覆盖回去、与当前选择错配（显示别的 project 的图）。
-    // 对齐 InlineLoraPicker 同款守卫。captions 与其来源 (pid, vid) 一起写，供
-    // 缩略图 URL 锚定（见 `loaded` 注释），二者原子更新不脱节。
+    // Stale-response guard: rapidly switching project/version can make an old request resolve
+    // after the new one; without this guard the old captions would overwrite the new ones and
+    // mismatch the current selection (showing another project's images). Matches the same guard
+    // in InlineLoraPicker. `captions` is written together with its source (pid, vid), which
+    // anchors thumbnail URLs (see the `loaded` comment) -- the two update atomically and never drift.
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -166,8 +178,9 @@ export default function PromptFromDatasetPicker({
     )
   }, [captions, search])
 
-  // 当前 list 中匹配选中 caption 的 key（仅当已加载的 captions 与 value 同属一个
-  // (pid, vid) 才高亮 —— 用 loaded 而非实时 pid/vid，跟列表/缩略图保持同一来源）
+  // The key in the current list matching the selected caption (highlighted only when the
+  // loaded captions and `value` share the same (pid, vid) -- uses `loaded`, not the live
+  // pid/vid, to stay consistent with the list/thumbnail source)
   const selectedKeyInList = useMemo(() => {
     if (!value || !loaded || value.projectId !== loaded.pid || value.versionId !== loaded.vid) return null
     return value.name
@@ -175,12 +188,13 @@ export default function PromptFromDatasetPicker({
 
   const tagsText = value ? value.tags.join(', ') : ''
 
-  // 底部大图预览源：优先悬停行（浏览中 pid/vid），其次已选 value（用 value 自带
-  // 的 project/version/folder，跟浏览位置解耦）。旧快照的 value 没 folder → 不渲染。
+  // Bottom large-preview source: prefers the hovered row (browsing pid/vid), then falls back to
+  // the selected value (using value's own project/version/folder, decoupled from the browsing
+  // position). A value from an old snapshot with no folder simply doesn't render.
   const hoveredCaption = hoveredKey
     ? captions.find((c) => `${c.folder}/${c.name}` === hoveredKey) ?? null
     : null
-  // 当前预览图的定位信息，缩览图（512）和点击放大（1600）共用；null = 无图可显示。
+  // Location info for the current preview image, shared by the thumbnail (512) and the zoomed view (1600); null = nothing to show.
   const previewMeta =
     hoveredCaption && loaded
       ? { pid: loaded.pid, vid: loaded.vid, name: hoveredCaption.name, folder: hoveredCaption.folder }
@@ -192,8 +206,9 @@ export default function PromptFromDatasetPicker({
     : ''
 
   const handleRowClick = (c: CaptionEntry) => {
-    // 行属于 loaded 这一组 captions，选中也要落到 loaded 的 (pid, vid)，不能用
-    // 实时 pid/vid（切换瞬间二者可能不一致，否则会把别的 project 写进 datasetPick）。
+    // The row belongs to the `loaded` set of captions, so the selection must also land on
+    // loaded's (pid, vid), not the live pid/vid (the two can briefly disagree mid-switch,
+    // which would otherwise write the wrong project into datasetPick).
     if (!loaded) return
     if (
       value
@@ -201,7 +216,7 @@ export default function PromptFromDatasetPicker({
       && value.versionId === loaded.vid
       && value.name === c.name
     ) {
-      // 反选
+      // Deselect
       onChange(null)
       return
     }
@@ -216,9 +231,11 @@ export default function PromptFromDatasetPicker({
 
   return (
     <>
-    {/* onMouseLeave 绑在整个 picker（而非仅列表）：从列表行移到底部大图想点击放大时
-        不能丢 hover —— 否则未选中场景下大图与放大按钮会随 hoveredKey 清空而消失、点不到，
-        已选场景下则会回落成放大 value 的另一张图。移出整个 picker 才清空、回落到 value。 */}
+    {/* onMouseLeave is bound to the whole picker (not just the list): moving from a list row to
+        the bottom large preview to click and zoom it must not lose hover -- otherwise, in the
+        unselected case the preview and its zoom button would vanish (clearing on hoveredKey)
+        before they could be clicked, and in the selected case it would fall back to zooming a
+        different image (value's). Only leaving the whole picker clears it and falls back to value. */}
     <div
       className="rounded-md border border-subtle bg-overlay p-2.5 flex flex-col gap-2"
       data-testid="prompt-dataset-picker"
@@ -247,7 +264,7 @@ export default function PromptFromDatasetPicker({
         </button>
       </div>
 
-      {/* project / version 选择 */}
+      {/* project / version selection */}
       <div className="flex gap-2">
         <select
           className="input text-xs flex-1"
@@ -286,7 +303,7 @@ export default function PromptFromDatasetPicker({
 
       {error && <div className="text-2xs text-err">{error}</div>}
 
-      {/* caption 列表 */}
+      {/* caption list */}
       <div
         className="flex flex-col gap-px overflow-y-auto"
         style={{ maxHeight: 320 }}
@@ -298,9 +315,10 @@ export default function PromptFromDatasetPicker({
         {!loading && filtered.map((c) => {
           const k = `${c.folder}/${c.name}`
           const active = selectedKeyInList === c.name
-          // 行内缩略图请求 64px（≈2× 显示尺寸）保证高 DPI 不糊；native lazy
-          // 让没滚到的行不发请求，长列表不会一次性把图全拉下来。URL 用 loaded
-          // 而非实时 pid/vid，保证文件名与 (pid, vid) 同属一组、不会错配 404。
+          // In-row thumbnails request 64px (~2x display size) so high-DPI screens stay sharp;
+          // native lazy loading means rows that haven't scrolled into view don't fire a request,
+          // so long lists don't pull every image down at once. The URL uses `loaded`, not the
+          // live pid/vid, so the filename and (pid, vid) always belong to the same set and never 404.
           const thumb = loaded
             ? api.versionThumbUrl(loaded.pid, loaded.vid, 'train', c.name, c.folder, 64)
             : ''
@@ -339,8 +357,9 @@ export default function PromptFromDatasetPicker({
       </div>
 
       <label className="caption block mt-1">{t('generate.selectedDatasetTagsLabel')}</label>
-      {/* 上：训练集大图（悬停行 / 已选行），跟生成结果肉眼比对；下：只读 tags。
-          object-contain 看全图（大预览惯例，对齐 TagEdit / Preprocess），不裁切。 */}
+      {/* Top: the training-set large image (hovered row / selected row), for eyeballing against
+          generated results; bottom: read-only tags. object-contain shows the whole image
+          uncropped (matches the large-preview convention used by TagEdit / Preprocess). */}
       <div className="flex flex-col gap-2">
         <div
           className="rounded border border-subtle bg-sunken overflow-hidden flex items-center justify-center"
@@ -368,7 +387,7 @@ export default function PromptFromDatasetPicker({
             </span>
           )}
         </div>
-        {/* 最小高度对齐「正向」(PromptList rows=5 text-sm)：5×20 行高 + .input 14 padding + 2 边框 = 116 */}
+        {/* Minimum height matches "positive" (PromptList rows=5 text-sm): 5x20 line-height + .input's 14 padding + 2 border = 116 */}
         <textarea
           className="input w-full font-mono text-xs resize-y"
           style={{ minHeight: 116 }}

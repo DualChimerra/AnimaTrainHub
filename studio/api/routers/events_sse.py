@@ -1,9 +1,10 @@
-"""SSE 事件流（PR-5 从 server.py 抽出）。
+"""SSE event stream (extracted from server.py in PR-5).
 
-1 route：
-    GET /api/events    SSE — 广播 task/job 状态变化 + monitor delta + daemon state 等
-                       给所有订阅者。15s keepalive 防代理超时；await is_disconnected()
-                       立刻 break 不残留 queue（防内存泄漏）。
+1 route:
+    GET /api/events    SSE — broadcasts task/job status changes + monitor deltas +
+                       daemon state etc. to all subscribers. 15s keepalive to avoid
+                       proxy timeouts; await is_disconnected() breaks immediately so
+                       no queue is left dangling (prevents memory leaks).
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ router = APIRouter()
 
 @router.get("/api/events")
 async def events(request: Request) -> StreamingResponse:
-    """SSE：广播任务状态变化事件给所有订阅者。"""
+    """SSE: broadcasts task status-change events to all subscribers."""
     queue = await bus.subscribe()
 
     async def gen() -> AsyncIterator[bytes]:

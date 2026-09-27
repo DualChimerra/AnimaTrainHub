@@ -1,9 +1,3 @@
-"""DOP（差分输出保持）：触发词剥离、参照前向、schema 接线。
-
-核心语义：同一批图、去掉触发词的 caption，比较「开着适配器」与「关掉适配器」的
-预测。带触发词=风格，不带=什么都不改；两条分支内容完全相同，所以「抄数据集内容」
-拿不到奖励。详见 runtime/training/dop.py 的模块 docstring。
-"""
 from __future__ import annotations
 
 import random
@@ -16,7 +10,6 @@ torch = pytest.importorskip("torch")
 from training import dop
 
 
-# ── 触发词剥离 ────────────────────────────────────────────────────────────────
 
 def test_strips_trigger_as_a_standalone_tag():
     caption = "@mystyle, 1girl, solo, furry female"
@@ -41,7 +34,6 @@ def test_strip_is_case_insensitive():
 
 
 def test_does_not_touch_words_that_merely_contain_the_trigger():
-    """``@mystyle2`` 不是触发词，不能被吃掉一半。"""
     caption = "@mystyle2, 1girl"
     assert dop.strip_trigger(caption, "@mystyle") == caption
 
@@ -70,10 +62,8 @@ def test_has_trigger_detects_presence():
     assert not dop.has_trigger(["@t, a"], "")
 
 
-# ── 参照前向 ──────────────────────────────────────────────────────────────────
 
 class _FakeInjector:
-    """最小适配器替身：disabled() 里把 delta 置 0。"""
 
     def __init__(self):
         self.delta = 1.0
@@ -93,7 +83,6 @@ class _FakeInjector:
 
 
 class _FakeFamily:
-    """forward_train 的输出 = 输入 + injector.delta，便于断言两支的差。"""
 
     def __init__(self, injector):
         self.injector = injector
@@ -119,9 +108,8 @@ def test_reference_branch_runs_with_the_adapter_disabled():
         family=fam, model=None, injector=inj,
         noisy=noisy, t=t, cross_wo_trigger=cross,
     )
-    assert inj.disable_calls == 1          # 参照分支关了适配器
-    assert inj.delta == 1.0                # 之后恢复
-    # 有适配器 = noisy + 1*1, 无适配器 = noisy + 0 → MSE = 1
+    assert inj.disable_calls == 1
+    assert inj.delta == 1.0
     assert pytest.approx(float(loss.detach())) == 1.0
 
 
@@ -136,7 +124,6 @@ def test_loss_is_zero_when_the_adapter_changes_nothing():
 
 
 def test_gradient_flows_only_through_the_adapter_branch():
-    """参照分支在 no_grad 里 —— 它是常量目标，不能反向传播。"""
     inj, fam, noisy, t, cross = _pieces()
     loss = dop.compute_dop_loss(
         family=fam, model=None, injector=inj,
@@ -148,16 +135,14 @@ def test_gradient_flows_only_through_the_adapter_branch():
 
 
 def test_reference_branch_never_uses_gradient_checkpointing():
-    """no_grad 下 checkpoint 只是白白重算一遍，没有任何收益。"""
     inj, fam, noisy, t, cross = _pieces()
     dop.compute_dop_loss(
         family=fam, model=None, injector=inj,
         noisy=noisy, t=t, cross_wo_trigger=cross, use_checkpoint=True,
     )
-    assert fam.checkpoint_flags == [False, True]   # 参照分支 False，训练分支 True
+    assert fam.checkpoint_flags == [False, True]
 
 
-# ── ratio / 启动期校验 ────────────────────────────────────────────────────────
 
 def test_should_apply_edges():
     rng = random.Random(0)
@@ -175,7 +160,7 @@ def test_should_apply_is_roughly_the_requested_fraction():
 def test_adapter_without_disabled_fails_fast():
     with pytest.raises(RuntimeError, match="disabled"):
         dop.assert_adapter_supports_dop(SimpleNamespace())
-    dop.assert_adapter_supports_dop(_FakeInjector())   # 有 disabled() → 通过
+    dop.assert_adapter_supports_dop(_FakeInjector())
 
 
 # ── schema ───────────────────────────────────────────────────────────────────

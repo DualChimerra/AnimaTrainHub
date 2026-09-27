@@ -1,8 +1,8 @@
-"""跨平台杀进程树工具（PR-4 从 supervisor.py 抽出）。
+"""Cross-platform process-tree killing utilities (extracted from supervisor.py in PR-4).
 
-Windows 上 `proc.kill()` 只杀 immediate child，DataLoader workers /
-accelerate 的 sub-subprocess 会留下来占着 GPU；用 `taskkill /T /F` 能
-递归到整个进程树。POSIX 用 killpg。
+On Windows, `proc.kill()` only kills the immediate child -- DataLoader workers /
+accelerate's sub-subprocesses would be left behind still holding the GPU; `taskkill /T /F`
+recurses through the whole process tree. POSIX uses killpg.
 """
 from __future__ import annotations
 
@@ -15,10 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 def _kill_process_tree_psutil(pid: int) -> None:
-    """taskkill 不可用/被策略拒绝时的 Windows fallback。
+    """Windows fallback for when taskkill is unavailable / denied by policy.
 
-    psutil 是项目必需依赖。先杀最深子进程再杀根，尽量保留 taskkill 的 tree
-    语义；NoSuchProcess 是并发退出的正常竞态。
+    psutil is a required project dependency. Kills the deepest children first, then the
+    root, to approximate taskkill's tree semantics as closely as possible; NoSuchProcess
+    is a normal race from a process exiting concurrently.
     """
     import psutil
 
@@ -51,7 +52,7 @@ def _kill_process_tree_psutil(pid: int) -> None:
 
 
 def _kill_process_tree_windows(pid: int) -> None:
-    """Windows taskkill 主路径；失败时保证落到 psutil tree fallback。"""
+    """Windows taskkill primary path; guaranteed to fall back to the psutil tree kill on failure."""
     try:
         result = subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(pid)],
@@ -72,11 +73,11 @@ def _kill_process_tree_windows(pid: int) -> None:
 
 
 def _kill_process_tree(pid: int) -> None:
-    """杀掉以 pid 为根的整棵进程树。
+    """Kill the entire process tree rooted at pid.
 
-    Windows 上 `proc.kill()` 只杀 immediate child，DataLoader workers /
-    accelerate 的 sub-subprocess 会留下来占着 GPU；用 `taskkill /T /F` 能
-    递归到整个进程树。POSIX 用 killpg。
+    On Windows, `proc.kill()` only kills the immediate child -- DataLoader workers /
+    accelerate's sub-subprocesses would be left behind still holding the GPU; `taskkill /T /F`
+    recurses through the whole process tree. POSIX uses killpg.
     """
     if os.name == "nt":
         _kill_process_tree_windows(pid)

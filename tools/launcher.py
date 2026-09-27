@@ -1,29 +1,34 @@
 #!/usr/bin/env python
-"""本机一键启动器 —— `AnimaLoraStudio.exe` 的源码（本 fork 新增）。
+"""Local one-click launcher -- source for `AnimaLoraStudio.exe` (added in this fork).
 
-面向的是「下载了仓库、双击就想用」的本地用户：Windows 上 `studio.bat` 要先会
-开终端、知道 PowerShell 得写 `.\\`、遇到没装 Python 时只能看到一行英文报错就
-消失。这个启动器把同一套 bootstrap 用 Python 重写，编译成单文件 exe 后双击即
-可，出错时留在屏幕上讲人话。
+Aimed at local users who "downloaded the repo and just want to double-click and go":
+on Windows, `studio.bat` requires already knowing how to open a terminal, that PowerShell
+needs `.\\`, and if Python isn't installed you just see one line of English error text
+before the window vanishes. This launcher reimplements the same bootstrap in Python;
+compiled into a single-file exe, double-clicking it works, and errors stay on screen in
+plain language.
 
-它**不是**把整个应用打进 exe：torch / CUDA 轮子有好几 GB，塞进 PyInstaller 既
-不现实也没法按用户显卡选对版本。exe 只是引导程序（几 MB，纯 stdlib），干的事
-和 `studio.bat` 一样：
+It **doesn't** bundle the whole app into the exe: torch / CUDA wheels are several GB,
+which isn't realistic to stuff into PyInstaller and can't be matched to the user's GPU
+anyway. The exe is just a bootstrapper (a few MB, pure stdlib) that does the same thing
+`studio.bat` does:
 
-    找仓库 → 建/复用 venv → 按 GPU 装 torch → 装 requirements → 起 studio
+    locate the repo -> create/reuse a venv -> install torch for the GPU -> install
+    requirements -> start studio
 
-因此本文件**必须只用标准库**：它要在 venv 还不存在、requirements 一个都没装的
-时候跑起来。
+For that reason this file **must use only the standard library**: it has to run before
+the venv exists and before a single requirement is installed.
 
-用法（源码形式与 exe 形式等价）：
-    python tools/launcher.py                本机模式启动
-    python tools/launcher.py --mode colab   传给 studio 的模式（云端一般直接用
-                                            notebook，这里主要给测试用）
-    python tools/launcher.py --port 8800    透传给 `python -m studio run`
-    python tools/launcher.py --reinstall    删掉 venv 重建（studio_data 不动）
-    python tools/launcher.py --repo D:\\path 手动指定仓库位置
+Usage (source form and exe form are equivalent):
+    python tools/launcher.py                start in local mode
+    python tools/launcher.py --mode colab   mode passed to studio (cloud usage generally
+                                            goes straight through the notebook; this is
+                                            mainly for testing)
+    python tools/launcher.py --port 8800    passed through to `python -m studio run`
+    python tools/launcher.py --reinstall    delete and recreate the venv (studio_data untouched)
+    python tools/launcher.py --repo D:\\path manually specify the repo location
 
-未识别的参数原样透传给 `python -m studio run`。
+Unrecognized arguments are passed through unchanged to `python -m studio run`.
 """
 from __future__ import annotations
 
@@ -38,12 +43,13 @@ from typing import Any, NoReturn, Optional, Sequence
 
 APP_NAME = "AnimaLora Studio"
 
-#: 判定「这个目录是不是仓库根」的标记。两个都要有 —— 只看 requirements.txt 会
-#: 命中一堆无关的 Python 项目。
+#: Markers used to decide "is this directory the repo root". Both are required -- checking
+#: only requirements.txt would match a bunch of unrelated Python projects.
 REPO_MARKERS = ("requirements.txt", "studio/__init__.py")
 
-#: cli.py 的 installer 自更新协议：cli 退出码 42 = 启动器文件本身被改过，要重新
-#: 加载自己。见 docs/adr/0002-webui-self-update.md 与 studio.bat 的同名分支。
+#: cli.py's installer self-update protocol: cli exit code 42 = the launcher file itself was
+#: changed and needs to reload itself. See docs/adr/0002-webui-self-update.md and the
+#: matching branch in studio.bat.
 INSTALLER_RELOAD_EXIT_CODE = 42
 
 PYPI_MIRROR = "https://mirrors.cloud.tencent.com/pypi/simple/"
@@ -52,18 +58,21 @@ MIN_PYTHON = (3, 10)
 
 
 # ---------------------------------------------------------------------------
-# 输出
+# Output
 # ---------------------------------------------------------------------------
 #
-# **本文件打印出去的字符串必须是纯 ASCII**，与 studio.bat 同一条纪律。
-# Windows 控制台按系统 ANSI 代码页解码（俄语 cp866、中文 cp936、日语 cp932），
-# frozen exe 往里写一个 `→` 就是 UnicodeEncodeError 直接崩 —— 而崩的位置往往是
-# **报错路径本身**（die() 的提示行），于是用户看到的不是「Python 没装」而是一段
-# PyInstaller traceback。注释和 docstring 不受此限（它们不会被打印）。
+# **Every string this file prints must be pure ASCII**, the same discipline as studio.bat.
+# The Windows console decodes using the system ANSI codepage (Russian cp866, Chinese cp936,
+# Japanese cp932); a frozen exe writing a single `->`-style arrow glyph is an instant
+# UnicodeEncodeError crash -- and the crash usually happens **in the error path itself**
+# (die()'s hint line), so the user doesn't see "Python isn't installed" but a PyInstaller
+# traceback instead. Comments and docstrings aren't bound by this rule (they're never
+# printed).
 #
-# 下面这段是第二道防线：万一将来有人又写了非 ASCII，降级成 `?` 也不要让启动器
-# 死掉。刻意用 errors="replace" 而不是强制 UTF-8 —— 后者会把非 UTF-8 控制台变成
-# 一屏乱码，比几个问号更难读。
+# The block below is the second line of defense: if someone writes non-ASCII again in the
+# future, degrade to `?` instead of letting the launcher crash. Deliberately using
+# errors="replace" instead of forcing UTF-8 -- the latter would turn a non-UTF-8 console into
+# a screen of garbage, harder to read than a few question marks.
 
 
 def _make_output_crash_proof() -> None:
@@ -71,8 +80,9 @@ def _make_output_crash_proof() -> None:
         try:
             stream.reconfigure(errors="replace")  # type: ignore[union-attr]
         except (AttributeError, OSError, ValueError):
-            # 被重定向到不支持 reconfigure 的对象（管道包装、pythonw 下的 None）：
-            # 没有第二道防线也不该因此崩，第一道（纯 ASCII）仍然成立。
+            # Redirected to an object that doesn't support reconfigure (a pipe wrapper, or
+            # None under pythonw): shouldn't crash even without this second line of defense,
+            # since the first one (pure ASCII) still holds.
             pass
 
 
@@ -88,10 +98,11 @@ def warn(msg: str) -> None:
 
 
 def die(msg: str, *hints: str) -> NoReturn:
-    """报错 + 可操作建议，然后按住窗口。
+    """Print an error + actionable hints, then hold the window open.
 
-    双击启动的场景里控制台会随进程退出立刻关掉，用户根本读不到报错 —— 这是
-    「exe 一闪而过」类问题的全部成因，所以出错路径一律 pause。
+    In the double-click launch scenario, the console closes the instant the process exits,
+    so the user never gets to read the error -- this is the entire cause of the "exe just
+    flashes and disappears" class of bugs, so every error path pauses unconditionally.
     """
     print(f"\n[studio] ERROR: {msg}", file=sys.stderr, flush=True)
     for hint in hints:
@@ -101,7 +112,7 @@ def die(msg: str, *hints: str) -> NoReturn:
 
 
 def pause() -> None:
-    """只在真的连着终端时等回车（CI / 管道里不要挂住）。"""
+    """Only wait for Enter when actually attached to a real terminal (don't hang in CI / pipes)."""
     if not sys.stdin or not sys.stdin.isatty():
         return
     try:
@@ -111,15 +122,16 @@ def pause() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 定位仓库
+# Locating the repo
 # ---------------------------------------------------------------------------
 
 
 def launcher_dir() -> Path:
-    """exe / 脚本自身所在目录。
+    """Directory the exe / script itself lives in.
 
-    PyInstaller onefile 会把内容解到临时目录再执行，`__file__` 指向那个临时目
-    录 —— 找仓库必须用 `sys.executable`（真正的 exe 位置）。
+    PyInstaller onefile extracts its contents to a temp dir before running, and `__file__`
+    points at that temp dir -- finding the repo must use `sys.executable` (the real exe
+    location) instead.
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -131,10 +143,12 @@ def looks_like_repo(path: Path) -> bool:
 
 
 def find_repo(explicit: Optional[str]) -> Path:
-    """按「显式指定 → exe 所在目录及其上级 → 当前工作目录」的顺序找仓库根。
+    """Find the repo root in order: explicit path -> the exe's directory and its ancestors ->
+    the current working directory.
 
-    上溯是为了让 exe 放在 `tools/`、`dist/` 之类子目录里也能用；层数给到 4，
-    再深就不是误放而是放错地方了，应当报错而不是继续猜。
+    Walking up ancestors lets the exe live in a subdirectory like `tools/` or `dist/` and
+    still work; the depth is capped at 4 -- any deeper and it's no longer a misplacement but
+    genuinely the wrong location, which should error out instead of guessing further.
     """
     if explicit:
         path = Path(explicit).expanduser().resolve()
@@ -163,19 +177,22 @@ def find_repo(explicit: Optional[str]) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 缓存目录
+# Cache directory
 # ---------------------------------------------------------------------------
 
 
 def load_local_cache(repo: Path) -> Optional[Any]:
-    """按路径 import `studio/infrastructure/local_cache.py`。
+    """Import `studio/infrastructure/local_cache.py` by path.
 
-    按路径 import 而不是把环境变量清单复制一份进来：清单只该有一处权威源，
-    抄成两份早晚会漂。这里能这么做是因为此刻仓库已经找到、而那个模块是纯
-    标准库的（venv 还不存在也 import 得动）。
+    Importing by path instead of duplicating the environment-variable list here: the list
+    should have exactly one authoritative source, and copying it into two places will
+    eventually drift. This works because at this point the repo has already been found, and
+    that module is pure standard library (importable even before the venv exists).
 
-    失败返回 None —— 缓存位置是优化不是正确性，加载不了就让各库用自己的默认
-    位置照常启动。但要 warn：静默会让「以为收进来了、其实没有」无从察觉。
+    Returns None on failure -- the cache location is an optimization, not a correctness
+    requirement, so if it can't be loaded, each library just starts up with its own default
+    location. But it must warn: staying silent would make "thought it was redirected, but
+    actually wasn't" impossible to notice.
     """
     module_path = repo / "studio" / "infrastructure" / "local_cache.py"
     try:
@@ -194,10 +211,11 @@ def load_local_cache(repo: Path) -> Optional[Any]:
 
 
 def apply_local_caches(repo: Path) -> dict[str, str]:
-    """把第三方缓存指进 `<仓库>/.cache/`。
+    """Redirect third-party caches into `<repo>/.cache/`.
 
-    **必须在第一次 `pip install` 之前调用** —— pip 的轮子缓存是所有缓存里最大
-    的一份（CUDA torch 单个轮子 2-3GB），晚一步设就已经落到系统盘了。
+    **Must be called before the first `pip install`** -- pip's wheel cache is the largest
+    of all the caches (a single CUDA torch wheel is 2-3GB); setting this even one step late
+    means it's already landed on the system drive.
     """
     module = load_local_cache(repo)
     return dict(module.apply(repo)) if module is not None else {}
@@ -208,6 +226,7 @@ def apply_local_caches(repo: Path) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+
 def venv_python(venv_dir: Path) -> Path:
     if os.name == "nt":
         return venv_dir / "Scripts" / "python.exe"
@@ -215,7 +234,7 @@ def venv_python(venv_dir: Path) -> Path:
 
 
 def find_existing_venv(repo: Path) -> Optional[Path]:
-    """`venv/` 优先、`.venv/` 兜底 —— 与 studio.bat / studio.sh 的顺序一致。"""
+    """`venv/` takes priority, `.venv/` as fallback -- matches the order used by studio.bat / studio.sh."""
     for name in ("venv", ".venv"):
         candidate = repo / name
         if venv_python(candidate).exists():
@@ -224,12 +243,13 @@ def find_existing_venv(repo: Path) -> Optional[Path]:
 
 
 def bootstrap_python() -> list[str]:
-    """挑一个用来**创建** venv 的解释器。
+    """Pick an interpreter to use for **creating** the venv.
 
-    frozen 的 exe 里 `sys.executable` 是 exe 自己 —— 它没有 venv 模块也没法
-    `-m venv`，所以必须去系统上找真 Python。Windows 上优先 `py -3`：很多机器
-    为了兼容老项目在 PATH 上留着一个旧 `python`，而 py launcher 会挑最新的
-    3.x。非 frozen 运行时直接用当前解释器。
+    In a frozen exe, `sys.executable` is the exe itself -- it has no venv module and can't
+    do `-m venv`, so a real Python must be found on the system instead. On Windows, `py -3`
+    is preferred: many machines keep an old `python` on PATH for backward compatibility with
+    older projects, while the py launcher picks the newest 3.x. When not frozen, just use
+    the current interpreter directly.
     """
     if not getattr(sys, "frozen", False):
         return [sys.executable]
@@ -248,8 +268,9 @@ def bootstrap_python() -> list[str]:
 
 
 def check_version(python_argv: Sequence[str], *, label: str) -> None:
-    """低于 3.10 只警告不拦：部分依赖会装不上，但用户可能只是想跑已装好的
-    环境，硬拦住反而堵死自救路径。"""
+    """Below 3.10, only warn, don't block: some dependencies will fail to install, but the
+    user might just want to run an already-installed environment, and hard-blocking would
+    cut off their own way to fix it."""
     code = f"import sys;sys.exit(0 if sys.version_info>={MIN_PYTHON} else 1)"
     try:
         rc = subprocess.call([*python_argv, "-c", code])
@@ -261,7 +282,7 @@ def check_version(python_argv: Sequence[str], *, label: str) -> None:
 
 
 def create_venv(repo: Path) -> Path:
-    """建 venv。frozen 时用系统 Python 起子进程，否则用内置 venv 模块。"""
+    """Create the venv. When frozen, spawns a subprocess using the system Python; otherwise uses the built-in venv module."""
     venv_dir = repo / "venv"
     say(f"no virtual environment found; creating {venv_dir} (first run takes a few minutes)")
     if getattr(sys, "frozen", False):
@@ -280,12 +301,12 @@ def create_venv(repo: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 依赖
+# Dependencies
 # ---------------------------------------------------------------------------
 
 
 def pip_install(py: Path, args: Sequence[str], *, what: str) -> bool:
-    """先走官方 PyPI，失败再退到腾讯镜像（国内直连常年超时）。返回是否成功。"""
+    """Try the official PyPI first, fall back to the Tencent mirror on failure (direct connections from mainland China time out chronically). Returns whether it succeeded."""
     base = [str(py), "-m", "pip", "install", *args]
     if subprocess.call(base) == 0:
         return True
@@ -294,11 +315,12 @@ def pip_install(py: Path, args: Sequence[str], *, what: str) -> bool:
 
 
 def install_torch(py: Path, repo: Path, forced_tag: Optional[str]) -> None:
-    """先按 GPU 装对的 torch，再让 requirements.txt 跑。
+    """Install the right torch for the GPU first, then let requirements.txt run.
 
-    顺序是关键：requirements.txt 里只写 `torch>=2.0.0`，先跑它的话 pip 会拉
-    PyPI 上的 **CPU** 轮子，之后一切训练都跑在 CPU 上而且没有任何报错。先从
-    PyTorch 官方 index 装好 CUDA 版，约束已满足，pip 不会再替换。
+    Order matters: requirements.txt only says `torch>=2.0.0`, so running it first would make
+    pip pull the **CPU** wheel from PyPI, and every subsequent training run would silently
+    run on CPU with no error at all. Installing the CUDA build from the official PyTorch
+    index first satisfies the constraint, so pip won't replace it later.
     """
     if forced_tag:
         index = f"https://download.pytorch.org/whl/{forced_tag}"
@@ -329,7 +351,7 @@ def requirements_marker(venv_dir: Path) -> Path:
 
 
 def requirements_state(py: Path, repo: Path, marker: Path, *, update: bool = False) -> str:
-    """复用 `tools/check_requirements_changed.py`（内容 hash 而非 mtime）。"""
+    """Reuse `tools/check_requirements_changed.py` (content hash, not mtime)."""
     helper = repo / "tools" / "check_requirements_changed.py"
     if not helper.exists():
         return "stale" if not marker.exists() else "current"
@@ -365,8 +387,9 @@ def ensure_deps(py: Path, repo: Path, venv_dir: Path, *, fresh: bool,
         return
 
     if forced_tag:
-        # 已有 venv 但用户显式换 CUDA 版本 —— 照办，不然 --torch 在第二次运行
-        # 起就静默无效了。
+        # The venv already exists but the user explicitly requested a different CUDA
+        # version -- honor it, otherwise --torch would silently become a no-op from the
+        # second run onward.
         install_torch(py, repo, forced_tag)
 
     if requirements_state(py, repo, marker) == "stale":
@@ -399,26 +422,31 @@ def reinstall_venv(repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 启动
+# Startup
 # ---------------------------------------------------------------------------
 
 
 def run_studio(py: Path, repo: Path, mode: Optional[str], passthrough: Sequence[str]) -> int:
-    """起 `python -m studio run` 并守 restart 协议。
+    """Start `python -m studio run` and honor the restart protocol.
 
-    与 studio.bat 的外层 loop 同构：`tmp/restart` 还在就再起一轮（server 端
-    `/api/system/restart` 写的标志）；退出码 42 表示启动器文件自己被更新过，
-    exe 形态下没法像 POSIX `exec` 那样原地换壳，所以让用户重开一次 —— 这条
-    路径只在自更新后出现一次，比起悄悄跑着旧逻辑更安全。
+    Mirrors studio.bat's outer loop: if `tmp/restart` still exists, start another round
+    (the flag is written server-side by `/api/system/restart`); exit code 42 means the
+    launcher file itself was updated, and since the exe form can't swap itself in place the
+    way a POSIX `exec` would, the user is asked to restart it manually -- this path only
+    happens once, right after a self-update, and is safer than silently continuing to run
+    stale logic.
     """
     restart_flag = repo / "tmp" / "restart"
     env = dict(os.environ)
-    # 只有用户显式传了 --mode 才钉死模式。不传时留给 studio 自己解析（用户在
-    # UI 里选过的值 → 探测兜底）—— 启动器无条件注入 "local" 的话，UI 里的模式
-    # 开关会永远显示成"被环境变量锁定"，等于用一个便利换掉了另一个功能。
+    # Mode is only pinned when the user explicitly passes --mode. Without it, leave it for
+    # studio to resolve itself (falls back to whatever the user picked in the UI, via
+    # detection) -- if the launcher unconditionally injected "local", the mode toggle in the
+    # UI would forever show as "locked by an environment variable", trading one convenience
+    # for breaking another feature.
     if mode:
         env["ALS_RUNTIME_MODE"] = mode
-    # 非 UTF-8 系统区域（日文 cp932 等）下 studio 的中文输出会崩在 print 上。
+    # On a non-UTF-8 system locale (Japanese cp932, etc.) studio's non-ASCII output would
+    # crash on print.
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
 
@@ -445,7 +473,7 @@ def run_studio(py: Path, repo: Path, mode: Optional[str], passthrough: Sequence[
 
 
 # ---------------------------------------------------------------------------
-# 入口
+# Entry point
 # ---------------------------------------------------------------------------
 
 
@@ -468,10 +496,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_check(repo: Path) -> int:
-    """「为什么起不来」的自查报告。
+    """A self-check report for "why won't this start".
 
-    远程帮人排查时，"把 exe 拖进终端加 --check 再把输出发我"比来回问十句有效
-    得多 —— 装没装 Python、venv 在不在、认不认得出显卡，一屏说清。
+    When helping someone remotely, "drag the exe into a terminal, add --check, and send me
+    the output" beats ten rounds of back-and-forth questions -- whether Python is installed,
+    whether the venv exists, whether the GPU is detected, all on one screen.
     """
     print()
     say(f"folder      : {repo}")
@@ -496,7 +525,7 @@ def run_check(repo: Path) -> int:
         except (OSError, subprocess.TimeoutExpired):
             say(f"system python: {' '.join(argv)} (cannot run)")
 
-    # 「东西到底装哪去了」是这个报告最常被用来回答的问题，缓存位置要在里面。
+    # "Where did it actually get installed" is the question this report is most often used to answer, so the cache location has to be in it.
     module = load_local_cache(repo)
     if module is not None:
         current = module.describe(repo)
@@ -537,7 +566,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     say("+----------------------------------------------------------+")
     repo = find_repo(args.repo)
     say(f"workspace : {repo}")
-    # 在任何 pip 调用之前 —— 见 apply_local_caches 的说明。
+    # Before any pip call -- see apply_local_caches's docstring.
     cached = apply_local_caches(repo)
     if cached:
         say(f"cache     : {repo / '.cache'}")

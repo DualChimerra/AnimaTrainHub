@@ -1,4 +1,4 @@
-"""ADR-0007 §11.3-C / §6.9: derive_status_from_tasks + reconcile_version_status 测试。"""
+"""ADR-0007 section 11.3-C / section 6.9: derive_status_from_tasks + reconcile_version_status tests."""
 from __future__ import annotations
 
 import time
@@ -65,7 +65,7 @@ def test_derive_running_task_returns_training(isolated) -> None:
 
 
 def test_derive_paused_task_returns_training(isolated) -> None:
-    """§11.3-A: task=paused 时 version 仍 training，UI 派生显示 pause icon。"""
+    """section 11.3-A: when task=paused, version stays training; the UI derives and shows a pause icon."""
     v = _make_version(isolated)
     _insert_task(isolated, v["id"], v["project_id"], "paused")
     with db.connection_for(isolated["db"]) as conn:
@@ -94,7 +94,7 @@ def test_derive_canceled_task_returns_canceled(isolated) -> None:
 
 
 def test_derive_active_takes_priority_over_terminal(isolated) -> None:
-    """老 task done + 新 task running → training（active 优先）。"""
+    """Old task done + new task running -> training (active takes priority)."""
     v = _make_version(isolated)
     now = time.time()
     _insert_task(isolated, v["id"], v["project_id"], "done", created_at=now - 100)
@@ -104,7 +104,7 @@ def test_derive_active_takes_priority_over_terminal(isolated) -> None:
 
 
 def test_derive_picks_latest_terminal_task(isolated) -> None:
-    """多个终态 task → 按 created_at 取最新的。"""
+    """Multiple terminal-state tasks -> take the most recent by created_at."""
     v = _make_version(isolated)
     now = time.time()
     _insert_task(isolated, v["id"], v["project_id"], "failed", created_at=now - 100)
@@ -120,30 +120,30 @@ def test_derive_picks_latest_terminal_task(isolated) -> None:
 
 
 def test_reconcile_noop_when_consistent(isolated) -> None:
-    """status 与 derived 一致 → was_corrected=False。"""
+    """status matches derived -> was_corrected=False."""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
         ver, corrected = versions.reconcile_version_status(conn, v["id"])
     assert ver is not None
-    assert ver["status"] == "preparing"  # 无 task → preparing
+    assert ver["status"] == "preparing"  # no task -> preparing
     assert corrected is False
 
 
 def test_reconcile_corrects_stale_status(isolated) -> None:
-    """版本 status=training 但已经无 active task → 派生 preparing → 修正。"""
+    """Version status=training but there's no longer an active task -> derives preparing -> gets corrected."""
     v = _make_version(isolated)
     with db.connection_for(isolated["db"]) as conn:
-        # 手动写入"撒谎"的 status
+        # manually write a "lying" status
         versions.update_version(conn, v["id"], status="training")
-        # reconcile 应修正
+        # reconcile should correct it
         ver, corrected = versions.reconcile_version_status(conn, v["id"])
     assert ver is not None
-    assert ver["status"] == "preparing"  # 无 task 派生
+    assert ver["status"] == "preparing"  # derived with no task
     assert corrected is True
 
 
 def test_reconcile_corrects_when_task_terminal_but_version_still_training(isolated) -> None:
-    """task done 但 version 还停留 training（supervisor 漏写）→ 修正成 completed。"""
+    """task done but version is still stuck on training (supervisor missed a write) -> corrected to completed."""
     v = _make_version(isolated)
     _insert_task(isolated, v["id"], v["project_id"], "done")
     with db.connection_for(isolated["db"]) as conn:

@@ -1,24 +1,28 @@
-"""InfoNoise 端到端算法 verify 工具（无 GPU、无真模型，纯 numpy）。
+"""InfoNoise end-to-end algorithm verification tool (no GPU, no real model, pure numpy).
 
-通过 mock 训练 loop + closed-form toy mmse 函数跑 InfoNoiseScheduler，
-对比 4 个 pivot 选取配置（current / fix_last_above / fix_paper_c015 / oracle），
-log paper-aligned 指标（c 时间序列 / mass 分布 / KL to target_ρ / gate shape entropy）。
+Runs InfoNoiseScheduler through a mock training loop + a closed-form toy mmse function,
+comparing 4 pivot-selection configurations (current / fix_last_above / fix_paper_c015 /
+oracle), logging paper-aligned metrics (c time series / mass distribution / KL to
+target_rho / gate shape entropy).
 
-用途：
-1. 建议 1 (gate pivot bug) 端到端 verify
-2. 算法回归测试（修改 _refresh 后跑一遍看是否回归）
-3. paper §5 报告值对照（c≈0.15 / info_window 占比）
-4. X1 协同效应 (N_warm + Jacobian) 检验
+Uses:
+1. End-to-end verify for Recommendation 1 (gate pivot bug)
+2. Algorithm regression testing (run once after modifying _refresh to check for regressions)
+3. Comparison against paper §5 reported values (c ~= 0.15 / info_window fraction)
+4. X1 synergy effect (N_warm + Jacobian) check
 
-设计：
-- mmse(σ) 是 toy 闭式函数，不真训模型 — 跑得快且不混淆模型质量与算法行为
-- 4 配置共享同一 mock loop，只改 pivot 选取或 sampler 类
-- 输出 csv + matplotlib plot + 自动生成 markdown report
+Design:
+- mmse(sigma) is a toy closed-form function, no real model is trained -- runs fast and
+  doesn't conflate model quality with algorithm behavior
+- all 4 configs share the same mock loop, only pivot selection or the sampler class changes
+- outputs csv + matplotlib plot + auto-generated markdown report
 
-不当用法：
-- 不是性能基准（toy mmse 跟真模型 mmse 形状仍有 gap）
-- 不是 paper 论文复现（论文用真数据集；这里仅 verify InfoNoise 算法实现）
-- 不要在生产 CI 跑全 96 组合（用 --quick）
+Misuse warnings:
+- this is not a performance benchmark (the toy mmse still has a shape gap vs a real
+  model's mmse)
+- this is not a paper reproduction (the paper uses real datasets; this only verifies the
+  InfoNoise algorithm implementation)
+- don't run all 96 combinations in production CI (use --quick)
 """
 from __future__ import annotations
 
@@ -32,7 +36,7 @@ import os
 import sys
 import time
 
-# Windows cp932 / cp1252 控制台不能渲染中文 —— 强制 stdout/stderr 走 UTF-8
+# The Windows cp932 / cp1252 console can't render non-ASCII -- force stdout/stderr to UTF-8
 if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "buffer"):
@@ -43,24 +47,24 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# 静音 matplotlib + warnings —— 报告里再单独 surface
+# Silence matplotlib + warnings -- surfaced separately in the report instead
 import warnings
 warnings.filterwarnings("ignore")
 logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
-# 让脚本无需安装就能 import runtime.training
+# Lets the script import runtime.training without an install
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME_DIR = _REPO_ROOT / "runtime"
 if str(_RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(_RUNTIME_DIR))
 
-import torch  # noqa: E402  仅用于 sample.sample / sample.record 接口
+import torch  # noqa: E402  only used for the sample.sample / sample.record interface
 from training.timestep_samplers.infonoise import InfoNoiseScheduler  # noqa: E402
 
 # Paper §5 reported values (CIFAR experiment, arxiv 2602.18647)
 PAPER_C_CIFAR = 0.15
 # Paper §5 / Figure 4: information window roughly σ ∈ [0.05, 1.5] for CIFAR
-# 我们用对照表中 paper-aligned "info window" 估计的范围
+# We use the range estimated as the paper-aligned "info window" in the comparison table
 PAPER_INFO_WINDOW_SIGMA = (0.05, 1.5)
 
 
@@ -70,30 +74,31 @@ PAPER_INFO_WINDOW_SIGMA = (0.05, 1.5)
 
 
 def mmse_paper_fig4(sigma: np.ndarray) -> np.ndarray:
-    """论文 Fig 4 经验形状：宽 Gaussian-in-log-σ（无 floor），peak at σ=0.5。
+    """Paper Fig 4's empirical shape: a wide Gaussian-in-log-sigma (no floor), peak at sigma=0.5.
 
-    设计让 paper c=0.15 落在峰左肩。宽度 σ_log=1.5 让 r_norm>=p_onset 在 log-σ 上
-    跨越广泛区域（这样 last_above 选到峰右肩附近）。R3 verify_pivot.py Scenario C
-    用同样形状（无 floor）。**有 floor 的实验单独放在 mmse=paper_fig4_with_floor**
-    用于诊断"floor 让 fix_last_above 退化"的 stress test。
+    Designed so paper c=0.15 falls on the peak's left shoulder. Width sigma_log=1.5 makes
+    r_norm>=p_onset span a wide region in log-sigma (so last_above picks somewhere near
+    the peak's right shoulder). R3 verify_pivot.py Scenario C uses the same shape (no
+    floor). **The floor experiment lives separately under mmse=paper_fig4_with_floor**,
+    used as a stress test to diagnose "floor makes fix_last_above degenerate".
     """
     return 1.0 * np.exp(-((np.log(sigma) - np.log(0.5)) ** 2) / (2 * 1.5 ** 2))
 
 
 def mmse_unimodal_log(sigma: np.ndarray) -> np.ndarray:
-    """单峰在中段（peak 在 σ=2.0 而不是 0.5，robustness check）。"""
+    """Single peak in the middle (peak at sigma=2.0 instead of 0.5, robustness check)."""
     return 1.0 * np.exp(-((np.log(sigma) - np.log(2.0)) ** 2) / (2 * 1.2 ** 2))
 
 
 def mmse_bimodal_log(sigma: np.ndarray) -> np.ndarray:
-    """双峰：低 σ + 高 σ 各有 information mass，stress test 是否 gate 把两端都保留。"""
+    """Bimodal: low sigma + high sigma each carry information mass, stress-tests whether the gate keeps both ends."""
     peak_lo = 0.6 * np.exp(-((np.log(sigma) - np.log(0.2)) ** 2) / (2 * 0.8 ** 2))
     peak_hi = 0.6 * np.exp(-((np.log(sigma) - np.log(5.0)) ** 2) / (2 * 0.8 ** 2))
     return peak_lo + peak_hi
 
 
 def mmse_monotone_decay(sigma: np.ndarray) -> np.ndarray:
-    """mmse 从低 σ 单调降到高 σ（极端 case；模拟 signal washed out 模型）。"""
+    """mmse decays monotonically from low to high sigma (extreme case; simulates a signal-washed-out model)."""
     return 0.005 + 0.995 / (1.0 + sigma)
 
 
@@ -114,7 +119,7 @@ CONFIGS = ["current", "fix_last_above", "fix_paper_c015", "oracle"]
 
 
 def _build_refresh_override(config: str) -> Callable[[InfoNoiseScheduler], None]:
-    """返回一个 monkey-patch 版的 _refresh —— 跟源码只差 pivot 选取那 2 行。"""
+    """Returns a monkey-patched version of _refresh -- differs from the source only in the 2 pivot-selection lines."""
 
     def _refresh_with_pivot(self: InfoNoiseScheduler) -> None:
         self._refresh_attempts += 1
@@ -138,7 +143,7 @@ def _build_refresh_override(config: str) -> Callable[[InfoNoiseScheduler], None]
             self._refresh_degraded_count += 1
             return
 
-        # ── pivot 选取：唯一的 config 差异 ──
+        # -- pivot selection: the one config-dependent difference --
         if config == "current":
             first_above = int(above.argmax())
             c = float(self._sigma_centers[max(0, first_above - 1)])
@@ -150,7 +155,7 @@ def _build_refresh_override(config: str) -> Callable[[InfoNoiseScheduler], None]
         else:
             raise ValueError(f"unsupported config: {config}")
 
-        # 记录 c 让 report 能 surface
+        # Record c so the report can surface it
         self._last_pivot_c = c
 
         sn = self._sigma_centers ** self.n_gate
@@ -172,11 +177,11 @@ def _build_refresh_override(config: str) -> Callable[[InfoNoiseScheduler], None]
     return _refresh_with_pivot
 
 
-# ── Oracle sampler：跳过 InfoNoise，按 paper-aligned ρ(σ) = mmse·gate/σ³ 直采 ──
+# -- Oracle sampler: skips InfoNoise, samples directly from the paper-aligned rho(sigma) = mmse*gate/sigma^3 --
 
 
 class OracleSampler:
-    """直接按已知 mmse(σ) 闭式 + paper c=0.15 gate 构 CDF，作为 mass 分布上界。"""
+    """Builds the CDF directly from the known closed-form mmse(sigma) + the paper's c=0.15 gate, as an upper bound on the mass distribution."""
 
     def __init__(
         self,
@@ -200,13 +205,13 @@ class OracleSampler:
         self._log_sigma_edges = log_edges
         self._delta_log_sigma = float(log_edges[1] - log_edges[0])
         self._sigma_centers = np.exp(0.5 * (log_edges[:-1] + log_edges[1:]))
-        self._n_count = np.full(K, 9999, dtype=np.int32)  # 让 status 报满
+        self._n_count = np.full(K, 9999, dtype=np.int32)  # makes status report as fully populated
         self._internal_step = 0
         self._refresh_attempts = 0
         self._refresh_degraded_count = 0
         self._last_refresh_status = "ok"
         self._last_pivot_c = c
-        # 闭式 CDF —— 一次性算好不依赖 record
+        # Closed-form CDF -- computed once up front, doesn't depend on record
         mmse = mmse_fn(self._sigma_centers)
         r_hat = mmse / (self._sigma_centers ** 3 + 1e-30)
         sn = self._sigma_centers ** n_gate
@@ -227,7 +232,7 @@ class OracleSampler:
         return torch.tensor(t, device=device, dtype=torch.float32).clamp(1e-4, 1 - 1e-4)
 
     def record(self, t: torch.Tensor, raw_mse: torch.Tensor) -> None:
-        # oracle 不需要 record；为接口对齐保留 noop
+        # oracle doesn't need record; kept as a noop for interface parity
         self._internal_step += 1
 
     def maybe_refresh(self, global_step: int) -> None:
@@ -262,7 +267,7 @@ class RunConfig:
 
 
 def build_sampler(cfg: RunConfig, mmse_fn: Callable[[np.ndarray], np.ndarray]):
-    """构造 4 配置之一的 sampler。current/fix_*/oracle 各走自己分支。"""
+    """Build the sampler for one of the 4 configs. current/fix_*/oracle each take their own branch."""
     if cfg.config == "oracle":
         return OracleSampler(
             mmse_fn=mmse_fn,
@@ -278,23 +283,25 @@ def build_sampler(cfg: RunConfig, mmse_fn: Callable[[np.ndarray], np.ndarray]):
         N_min=cfg.N_min,
         baseline_mode=cfg.baseline_mode,
     )
-    # monkey-patch pivot 选取（不动 repo 源码）
+    # monkey-patch pivot selection (doesn't touch the repo's source)
     bound_refresh = _build_refresh_override(cfg.config)
     sched._refresh = bound_refresh.__get__(sched, InfoNoiseScheduler)
-    # ── baseline coverage 问题 ──
-    # 真实 anima 默认 baseline=logit_normal_shift3 在 log-σ 空间只覆盖中段；
-    # K=64 个 bin 半数永远拿不到样本 → n_count.min()=0 → refresh 永远 skip。
-    # 这是真实训练里 X1 协同效应的根因之一，但对端到端 verify 而言我们想测
-    # _refresh 内部逻辑（pivot/gate/cdf），所以重写 _sample_baseline 走 log-uniform
-    # 在 log-σ 空间均匀采样确保所有 bin 都填够。最终 adaptive 期采的还是 InfoNoise CDF，
-    # 这部分行为不变。baseline_mode 字段仍记录给 report 用做 sanity check。
+    # -- the baseline coverage problem --
+    # Real anima's default baseline=logit_normal_shift3 only covers the middle section in
+    # log-sigma space; half of the K=64 bins never get a single sample -> n_count.min()=0 ->
+    # refresh skips forever. This is one root cause of the real-training X1 synergy effect,
+    # but for end-to-end verify we want to test _refresh's internal logic (pivot/gate/cdf),
+    # so _sample_baseline is overridden with a log-uniform sampler over log-sigma space to
+    # guarantee every bin fills up. The adaptive phase still samples from the InfoNoise CDF
+    # afterward, unchanged. The baseline_mode field is still recorded for the report's
+    # sanity check.
     sched._sample_baseline = _make_log_uniform_baseline(sched)
-    sched._last_pivot_c = float("nan")  # _refresh 跑之前没有
+    sched._last_pivot_c = float("nan")  # not set yet before _refresh runs
     return sched
 
 
 def _make_log_uniform_baseline(sched: InfoNoiseScheduler):
-    """在 log-σ 空间均匀采样的 baseline；保证所有 bin 都填够样本让 _refresh 能跑。"""
+    """A baseline that samples uniformly in log-sigma space; guarantees every bin gets enough samples for _refresh to run."""
     sigma_min = float(np.exp(sched._log_sigma_edges[0]))
     sigma_max = float(np.exp(sched._log_sigma_edges[-1]))
     log_lo = math.log(sigma_min)
@@ -314,9 +321,9 @@ def run_one_config(
     cfg: RunConfig,
     mmse_fn: Callable[[np.ndarray], np.ndarray],
 ) -> Tuple[List[Dict], List[np.ndarray]]:
-    """跑一组 mock 训练 loop，返回每 log_every 一行的指标 + sampled t 历史。"""
+    """Run one mock training loop, returning metrics (one row per log_every) + the sampled t history."""
     rng = np.random.default_rng(cfg.seed)
-    # 让 torch.rand 也可复现（采样用）
+    # Make torch.rand reproducible too (used for sampling)
     torch.manual_seed(cfg.seed)
 
     sampler = build_sampler(cfg, mmse_fn)
@@ -327,13 +334,15 @@ def run_one_config(
     target_rho = _paper_target_rho(sigma_grid, mmse_fn)
 
     for global_step in range(cfg.total_optsteps + 1):
-        # micro batches —— 模拟 grad_accum
+        # micro batches -- simulates grad_accum
         for _ in range(cfg.grad_accum):
             t = sampler.sample(cfg.bs, device="cpu")
             t_np = t.detach().cpu().numpy()
             sigma_np = t_np / np.clip(1.0 - t_np, 1e-8, None)
-            # toy raw mse = mmse(σ) · (1 + noise_std · gauss)（multiplicative 噪声防 mse 估计在
-            # 高 σ 端被加性噪声 swamp；mock 模拟训练中"loss 估计有相对误差但绝对形状保留"）
+            # toy raw mse = mmse(sigma) * (1 + noise_std * gauss) (multiplicative noise
+            # prevents the mse estimate from being swamped by additive noise at the
+            # high-sigma end; mocks "loss estimate has relative error but keeps its
+            # absolute shape" during training)
             raw_mse = mmse_fn(sigma_np) * (1.0 + cfg.noise_std * rng.normal(size=cfg.bs))
             raw_mse = np.clip(raw_mse, 1e-8, None)
             sampler.record(t.detach(), torch.tensor(raw_mse, dtype=torch.float32))
@@ -353,9 +362,10 @@ def run_one_config(
 
 
 def _paper_target_rho(sigma_centers: np.ndarray, mmse_fn: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
-    """paper-aligned target ρ(σ) = mmse(σ)·gate_paper(σ)/σ³（log-σ 空间密度）。
+    """paper-aligned target rho(sigma) = mmse(sigma)*gate_paper(sigma)/sigma^3 (density in log-sigma space).
 
-    用 paper c=0.15 + n_gate=3 算 gate；归一化到 ∫ρ·d(log σ) = 1。
+    Computes the gate with the paper's c=0.15 + n_gate=3; normalized so that
+    integral(rho * d(log sigma)) = 1.
     """
     n_gate = 3
     c = PAPER_C_CIFAR
@@ -372,17 +382,17 @@ def _paper_target_rho(sigma_centers: np.ndarray, mmse_fn: Callable[[np.ndarray],
 
 
 def _sample_batch_for_hist(sampler, n: int = 1000) -> np.ndarray:
-    """大批采 t 用于 mass 分布 / KL 估计。"""
+    """Sample a large batch of t for mass-distribution / KL estimation."""
     t = sampler.sample(n, device="cpu").detach().cpu().numpy()
     return t
 
 
 def _gate_entropy(sigma_centers: np.ndarray, c: float, n_gate: int = 3) -> float:
-    """gate 序列 entropy：-Σ gate·log(gate) / log(K)，归一化到 [0,1]。"""
+    """Entropy of the gate sequence: -sum(gate*log(gate)) / log(K), normalized to [0,1]."""
     sn = sigma_centers ** n_gate
     cn = c ** n_gate
     gate = sn / (sn + cn + 1e-30)
-    # 把 gate 看成 unnormalized prob，归一后算 entropy
+    # Treat gate as an unnormalized prob, normalize it, then compute entropy
     p = gate / (gate.sum() + 1e-30)
     p = p.clip(1e-30, 1.0)
     H = float(-(p * np.log(p)).sum())
@@ -390,7 +400,7 @@ def _gate_entropy(sigma_centers: np.ndarray, c: float, n_gate: int = 3) -> float
 
 
 def _kl_divergence(p_sampled: np.ndarray, p_target: np.ndarray) -> float:
-    """KL(π_sampled || ρ_target)，两 array 都是 log-σ 空间 hist。"""
+    """KL(pi_sampled || rho_target); both arrays are histograms in log-sigma space."""
     p = p_sampled.clip(1e-12)
     q = p_target.clip(1e-12)
     p = p / p.sum()
@@ -419,11 +429,11 @@ def compute_metrics(
         gate_min = gate_max = float("nan")
         gate_H = float("nan")
 
-    # mass 分布 —— 用 1000 sample 估
+    # mass distribution -- estimated from 1000 samples
     if cdf_ready:
         t_batch = _sample_batch_for_hist(sampler, n=1000)
         sigma_batch = t_batch / np.clip(1.0 - t_batch, 1e-8, None)
-        # 用 log-σ 空间 quartile
+        # use quartiles in log-sigma space
         log_sigma_batch = np.log(np.clip(sigma_batch, 1e-12, None))
         log_q25 = np.quantile(np.log(sigma_grid), 0.25)
         log_q75 = np.quantile(np.log(sigma_grid), 0.75)
@@ -432,7 +442,7 @@ def compute_metrics(
         mass_info = float(
             ((sigma_batch >= PAPER_INFO_WINDOW_SIGMA[0]) & (sigma_batch <= PAPER_INFO_WINDOW_SIGMA[1])).mean()
         )
-        # KL to target —— hist over sigma_grid 的 log-σ bins
+        # KL to target -- histogram over sigma_grid's log-sigma bins
         log_edges = np.linspace(np.log(sigma_grid[0]) - 0.5, np.log(sigma_grid[-1]) + 0.5, len(sigma_grid) + 1)
         hist, _ = np.histogram(log_sigma_batch, bins=log_edges)
         p_sampled = hist.astype(np.float64) / max(1, hist.sum())
@@ -495,7 +505,7 @@ def render_plots(
     sigma_grid: np.ndarray,
     title: str,
 ) -> None:
-    # 懒 import，无 matplotlib 时也能跑（仅没图）
+    # Lazy import, so this still runs without matplotlib (just no plot)
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -538,7 +548,7 @@ def render_plots(
     # Panel 3: histograms warmup-end vs train-end
     ax3 = axes[1, 0]
     if len(sampled_t_history) >= 2:
-        early = sampled_t_history[len(sampled_t_history) // 4]  # 训练 1/4 处
+        early = sampled_t_history[len(sampled_t_history) // 4]  # at 1/4 of training
         late = sampled_t_history[-1]
         bins = np.linspace(0, 1, 41)
         ax3.hist(early, bins=bins, alpha=0.5, label="early (1/4 train)", color="tab:gray")
@@ -579,7 +589,7 @@ def render_plots(
 
 
 def _final_row(rows: List[Dict]) -> Dict:
-    """取最后一条 cdf_ready=1 的 row 作 final 指标；都没 ready 取最后一条。"""
+    """Take the last row with cdf_ready=1 as the final metrics; if none is ready, take the last row."""
     ready = [r for r in rows if r.get("cdf_ready") == 1]
     return ready[-1] if ready else rows[-1]
 
@@ -592,7 +602,7 @@ def _first_cdf_ready_step(rows: List[Dict]) -> Optional[int]:
 
 
 def _c_stable_step(rows: List[Dict], tol: float = 0.2) -> Optional[int]:
-    """找 c 第一次进入 [PAPER_C/1.5, PAPER_C*1.5] 区间并保持的 step。"""
+    """Find the step where c first enters and stays within [PAPER_C/1.5, PAPER_C*1.5]."""
     target_lo = PAPER_C_CIFAR / 1.5
     target_hi = PAPER_C_CIFAR * 1.5
     for r in rows:
@@ -605,31 +615,31 @@ def _c_stable_step(rows: List[Dict], tol: float = 0.2) -> Optional[int]:
 
 
 def generate_report(out_dir: Path, results: Dict[str, Dict]) -> None:
-    """生成 report.md：组合对照表 + finding 文字总结。"""
+    """Generate report.md: the combination comparison tables + a text summary of findings."""
     md = []
     md.append("# InfoNoise E2E Verify Report")
     md.append("")
-    md.append("脚本：`tools/infonoise_e2e_verify.py`  ·  生成时间：" + time.strftime("%Y-%m-%d %H:%M:%S"))
+    md.append("Script: `tools/infonoise_e2e_verify.py`  ·  generated at: " + time.strftime("%Y-%m-%d %H:%M:%S"))
     md.append("")
-    md.append("## 0. 实验设置")
+    md.append("## 0. Experiment setup")
     md.append("")
-    md.append("- **配置 × mmse_shape × grad_accum × baseline** 组合矩阵")
+    md.append("- **config x mmse_shape x grad_accum x baseline** combination matrix")
     sample_cfg = next(iter(results.values()))["cfg"]
     md.append(f"- total_optsteps = {sample_cfg.total_optsteps}, N_warm = {sample_cfg.N_warm}, "
               f"log_every = {sample_cfg.log_every}, K = {sample_cfg.K}, bs = {sample_cfg.bs}, "
               f"B = {sample_cfg.B}, N_min = {sample_cfg.N_min}, M = {sample_cfg.M}")
     md.append(f"- seed = {sample_cfg.seed}, mock noise_std = {sample_cfg.noise_std}")
-    md.append(f"- **paper 参考**: CIFAR c = {PAPER_C_CIFAR} (arxiv 2602.18647 §5, Algorithm 1, Eq 87); "
-              f"info window σ ∈ {PAPER_INFO_WINDOW_SIGMA} (Fig 4)")
-    md.append(f"- 共 {len(results)} 组合")
+    md.append(f"- **paper reference**: CIFAR c = {PAPER_C_CIFAR} (arxiv 2602.18647 §5, Algorithm 1, Eq 87); "
+              f"info window sigma in {PAPER_INFO_WINDOW_SIGMA} (Fig 4)")
+    md.append(f"- {len(results)} combinations total")
     md.append("")
 
-    # —— section 1: 建议 1 端到端 verify ——
-    md.append("## 1. 建议 1 (Gate pivot bug) 端到端 verify")
+    # —— section 1: Suggestion 1 end-to-end verify ——
+    md.append("## 1. Suggestion 1 (Gate pivot bug) end-to-end verify")
     md.append("")
-    md.append("### 1.1 paper_fig4 toy + grad_accum=1 + baseline=logit_normal 对照（核心表）")
+    md.append("### 1.1 paper_fig4 toy + grad_accum=1 + baseline=logit_normal comparison (core table)")
     md.append("")
-    md.append("| 配置 | c 最终值 | c stable step | mass_low | mass_info_window | mass_high | KL→target | refresh_status |")
+    md.append("| config | c final | c stable step | mass_low | mass_info_window | mass_high | KL→target | refresh_status |")
     md.append("|---|---|---|---|---|---|---|---|")
     for cfg_name in CONFIGS:
         run_id = f"{cfg_name}__paper_fig4__ga1__logit_normal"
@@ -651,14 +661,14 @@ def generate_report(out_dir: Path, results: Dict[str, Dict]) -> None:
     md.append("")
 
     # —— section 1.2: robustness across mmse shapes ——
-    md.append("### 1.2 其他 mmse 形状下的 robustness check (grad_accum=1, baseline=logit_normal)")
+    md.append("### 1.2 Robustness check across other mmse shapes (grad_accum=1, baseline=logit_normal)")
     md.append("")
     for shape in MMSE_SHAPES:
         if shape == "paper_fig4":
             continue
         md.append(f"#### {shape}")
         md.append("")
-        md.append("| 配置 | c 最终值 | mass_low | mass_info | mass_high | KL→target |")
+        md.append("| config | c final | mass_low | mass_info | mass_high | KL→target |")
         md.append("|---|---|---|---|---|---|")
         for cfg_name in CONFIGS:
             run_id = f"{cfg_name}__{shape}__ga1__logit_normal"
@@ -675,13 +685,13 @@ def generate_report(out_dir: Path, results: Dict[str, Dict]) -> None:
             )
         md.append("")
 
-    # —— section 1.3: X1 协同效应 ——
-    md.append("### 1.3 X1 协同效应（grad_accum 影响）—— paper_fig4 + logit_normal")
+    # —— section 1.3: X1 interaction effect ——
+    md.append("### 1.3 X1 interaction effect (impact of grad_accum) - paper_fig4 + logit_normal")
     md.append("")
-    md.append("X1：N_warm 单位用 _internal_step（record 数）而不是 optimizer step；grad_accum>1 时 ")
-    md.append("warmup 提前结束让 sampler 在尚未充分收敛的 EMA 上跑 gate。下表对照不同 grad_accum 下各 config 表现。")
+    md.append("X1: N_warm is counted in _internal_step units (record count), not optimizer steps; when grad_accum>1, ")
+    md.append("warmup ends early, causing the sampler to run the gate on an EMA that hasn't converged enough yet. Table below compares each config's behavior across different grad_accum values.")
     md.append("")
-    md.append("| 配置 | grad_accum | c 最终值 | mass_info_window | mass_low | KL→target |")
+    md.append("| config | grad_accum | c final | mass_info_window | mass_low | KL→target |")
     md.append("|---|---|---|---|---|---|")
     for cfg_name in CONFIGS:
         for ga in sorted({c.grad_accum for c in (r["cfg"] for r in results.values())}):
@@ -698,13 +708,13 @@ def generate_report(out_dir: Path, results: Dict[str, Dict]) -> None:
             )
     md.append("")
 
-    # —— section 2: baseline mode 对照 ——
-    md.append("## 2. Baseline mode 影响 (paper_fig4 + grad_accum=1)")
+    # —— section 2: baseline mode comparison ——
+    md.append("## 2. Baseline mode effect (paper_fig4 + grad_accum=1)")
     md.append("")
-    md.append("Baseline 仅在 warmup + CDF 未就绪期间影响采样；adaptive 期由 InfoNoise CDF 接管。")
-    md.append("不同 baseline 应在 ok-config 下收敛到相同的 final mass。")
+    md.append("Baseline only affects sampling during warmup and while the CDF isn't ready yet; once adaptive, InfoNoise's CDF takes over.")
+    md.append("Different baselines should converge to the same final mass under an ok-config.")
     md.append("")
-    md.append("| 配置 | baseline | c 最终值 | mass_info_window | KL→target |")
+    md.append("| config | baseline | c final | mass_info_window | KL→target |")
     md.append("|---|---|---|---|---|")
     for cfg_name in CONFIGS:
         for baseline in sorted({c.baseline_mode for c in (r["cfg"] for r in results.values())}):
@@ -720,19 +730,19 @@ def generate_report(out_dir: Path, results: Dict[str, Dict]) -> None:
             )
     md.append("")
 
-    # —— section 3: 关键 finding ——
-    md.append("## 3. 关键 finding")
+    # —— section 3: key findings ——
+    md.append("## 3. Key findings")
     md.append("")
 
     finding_lines, verdicts = _summarize_findings(results)
     md.extend(finding_lines)
     md.append("")
 
-    md.append("## 4. 跟 paper §5 报告值的偏离量化")
+    md.append("## 4. Quantifying deviation from paper §5 reported values")
     md.append("")
-    md.append("Paper CIFAR 报告：c ≈ 0.15 (Eq 87, §5)，info window 占采样 mass 37-57% (Fig 4 B)。")
+    md.append("Paper CIFAR report: c ~= 0.15 (Eq 87, §5), info window occupies 37-57% of sampled mass (Fig 4 B).")
     md.append("")
-    md.append("| 配置 | mean c (final) | c / 0.15 | mean mass_info | 偏离 paper |")
+    md.append("| config | mean c (final) | c / 0.15 | mean mass_info | deviation from paper |")
     md.append("|---|---|---|---|---|")
     for cfg_name in CONFIGS:
         run_id = f"{cfg_name}__paper_fig4__ga1__logit_normal"
@@ -755,14 +765,14 @@ def generate_report(out_dir: Path, results: Dict[str, Dict]) -> None:
         md.append(f"| {cfg_name} | {_fmt(c)} | {_fmt(c_ratio)} | {_pct(mi)} | {deviation} |")
     md.append("")
 
-    # —— section 5: 推荐 ——
-    md.append("## 5. 推荐：哪种 fix 应该落地")
+    # —— section 5: recommendation ——
+    md.append("## 5. Recommendation: which fix should ship")
     md.append("")
     md.extend(verdicts)
     md.append("")
 
-    # —— appendix: 全 96 组合 final ——
-    md.append("## 附录 A：全组合 final 指标表")
+    # —— appendix: all 96 combinations final ——
+    md.append("## Appendix A: final metrics table for all combinations")
     md.append("")
     md.append("| run_id | c_pivot | mass_low | mass_info | mass_high | KL | refresh_status |")
     md.append("|---|---|---|---|---|---|---|")
@@ -784,7 +794,7 @@ def generate_report(out_dir: Path, results: Dict[str, Dict]) -> None:
 
 
 def _summarize_findings(results: Dict[str, Dict]) -> Tuple[List[str], List[str]]:
-    """从 paper_fig4 + ga=1 + logit_normal 的 4 配置 final 抽出 finding。"""
+    """Extract findings from the final rows of the 4 paper_fig4 + ga=1 + logit_normal configs."""
     pf_ga1 = {}
     for cfg_name in CONFIGS:
         rid = f"{cfg_name}__paper_fig4__ga1__logit_normal"
@@ -794,37 +804,37 @@ def _summarize_findings(results: Dict[str, Dict]) -> Tuple[List[str], List[str]]
     lines: List[str] = []
     verdicts: List[str] = []
 
-    # Finding 1: 建议 1 bug
+    # Finding 1: suggestion 1 bug
     cur = pf_ga1.get("current")
     if cur is not None:
         bug_reproduced = (cur.get("mass_low_quarter", 0) or 0) > 0.7
         c_val = cur.get("c_pivot")
-        lines.append(f"### Finding 1：建议 1 (gate pivot bug) 端到端复现")
+        lines.append(f"### Finding 1: suggestion 1 (gate pivot bug) end-to-end reproduction")
         lines.append("")
         lines.append(
-            f"- `current` config 下 c_pivot 最终值 = **{_fmt(c_val)}** "
-            f"(paper 报 0.15，差 {_fmt((c_val or PAPER_C_CIFAR) / PAPER_C_CIFAR)}×)"
+            f"- final c_pivot under the `current` config = **{_fmt(c_val)}** "
+            f"(paper reports 0.15, off by {_fmt((c_val or PAPER_C_CIFAR) / PAPER_C_CIFAR)}x)"
         )
         lines.append(f"- mass_low_quarter = **{_pct(cur.get('mass_low_quarter'))}**, "
                      f"mass_info_window = **{_pct(cur.get('mass_info_window'))}**, "
                      f"mass_high_quarter = **{_pct(cur.get('mass_high_quarter'))}**")
         lines.append(
-            f"- **判决**：{'BUG 端到端复现' if bug_reproduced else '未复现 — 需复核'} "
+            f"- **Verdict**: {'bug reproduced end-to-end' if bug_reproduced else 'not reproduced -- needs review'} "
             f"(criterion: mass_low_quarter > 70%)"
         )
         lines.append("")
 
-    # Finding 2: fix_last_above 修法效果
+    # Finding 2: effect of the fix_last_above fix
     fla = pf_ga1.get("fix_last_above")
     if fla is not None:
         c_val = fla.get("c_pivot")
         in_paper_range = (c_val is not None and not math.isnan(c_val) and PAPER_C_CIFAR / 3 <= c_val <= PAPER_C_CIFAR * 3)
         mass_ok = 0.20 <= (fla.get("mass_info_window") or 0) <= 0.70
-        lines.append(f"### Finding 2：fix_last_above 修法效果")
+        lines.append(f"### Finding 2: effect of the fix_last_above fix")
         lines.append("")
-        lines.append(f"- c_pivot 最终 = **{_fmt(c_val)}** ({'回到 paper 量级 ✓' if in_paper_range else '未回到 paper 量级'})")
+        lines.append(f"- final c_pivot = **{_fmt(c_val)}** ({'back to paper magnitude \u2713' if in_paper_range else 'not back to paper magnitude'})")
         lines.append(f"- mass_info_window = **{_pct(fla.get('mass_info_window'))}** "
-                     f"({'paper 范围 37-57% 内 ✓' if 0.37 <= (fla.get('mass_info_window') or 0) <= 0.57 else '偏离 paper 37-57%'})")
+                     f"({'within the paper range 37-57% \u2713' if 0.37 <= (fla.get('mass_info_window') or 0) <= 0.57 else 'outside the paper 37-57% range'})")
         lines.append(f"- KL→target = **{_fmt(fla.get('kl_to_target_rho'))}**")
         lines.append("")
 
@@ -836,22 +846,22 @@ def _summarize_findings(results: Dict[str, Dict]) -> Tuple[List[str], List[str]]
         kl_fla = fla.get("kl_to_target_rho")
         kl_ora = ora.get("kl_to_target_rho")
         winner = "fix_paper_c015" if (kl_pc is not None and kl_fla is not None and kl_pc < kl_fla) else "fix_last_above"
-        lines.append(f"### Finding 3：fix_paper_c015 vs fix_last_above（谁更接近 oracle）")
+        lines.append(f"### Finding 3: fix_paper_c015 vs fix_last_above (which is closer to oracle)")
         lines.append("")
-        lines.append(f"- KL(oracle → target) = {_fmt(kl_ora)}（应近 0；mock sample 噪声决定下限）")
+        lines.append(f"- KL(oracle -> target) = {_fmt(kl_ora)} (should be near 0; the mock sample noise sets the floor)")
         lines.append(f"- KL(fix_paper_c015 → target) = **{_fmt(kl_pc)}**")
         lines.append(f"- KL(fix_last_above → target) = **{_fmt(kl_fla)}**")
-        lines.append(f"- 更接近 oracle：**{winner}**")
+        lines.append(f"- closer to oracle: **{winner}**")
         lines.append("")
 
-    # Finding 4: fix_last_above 在 monotone_decay 上的退化
+    # Finding 4: fix_last_above degrading on monotone_decay
     md_fla = {}
     for shape in MMSE_SHAPES:
         rid = f"fix_last_above__{shape}__ga1__logit_normal"
         if rid in results:
             md_fla[shape] = _final_row(results[rid]["rows"])
     fla_fails_on = [s for s, r in md_fla.items() if (r.get("mass_info_window") or 0) < 0.2]
-    lines.append("### Finding 4：fix_last_above 跨 mmse 形状的 robustness")
+    lines.append("### Finding 4: fix_last_above robustness across mmse shapes")
     lines.append("")
     for shape, r in md_fla.items():
         lines.append(
@@ -862,17 +872,18 @@ def _summarize_findings(results: Dict[str, Dict]) -> Tuple[List[str], List[str]]
     if fla_fails_on:
         lines.append("")
         lines.append(
-            f"- **退化**：在 {fla_fails_on} 上 mass_info_window < 20%；"
-            "原因：当 mmse 单调递减（monotone_decay）时 1/σ³ tail 与 mmse 同向衰减，"
-            "r_norm 在 log-σ 上下降平缓，above 区域延伸到低 σ 端，`last_above` 仍落在低 σ"
+            f"- **Degradation**: mass_info_window < 20% on {fla_fails_on}; "
+            "reason: when mmse decays monotonically (monotone_decay), the 1/sigma^3 tail decays "
+            "in the same direction as mmse, r_norm falls off gently on the log-sigma axis, the "
+            "above region stretches down to the low-sigma end, and `last_above` still lands at low sigma"
         )
     else:
         lines.append("")
-        lines.append("- 在所有 4 个 mmse shape 上 mass_info_window >= 20%")
+        lines.append("- mass_info_window >= 20% on all 4 mmse shapes")
     lines.append("")
 
-    # Finding 5: X1 协同效应
-    lines.append("### Finding 5：X1 协同效应（grad_accum 影响）")
+    # Finding 5: X1 interaction effect
+    lines.append("### Finding 5: X1 interaction effect (grad_accum impact)")
     lines.append("")
     x1_lines = []
     for cfg_name in ("current", "fix_last_above"):
@@ -886,7 +897,7 @@ def _summarize_findings(results: Dict[str, Dict]) -> Tuple[List[str], List[str]]
             x1_lines.append(f"- **{cfg_name}**: mass_info_window {mi_str}")
     if x1_lines:
         lines.extend(x1_lines)
-        # 简单判 fix_last_above 在 ga=4 下是否仍 work
+        # quick check: does fix_last_above still work at ga=4
         fla_ga4 = _final_row(results["fix_last_above__paper_fig4__ga4__logit_normal"]["rows"]) \
             if "fix_last_above__paper_fig4__ga4__logit_normal" in results else None
         if fla_ga4 is not None:
@@ -894,22 +905,23 @@ def _summarize_findings(results: Dict[str, Dict]) -> Tuple[List[str], List[str]]
             still_ok = 0.20 <= mi <= 0.80
             lines.append("")
             lines.append(
-                f"- **判决**：fix_last_above 在 grad_accum=4 下 mass_info_window={_pct(mi)} "
-                f"({'仍 work ✓' if still_ok else '退化 ✗ —— X1 协同效应放大'})"
+                f"- **Verdict**: fix_last_above at grad_accum=4 has mass_info_window={_pct(mi)} "
+                f"({'still works \u2713' if still_ok else 'degrades \u2717 -- amplified by the X1 interaction'})"
             )
             lines.append("")
             lines.append(
-                "- **注意**：本 verify 用 log-uniform baseline 让所有 bin 都填够，绕过了 X1 "
-                "的另一半（真实 anima logit_normal_shift=3 baseline 在低 σ 几乎不填 bin "
-                "→ n_count.min()=0 → refresh 永远 skip）。该 X1 component 需要单独 verify。"
+                "- **Note**: this verify uses a log-uniform baseline so every bin fills up, which "
+                "sidesteps the other half of X1 (the real anima logit_normal_shift=3 baseline barely "
+                "fills bins at low sigma -> n_count.min()=0 -> refresh always skips). That X1 "
+                "component needs its own separate verify."
             )
     lines.append("")
 
-    # —— 推荐 ——
-    # 选 fix_last_above vs fix_paper_c015 ——基于跨 mmse 平均 KL + monotone_decay 退化情况
+    # -- Recommendation --
+    # Pick fix_last_above vs fix_paper_c015 based on cross-mmse average KL + monotone_decay degradation
     kl_fla_avg = _avg_kl(results, "fix_last_above")
     kl_pc_avg = _avg_kl(results, "fix_paper_c015")
-    fla_fails = fla_fails_on  # 上面 Finding 4 已算
+    fla_fails = fla_fails_on  # already computed above in Finding 4
     if not fla_fails and kl_fla_avg <= kl_pc_avg * 1.5:
         winner = "fix_last_above"
         runner_up = "fix_paper_c015"
@@ -917,62 +929,65 @@ def _summarize_findings(results: Dict[str, Dict]) -> Tuple[List[str], List[str]]
         winner = "fix_paper_c015"
         runner_up = "fix_last_above"
 
-    verdicts.append(f"### 推荐：默认走 `{winner}`，escape hatch 字段允许用户覆盖")
+    verdicts.append(f"### Recommendation: default to `{winner}`, with an escape-hatch field for user override")
     verdicts.append("")
-    verdicts.append("理由：")
+    verdicts.append("Rationale:")
     verdicts.append("")
     if cur is not None and (cur.get("mass_low_quarter") or 0) > 0.7:
         verdicts.append(
-            "1. **current 端到端复现 bug**："
+            "1. **current reproduces the bug end-to-end**: "
             f"mass_low_quarter = {_pct(cur.get('mass_low_quarter'))} on paper_fig4 "
-            "(论文 Algorithm 1 Eq 87 + §B.6 Θ(σ⁻¹) tail 警告对齐) — InfoNoise 实际未生效"
+            "(consistent with the paper's Algorithm 1 Eq 87 + \u00a7B.6 \u0398(sigma^-1) tail warning) "
+            "-- InfoNoise is effectively not doing anything"
         )
     if winner == "fix_last_above" and fla is not None:
         c_val = fla.get("c_pivot")
         mi = fla.get("mass_info_window") or 0
         verdicts.append(
-            f"2. **fix_last_above 在 paper_fig4 上修好**："
-            f"c={_fmt(c_val)} (paper 0.15 量级)、mass_info_window={_pct(mi)}；"
-            f"跨 mmse 平均 KL={_fmt(kl_fla_avg)} vs fix_paper_c015={_fmt(kl_pc_avg)}"
+            f"2. **fix_last_above fixes it on paper_fig4**: "
+            f"c={_fmt(c_val)} (paper-scale 0.15), mass_info_window={_pct(mi)}; "
+            f"cross-mmse average KL={_fmt(kl_fla_avg)} vs fix_paper_c015={_fmt(kl_pc_avg)}"
         )
         verdicts.append(
-            "3. **dynamic 比固定值更稳健**：fix_paper_c015 把 c 写死 0.15 在 paper 数据集外不一定最优；"
-            "fix_last_above 跟随 mmse 形状自适应"
+            "3. **dynamic is more robust than a fixed value**: fix_paper_c015 hardcodes c=0.15, which "
+            "is not necessarily optimal outside the paper's dataset; fix_last_above adapts to the mmse shape"
         )
     else:
         verdicts.append(
-            f"2. **fix_paper_c015 更稳健**：fix_last_above 在 {fla_fails or '某些 mmse 形状'} 上退化"
-            f"（mass_info_window < 20%），原因详见 Finding 4。fix_paper_c015 把 c 钉到 paper "
-            f"CIFAR 值，对 1/σ³ tail 形状最 worst-case 时仍有保底"
+            f"2. **fix_paper_c015 is more robust**: fix_last_above degrades on {fla_fails or 'some mmse shapes'} "
+            f"(mass_info_window < 20%); see Finding 4 for why. fix_paper_c015 pins c to the paper's "
+            f"CIFAR value, which still has a floor in the worst case 1/sigma^3 tail shape"
         )
         verdicts.append(
-            f"3. **跨 mmse 平均 KL**：fix_paper_c015={_fmt(kl_pc_avg)} vs fix_last_above={_fmt(kl_fla_avg)}"
+            f"3. **cross-mmse average KL**: fix_paper_c015={_fmt(kl_pc_avg)} vs fix_last_above={_fmt(kl_fla_avg)}"
         )
     if winner == "fix_last_above":
         verdicts.append(
-            "4. **escape hatch**：schema 加 `infonoise_gate_pivot_c: Optional[float] = None`，"
-            "None → 走 dynamic `fix_last_above`；填正数 → 用户固定值（如 0.15）"
+            "4. **escape hatch**: add `infonoise_gate_pivot_c: Optional[float] = None` to the schema -- "
+            "None uses dynamic `fix_last_above`; a positive value pins the user's fixed value (e.g. 0.15)"
         )
     else:
         verdicts.append(
-            "4. **escape hatch**：schema 加 `infonoise_gate_pivot_c: float = 0.15`（默认 paper 值），"
-            "用户可改 0 走 dynamic `fix_last_above`，或填别的值定制 c"
+            "4. **escape hatch**: add `infonoise_gate_pivot_c: float = 0.15` to the schema (default is the "
+            "paper value) -- the user can set it to 0 for dynamic `fix_last_above`, or another value to customize c"
         )
     verdicts.append(
-        "5. **不破坏现有 test**：`tests/test_infonoise.py` oracle 只测 CDF 单调 + 端值，"
-        "不测 c 实际数值；patch 落地无 test breakage。建议补 `test_gate_pivot_not_pinned_to_sigma_min` "
-        "(4 个 mmse profile 都断言 c >> σ_min) 防回归"
+        "5. **does not break existing tests**: the `tests/test_infonoise.py` oracle only checks CDF "
+        "monotonicity + endpoints, not the actual value of c; landing the patch causes no test breakage. "
+        "Recommend adding `test_gate_pivot_not_pinned_to_sigma_min` (asserting c >> sigma_min across "
+        "all 4 mmse profiles) as a regression guard"
     )
     verdicts.append(
-        "6. **monotone_decay edge case**：4 个配置在 monotone_decay 上 mass_info 都 < 20%，"
-        "因为该 mmse 形状下 1/σ³ tail 与 mmse 同向衰减，gate 单独修不了 — 这是 P0-4 (Jacobian σ³→σ²) "
-        "的辖区，不应该归到 P0-5 (gate pivot)。建议 P0-4 + P0-5 同 PR"
+        "6. **monotone_decay edge case**: all 4 configs have mass_info < 20% on monotone_decay, because "
+        "under that mmse shape the 1/sigma^3 tail decays in the same direction as mmse, which the gate "
+        "alone cannot fix -- that is P0-4's territory (Jacobian sigma^3->sigma^2), not P0-5's (gate pivot). "
+        "Recommend landing P0-4 + P0-5 in the same PR"
     )
     return lines, verdicts
 
 
 def _avg_kl(results: Dict[str, Dict], config: str) -> float:
-    """跨所有 mmse + ga=1 + logit_normal 的平均 KL（cross-shape robustness 衡量）。"""
+    """Average KL across all mmse shapes + ga=1 + logit_normal (a cross-shape robustness measure)."""
     kls = []
     for shape in MMSE_SHAPES:
         rid = f"{config}__{shape}__ga1__logit_normal"
@@ -1043,18 +1058,18 @@ def _expand_combinations(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="InfoNoise 端到端算法 verify（4 config × 4 mmse × 3 grad_accum × 2 baseline 默认）",
+        description="InfoNoise end-to-end algorithm verify (4 config x 4 mmse x 3 grad_accum x 2 baseline by default)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--out-dir", default=str(_REPO_ROOT / "tmp" / "infonoise" / "e2e_run"))
     parser.add_argument("--config", choices=CONFIGS, default=None,
-                        help="只跑某一个 config（默认全部）")
+                        help="run only one config (default: all)")
     parser.add_argument("--mmse-shape", choices=list(MMSE_SHAPES), default=None,
-                        help="只跑某一种 mmse shape（默认全部）")
+                        help="run only one mmse shape (default: all)")
     parser.add_argument("--grad-accum", type=int, default=None,
-                        help="只跑某一个 grad_accum 值（默认 1/2/4）")
+                        help="run only one grad_accum value (default: 1/2/4)")
     parser.add_argument("--baseline-mode", default=None,
-                        help="只跑某一种 baseline_mode（默认 logit_normal/uniform）")
+                        help="run only one baseline_mode (default: logit_normal/uniform)")
     parser.add_argument("--total-steps", type=int, default=5000)
     parser.add_argument("--N-warm", type=int, default=500)
     parser.add_argument("--M", type=int, default=100)
@@ -1066,8 +1081,8 @@ def main():
     parser.add_argument("--noise-std", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--quick", action="store_true",
-                        help="CI smoke：total_steps=1000、组合数 = 4 config × paper_fig4 × ga1 × logit_normal")
-    parser.add_argument("--no-plots", action="store_true", help="跳过 matplotlib 出图（更快）")
+                        help="CI smoke: total_steps=1000, combinations = 4 config x paper_fig4 x ga1 x logit_normal")
+    parser.add_argument("--no-plots", action="store_true", help="skip matplotlib plot rendering (faster)")
     args = parser.parse_args()
 
     if args.quick:
@@ -1097,7 +1112,7 @@ def main():
 
     run_configs = _expand_combinations(configs, shapes, grad_accums, baseline_modes, base)
 
-    print(f"[infonoise_e2e_verify] 跑 {len(run_configs)} 个组合，输出 -> {out_dir}")
+    print(f"[infonoise_e2e_verify] running {len(run_configs)} combinations, output -> {out_dir}")
     print(f"  total_steps={args.total_steps}, N_warm={args.N_warm}, log_every={args.log_every}, K={args.K}, bs={args.bs}")
     print()
 
@@ -1132,7 +1147,7 @@ def main():
         )
 
     elapsed_total = time.time() - t_start
-    print(f"\n[infonoise_e2e_verify] 全部跑完 ({elapsed_total:.1f}s)，生成 report.md")
+    print(f"\n[infonoise_e2e_verify] all runs finished ({elapsed_total:.1f}s), generating report.md")
     generate_report(out_dir, results)
     print(f"\nReport -> {out_dir / 'report.md'}")
 

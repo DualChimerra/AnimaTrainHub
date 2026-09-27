@@ -35,7 +35,7 @@ describe('JobProgress (PP2)', () => {
     expect(screen.getByText('running')).toBeInTheDocument()
     expect(screen.getByText(/job #7/)).toBeInTheDocument()
     expect(screen.getByText(/line a\s+line b/)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '取消' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onCancel).toHaveBeenCalledOnce()
   })
 
@@ -47,14 +47,14 @@ describe('JobProgress (PP2)', () => {
         onCancel={() => {}}
       />
     )
-    expect(screen.queryByRole('button', { name: '取消' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull()
     expect(screen.getByText('done')).toBeInTheDocument()
   })
 
-  it('shows "等待日志..." when no logs yet', () => {
+  it('shows "waiting for logs" when no logs yet', () => {
     render(
       <JobProgress job={makeJob()} logs={[]} onCancel={() => {}} />
     )
-    expect(screen.getByText(/等待日志/)).toBeInTheDocument()
+    expect(screen.getByText(/Waiting for logs/)).toBeInTheDocument()
   })
 })

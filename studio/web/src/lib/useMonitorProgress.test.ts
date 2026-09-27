@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { _mergeDeltaForTest as mergeDelta } from './useMonitorProgress'
 
-describe('mergeDelta (PR #37 增量协议)', () => {
+describe('mergeDelta (PR #37 delta protocol)', () => {
   it('initial merge populates state from null prev', () => {
     const out = mergeDelta(null, {
       step: 5, total_steps: 100, epoch: 1,
@@ -36,7 +36,8 @@ describe('mergeDelta (PR #37 增量协议)', () => {
   })
 
   it('dedups losses whose step <= last known step', () => {
-    // 模拟重连场景：snapshot 已包含 step 1-3，delta 又重复推送 step 2-4
+    // Simulates a reconnect scenario: the snapshot already has steps 1-3, and
+    // the delta re-pushes steps 2-4
     const out = mergeDelta(
       {
         step: 3,
@@ -57,7 +58,7 @@ describe('mergeDelta (PR #37 增量协议)', () => {
         ],
       },
     )
-    // 只保留 > 3 的，即 step 4
+    // Only keeps > 3, i.e. step 4
     expect(out.losses).toHaveLength(4)
     expect(out.losses?.map((l) => l.step)).toEqual([1, 2, 3, 4])
   })
@@ -96,8 +97,8 @@ describe('mergeDelta (PR #37 增量协议)', () => {
       {
         appended_samples: [
           { path: '/b.png', step: 1 },  // dup
-          { path: '/c.png', step: 1 },  // 同 step 不同 path → 新
-          { path: '/d.png', step: 2 },  // 新 step
+          { path: '/c.png', step: 1 },  // same step, different path -> new
+          { path: '/d.png', step: 2 },  // new step
         ],
       },
     )
@@ -106,8 +107,10 @@ describe('mergeDelta (PR #37 增量协议)', () => {
   })
 
   it('caps losses at MAX_LOSSES=50000 (matches backend disk cap)', () => {
-    // 长训练 + 全量 snapshot 场景：早期上限 5000 会立刻 slice 掉历史；
-    // 改对齐 backend train_monitor 的 50000 cap，前端只在真的爆量时兜底。
+    // Long training run + full snapshot scenario: the old 5000 cap would
+    // immediately slice off history. Now aligned with the backend
+    // train_monitor's 50000 cap; the frontend only trims as a last resort
+    // when volume truly explodes.
     const prev = {
       losses: Array.from({ length: 49500 }, (_, i) => ({ step: i, loss: 0.0 })),
       lr_history: [],
@@ -117,14 +120,14 @@ describe('mergeDelta (PR #37 增量协议)', () => {
       appended_losses: Array.from({ length: 1000 }, (_, i) => ({ step: 49500 + i, loss: 0.0 })),
     })
     expect(out.losses).toHaveLength(50000)
-    // 留尾部
+    // Keeps the tail
     expect(out.losses?.[0].step).toBe(500)
     expect(out.losses?.[49999].step).toBe(50499)
   })
 
   it('keeps 10k step training intact without truncation', () => {
-    // 回归 cold-start 拿全量后立刻被裁的 bug：10k 历史 + 一两个 delta，不应
-    // 任何 slice。
+    // Regression for a bug where a cold-start full fetch was immediately
+    // truncated: 10k history + one or two deltas should never be sliced.
     const prev = {
       losses: Array.from({ length: 10000 }, (_, i) => ({ step: i, loss: 0.0 })),
       lr_history: [],
@@ -147,7 +150,7 @@ describe('mergeDelta (PR #37 增量协议)', () => {
       appended_samples: Array.from({ length: 10 }, (_, i) => ({ path: `/n${i}`, step: 45 + i })),
     })
     expect(out.samples).toHaveLength(50)
-    expect(out.samples?.[0].path).toBe('/p5')  // 头部被裁
+    expect(out.samples?.[0].path).toBe('/p5')  // head got trimmed
     expect(out.samples?.[49].path).toBe('/n9')
   })
 

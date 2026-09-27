@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useDialog } from './Dialog'
 import { useToast } from './Toast'
-import { TranslatedTag } from './tagDisplay/TranslatedTag'
 
 type Op = 'add' | 'remove' | 'replace' | 'dedupe'
 type Position = 'front' | 'back'
@@ -14,24 +13,29 @@ interface Props {
   onSelectAll: () => void
   onClearSelection: () => void
   tagSuggestions?: string[]
-  /** 用来给"未选时"的 hint 显示总数。 */
+  /** Used to show the total count in the "nothing selected" hint. */
   totalCount: number
   /** 'bar': one-line green strip under the image grid (mockup TagEdit);
    *  remove / replace then live in the tag statistics card. */
   variant?: 'panel' | 'bar'
 }
 
-/** 批量操作面板 — V2「行式」布局。
+/** Bulk action panel -- V2 "row-based" layout.
  *
- * 四个操作 (添加 / 删除 / 替换 / 去重) 各占一行，按钮在同一条竖线上：
- * `[icon·label] [input(s)] [toggle / spacer] [action button]`。
- * 节奏统一，按钮归属明确（首部/尾部 只挂在添加行内）。
+ * The four operations (add / remove / replace / dedupe) each take one row, with
+ * buttons aligned on the same vertical line:
+ * `[icon·label] [input(s)] [toggle / spacer] [action button]`.
+ * The rhythm is uniform and button ownership is unambiguous (the front/back
+ * toggle only appears in the add row).
  *
- * - **零 popover**：所有 input 常驻可见。
- * - **零 scope**：永远操作 selectedKeys（要全部 → 先「全选图片」按钮）。
- * - **add / remove 各有自己的 input**：避免「一个输入框两个按钮」的归属歧义。
- * - **每个 op 都过 useDialog().confirm**：影响张数预计算（pre-compute
- *   updates → 拿 size），用户看到的"N 张"是真实数。
+ * - **Zero popovers**: every input is always visible.
+ * - **Zero scope**: always operates on selectedKeys (need everything -> hit the
+ *   "select all images" button first).
+ * - **add / remove each have their own input**: avoids the ambiguity of "one
+ *   input field, two buttons".
+ * - **Every op goes through useDialog().confirm**: the affected count is
+ *   pre-computed (pre-compute updates -> take the size), so the "N images" the
+ *   user sees is the real number.
  */
 export default function BulkActionBar({
   cache,
@@ -53,7 +57,7 @@ export default function BulkActionBar({
   const [position, setPosition] = useState<Position>('front')
 
   const parseTags = (raw: string): string[] =>
-    raw.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean)
+    raw.split(/[,\n]/).map((s) => s.trim()).filter(Boolean)
 
   const computeUpdates = (op: Op): Map<string, string[]> => {
     const updates = new Map<string, string[]>()
@@ -216,7 +220,7 @@ export default function BulkActionBar({
         >{t('common.deselect')}</button>
       </div>
 
-      {/* V2 行式：四操作各一行，按钮列右对齐。 */}
+      {/* V2 row-based: each of the four ops takes one row, buttons right-aligned. */}
       <div className="rounded-md border border-subtle overflow-hidden">
         <BulkRow icon={ICON.plus} label={t('bulkAction.add')}>
           <TagsField
@@ -342,10 +346,11 @@ function RowIcon({ children }: { children: ReactNode }) {
   )
 }
 
-/** 在「删除」「去重」行里占位，宽度对齐到「添加」行的首部/尾部 toggle 列，
- * 保证四行的右按钮在同一条竖线上。 */
+/** Placeholder spacer in the "remove" / "dedupe" rows, matching the width of
+ * the front/back toggle column in the "add" row, so the right-hand buttons of
+ * all four rows line up on the same vertical line. */
 function ToggleSpacer() {
-  // 64px ≈ 首部/尾部 segmented 的渲染宽度（含 padding + border）。
+  // 64px ≈ the rendered width of the front/back segmented control (incl. padding + border).
   return <span aria-hidden="true" className="shrink-0" style={{ width: 64 }} />
 }
 
@@ -362,9 +367,10 @@ function RowButton({
   title?: string
   children: ReactNode
 }) {
-  // 设计稿 V2：只有「添加」是 filled primary，其它三个（删除 / 替换 / 去重）都是
-  // outline。删除走 err 着色（text + 边），保持和 替换 / 去重 同等视觉份量 —
-  // 不再 filled，避免抢走 caption 列表的注意力。
+  // Design V2: only "add" is filled primary, the other three (remove / replace
+  // / dedupe) are all outline. Remove uses err coloring (text + border), keeping
+  // the same visual weight as replace / dedupe -- not filled, so it doesn't pull
+  // attention away from the caption list.
   const baseCls = 'btn btn-sm shrink-0 justify-center'
   const cls =
     tone === 'primary'
@@ -411,7 +417,7 @@ const ICON = {
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/* position toggle (segmented control: 首部 / 尾部)                          */
+/* position toggle (segmented control: front / back)                         */
 /* ────────────────────────────────────────────────────────────────────────── */
 
 function PositionToggle({
@@ -423,9 +429,10 @@ function PositionToggle({
   onChange: (p: Position) => void
   t: (k: string) => string
 }) {
-  // 设计稿 V2：container 是 bg-sunken 的小坑，激活态是「弹出的小台」—
-  // bg-canvas + 仅 accent 文字 + 一道 accent 着色的 inset 边，整体很克制，
-  // 不抢「添加」主按钮的颜色。
+  // Design V2: the container is a small bg-sunken well, the active state is a
+  // "popped-up little platform" -- bg-canvas + accent-only text + an
+  // accent-tinted inset border. Overall restrained, so it doesn't steal the
+  // "add" primary button's color.
   const activeStyle = {
     background: 'var(--bg-canvas)',
     color: 'var(--accent-text, var(--accent))',
@@ -481,7 +488,7 @@ function TagsField({ value, onChange, placeholder, suggestions, ariaLabel, class
   const ref = useRef<HTMLDivElement>(null)
 
   const tail = (() => {
-    const m = value.match(/([^,，\n]*)$/)
+    const m = value.match(/([^,\n]*)$/)
     return (m ? m[1] : value).trim().toLowerCase()
   })()
   const matches = tail
@@ -497,7 +504,7 @@ function TagsField({ value, onChange, placeholder, suggestions, ariaLabel, class
   }, [])
 
   const pick = (s: string) => {
-    const head = value.replace(/([^,，\n]*)$/, '')
+    const head = value.replace(/([^,\n]*)$/, '')
     onChange(head + s); setOpen(false)
   }
 
@@ -523,7 +530,7 @@ function TagsField({ value, onChange, placeholder, suggestions, ariaLabel, class
               onMouseDown={(e) => { e.preventDefault(); pick(s) }}
               className="px-2.5 py-1 text-xs font-mono text-fg-primary cursor-pointer hover:bg-overlay rounded-sm"
             >
-              <TranslatedTag tag={s} />
+              {s}
             </li>
           ))}
         </ul>

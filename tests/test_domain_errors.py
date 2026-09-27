@@ -1,6 +1,7 @@
-"""PR-2 C1 — DomainError 体系基础测试。
+"""PR-2 C1 -- basic tests for the DomainError hierarchy.
 
-不依赖 fastapi / handler（C2 才有）；只验类层级 + 字段。
+No dependency on fastapi / handler (that's C2); only verifies the class
+hierarchy + fields.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from studio.domain.errors import (
 )
 
 
-# ── 基类 ─────────────────────────────────────────────────────────────────
+# -- base class ------------------------------------------------------------
 
 
 def test_domain_error_default_fields() -> None:
@@ -53,7 +54,7 @@ def test_domain_error_repr_contains_code() -> None:
     assert "DomainError" in repr(e)
 
 
-# ── 5 核心子类 ──────────────────────────────────────────────────────────
+# -- 5 core subclasses -------------------------------------------------
 
 
 @pytest.mark.parametrize("cls,expected_status,expected_code", [
@@ -70,7 +71,7 @@ def test_core_subclass_status_and_code(cls, expected_status, expected_code) -> N
     assert isinstance(e, DomainError)
 
 
-# ── preset / path 别名 ───────────────────────────────────────────────────
+# -- preset / path aliases ---------------------------------------------
 
 
 def test_preset_not_found_is_404_with_preset_code() -> None:
@@ -81,7 +82,7 @@ def test_preset_not_found_is_404_with_preset_code() -> None:
 
 
 def test_preset_name_invalid_is_400() -> None:
-    """name_invalid 是 400 而非 422 — name 是 URL path 一部分，URL 校验是 400 惯例。"""
+    """name_invalid is 400, not 422 -- name is part of the URL path, and URL validation conventionally returns 400."""
     e = PresetNameInvalidError("preset name contains '/'")
     assert e.http_status == 400
     assert e.code == "preset.name_invalid"
@@ -101,24 +102,25 @@ def test_invalid_path_is_400() -> None:
     assert e.code == "path.invalid"
 
 
-# ── 不依赖 fastapi ──────────────────────────────────────────────────────
+# -- no fastapi dependency -----------------------------------------------
 
 
 def test_domain_errors_module_does_not_import_fastapi() -> None:
-    """domain/ 层禁止反向依赖 api（ADR-0008 / ADR-0009 §4）。"""
+    """The domain/ layer must not depend back on api (ADR-0008 / ADR-0009 Section 4)."""
     import studio.domain.errors as _e
     import sys
-    # 检查 module 不直接 import fastapi（不能 100% 阻止子模块传染，但能 catch 直接 import）
+    # Check the module doesn't directly import fastapi (can't 100% block transitive
+    # contamination via submodules, but catches a direct import)
     src = open(_e.__file__, encoding="utf-8").read()
     for forbidden in ("import fastapi", "from fastapi"):
         assert forbidden not in src, (
-            f"domain/errors.py 不应 import fastapi（services 通过 domain raise）；"
-            f"找到: {forbidden!r}"
+            f"domain/errors.py should not import fastapi (services raise via domain); "
+            f"found: {forbidden!r}"
         )
 
 
 def test_subclass_can_override_per_instance() -> None:
-    """子类可以 per-instance 覆盖 http_status（罕见但合法）。"""
-    e = NotFoundError("x", http_status=410)  # Gone 而非 404
+    """A subclass can override http_status per-instance (rare but legal)."""
+    e = NotFoundError("x", http_status=410)  # Gone instead of 404
     assert e.http_status == 410
-    assert e.code == "not_found"  # code 不变
+    assert e.code == "not_found"  # code stays unchanged

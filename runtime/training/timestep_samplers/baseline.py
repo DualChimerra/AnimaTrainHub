@@ -1,8 +1,8 @@
-"""Baseline timestep 采样器：包装 training.timestep_sampling.sample_t。
+"""Baseline timestep sampler: wraps training.timestep_sampling.sample_t.
 
-非自适应；record / maybe_refresh 是 no-op。
-覆盖 8 种 mode：logit_normal / uniform / logit_normal_low / mode /
-mixed_uniform_low / mixed_uniform_logit / style_friendly / dual_peak。
+Non-adaptive; record / maybe_refresh are no-ops.
+Covers 8 modes: logit_normal / uniform / logit_normal_low / mode /
+mixed_uniform_low / mixed_uniform_logit / style_friendly / dual_peak.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from training.timestep_sampling import sample_t
 
 
 class BaselineTimestepSampler:
-    """sample_t 的 thin wrapper，使它符合 TimestepSamplerProtocol。"""
+    """Thin wrapper around sample_t that conforms to TimestepSamplerProtocol."""
 
     def __init__(
         self,
@@ -71,8 +71,9 @@ class BaselineTimestepSampler:
             **({"dual_peak": asdict(self.dual_peak_config)} if self.dual_peak_config is not None else {}),
         }
 
-    # ─── pause/resume（ADR 0006 Addendum 1）：无状态采样器是真的无状态，no-op ───
-    # Protocol body 里的 default 仅给 type checker；运行时不分发，必须显式实现。
+    # --- pause/resume (ADR 0006 Addendum 1): a stateless sampler is truly stateless, no-op ---
+    # The Protocol body's default is only for the type checker; it isn't dispatched
+    # at runtime, so this must be implemented explicitly.
     def state_dict(self) -> dict:
         return {}
 
@@ -81,13 +82,14 @@ class BaselineTimestepSampler:
 
 
 def build(args, total_steps) -> BaselineTimestepSampler:
-    """按 args 构建 BaselineTimestepSampler。total_steps 此采样器用不到。"""
+    """Build a BaselineTimestepSampler from args. This sampler ignores total_steps."""
     return BaselineTimestepSampler(
         mode=str(getattr(args, "timestep_sampling", "logit_normal") or "logit_normal"),
         shift=float(getattr(args, "timestep_shift", 3.0) or 3.0),
         mix_low_prob=float(getattr(args, "timestep_mix_low_prob", 0.0) or 0.0),
         timestep_schedule_shift=float(getattr(args, "timestep_schedule_shift", 1.0) or 1.0),
-        # 显式 None 检查而非 `or`：mean 的合法值里有 0.0，sigma 没有但保持同一写法
+        # Explicit None check instead of `or`: mean's valid range includes 0.0;
+        # sigma doesn't, but kept in the same style for consistency.
         style_snr_mean=_float_or(getattr(args, "style_snr_mean", None), -6.0),
         style_snr_sigma=_float_or(getattr(args, "style_snr_sigma", None), 2.0),
         dual_peak_config=config_from_args(args),
@@ -95,5 +97,5 @@ def build(args, total_steps) -> BaselineTimestepSampler:
 
 
 def _float_or(value, default: float) -> float:
-    """None/缺省 → default；其余按 float 解析（0.0 是合法值，不能被 `or` 吞掉）。"""
+    """None/unset -> default; otherwise parse as float (0.0 is valid and must not be swallowed by `or`)."""
     return default if value is None else float(value)

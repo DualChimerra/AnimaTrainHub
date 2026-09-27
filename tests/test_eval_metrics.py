@@ -84,10 +84,10 @@ def _vdir_for(pid: int, vid: int) -> tuple[dict[str, Any], dict[str, Any], Path]
 
 def test_list_task_eval_jobs_filters_by_task_and_kind(client: TestClient) -> None:
     pid, vid = _make(client)
-    # /eval/jobs 只返回 run 仍存在的 job —— 给 task 42 的三个 job 各建一个 run.json
+    # /eval/jobs only returns jobs whose run still exists -- create a run.json for each of task 42's three jobs
     eval_root = infra_paths.task_eval_dir(42)
     with db.connection_for() as conn:
-        # task 42 的三种 eval job
+        # task 42's three eval job kinds
         for kind in ("eval_samples", "eval_clip", "eval_dino"):
             run_dir = eval_root / "samples" / f"run-{kind}"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -96,7 +96,7 @@ def test_list_task_eval_jobs_filters_by_task_and_kind(client: TestClient) -> Non
                 conn, project_id=pid, version_id=vid, kind=kind,
                 params={"task_id": 42, "run_id": f"run-{kind}"},
             )
-        # 别的 task 的 eval job + 非 eval job：都不该出现
+        # An eval job from another task + a non-eval job: neither should show up
         project_jobs.create_job(
             conn, project_id=pid, version_id=vid, kind="eval_samples",
             params={"task_id": 99, "run_id": "run-other"},
@@ -138,7 +138,7 @@ def test_list_results_attaches_baseline_delta(isolated) -> None:
     results = eval_metrics.list_results(vdir)
     base_res = next(r for r in results if r["baseline"])
     ckpt_res = next(r for r in results if not r["baseline"])
-    assert "delta" not in base_res  # baseline 自己不挂 delta
+    assert "delta" not in base_res  # baseline itself carries no delta
     assert ckpt_res["delta"]["clip_i"] == pytest.approx(0.12)
     assert ckpt_res["delta"]["dino_i"] == pytest.approx(0.0)
     assert ckpt_res["baseline_metrics"]["clip_i"] == pytest.approx(0.60)

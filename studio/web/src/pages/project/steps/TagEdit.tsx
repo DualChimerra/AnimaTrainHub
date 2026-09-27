@@ -54,8 +54,8 @@ export default function TagEditPage() {
   const [activeKey, setActiveKey] = useState<string>('')
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [anchor, setAnchor] = useState<string | null>(null)
-  // '' = 全部；否则限定到该 folder（1_data / 2_data ...）。命名特意区分于下面
-  // editing 时用的 `activeFolder`（那个是当前编辑图所在 folder，纯展示）。
+  // '' = all; otherwise scoped to that folder (1_data / 2_data ...). Deliberately named
+  // differently from `activeFolder` used below during editing (that one is the folder of the currently-edited image, purely for display).
   const [folderFilter, setFolderFilter] = useState<string>('')
   // tag picked in the statistics card; its remove / replace work on it
   const [pickedTag, setPickedTag] = useState<string | null>(null)
@@ -115,9 +115,9 @@ export default function TagEditPage() {
     return () => window.removeEventListener('beforeunload', handler)
   }, [dirty])
 
-  // 应用内 React-Router 导航不触发 beforeunload，得靠 useBlocker（v6.4+）。
-  // dirty=false 时 blocker 自动放行；dirty=true 时拦下导航 → confirm 弹窗
-  // → 用户选"放弃"调 proceed()、"留下"调 reset()。
+  // In-app React-Router navigation doesn't fire beforeunload, so we need useBlocker (v6.4+).
+  // When dirty=false the blocker auto-allows navigation; when dirty=true it intercepts navigation
+  // → confirm popup → the user choosing "discard" calls proceed(), "stay" calls reset().
   const blocker = useBlocker(dirty)
   useEffect(() => {
     if (blocker.state !== 'blocked') return
@@ -138,8 +138,8 @@ export default function TagEditPage() {
     return () => { cancelled = true }
   }, [blocker, confirm, t, dirtyKeys.length])
 
-  // 切版本会重挂载本页（Layout 的 Outlet key），不走路由导航、useBlocker 拦不住；
-  // dirty 时注册切换守卫，复用同一套 confirm 文案。
+  // Switching versions remounts this page (Layout's Outlet key), which doesn't go through route
+  // navigation, so useBlocker can't catch it; register a switch guard while dirty, reusing the same confirm copy.
   useEffect(() => {
     if (!dirty) return
     setVersionSwitchGuard(() =>
@@ -156,8 +156,8 @@ export default function TagEditPage() {
     return () => setVersionSwitchGuard(null)
   }, [dirty, dirtyKeys.length, setVersionSwitchGuard, confirm, t])
 
-  // folder 列表 + 每个 folder 的原始张数（不受 filterTag 影响，让 tab 数字稳定
-  // 不抖动 — 同 Preprocess chip 风格）。单 folder 项目时 UI 不显示 tabs。
+  // folder list + each folder's raw image count (unaffected by filterTag, so the tab numbers stay
+  // stable and don't jitter -- same style as the Preprocess chips). UI hides the tabs for single-folder projects.
   const folderNames = useMemo(() => {
     const set = new Set<string>()
     for (const m of meta.values()) set.add(m.folder)
@@ -254,8 +254,9 @@ export default function TagEditPage() {
     })
   }
 
-  // 标签分布行内 × 触发：从当前选中图删除该 tag。pre-compute updates 拿真实
-  // 影响数 → confirm modal 显示精确张数 → 用户点确认后才 apply。
+  // Triggered by the × inline in the tag distribution row: removes that tag from the currently
+  // selected images. pre-compute updates gets the real affected count → the confirm modal shows
+  // the exact number of images → apply only happens after the user confirms.
   const removeTagFromSelected = async (tag: string) => {
     if (selectedKeys.length === 0) return
     const updates = new Map<string, string[]>()
@@ -278,7 +279,7 @@ export default function TagEditPage() {
     toast(t('tagEdit.removedFromN', { tag, n: updates.size }), 'success')
   }
 
-  // 标签分布行内 ✎ inline edit 提交：把选中图里的 oldTag 替换成 newTag，去重。
+  // Submit from the ✎ inline edit in the tag distribution row: replaces oldTag with newTag across the selected images, deduplicating.
   const replaceTagInSelected = async (oldTag: string, newTag: string) => {
     if (selectedKeys.length === 0 || !newTag || newTag === oldTag) return
     const updates = new Map<string, string[]>()
@@ -476,7 +477,7 @@ export default function TagEditPage() {
           {activeKey ? (
             <>
               <div style={{ padding: '0 17px 12px', flex: 'none' }}>
-                {/* 原图直出 + 滚轮缩放 / 拖拽平移 / 双击 fit↔100%（核对细节 tag） */}
+                {/* Full-resolution image straight out + wheel zoom / drag pan / double-click fit↔100% (for checking fine-detail tags) */}
                 <div style={{ height: 186 }}>
                   <ZoomableImage
                     key={activeKey}

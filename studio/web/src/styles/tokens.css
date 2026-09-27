@@ -74,7 +74,8 @@
   --font-display: var(--font-geist);
   --font-alt:     var(--font-geist);
   --font-serif:   ui-serif, Georgia, "Times New Roman", serif;  /* legacy .serif shim */
-  --font-mono:    var(--font-geist-mono);
+  --font-mono:    var(--font-geist);
+  --font-code:    var(--font-geist-mono);
 
   --t-2xs: 11px;
   --t-xs:  12px;

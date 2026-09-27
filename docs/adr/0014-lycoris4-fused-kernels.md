@@ -1,63 +1,45 @@
-# 0014 — LyCORIS 4 fused kernels 与 Windows Triton
+# 0014 — LyCORIS 4 fused kernels and Windows Triton
 
-**状态**：Accepted
+**Status**: Accepted
 
-**日期**：2026-09-20
-**决策者**：项目维护者
+**Date**: 2026-09-20
+**Decision makers**: project maintainers
 
-## 背景
+## Background
 
-训练栈通过 `utils/lycoris_adapter.py` 接入 LyCORIS 3.4。普通 LoRA 已走
-bypass forward，但 LoHa / LoKr / DoRA 与 plain T-LoRA 的 rebuild 路径仍可能
-物化完整 `ΔW`。LyCORIS 4.0 新增 Triton / TileLang fused kernels，并按
-Triton → TileLang → `torch.compile` → eager 的顺序逐调用选择与回退。
+The training stack integrates LyCORIS 3.4 via `utils/lycoris_adapter.py`. Plain LoRA already uses bypass forward, but the rebuild paths for LoHa / LoKr / DoRA and plain T-LoRA can still materialize the full `ΔW`. LyCORIS 4.0 adds Triton / TileLang fused kernels, selecting and falling back per call in the order Triton → TileLang → `torch.compile` → eager.
 
-Windows 上 PyTorch 不自带可导入的 Triton，缺失时还会让 xformers 在启动期打印
-非致命 traceback。当前项目的目标本机环境是 PyTorch 2.11 + CUDA 12.8；该组合
-按 triton-windows 的兼容表对应 Triton 3.6。
+PyTorch on Windows doesn't ship an importable Triton, and its absence also causes xformers to print a non-fatal traceback at startup. This project's target local environment is PyTorch 2.11 + CUDA 12.8, which corresponds to Triton 3.6 per the triton-windows compatibility table.
 
-同时，LyCORIS 4.0 移除了旧 patch 所依赖的内部 `make_kron` /
-`rebuild_tucker` import，但 4.0.0 的 LoKr `rank_dropout` 仍会在 CPU 创建 mask。
+Separately, LyCORIS 4.0 removes the internal `make_kron` / `rebuild_tucker` imports that the old patch relied on, but 4.0.0's LoKr `rank_dropout` still creates its mask on CPU.
 
-## 候选方案
+## Candidate approaches
 
-1. **保留 LyCORIS 3.4**：风险最低，但无法使用 fused kernels，启动警告保留。
-2. **直接升级并删除本地 adapter / patch**：代码最少，但丢失 family preset、
-   checkpoint metadata、训练 hook、T-LoRA timestep mask，并重新暴露 LoKr device bug。
-3. **升级到 4.0，保留薄 integration adapter，数学运算委托官方 functional API**：
-   需要小范围兼容改动，但保留项目协议并获得官方 kernel dispatch。
+1. **Stay on LyCORIS 3.4**: lowest risk, but no access to fused kernels, and the startup warning remains.
+2. **Upgrade directly and drop the local adapter/patch**: least code, but loses the family preset, checkpoint metadata, training hooks, and T-LoRA timestep mask, and re-exposes the LoKr device bug.
+3. **Upgrade to 4.0, keep a thin integration adapter, and delegate the math to the official functional API**: requires small compatibility changes, but keeps the project's own contracts and gains official kernel dispatch.
 
-## 决策
+## Decision
 
-- 固定 `lycoris-lora==4.0.0`，避免未来 major API 静默漂移。
-- Windows dependency 声明允许 Triton 3.6–3.8；启动器在导入 xformers/flash-attn
-  之前按已安装 PyTorch minor 自动收窄或修复版本（2.10/2.11→3.6、
-  2.12/2.13→3.7、2.14→3.8）。
-- 保留 `LycorisAdapter`：它只负责 AdapterProtocol、模型族 target preset、保存元数据、
-  sample/eval 状态和 T-LoRA step hook；LoRA 数学继续交给 LyCORIS。
-- plain T-LoRA 在两个低秩因子上应用 timestep mask。forward 调用官方
-  `functional.locon.bypass_forward_diff`，不物化 `ΔW`；merge/save 路径调用
-  `functional.locon.diff_weight`。两者都进入 LyCORIS 4 fused/compile/eager dispatch。
-- LoKr device patch 改为包装 upstream `get_weight`：只临时关闭坏的 dropout 分支，
-  调用 upstream（保留 fused dispatch），然后在 `weight.device` 重放 dropout。
-- OrthoLoRA 保持项目自实现。LyCORIS 4 没有与其 Cayley/SVD 参数化等价的官方
-  adapter，不能为了去掉 wrapper 改变算法或 checkpoint 语义。
+- Pin `lycoris-lora==4.0.0` to avoid silent drift from future major API changes.
+- The Windows dependency declaration allows Triton 3.6–3.8; the launcher automatically narrows/fixes the version based on the installed PyTorch minor version before xformers/flash-attn are imported (2.10/2.11→3.6, 2.12/2.13→3.7, 2.14→3.8).
+- Keep `LycorisAdapter`: it's responsible only for the AdapterProtocol, model-family target presets, saved metadata, sample/eval state, and the T-LoRA step hook; the LoRA math itself is delegated to LyCORIS.
+- Plain T-LoRA applies the timestep mask on the two low-rank factors. Forward calls the official `functional.locon.bypass_forward_diff` and does not materialize `ΔW`; the merge/save path calls `functional.locon.diff_weight`. Both paths go through LyCORIS 4's fused/compile/eager dispatch.
+- The LoKr device patch now wraps the upstream `get_weight`: it temporarily disables only the broken dropout branch, calls upstream (preserving fused dispatch), then replays the dropout on `weight.device`.
+- OrthoLoRA remains a project-owned implementation. LyCORIS 4 has no official adapter equivalent to its Cayley/SVD parameterization, so the algorithm and checkpoint semantics can't be changed just to drop the wrapper.
 
-## 理由
+## Rationale
 
-方案 3 把外部算法实现尽量留给上游，同时保留 Anima/Krea2 集成必需的边界。
-显式 pin 能让 device patch 的适用版本可审计。Triton 缺少或某个 shape 不受支持时，
-LyCORIS 自带回退，因此加速失败不会改变训练正确性。
+Approach 3 leaves as much of the external algorithm implementation to upstream as possible, while preserving the boundaries needed for Anima/Krea2 integration. Explicitly pinning the version makes the applicable version range for the device patch auditable. When Triton is unavailable or a given shape is unsupported, LyCORIS falls back on its own, so a failed acceleration attempt never changes training correctness.
 
-## 后果
+## Consequences
 
-- Windows 首次安装多下载约 50 MB，并在首次遇到新 shape 时支付 JIT/tuning 开销。
-- fused kernel 的 microbenchmark 提升不等于整步训练等比例提升；DiT 主干仍占大头。
-- `rank_dropout`、卷积、过大 rank 等超出 fused scope 的调用会自动回退。
-- Triton 与 PyTorch minor 有配对约束；支持表之外的新 PyTorch 会保守回退并要求
-  更新 `_WINDOWS_TRITON_FOR_TORCH`，不会猜测 ABI。
+- First install on Windows downloads roughly 50 MB more, and pays a JIT/tuning cost the first time it encounters a new shape.
+- Fused-kernel microbenchmark gains don't translate proportionally to whole-step training time; the DiT backbone still dominates.
+- Calls outside fused scope — `rank_dropout`, convolutions, overly large ranks, etc. — fall back automatically.
+- Triton has paired constraints with PyTorch minor versions; a new PyTorch release outside the support table falls back conservatively and requires updating `_WINDOWS_TRITON_FOR_TORCH` rather than guessing ABI compatibility.
 
-## 参考
+## References
 
 - [LyCORIS 4.0 fused kernels](https://github.com/KohakuBlueleaf/LyCORIS/blob/v4.0.0/docs/kernels/README.md)
 - [LyCORIS backend selection](https://github.com/KohakuBlueleaf/LyCORIS/blob/v4.0.0/docs/kernels/backends.md)

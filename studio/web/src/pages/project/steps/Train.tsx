@@ -32,7 +32,6 @@ import { useMonitorProgress } from '../../../lib/useMonitorProgress'
 import type { SaveStatus } from '../../../lib/SettingsData'
 import { useToast } from '../../../components/Toast'
 import { useSettingsDrawer } from '../../../lib/SettingsDrawer'
-import { useAdvancedMode } from '../../../lib/useAdvancedMode'
 import {
   PRESET_NAME_RE,
   defaultsFromSchema,
@@ -41,7 +40,7 @@ import {
 import FamilySwitchDialog from '../../../components/FamilySwitchDialog'
 import TriggerWordCard from '../../../components/TriggerWordCard'
 
-// 全局模型字段来自全局设置，对版本维度只读
+// Global model fields come from global settings and are read-only per version
 const GLOBAL_MODEL_FIELDS = [
   'transformer_path',
   'vae_path',
@@ -73,47 +72,52 @@ export default function TrainPage() {
   const [droppedFields, setDroppedFields] = useState<string[]>([])
   const [defaultedFields, setDefaultedFields] = useState<string[]>([])
 
-  /** 已落盘的 config JSON 快照，dirty 判断的 baseline。 */
+  /** The config JSON snapshot as last saved to disk; the baseline for dirty checks. */
   const savedJsonRef = useRef<string | null>(null)
-  /** 当前 config 的同步镜像。React setState 是 queued 的，事件 handler 跑完才
-   * flush；onEnqueue / cleanup-on-unmount 需要立刻读到最新值，不能等 React
-   * commit。所有 setConfig 都走 setConfigSync 包装，写 ref 同步、写 state 异步。 */
+  /** Synchronous mirror of the current config. React setState is queued and only
+   * flushes after the event handler finishes; onEnqueue / cleanup-on-unmount need to
+   * read the latest value immediately, they can't wait for a React commit. Every
+   * setConfig call goes through the setConfigSync wrapper: it writes the ref
+   * synchronously and the state asynchronously. */
   const configRef = useRef<ConfigData | null>(null)
-  /** 当前在飞的 save promise，dedup 重叠的保存请求。 */
+  /** The currently in-flight save promise, to dedupe overlapping save requests. */
   const inFlightSaveRef = useRef<Promise<void> | null>(null)
-  /** 等待中的 debounce setTimeout id；onEnqueue 需要 cancel 它。 */
+  /** The pending debounce setTimeout id; onEnqueue needs to cancel it. */
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // 0.8.2 hotfix：删 presetBaselineRef + customized 标签逻辑。fork 之后
-  // version yaml 跟全局预设解耦了，承认这是"项目专属配置"。「已自定义」
-  // 标签是骗人的（全局模型 4 个字段 fork 时被注入绝对路径，跟全局预设
-  // 相对路径 diff 永远存在 → 永远显示已自定义）。
+  // 0.8.2 hotfix: removed presetBaselineRef + the "customized" label logic. After the
+  // fork, the version yaml is decoupled from the global preset, so this is now
+  // acknowledged as "project-specific config". The "customized" label was
+  // misleading (the 4 global model fields get absolute paths injected on fork, which
+  // always diffs against the global preset's relative paths -> it would always show as customized).
 
-  // 预设 picker（dropdown 模式，与 Presets 页一致）
+  // Preset picker (dropdown mode, matching the Presets page)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerSearch, setPickerSearch] = useState('')
-  // 0.17 P-B — 定时训练弹层（延迟 N 小时 / 指定绝对时间两种入口，D7）。
+  // 0.17 P-B -- scheduled training popover (two entry points: delay N hours / pick an absolute time, D7).
   const [scheduleOpen, setScheduleOpen] = useState(false)
   const [scheduleTime, setScheduleTime] = useState('')
-  const [advancedMode, toggleAdvancedMode] = useAdvancedMode()
   const pickerAnchorRef = useRef<HTMLButtonElement | null>(null)
   const pickerPopRef = useRef<HTMLDivElement | null>(null)
 
-  // 「新建预设」=一键创建+套用：点 + 新建预设 卡片直接生成 <slug>_<label> 命名
-  // 的预设、写全局池、fork 到当前 version。不弹中间表单，避免用户点了 + 就以为
-  // "已创建"但实际什么都没存（state 不持久化，切页面回来又是空）。
+  // "New preset" = one-click create + apply: clicking the "+ New preset" card
+  // directly generates a preset named `<slug>_<label>`, writes it to the global pool,
+  // and forks it onto the current version. No intermediate form pops up, to avoid the
+  // user clicking + and thinking "it's created" when nothing was actually saved yet
+  // (state isn't persisted, coming back to the page it'd be empty again).
 
-  /** 包装 setConfig：先同步写 configRef（绕 React state flush 延迟），再调
-   * setConfig 触发 React 渲染。 SchemaForm.onChange / 任何想改 config 的入口
-   * 都要走这个，不要直接 setConfig。 */
+  /** Wraps setConfig: first writes configRef synchronously (bypassing React's state
+   * flush delay), then calls setConfig to trigger a React render. Every entry point
+   * that wants to change config -- SchemaForm.onChange or anything else -- must go
+   * through this, never call setConfig directly. */
   const setConfigSync = useCallback((v: ConfigData | null) => {
     configRef.current = v
     setConfig(v)
   }, [])
 
-  /** 待确认的族切换目标（非空时渲染 FamilySwitchDialog）。 */
+  /** The pending family-switch target (renders FamilySwitchDialog when non-null). */
   const [familySwitchTarget, setFamilySwitchTarget] = useState<string | null>(null)
 
-  /** header 自动保存指示（与 Settings 页同款 SaveIndicator）。 */
+  /** Header auto-save indicator (the same SaveIndicator as the Settings page). */
   const [saveStatus, setSaveStatus] = useState<SaveStatus>({ state: 'idle' })
 
   /** Config as loaded for this version: the form marks fields that differ
@@ -121,7 +125,6 @@ export default function TrainPage() {
   const [baseline, setBaseline] = useState<ConfigData | null>(null)
   const [changes, setChanges] = useState<ChangeEntry[]>([])
   const [tab, setTab] = useLocalStorageState<TrainTabId>('train.formTab', 'model')
-  const [fieldFilter, setFieldFilter] = useState<FieldFilterMode>('all')
 
   /** Fold an edit into the session change log: one row per field, keeping its
    *  first "from"; a field edited back to where it started drops out. */
@@ -145,9 +148,11 @@ export default function TrainPage() {
     })
   }, [])
 
-  /** SchemaForm.onChange 入口：拦截 model_family 变化走切换动作（P4-3）。
-   * 切族不是裸字段编辑——弹结构化确认对话框（后端重算路径 + 重置族风味
-   * 字段），用户取消则保持旧值不动。其余字段变更原样透传 setConfigSync。 */
+  /** SchemaForm.onChange entry point: intercepts model_family changes and routes
+   * them through the switch action (P4-3). Switching family isn't a plain field edit
+   * -- it pops a structured confirmation dialog (the backend recomputes paths + resets
+   * family-flavored fields); canceling leaves the old value untouched. Every other
+   * field change passes straight through to setConfigSync. */
   const onFormChange = useCallback((v: ConfigData) => {
     const prev = configRef.current
     const prevFamily = String(prev?.model_family ?? 'anima')
@@ -188,8 +193,10 @@ export default function TrainPage() {
       setBaseline(r.config)
       setChanges([])
       savedJsonRef.current = JSON.stringify(r.config)
-      // 老 config 兼容（InfoNoise 互斥被后端自动关掉等）由后端写进 r.defaulted_fields，
-      // 顶部 banner 渲染。dropped_fields 兜底 schema 演进时丢弃的旧字段。
+      // Old-config compatibility (e.g. InfoNoise's mutual exclusion getting
+      // auto-disabled by the backend) is written into r.defaulted_fields by the
+      // backend, and rendered as the top banner. dropped_fields covers old fields
+      // dropped as the schema evolved.
       applyPresetWarnings(r)
     } catch (e) {
       toast(t('train.loadConfigFailed', { error: e }), 'error')
@@ -208,7 +215,7 @@ export default function TrainPage() {
     void refreshConfig()
   }, [refreshConfig])
 
-  // 拉 reg 状态用于显示「训练集 + 正则」分布
+  // Fetch reg status to display the "training set + regularization" distribution
   useEffect(() => {
     if (!vid) return
     api.getRegStatus(project.id, vid).then(setReg).catch(() => setReg(null))
@@ -217,9 +224,10 @@ export default function TrainPage() {
   const stats = useTrainStats(project.id, activeVersion, reg, config)
 
 
-  // auto_sync_paths ON（默认 / 多数用户）：4 个模型路径字段 disabled，fork 时
-  // 后端自动用 Settings 全局值覆盖；OFF（独立模型用户）：字段可编辑 + reset
-  // 按钮，fork 时尊重预设里的绝对路径。
+  // auto_sync_paths ON (default / most users): the 4 model path fields are disabled,
+  // and on fork the backend automatically overrides them with the global Settings
+  // values; OFF (users with independent models): the fields are editable + get a
+  // reset button, and on fork the preset's absolute paths are respected.
   const disabledFields = autoSyncPaths ? GLOBAL_MODEL_FIELDS : []
   const disabledHints = useMemo(() => {
     const h: Record<string, React.ReactNode> = {}
@@ -240,9 +248,10 @@ export default function TrainPage() {
     }
     return h
   }, [t, autoSyncPaths, settingsDrawer])
-  // 项目特定字段（data_dir / reg_data_dir / output_dir 等）：值由项目预填，但
-  // 不锁定，挂「自动 · 项目设置」徽章让用户知道这是预填的，不是预设里来的。
-  // toggle OFF 时全局模型字段也挂 hint「默认来自 Settings · 可改」。
+  // Project-specific fields (data_dir / reg_data_dir / output_dir, etc.): prefilled
+  // by the project but not locked, tagged with an "Auto - project setting" badge so
+  // the user knows it's prefilled, not from the preset. When the toggle is OFF, the
+  // global model fields also get a "Defaults from Settings - editable" hint.
   const autoHints = useMemo(() => {
     const h: Record<string, string> = {}
     for (const f of configResp?.project_specific_fields ?? []) {
@@ -254,9 +263,9 @@ export default function TrainPage() {
     return h
   }, [configResp?.project_specific_fields, t, autoSyncPaths])
 
-  // toggle OFF 时给 4 个模型字段加「↺ 重置为全局默认」按钮。值取自
-  // configResp.project_specific_defaults（后端已用 default_paths_for_new_version
-  // 算好的绝对路径）。
+  // When the toggle is OFF, add a "reset to global default" button to the 4 model
+  // fields. The value comes from configResp.project_specific_defaults (the backend
+  // already computed the absolute paths using default_paths_for_new_version).
   const makeResetSuffixes = useCallback(
     (formValues: ConfigData | null, setForm: (v: ConfigData) => void): Record<string, React.ReactNode> => {
       if (autoSyncPaths) return {}
@@ -283,35 +292,40 @@ export default function TrainPage() {
     [autoSyncPaths, configResp?.project_specific_defaults, t],
   )
 
-  /** 落盘 cfg。串行化保证：如果上一次 save 还在飞，等它跑完再决定是否要再
-   * save；这样多次 setConfig + debounce 不会丢任何一次的内容。
+  /** Persist cfg to disk. Serialization guarantee: if a previous save is still in
+   * flight, wait for it before deciding whether to save again; this way, multiple
+   * setConfig + debounce calls never lose any of their content.
    *
-   * 注意 race：用户在 await 期间可能又改了 config —— 那时不能用 server 返回的
-   * 归一化结果去覆盖 React state（会清空他正在打字的字段）。靠 reference
-   * 比对 configRef.current === cfg 区分：
-   *   - 相等 → 用户没动过，安全 sync server 归一化结果到 UI
-   *   - 不等 → 用户有新内容，只更新 savedJson baseline，UI state 不动；
-   *            useEffect debounce 会自然为新内容触发下一轮 save 收敛 */
+   * Watch out for the race: the user may edit config again while we're awaiting --
+   * in that case we must not overwrite React state with the server's normalized
+   * result (it would wipe out what they're currently typing). We tell the two apart
+   * by reference-comparing configRef.current === cfg:
+   *   - equal -> the user hasn't touched it, safe to sync the server's normalized result to the UI
+   *   - not equal -> the user has new content, only update the savedJson baseline,
+   *     leave UI state alone; the useEffect debounce will naturally trigger the next
+   *     save round to converge on the new content */
   const persistConfig = useCallback(async (cfg: ConfigData, force = false): Promise<void> => {
     while (inFlightSaveRef.current) {
       await inFlightSaveRef.current
     }
-    // force：内容没变也要 PUT（「清理旧字段」重写 yaml —— 磁盘上的旧键不在
-    // GET 归一化结果里，JSON diff 看不出差异）。
+    // force: PUT even if the content hasn't changed ("clean up old fields" rewrites
+    // the yaml -- a stale key on disk isn't in the GET-normalized result, so a JSON
+    // diff wouldn't show any difference).
     if (!force && JSON.stringify(cfg) === savedJsonRef.current) return
     const p = (async () => {
       setSaveStatus({ state: 'saving' })
       try {
         const r = await api.putVersionConfig(project.id, vid!, cfg)
         setConfigResp((prev) => prev ? { ...prev, has_config: true, config: r.config } : prev)
-        // baseline 用 server 归一化后的 r.config，下次 dirty diff 才不会假阳性。
+        // Use the server-normalized r.config as the baseline, so the next dirty diff doesn't false-positive.
         savedJsonRef.current = JSON.stringify(r.config)
         if (configRef.current === cfg) {
           configRef.current = r.config
           setConfig(r.config)
         }
-        // PUT 全量重写 yaml（tolerant validate + prune），磁盘上不再有旧字段 /
-        // 非法值 —— 兼容横幅的信息已过期，清掉。
+        // PUT rewrites the whole yaml (tolerant validate + prune), so there are no
+        // more stale fields / invalid values on disk -- the compat banner's info is
+        // now stale, clear it.
         applyPresetWarnings({})
         setSaveStatus({ state: 'saved', at: Date.now() })
       } catch (e) {
@@ -324,7 +338,8 @@ export default function TrainPage() {
   }, [project.id, vid, applyPresetWarnings])
 
   // ── auto-save ─────────────────────────────────────────────────────────
-  // config 变化 → 600ms 后没新改动就落盘。中途又改 → cleanup clearTimeout 重置。
+  // config changes -> persist after 600ms with no further changes. If it changes
+  // again in the meantime -> cleanup clears the timeout and resets it.
   useEffect(() => {
     if (!config) return
     if (JSON.stringify(config) === savedJsonRef.current) return
@@ -340,8 +355,9 @@ export default function TrainPage() {
     }
   }, [config, persistConfig, toast, t])
 
-  // 卸载时（路由切走）如果还有 dirty 没落盘 → fire-and-forget 把 PUT 发出去。
-  // fetch 一旦发起，浏览器会继续送，不需要 await。catch 静默以免 cleanup 抛出。
+  // On unmount (navigating away) if there's still a dirty state that hasn't been
+  // saved -> fire-and-forget the PUT. Once a fetch is initiated the browser keeps
+  // sending it, no need to await. Swallow errors so cleanup doesn't throw.
   useEffect(() => {
     return () => {
       const cur = configRef.current
@@ -359,7 +375,7 @@ export default function TrainPage() {
   // Preview card view (data / YAML), remembered across visits.
   const [previewTab, setPreviewTab] = useLocalStorageState<'stats' | 'config'>('train.previewTab', 'stats')
 
-  // popover 关闭：点外面 / Esc
+  // Close the popover: click outside / Esc
   useEffect(() => {
     if (!pickerOpen) return
     const onDocClick = (e: MouseEvent) => {
@@ -393,8 +409,8 @@ export default function TrainPage() {
     try {
       const r = await api.forkPresetForVersion(project.id, vid, name)
       applyPresetWarnings(r)
-      // refreshConfig 刷本页 config state；reload 刷父级 activeVersion，
-      // 主表单字段才会同步显示新预设的内容。
+      // refreshConfig refreshes this page's config state; reload refreshes the
+      // parent's activeVersion, so the main form fields sync to show the new preset's content.
       await Promise.all([refreshConfig(), reload()])
       toast(t('train.resetSuccess', { name }), 'success')
     } catch (e) {
@@ -450,8 +466,8 @@ export default function TrainPage() {
     }
   }
 
-  /** 默认预设名 = `<slug>_<label>`；label 含非法字符时 fallback 到 `<slug>_v<id>`。
-   * 用户在表单输入框里可改。 */
+  /** Default preset name = `<slug>_<label>`; falls back to `<slug>_v<id>` when the
+   * label contains invalid characters. Editable by the user in the form input. */
   const defaultPresetName = (): string => {
     if (!activeVersion) return project.slug
     const candidate = `${project.slug}_${activeVersion.label}`
@@ -459,15 +475,15 @@ export default function TrainPage() {
     return `${project.slug}_v${activeVersion.id}`
   }
 
-  /** 一键新建预设 +套用到当前 version。
+  /** One-click new preset + apply it to the current version.
    *
-   * 步骤：
-   *   1. version 已有 config → 弹覆盖确认（跟 onForkPreset 一致）
-   *   2. 拉最新 project_specific_defaults（用户常见路径是 fork 之后才跑 reg
-   *      build，缓存的 configResp 里 reg 状态过期）
-   *   3. 配置 = schema 默认 + 项目路径预填（仅 autoSyncPaths 开时）
-   *   4. 自动名 = `<slug>_<label>`（PRESET_NAME_RE 兼容），重名加 _1 _2 后缀
-   *   5. savePreset → forkPresetForVersion → 刷三处状态
+   * Steps:
+   *   1. If the version already has a config -> pop a confirmation to overwrite (same as onForkPreset)
+   *   2. Fetch the latest project_specific_defaults (a common user path is running
+   *      the reg build only after the fork, so the cached configResp's reg status is stale)
+   *   3. config = schema defaults + project path prefill (only when autoSyncPaths is on)
+   *   4. Auto name = `<slug>_<label>` (PRESET_NAME_RE-compatible), with a _1 _2 suffix on collision
+   *   5. savePreset -> forkPresetForVersion -> refresh all three states
    */
   const startCreatePreset = async () => {
     setPickerOpen(false)
@@ -489,11 +505,13 @@ export default function TrainPage() {
         ?? configResp?.project_specific_defaults
         ?? {}
 
-      // 全局预设池不带项目特定字段（数据集路径 / 输出名等）：schema 默认即可，
-      // fork 时后端再把项目预填注入到 version 私有 config。
-      // 4 个模型字段：autoSyncPaths ON 时用当前 Settings 算的绝对路径，OFF 时
-      // 维持 schema 默认（独立模型用户场景）。跟 services/presets.py:
-      // save_version_config_as_preset 的清理逻辑对齐。
+      // The global preset pool doesn't carry project-specific fields (dataset path /
+      // output name, etc.): schema defaults are enough, and on fork the backend
+      // injects the project prefill into the version's private config.
+      // The 4 model fields: use the absolute paths computed from the current
+      // Settings when autoSyncPaths is ON, keep the schema defaults when OFF (the
+      // independent-model user scenario). Kept aligned with the cleanup logic in
+      // services/presets.py: save_version_config_as_preset.
       const cleaned: ConfigData = { ...defaultsFromSchema(schema) }
       if (autoSyncPaths) {
         for (const f of GLOBAL_MODEL_FIELDS) {
@@ -508,8 +526,8 @@ export default function TrainPage() {
 
       const list = await api.listPresets()
       setPresets(list)
-      // refreshConfig 刷本页 config state；reload 刷父级 activeVersion，
-      // 主表单字段才会同步显示新预设的内容。
+      // refreshConfig refreshes this page's config state; reload refreshes the parent's
+      // activeVersion -- only then will the main form fields show the new preset's content.
       await Promise.all([refreshConfig(), reload()])
       toast(t('train.createdPreset', { name }), 'success')
     } catch (e) {
@@ -526,18 +544,18 @@ export default function TrainPage() {
     }
     setBusy(true)
     try {
-      // 1. 干掉等待中的 debounce save；不然它可能在 enqueue 之后才 fire，导致
-      //    worker 起来时读的是旧 config。
+      // 1. Kill any pending debounced save; otherwise it could fire after enqueue, causing the
+      //    worker to read a stale config when it starts up.
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current)
         debounceTimerRef.current = null
       }
-      // 2. 等任何正在飞的 save 跑完（debounce 刚刚 fire 的那一次）。
+      // 2. Wait for any in-flight save to finish (the one the debounce just fired).
       if (inFlightSaveRef.current) await inFlightSaveRef.current
-      // 3. 用 configRef（不是 config closure）再 diff 一次。覆盖「用户在 input
-      //    里敲完值不离开焦点直接点开始训练」的场景：input.onBlur (commit) 同步
-      //    setConfig 入队但 React 还没 flush，config closure 是旧的，但 configRef
-      //    在 setConfigSync 里同步更新过了。
+      // 3. Diff once more using configRef (not the config closure). This covers the case of "user
+      //    finishes typing a value in an input, then clicks start training without blurring
+      //    first": input.onBlur (commit) queues setConfig synchronously but React hasn't flushed
+      //    yet, so the config closure is stale, while configRef was already updated synchronously in setConfigSync.
       const cur = configRef.current
       if (cur && JSON.stringify(cur) !== savedJsonRef.current) {
         await persistConfig(cur)
@@ -563,7 +581,7 @@ export default function TrainPage() {
     }
   }
 
-  // datetime-local 的 value 格式（本地时区，分钟精度）。
+  // datetime-local's value format (local timezone, minute precision).
   const toLocalInputValue = (d: Date) => {
     const pad = (n: number) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -592,7 +610,7 @@ export default function TrainPage() {
   /** Fields of a group as the form would show them right now. */
   const groupFields = (key: string): string[] =>
     Object.entries(props)
-      .filter(([, p]) => !p.hidden && (!p.advanced || advancedMode) && (p.group ?? 'misc') === key
+      .filter(([, p]) => !p.hidden && (p.group ?? 'misc') === key
         && (!config || evalShowWhen(p.show_when, config)))
       .map(([n]) => n)
   const tabGroups = (id: TrainTabId): string[] => {
@@ -606,10 +624,6 @@ export default function TrainPage() {
     TRAIN_TABS.find((x) => (x.groups as readonly string[]).includes(groupKey))?.id ?? 'system'
   const tabFieldNames = (id: TrainTabId) => tabGroups(id).flatMap(groupFields)
   const currentFields = tabFieldNames(tab)
-  const filterFn = fieldFilter === 'changed' ? isChanged
-    : fieldFilter === 'nondefault' ? isNonDefault
-      : fieldFilter === 'locked' ? isLocked
-        : undefined
   const totalFields = TRAIN_TABS.reduce((s, x) => s + tabFieldNames(x.id).length, 0)
 
   const resetTab = async () => {
@@ -636,7 +650,6 @@ export default function TrainPage() {
 
   const openGroup = (key: string) => {
     setTab(tabOf(key))
-    setFieldFilter('all')
     requestAnimationFrame(() => {
       document.getElementById(`schema-group-${key}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
     })
@@ -678,7 +691,7 @@ export default function TrainPage() {
       subtitle={subtitle}
       actions={
         <>
-          {/* 0.17 P-B — 定时训练：延迟 N 小时 / 指定时间，建成 scheduled task。 */}
+          {/* 0.17 P-B -- scheduled training: delay N hours / a specific time, creates a scheduled task. */}
           <button
             type="button"
             onClick={() => setScheduleOpen(true)}
@@ -767,8 +780,8 @@ export default function TrainPage() {
                 </span>
               </div>
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, alignContent: 'start' }}>
-                {/* + 新建预设 永远第一格（跟 Presets 页面一致）。pickerSearch
-                    非空时藏起来 —— 用户在搜旧的，新建是另一条意图。 */}
+                {/* + New preset is always the first cell (consistent with the Presets page). Hidden
+                    when pickerSearch is non-empty -- the user is searching for an existing one; creating new is a separate intent. */}
                 {!pickerSearch && (
                   <button
                     type="button"
@@ -860,30 +873,10 @@ export default function TrainPage() {
                       {t(`train.tab_${x.id}`)}<span className="ds-badge ds-mute">{tabFieldNames(x.id).length}</span>
                     </button>
                   ))}
-                </div>
-                <div className="ds-pane-head" style={{ flexWrap: 'wrap' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div className="ds-card-title">{t(`train.tab_${tab}`)}</div>
-                    <div className="ds-card-sub">
-                      {t('train.schemaGroups')}{' '}
-                      {tabGroups(tab).filter((g) => groupFields(g).length > 0).map((g, i) => (
-                        <span key={g}>{i > 0 && ' · '}<span className="ds-mono">{g}</span></span>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div className="ds-seg" role="group" aria-label={t('train.fieldModeLabel')}>
-                      <button type="button" className={`ds-seg-item${!advancedMode ? ' ds-is-active' : ''}`} onClick={() => { if (advancedMode) toggleAdvancedMode() }} aria-pressed={!advancedMode}>{t('train.simpleMode')}</button>
-                      <button type="button" className={`ds-seg-item${advancedMode ? ' ds-is-active' : ''}`} onClick={() => { if (!advancedMode) toggleAdvancedMode() }} aria-pressed={advancedMode}>{t('train.advancedMode')}</button>
-                    </div>
-                    <select className="ds-inp" style={{ width: 190 }} value={fieldFilter} onChange={(e) => setFieldFilter(e.target.value as FieldFilterMode)} aria-label={t('train.filterLabel')}>
-                      <option value="all">{t('train.filterAll', { n: currentFields.length })}</option>
-                      <option value="changed">{t('train.filterChanged', { n: currentFields.filter(isChanged).length })}</option>
-                      <option value="nondefault">{t('train.filterNonDefault', { n: currentFields.filter(isNonDefault).length })}</option>
-                      <option value="locked">{t('train.filterLocked', { n: currentFields.filter(isLocked).length })}</option>
-                    </select>
-                    <button type="button" className="ds-iconbtn" onClick={() => void resetTab()} aria-label={t('train.resetTab')} title={t('train.resetTab')}>{TrainIcon.reset}</button>
-                  </div>
+                  <span style={{ flex: 1 }} />
+                  <button type="button" className="ds-ctl ds-sm" style={{ alignSelf: 'center' }} onClick={() => void resetTab()} title={t('train.resetTab')}>
+                    {TrainIcon.reset}{t('train.resetTabShort')}
+                  </button>
                 </div>
                 {/* Trigger word: under DOP (gated row) when DOP is on and its field is
                     shown; otherwise at the top of the data tab, next to captions. */}
@@ -896,11 +889,8 @@ export default function TrainPage() {
                   disabledHints={disabledHints}
                   autoHints={autoHints}
                   fieldSuffixes={makeResetSuffixes(config, applyEdit)}
-                  advancedMode={advancedMode}
                   groupKeys={tabGroups(tab)}
-                  fieldFilter={filterFn}
                   baseline={baseline}
-                  emptyHint={t('train.filterEmpty')}
                   afterField={triggerUnderDop ? { dop_enabled: triggerRow } : undefined}
                 />
                 {familySwitchTarget && (
@@ -965,7 +955,6 @@ export default function TrainPage() {
 // ---------------------------------------------------------------------------
 
 type TrainTabId = 'model' | 'data' | 'optim' | 'system'
-type FieldFilterMode = 'all' | 'changed' | 'nondefault' | 'locked'
 
 /** Which schema groups each tab of the form shows. */
 /** How the network type reads in the page subtitle (the mockup writes "LoKr r32"). */
@@ -1068,7 +1057,7 @@ function ScheduleDialog({ busy, scheduleTime, minTime, onTimeChange, onDelay, on
   )
 }
 
-/** config.resolution 归一成 number[]（schema 是 list[int]，旧 config / 标量也兜底）。 */
+/** Normalizes config.resolution to number[] (schema is list[int]; also falls back for old configs / scalar values). */
 function configResolutions(config: ConfigData | null): number[] {
   const r = config?.resolution as unknown
   if (Array.isArray(r)) return r.length ? (r as number[]) : [1024]
@@ -1076,13 +1065,13 @@ function configResolutions(config: ConfigData | null): number[] {
   return [1024]
 }
 
-/** 文件夹有效样本数 = repeat × 图数 × 分辨率档数（px 文件夹固定 1 档；否则跟 config 列表）。 */
+/** A folder's effective sample count = repeat × image count × resolution-tier count (a px folder is fixed at 1 tier; otherwise follows the config list). */
 function folderEffective(name: string, imageCount: number, resoCount: number): number {
   const { reso, repeat } = parseFolderMeta(name)
   return repeat * imageCount * (reso ? 1 : resoCount)
 }
 
-/** reg.files 形如 `5_concept/12345.png` —— 按首段文件夹聚合计数。 */
+/** reg.files look like `5_concept/12345.png` -- counts are aggregated by the first path segment (folder). */
 function aggregateRegFolders(files: string[]): Array<{ name: string; image_count: number }> {
   const m = new Map<string, number>()
   for (const f of files) {
@@ -1132,16 +1121,17 @@ function useTrainStats(projectId: number, activeVersion: Version | null, reg: Re
   const regEffective = regFolders.reduce((s, f) => s + folderEffective(f.name, f.image_count, resoCount), 0)
   const totalEffective = trainEffective + regEffective
 
-  // 桶分布 + NaViT 打包预估（后端用真 BucketManager / NavitPackBatchSampler 算）。
+  // Bucket distribution + NaViT packing estimate (computed backend-side with the real BucketManager / NavitPackBatchSampler).
   const vid = activeVersion?.id ?? 0
   const navitOn = config?.navit_packing === true
   const [dist, setDist] = useState<BucketDistribution | null>(null)
   const distSig = JSON.stringify([
     config?.resolution,
     config?.aspect_ratio_limit,
-    // 文件夹名单（含 px 前缀 / repeat / 图数）—— 改名加 px 也要触发重取，不能只看总数
+    // Folder list (including px prefix / repeat / image count) -- a rename adding a px prefix
+    // must also trigger a refetch, so it can't just look at totals
     activeVersion?.stats?.train_folders,
-    // navit 打包预估的输入 —— 任何一项变了包数都可能变
+    // Inputs to the navit packing estimate -- a change in any of them can change the pack count
     config?.navit_packing,
     config?.navit_native_resolution,
     config?.navit_token_budget,
@@ -1176,12 +1166,13 @@ function useTrainStats(projectId: number, activeVersion: Version | null, reg: Re
     return () => { cancelled = true }
   }, [projectId, vid, estSig])
 
-  // 单 epoch 优化器步数估算（与 sd-scripts max_train_steps 同语义）。
-  // - 常规路径：样本 ÷ (batch × ga)。不算 AR bucketing 损失（每桶最后一 batch
-  //   可能不满），相同 AR 数据集误差 < 5%。
-  // - navit_packing：batch_size 不参与分批（NavitPackBatchSampler 按 token 预算
-  //   拼包，一步 = 一包）——steps/epoch = ceil(包数 ÷ ga)，包数来自后端真打包模拟；
-  //   模拟结果没到手前不显示估算（宁缺毋假）。
+  // Estimated optimizer steps per epoch (same semantics as sd-scripts' max_train_steps).
+  // - Regular path: samples ÷ (batch × ga). Doesn't account for AR-bucketing loss (a bucket's
+  //   last batch may be under-filled); error is < 5% for a dataset with uniform AR.
+  // - navit_packing: batch_size doesn't participate in batching (NavitPackBatchSampler packs by
+  //   token budget; one step = one pack) -- steps/epoch = ceil(pack count ÷ ga), where the pack
+  //   count comes from the backend's real packing simulation; no estimate is shown before the
+  //   simulation result is in hand (prefer no number over a wrong one).
   const bs = Number(config?.batch_size) || 1
   const ga = Number(config?.grad_accum) || 1
   const epochs = Number(config?.epochs) || 0
@@ -1201,8 +1192,8 @@ function useTrainStats(projectId: number, activeVersion: Version | null, reg: Re
   const naturalTotal = stepsPerEpoch !== null && epochs > 0 ? stepsPerEpoch * epochs : null
   const finalTotal = naturalTotal !== null && maxSteps > 0 ? Math.min(maxSteps, naturalTotal) : naturalTotal
   const maxStepsTruncates = maxSteps > 0 && naturalTotal !== null && maxSteps < naturalTotal
-  // navit 下有效样本以真打包模拟为准（native 收拢多分辨率 fan-out、含 reg），
-  // 前端 folderEffective 的 resoCount fan-out 在该模式下会虚算
+  // Under navit, the effective sample count defers to the real packing simulation (natively
+  // collapses multi-resolution fan-out and includes reg); the frontend's folderEffective resoCount fan-out would over-count in this mode
   const shownEffective = navitEst && navitEst.samples > 0
     ? navitEst.samples
     : (authoritativeSamples ?? totalEffective)
@@ -1527,7 +1518,7 @@ function BucketBars({ dist }: { dist: BucketDistribution | null }) {
   )
 }
 
-/** 训练集有 mask 但 masked_loss 关闭时的提示（决策 D7：只提示不代开）。 */
+/** Hint shown when the train set has masks but masked_loss is off (decision D7: hint only, don't auto-enable it). */
 function MaskedLossHint({
   projectId, vid, maskedLoss,
 }: {

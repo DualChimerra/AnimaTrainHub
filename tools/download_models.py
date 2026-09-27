@@ -1,18 +1,19 @@
 #!/usr/bin/env python
-"""下载指定模型族训练所需的全部模型 + tokenizer（CLI 薄壳）。
+"""Download every model + tokenizer required to train a given model family (thin CLI shell).
 
-实际逻辑在 `studio.services.model_downloader`，CLI 和 Studio 设置页 UI 共用。
+The actual logic lives in `studio.services.model_downloader`, shared between the CLI and the
+Studio settings page UI.
 
-最终落地结构（默认由 Settings 的 models_root 决定）：
+Final layout on disk (by default determined by Settings' models_root):
     models/
       diffusion_models/anima-base-v1.0.safetensors
       diffusion_models/krea2-raw-bf16.safetensors
       vae/qwen_image_vae.safetensors
-      text_encoders/                # Anima Qwen3（legacy 扁平布局）
+      text_encoders/                # Anima Qwen3 (legacy flat layout)
       text_encoders/Qwen_Qwen3-VL-4B-Instruct/
-      t5_tokenizer/                 # T5 仅 tokenizer，不要权重
+      t5_tokenizer/                 # T5 tokenizer only, no weights
 
-用法:
+Usage:
     python tools/download_models.py
     python tools/download_models.py --family krea2
     python tools/download_models.py --family krea2 --variant turbo
@@ -27,14 +28,14 @@ import argparse
 import sys
 from pathlib import Path
 
-# Windows 控制台 cp936/cp932 写中文 / emoji 会 UnicodeEncodeError，强制 UTF-8。
+# Windows consoles using cp936/cp932 raise UnicodeEncodeError on non-ASCII / emoji; force UTF-8.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, OSError):
         pass
 
-# 让 `python tools/download_models.py` 也能 import studio package
+# Let `python tools/download_models.py` import the studio package too
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from studio.services.models import (  # noqa: E402
@@ -54,49 +55,49 @@ from studio.services.models import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="下载 Anima / Krea 2 训练所需的模型 + tokenizer",
+        description="Download the models + tokenizer required to train Anima / Krea 2",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""\
-Anima 主模型版本（--variant）:
+Anima main model versions (--variant):
 {chr(10).join(f"  {k:<14} {v}" for k, v in ANIMA_VARIANTS.items())}
   latest         (= {LATEST_ANIMA})
 
-Krea 2 主模型版本（--family krea2 --variant）:
+Krea 2 main model versions (--family krea2 --variant):
 {chr(10).join(f"  {k:<14} {v['repo']}/{v['subpath']}" for k, v in KREA2_VARIANTS.items())}
   latest         (= {LATEST_KREA2})
 
-下载源：默认从 secrets.huggingface.endpoint 读（首装是 "" = HF 官方）。
-  - --no-mirror     强制使用 HuggingFace 官方源（覆盖 secrets，等价于 endpoint=https://huggingface.co）
-  - --endpoint URL  自定义 endpoint URL（覆盖 secrets 和 --no-mirror）
-  - --modelscope    走魔搭社区下载（需 pip install modelscope）
+Download source: read from secrets.huggingface.endpoint by default (empty on first install = official HF).
+  - --no-mirror     force the official HuggingFace source (overrides secrets, equivalent to endpoint=https://huggingface.co)
+  - --endpoint URL  custom endpoint URL (overrides secrets and --no-mirror)
+  - --modelscope    download via ModelScope instead (requires pip install modelscope)
 
-注：0.8.2 hotfix 起 hf-mirror.com 暂时不可用（详见 docs/todo/hf-mirror-recheck.md），
-    Settings UI 已隐藏该 preset，但 --endpoint URL 仍接受任意值。
+Note: as of the 0.8.2 hotfix, hf-mirror.com is temporarily unavailable (see docs/todo/hf-mirror-recheck.md).
+    The Settings UI has hidden that preset, but --endpoint URL still accepts any value.
 """,
     )
     parser.add_argument(
         "--family", default="anima", choices=["anima", "krea2"],
-        help="模型族（默认 anima）",
+        help="model family (default: anima)",
     )
     parser.add_argument(
         "--no-mirror", action="store_true",
-        help="使用 HuggingFace 官方源（等价于 --endpoint=https://huggingface.co）",
+        help="use the official HuggingFace source (equivalent to --endpoint=https://huggingface.co)",
     )
     parser.add_argument(
         "--endpoint", default=None,
-        help="自定义 HF endpoint URL（覆盖 secrets 配置 + --no-mirror）",
+        help="custom HF endpoint URL (overrides the secrets config + --no-mirror)",
     )
     parser.add_argument(
         "--modelscope", action="store_true",
-        help="走魔搭社区（ModelScope）下载；无映射的模型自动回退 HF",
+        help="download via ModelScope instead; models with no mapping fall back to HF automatically",
     )
     parser.add_argument(
         "--output", default="",
-        help="目标根目录（默认使用 Settings 的 models_root）",
+        help="target root directory (defaults to Settings' models_root)",
     )
     parser.add_argument(
         "--variant", default="latest",
-        help="主模型版本（Anima 默认 1.0；Krea 2 默认 raw）",
+        help="main model version (default: 1.0 for Anima, raw for Krea 2)",
     )
     parser.add_argument("--skip-main", action="store_true")
     parser.add_argument("--skip-vae",  action="store_true")
@@ -107,26 +108,26 @@ Krea 2 主模型版本（--family krea2 --variant）:
     import os  # noqa: PLC0415
     if args.modelscope:
         os.environ["MODELSCOPE_SOURCE"] = "modelscope"
-        print("使用下载源: ModelScope（无映射模型自动回退 HF）")
+        print("Using download source: ModelScope (models with no mapping fall back to HF automatically)")
     else:
-        # CLI 显式 flag 覆盖 secrets：--endpoint 最强；--no-mirror 设 HF 官方；都没传 → secrets。
+        # Explicit CLI flags override secrets: --endpoint wins; --no-mirror sets official HF; neither given -> secrets.
         if args.endpoint:
             os.environ["HF_ENDPOINT"] = args.endpoint
         elif args.no_mirror:
             os.environ["HF_ENDPOINT"] = "https://huggingface.co"
         from studio.services.models import _resolve_endpoint  # noqa: PLC0415
-        active = _resolve_endpoint() or "https://huggingface.co (HF 默认)"
-        print(f"使用下载源: HuggingFace  endpoint: {active}")
+        active = _resolve_endpoint() or "https://huggingface.co (HF default)"
+        print(f"Using download source: HuggingFace  endpoint: {active}")
 
     out_root = Path(args.output) if args.output else models_root()
-    print(f"📁 目标根目录: {out_root.absolute()}")
+    print(f"📁 Target root directory: {out_root.absolute()}")
 
     variants = ANIMA_VARIANTS if args.family == "anima" else KREA2_VARIANTS
     latest = LATEST_ANIMA if args.family == "anima" else LATEST_KREA2
     variant = latest if args.variant == "latest" else args.variant
     if variant not in variants:
         parser.error(
-            f"{args.family} 不支持 variant {args.variant!r}；可选: "
+            f"{args.family} does not support variant {args.variant!r}; choices: "
             f"{', '.join(variants)} / latest"
         )
 
@@ -148,7 +149,7 @@ Krea 2 主模型版本（--family krea2 --variant）:
 
     print()
     print("=" * 50)
-    print("✅ 全部下载完成！" if ok else "⚠️  部分下载失败，详见上方日志")
+    print("✅ All downloads complete!" if ok else "⚠️  Some downloads failed, see the log above for details")
     print("=" * 50)
     return 0 if ok else 1
 

@@ -1,14 +1,17 @@
-"""NaViT 原生定尺寸（navit_native_resolution）单测。
+"""Unit tests for NaViT native resolution sizing (navit_native_resolution).
 
-覆盖：
-  1) plan_native_fit_image：floor 对齐 16px、零 padding、token 数 = 网格积。
-  2) 超预算 downscale：等比缩到 ≤ token 预算、≤ RoPE 单边上限，仍 16 对齐。
-  3) over_budget=fail：超限直接 raise。
-  4) **接线测试（关键）**：ImageDataset(native_resolution=True) 的定尺寸真的走原生 floor-16，
-     与 ARB 桶路径产出不同尺寸——这正是上一版 PR 缺失、导致"参数是空的"的那条。
-  5) config：TrainingConfig 默认 navit_native_resolution=False、可开、native 需 navit_packing。
+Covers:
+  1) plan_native_fit_image: floor-align to 16px, zero padding, token count = grid product.
+  2) Over-budget downscale: scale proportionally to <= token budget, <= RoPE per-side cap,
+     still 16-aligned.
+  3) over_budget=fail: raises when over the limit.
+  4) **Wiring test (critical)**: ImageDataset(native_resolution=True) actually sizes via
+     native floor-16, producing a different size than the ARB bucket path -- this is exactly
+     what was missing from the previous PR and caused "the argument is empty".
+  5) config: TrainingConfig defaults navit_native_resolution=False, can be enabled, and
+     native requires navit_packing.
 
-CPU-only、无 GPU / 无 VAE：CI（Linux 无 GPU）可跑。
+CPU-only, no GPU / no VAE: runs fine in CI (Linux, no GPU).
 """
 from __future__ import annotations
 
@@ -22,36 +25,36 @@ from training.dataset import (
 )
 
 
-# 一组异构原生尺寸（含非 16 整倍数的）
+# A set of heterogeneous native sizes (including some not multiples of 16)
 _SIZES = [(1000, 1500), (1536, 512), (777, 777), (2048, 768), (640, 1664)]
 
 
-# --------------------------------------------------------- plan：floor 不变量
+# --------------------------------------------------------- plan: floor invariants
 def test_floor_alignment_invariants():
     for w, h in _SIZES:
-        plan = plan_native_fit_image(w, h, align=16)  # 预算不限
+        plan = plan_native_fit_image(w, h, align=16)  # no budget limit
         assert isinstance(plan, NativeFitImagePlan)
         assert plan.width % 16 == 0 and plan.height % 16 == 0
-        assert plan.width <= w and plan.height <= h          # floor 只裁不放大
-        assert w - plan.width < 16 and h - plan.height < 16  # 每边只裁掉 <16 的余数
+        assert plan.width <= w and plan.height <= h          # floor only crops, never upscales
+        assert w - plan.width < 16 and h - plan.height < 16  # each side crops off < 16px remainder
         assert plan.token_count == (plan.width // 16) * (plan.height // 16)
         assert plan.was_downscaled is False
 
 
-# --------------------------------------------------------- plan：超预算 downscale
+# --------------------------------------------------------- plan: over-budget downscale
 def test_over_budget_downscale_fits_and_aligned():
-    # 1000x1500 floor→992x1488 = 62x93 = 5766 tokens；预算 1024 → 必须 downscale
+    # 1000x1500 floor -> 992x1488 = 62x93 = 5766 tokens; budget 1024 -> must downscale
     budget = 1024
     plan = plan_native_fit_image(1000, 1500, max_tokens=budget, over_budget="downscale")
     assert plan.was_downscaled is True
     assert plan.width % 16 == 0 and plan.height % 16 == 0
     assert plan.token_count <= budget
-    # 宽高比大致保持（缩放 + floor 的偏差不超过一个对齐单元的比例）
-    assert plan.height > plan.width  # 竖图仍竖
+    # aspect ratio is roughly preserved (scale + floor deviation stays within one align unit)
+    assert plan.height > plan.width  # portrait stays portrait
 
 
 def test_over_budget_downscale_extreme_aspect_within_budget():
-    # 极端长宽比：某轴被 max(1,·) 顶起时应把另一轴压回，仍不超预算
+    # extreme aspect ratio: when one axis gets clamped by max(1,.), the other should shrink back
     budget = 64
     plan = plan_native_fit_image(4096, 128, max_tokens=budget, over_budget="downscale")
     assert plan.token_count <= budget
@@ -59,7 +62,7 @@ def test_over_budget_downscale_extreme_aspect_within_budget():
 
 
 def test_rope_side_cap_downscales():
-    # 极扁图单边超 RoPE 上限：应被压到 ≤ max_side_tokens
+    # extremely elongated image over the RoPE per-side cap: should be clamped to <= max_side_tokens
     max_side = 32
     plan = plan_native_fit_image(
         8000, 512, max_tokens=0, max_side_tokens=max_side, over_budget="downscale"
@@ -72,9 +75,9 @@ def test_over_budget_fail_raises():
         plan_native_fit_image(4096, 4096, max_tokens=1024, over_budget="fail")
 
 
-# --------------------------------------------------------- 接线测试（关键）
+# --------------------------------------------------------- wiring test (critical)
 def _make_dataset_dir(tmp_path, sizes):
-    """在 tmp_path 造若干带 .txt caption 的 PNG，返回目录路径。"""
+    """Create a few PNGs with .txt captions in tmp_path, return the directory path."""
     from PIL import Image
     for i, (w, h) in enumerate(sizes):
         Image.new("RGB", (w, h), (i * 7 % 256, 0, 0)).save(tmp_path / f"img{i}.png")
@@ -83,21 +86,22 @@ def _make_dataset_dir(tmp_path, sizes):
 
 
 def test_dataset_native_sizing_bypasses_buckets(tmp_path):
-    """native_resolution=True 时定尺寸走原生 floor-16，且与 ARB 桶路径尺寸不同。"""
+    """When native_resolution=True, sizing really goes through native floor-16 and differs
+    from the ARB bucket path."""
     data_dir = _make_dataset_dir(tmp_path, [(1000, 1500), (777, 777)])
 
     native = ImageDataset(data_dir, resolution=1024, bucket_mgr=None,
                           native_resolution=True, native_token_budget=1_000_000)
-    # 直接问定尺寸口径：原生 floor-16
+    # ask the sizing directly: native floor-16
     assert native._target_size_for(1000, 1500) == (992, 1488)   # 1000//16*16, 1500//16*16
     assert native._target_size_for(777, 777) == (768, 768)
-    # 预扫的 bucket_for_index 也应是原生尺寸（非 None、16 对齐、≤源）
+    # the pre-scanned bucket_for_index should also be native sizes (not None, 16-aligned, <= source)
     for size in native.bucket_for_index:
         assert size is not None
         tw, th = size
         assert tw % 16 == 0 and th % 16 == 0
 
-    # 对照：ARB 桶路径（native 关）对同样的图给出桶尺寸，与原生不同
+    # control: the ARB bucket path (native off) gives bucket sizes for the same images, differing from native
     bucketed = ImageDataset(data_dir, resolution=1024,
                             bucket_mgr=BucketManager(1024, aspect_ratio_limit=2.0))
     assert bucketed.native_resolution is False
@@ -105,8 +109,8 @@ def test_dataset_native_sizing_bypasses_buckets(tmp_path):
 
 
 def test_dataset_native_downscale_wiring(tmp_path):
-    """native + 小 token 预算：ImageDataset 定尺寸真的把超预算图 downscale 到 fit。"""
-    data_dir = _make_dataset_dir(tmp_path, [(2048, 2048)])  # floor→128x128 token=16384
+    """native + small token budget: ImageDataset sizing really downscales an over-budget image to fit."""
+    data_dir = _make_dataset_dir(tmp_path, [(2048, 2048)])  # floor -> 128x128 token=16384
     budget = 4096
     ds = ImageDataset(data_dir, resolution=1024, bucket_mgr=None,
                       native_resolution=True, native_token_budget=budget,
@@ -116,22 +120,23 @@ def test_dataset_native_downscale_wiring(tmp_path):
 
 
 def test_dataset_native_collapses_multi_resolution_fanout(tmp_path):
-    """native + 多分辨率列表：fan-out 收拢为单份。
+    """native + a multi-resolution list: fan-out collapses to a single copy.
 
-    不收拢的话同图按每档复制样本（epoch 隐性 ×N）、且 CachedLatentDataset 会按
-    (图, target_reso) 把内容相同的 latent 各 encode 一份 r{reso}.npz。
+    Without collapsing, the same image would be duplicated per resolution tier (implicitly
+    x N per epoch), and CachedLatentDataset would encode one r{reso}.npz per
+    (image, target_reso) even though the latent content is identical.
     """
     data_dir = _make_dataset_dir(tmp_path, [(1000, 1500), (777, 777)])
 
     ds = ImageDataset(data_dir, resolution=1024, bucket_mgr=None,
                       resolutions=[1024, 512],
                       native_resolution=True, native_token_budget=1_000_000)
-    # 每张图恰好一个样本（未按分辨率档复制）
+    # exactly one sample per image (not duplicated per resolution tier)
     assert len(ds.samples) == 2
-    # 全部样本同一 target_reso → 缓存层不会按档分裂 npz（_multi_reso 判定为空）
+    # all samples share the same target_reso -> the cache layer won't split npz per tier (_multi_reso is empty)
     assert len({s.get("target_reso") for s in ds.samples}) == 1
 
-    # 对照：native 关时多分辨率 fan-out 行为不变（回归保护）
+    # control: with native off, multi-resolution fan-out behavior is unchanged (regression guard)
     bucketed = ImageDataset(data_dir, resolution=1024,
                             bucket_mgr=BucketManager(1024, aspect_ratio_limit=2.0),
                             resolutions=[1024, 512])
@@ -158,4 +163,4 @@ def test_config_can_enable_with_packing():
 def test_config_native_requires_packing():
     from studio.domain import TrainingConfig
     with pytest.raises(ValueError):
-        TrainingConfig(navit_native_resolution=True)  # navit_packing 默认 False → 拒
+        TrainingConfig(navit_native_resolution=True)  # navit_packing defaults to False -> rejected

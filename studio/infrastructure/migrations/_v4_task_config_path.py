@@ -1,9 +1,9 @@
-"""v3 → v4: tasks 表加 `config_path` 列（PP6.3）。
+"""v3 -> v4: adds a `config_path` column to tasks (PP6.3).
 
-PP6.3 之后训练 task 的 yaml 不再来自全局 `presets/{config_name}.yaml`，而是
-来自 version 私有 config（`projects/{id}-{slug}/versions/{label}/config.yaml`）。
-supervisor 优先用 `tasks.config_path`，没有则走 `_configs_dir / config_name.yaml`
-兜底（兼容老任务）。
+After PP6.3, a training task's yaml no longer comes from the global `presets/{config_name}.yaml`,
+but from the version's private config (`projects/{id}-{slug}/versions/{label}/config.yaml`).
+The supervisor prefers `tasks.config_path`, falling back to `_configs_dir / config_name.yaml`
+when absent (compat with old tasks).
 """
 from __future__ import annotations
 

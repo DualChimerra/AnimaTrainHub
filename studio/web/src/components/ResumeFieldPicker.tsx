@@ -2,18 +2,23 @@ import { useEffect, useRef, useState } from 'react'
 import { api, type LoraCkpt, type StateCkpt, type VersionCkptGroup } from '../api/client'
 
 /**
- * 字段内 dropdown picker：用户点字段旁的「📁 浏览本项目」按钮触发，
- * 弹出按 version 分组的可用文件列表，选中后写绝对路径回字段。
+ * In-field dropdown picker: triggered by the "browse this project" button
+ * next to a field, it pops up available files grouped by version; picking
+ * one writes the absolute path back into the field.
  *
- * 跟 PathPicker 的区别：不显示文件系统树，只显示语义化文件 label
- * （"baseline / step 2476"）。用户看不到深路径，但底层 onChange 仍写入
- * 真实绝对路径，保持 schema 字段值的兼容性。
+ * Difference from PathPicker: no filesystem tree, just semantic file labels
+ * ("baseline / step 2476"). The user never sees the deep path, but the
+ * underlying onChange still writes the real absolute path, keeping the
+ * schema field value compatible.
  *
- * resume_state 字段 → kind="state"，列项目所有 versions 的 training_state_step*.pt
- * resume_lora  字段 → kind="lora"，列项目所有 versions 的 *.safetensors（含 final）
+ * resume_state field -> kind="state", lists training_state_step*.pt across
+ *   all versions of the project
+ * resume_lora  field -> kind="lora", lists *.safetensors (including final)
+ *   across all versions of the project
  *
- * 外部文件 / 别项目的 ckpt 用户直接在字段 input 手填即可，本 picker 只覆盖
- * 「接本项目某 version 的产出」这个最常见路径。
+ * External files / checkpoints from other projects can be typed directly
+ * into the field input; this picker only covers the most common path of
+ * "reuse output from some version of this project".
  */
 export default function ResumeFieldPicker({
   pid,
@@ -35,7 +40,7 @@ export default function ResumeFieldPicker({
   const [error, setError] = useState<string | null>(null)
   const popRef = useRef<HTMLDivElement | null>(null)
 
-  // 拉数据
+  // fetch data
   useEffect(() => {
     let alive = true
     if (kind === 'state') {
@@ -50,7 +55,7 @@ export default function ResumeFieldPicker({
     return () => { alive = false }
   }, [pid, kind])
 
-  // 点外面关闭 + Esc 关闭
+  // Close on outside click + Esc
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
       if (popRef.current?.contains(e.target as Node)) return
@@ -88,7 +93,7 @@ export default function ResumeFieldPicker({
           {kind === 'state' ? 'Run one training round first with save_state_every_steps / save_state_every_epochs' : 'Train at least one ckpt first'}
         </div>
       ) : (
-        // 只渲染有 items 的 version；空 version 跳过减少噪音
+        // Only render versions that have items; skip empty versions to cut noise
         groups!.filter((g) => g.items.length > 0).map((g) => (
           <div key={g.version_id} className="border-b border-subtle last:border-0">
             <div className="px-3 py-1 bg-canvas caption sticky top-0 border-b border-subtle">

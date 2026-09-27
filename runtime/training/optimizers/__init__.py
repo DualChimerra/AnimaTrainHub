@@ -1,13 +1,15 @@
-"""Optimizer plugin registry（ADR 0003 PR-C）。
+"""Optimizer plugin registry (ADR 0003 PR-C).
 
-加新优化器（Lion / CAME / Schedule-Free AdamW）的步骤：
-1. 写 training/optimizers/{variant}.py 含 `build(args, params, lr, weight_decay)`，
-   可选 `validate(args)` 启动期检查
-2. 本文件 BUILDERS / VALIDATORS 字典加一行
-3. studio/schema.py 的 optimizer_type Literal 加枚举值 + 该 variant 专属字段
-4. requirements.txt 加依赖（如有）
+To add a new optimizer (Lion / CAME / Schedule-Free AdamW):
+1. Write training/optimizers/{variant}.py with
+   `build(args, params, lr, weight_decay)`, plus an optional `validate(args)`
+   startup check.
+2. Add a line to the BUILDERS / VALIDATORS dicts in this file.
+3. Add the enum value (and any variant-specific fields) to the
+   optimizer_type Literal in studio/schema.py.
+4. Add the dependency to requirements.txt (if any).
 
-详见 ADR 0003 "Case 6: Lion / CAME / Schedule-Free AdamW"。
+See ADR 0003 "Case 6: Lion / CAME / Schedule-Free AdamW" for details.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ BUILDERS: dict[str, Callable] = {
     "soap_sf": soap_sf.build,
 }
 
-# 启动期校验函数（None / 未注册 = 跳过）
+# Startup validation functions (None / unregistered = skipped)
 VALIDATORS: dict[str, Callable[[object], None]] = {
     "adamw8bit": adamw8bit.validate,
     "automagic": automagic.validate,
@@ -52,17 +54,17 @@ VALIDATORS: dict[str, Callable[[object], None]] = {
 
 
 def build_optimizer(args, params, lr: float, weight_decay: float):
-    """按 args.optimizer_type 派发。"""
+    """Dispatch on args.optimizer_type."""
     optimizer_type = (getattr(args, "optimizer_type", "adamw") or "adamw").lower()
     if optimizer_type not in BUILDERS:
         raise ValueError(
-            f"未知 optimizer_type={optimizer_type!r}；已注册: {sorted(BUILDERS)}"
+            f"Unknown optimizer_type={optimizer_type!r}; registered: {sorted(BUILDERS)}"
         )
     return BUILDERS[optimizer_type](args, params, lr, weight_decay)
 
 
 def validate_optimizer(args) -> None:
-    """跑 optimizer 专属启动期兼容检查（如 PPSF 要求 lr_scheduler=none）。"""
+    """Run the optimizer-specific startup compatibility check (e.g. PPSF requires lr_scheduler=none)."""
     optimizer_type = (getattr(args, "optimizer_type", "adamw") or "adamw").lower()
     validator = VALIDATORS.get(optimizer_type)
     if validator:
@@ -77,7 +79,7 @@ def validate_schema_consistency() -> None:
     registered = set(BUILDERS)
     if schema_options != registered:
         raise RuntimeError(
-            f"optimizer 注册与 schema 不同步（PR-C registry）：\n"
-            f"  schema 有但未注册: {schema_options - registered}\n"
-            f"  注册但 schema 没列: {registered - schema_options}"
+            f"Optimizer registration is out of sync with the schema (PR-C registry):\n"
+            f"  in schema but not registered: {schema_options - registered}\n"
+            f"  registered but not in schema: {registered - schema_options}"
         )

@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
 
-/** prompt 的真实 token 数（防抖调后端 tokenizer，与训练/推理同源）。
+/** The prompt's real token count (debounced call to the backend tokenizer,
+ *  same source of truth as training/inference).
  *
- * 返回 null 表示不可用（端点失败 / tokenizer 未就绪 / 空文本），角标隐藏。
- * 纯信息展示——不做长度警告（超长截断与否是模型口径，质量由用户掌握）。
+ * Returns null when unavailable (endpoint failure / tokenizer not ready /
+ * empty text), which hides the badge. Purely informational -- no length
+ * warning (whether over-length gets truncated is a model concern; the user
+ * owns quality).
  */
 export function useTokenCount(text: string, modelFamily: string): number | null {
   const [tokens, setTokens] = useState<number | null>(null)

@@ -6,7 +6,7 @@ import TaskLogDrawer, { type LogSource } from './TaskLogDrawer'
 function makeSource(overrides: Partial<LogSource> = {}): LogSource {
   return {
     key: 'tag',
-    label: '打标任务',
+    label: 'Tagging task',
     status: 'running',
     lines: ['line a', 'line b'],
     startedAt: 1700000000,
@@ -16,14 +16,14 @@ function makeSource(overrides: Partial<LogSource> = {}): LogSource {
 }
 
 describe('TaskLogDrawer (issue #251)', () => {
-  it('无 source 时整体隐藏', () => {
+  it('hides entirely when there is no source', () => {
     const { container } = render(<TaskLogDrawer sources={[null, false, undefined]} />)
     expect(container).toBeEmptyDOMElement()
   })
 
-  it('挂载即 running（回放场景）→ 自动展开，日志面板升起且显示尾部', () => {
+  it('mounting already running (replay scenario) auto-expands, the log panel rises and shows the tail', () => {
     render(<TaskLogDrawer sources={[makeSource()]} />)
-    expect(screen.getByRole('button', { name: /打标任务/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /Tagging task/ })).toHaveAttribute(
       'aria-expanded',
       'true',
     )
@@ -31,22 +31,23 @@ describe('TaskLogDrawer (issue #251)', () => {
     expect(screen.getByText(/line a\s+line b/)).toBeInTheDocument()
   })
 
-  it('挂载即 done（历史回放）→ 默认收起（body 高度 0），条上显示最后一行', () => {
+  it('mounting already done (historical replay) defaults to collapsed (body height 0), last line shown on the strip', () => {
     render(
       <TaskLogDrawer
         sources={[makeSource({ status: 'done', finishedAt: 1700000010 })]}
       />,
     )
-    const strip = screen.getByRole('button', { name: /打标任务/ })
+    const strip = screen.getByRole('button', { name: /Tagging task/ })
     expect(strip).toHaveAttribute('aria-expanded', 'false')
-    // body 常驻 DOM 做高度动画，收起 = 高度 0；收起条上有最后一行
+    // The body stays mounted for the height animation; collapsed = height 0;
+    // the collapsed strip shows the last line.
     expect(screen.getByTestId('log-drawer-body')).toHaveStyle({ height: '0px' })
     expect(screen.getByText('line b')).toBeInTheDocument()
   })
 
-  it('任务结束不自动收起（done / failed 都保持展开，收起只靠手动或切页卸载）', () => {
+  it('does not auto-collapse when the task ends (done / failed both stay expanded; collapsing is only manual or on page unmount)', () => {
     const { rerender } = render(<TaskLogDrawer sources={[makeSource()]} />)
-    const strip = () => screen.getByRole('button', { name: /打标任务/ })
+    const strip = () => screen.getByRole('button', { name: /Tagging task/ })
     expect(strip()).toHaveAttribute('aria-expanded', 'true')
 
     rerender(<TaskLogDrawer sources={[makeSource({ status: 'done' })]} />)
@@ -57,80 +58,80 @@ describe('TaskLogDrawer (issue #251)', () => {
     expect(strip()).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('点击收起条切换展开/收起，手动状态保持', async () => {
+  it('clicking the collapsed strip toggles expand/collapse and keeps the manual state', async () => {
     const user = userEvent.setup()
     render(<TaskLogDrawer sources={[makeSource()]} />)
-    const strip = screen.getByRole('button', { name: /打标任务/ })
+    const strip = screen.getByRole('button', { name: /Tagging task/ })
     await user.click(strip)
     expect(strip).toHaveAttribute('aria-expanded', 'false')
     await user.click(strip)
     expect(strip).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('多 source 单显：活着的优先于更晚启动的终态任务', () => {
+  it('multiple sources, single display: a live task takes priority over a later-started terminal task', () => {
     render(
       <TaskLogDrawer
         sources={[
           makeSource({
             key: 'reg_build',
-            label: 'Booru 建集',
+            label: 'Booru set build',
             status: 'done',
             startedAt: 1700009999,
           }),
-          makeSource({ key: 'reg_ai', label: 'AI 先验生成', status: 'running' }),
+          makeSource({ key: 'reg_ai', label: 'AI prior generation', status: 'running' }),
         ]}
       />,
     )
-    expect(screen.getByText('AI 先验生成')).toBeInTheDocument()
-    expect(screen.queryByText('Booru 建集')).toBeNull()
+    expect(screen.getByText('AI prior generation')).toBeInTheDocument()
+    expect(screen.queryByText('Booru set build')).toBeNull()
   })
 
-  it('都是终态时选最近启动的', () => {
+  it('picks the most recently started task when all are terminal', () => {
     render(
       <TaskLogDrawer
         sources={[
-          makeSource({ key: 'a', label: '旧任务', status: 'done', startedAt: 100 }),
-          makeSource({ key: 'b', label: '新任务', status: 'failed', startedAt: 200 }),
+          makeSource({ key: 'a', label: 'Old task', status: 'done', startedAt: 100 }),
+          makeSource({ key: 'b', label: 'New task', status: 'failed', startedAt: 200 }),
         ]}
       />,
     )
-    expect(screen.getByText('新任务')).toBeInTheDocument()
-    expect(screen.queryByText('旧任务')).toBeNull()
+    expect(screen.getByText('New task')).toBeInTheDocument()
+    expect(screen.queryByText('Old task')).toBeNull()
   })
 
-  it('live 且提供 onCancel 时显示取消按钮，点击不触发开合', async () => {
+  it('shows a cancel button when live and onCancel is provided; clicking it does not toggle expand/collapse', async () => {
     const onCancel = vi.fn()
     const user = userEvent.setup()
     render(<TaskLogDrawer sources={[makeSource({ onCancel })]} />)
-    const strip = screen.getByRole('button', { name: /打标任务/ })
+    const strip = screen.getByRole('button', { name: /Tagging task/ })
     expect(strip).toHaveAttribute('aria-expanded', 'true')
-    await user.click(screen.getByRole('button', { name: '取消' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onCancel).toHaveBeenCalledOnce()
     expect(strip).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('终态不显示取消按钮', () => {
+  it('does not show a cancel button in a terminal state', () => {
     render(
       <TaskLogDrawer sources={[makeSource({ status: 'done', onCancel: () => {} })]} />,
     )
-    expect(screen.queryByRole('button', { name: '取消' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull()
   })
 
-  it('failed 且提供 onRetry 时显示重试按钮，点击不触发开合', async () => {
+  it('shows a retry button when failed and onRetry is provided; clicking it does not toggle expand/collapse', async () => {
     const onRetry = vi.fn()
     const user = userEvent.setup()
     render(<TaskLogDrawer sources={[makeSource({ status: 'failed', onRetry })]} />)
-    const strip = screen.getByRole('button', { name: /打标任务/ })
+    const strip = screen.getByRole('button', { name: /Tagging task/ })
     expect(strip).toHaveAttribute('aria-expanded', 'false')
-    await user.click(screen.getByRole('button', { name: '重试' }))
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
     expect(onRetry).toHaveBeenCalledOnce()
     expect(strip).toHaveAttribute('aria-expanded', 'false')
   })
 
-  it('非 failed 不显示重试按钮', () => {
+  it('does not show a retry button when not failed', () => {
     render(
       <TaskLogDrawer sources={[makeSource({ status: 'done', onRetry: () => {} })]} />,
     )
-    expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
   })
 })

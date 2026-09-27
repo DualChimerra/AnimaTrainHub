@@ -1,7 +1,7 @@
-"""PR-1 C7 — supervisor error_msg 回写 + malformed event SSE + event_bus warn 验证。
+"""PR-1 C7 -- supervisor error_msg write-back + malformed event SSE + event_bus warn verification.
 
-3 个 B audit P1 修复：
-  - B-1.6: _tail_log_for_error_msg + _finish_slot 拼到 db.tasks.error_msg
+3 fixes from the B audit's P1 findings:
+  - B-1.6: _tail_log_for_error_msg + _finish_slot append into db.tasks.error_msg
   - B-4.4: _on_task_log malformed event → SSE event_malformed
   - B-1.5: event_bus._safe_put QueueFull → logger.warning
 """
@@ -24,7 +24,7 @@ def test_tail_log_missing_file_returns_empty(tmp_path: Path) -> None:
 
 
 def test_tail_log_picks_traceback_section(tmp_path: Path) -> None:
-    """末段有 Traceback 时优先取那一段（含完整 stack）。"""
+    """When the tail has a Traceback, prefer that section (with the full stack)."""
     from studio.supervisor.core import _tail_log_for_error_msg
     log = tmp_path / "42.log"
     log.write_text(
@@ -44,7 +44,7 @@ def test_tail_log_picks_traceback_section(tmp_path: Path) -> None:
 
 
 def test_tail_log_no_traceback_uses_last_lines(tmp_path: Path) -> None:
-    """无 Traceback 字串 → 取末 N 行（默认 12）。"""
+    """No Traceback string -> take the last N lines (default 12)."""
     from studio.supervisor.core import _tail_log_for_error_msg
     log = tmp_path / "x.log"
     lines = [f"line {i}" for i in range(30)]
@@ -67,7 +67,7 @@ def test_tail_log_truncates_to_max_chars(tmp_path: Path) -> None:
 
 
 def test_safe_put_logs_warning_on_queue_full(caplog: pytest.LogCaptureFixture) -> None:
-    """QueueFull 不再静默丢；记 WARNING 行带 event type。"""
+    """QueueFull is no longer silently dropped; a WARNING line with the event type is logged."""
     from studio.infrastructure.event_bus import _safe_put
 
     async def _run():
@@ -77,7 +77,7 @@ def test_safe_put_logs_warning_on_queue_full(caplog: pytest.LogCaptureFixture) -
             _safe_put(q, {"type": "task_state_changed", "task_id": 42})
         warnings = [r for r in caplog.records
                     if r.name == "studio.infrastructure.event_bus" and r.levelname == "WARNING"]
-        assert warnings, "QueueFull 必须 logger.warning 不能静默"
+        assert warnings, "QueueFull must logger.warning, not fail silently"
         assert "task_state_changed" in warnings[-1].getMessage()
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_run())
 
@@ -88,8 +88,8 @@ def test_safe_put_logs_warning_on_queue_full(caplog: pytest.LogCaptureFixture) -
 def test_malformed_event_publishes_sse_event_malformed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """worker 写错 __EVENT__: payload → supervisor _on_task_log catch + publish
-    event_malformed 让前端可见（之前静默丢导致 UI 暂停按钮永远灰）。"""
+    """A worker writing a malformed __EVENT__: payload -> supervisor _on_task_log catches it and publishes
+    event_malformed so the frontend can see it (previously it was silently dropped, leaving the UI pause button permanently greyed out)."""
     from studio.supervisor.core import Supervisor
     from unittest.mock import MagicMock
 
@@ -100,11 +100,11 @@ def test_malformed_event_publishes_sse_event_malformed(
     slot.id = 42
 
     callback = sup._make_task_log_callback(slot, 42)
-    # 喂一行 malformed event（payload 不是合法 JSON）
+    # feed in a malformed event line (payload isn't valid JSON)
     callback('__EVENT__:pause_state:{not json}')
 
     malformed = [e for e in events if e["type"] == "event_malformed"]
-    assert malformed, f"应 publish event_malformed；实际 events: {events}"
+    assert malformed, f"should publish event_malformed; actual events: {events}"
     assert malformed[0]["task_id"] == 42
     assert "pause_state" in malformed[0]["raw_preview"]
 
@@ -112,7 +112,7 @@ def test_malformed_event_publishes_sse_event_malformed(
 def test_well_formed_event_does_not_publish_event_malformed(
     tmp_path: Path,
 ) -> None:
-    """正常 event 不应触发 event_malformed。"""
+    """A normal event should not trigger event_malformed."""
     from studio.supervisor.core import Supervisor
     from unittest.mock import MagicMock
 

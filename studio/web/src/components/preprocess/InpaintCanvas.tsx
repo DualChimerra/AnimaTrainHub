@@ -9,15 +9,15 @@ import {
 import { useTranslation } from 'react-i18next'
 import { useZoomPan } from '../../lib/useZoomPan'
 
-/** 一笔涂抹 / mask 笔画。坐标 / 直径都是**原图像素**单位 —— 视图缩放只影响
- *  显示，笔画数据与 zoom 无关，离屏重放（保存全部）才能与画布所见一致。 */
+/** A single paint / mask stroke. Coordinates / diameter are always in **source-image pixel** units -- view zoom only
+ *  affects display; stroke data is zoom-independent, so offscreen replay ("save all") matches what the canvas shows. */
 export interface InpaintStroke {
   color: string
-  /** 笔刷直径（原图 px）。 */
+  /** Brush diameter (source-image px). */
   size: number
-  /** 1 = 实心；<1 时边缘按 size*(1-hardness)/2 的半径 blur 软化。 */
+  /** 1 = solid; below 1 the edge is softened by a blur with radius size*(1-hardness)/2. */
   hardness: number
-  /** 橡皮擦（destination-out）：paint 模式擦未保存涂抹笔画、mask 模式擦 mask。 */
+  /** Eraser (destination-out): in paint mode erases unsaved paint strokes, in mask mode erases the mask. */
   erase?: boolean
   points: { x: number; y: number }[]
 }
@@ -25,14 +25,14 @@ export interface InpaintStroke {
 export type InpaintMode = 'paint' | 'mask'
 
 export interface InpaintCanvasHandle {
-  /** 当前图 + 全部涂抹笔画合成导出 PNG。图片未加载完成时返回 null。 */
+  /** Composites the current image + all paint strokes and exports a PNG. Returns null if the image hasn't finished loading. */
   exportBlob: () => Promise<Blob | null>
-  /** mask 层导出灰度 PNG（255=学 0=不学）+ 覆盖率。
-   *  mask 为空（全学）→ null（调用方应 DELETE 而不是写全白文件）。 */
+  /** Exports the mask layer as a grayscale PNG (255=learn 0=don't-learn) + coverage.
+   *  An empty mask (learn everything) -> null (the caller should DELETE rather than write an all-white file). */
   exportMaskBlob: () => Promise<{ blob: Blob; coverage: number } | null>
 }
 
-/** mask 在画布上的显示色（导出只看 alpha，色值无所谓）。 */
+/** Display color for the mask on the canvas (export only looks at alpha, the color value doesn't matter). */
 const MASK_COLOR = '#ff2d2d'
 const MASK_VIEW_ALPHA = 0.45
 
@@ -59,7 +59,7 @@ function strokePath(ctx: CanvasRenderingContext2D, s: InpaintStroke, color?: str
 
 type ScratchRef = { current: HTMLCanvasElement | null }
 
-/** 画一笔（含软边：经复用 scratch canvas + blur filter 合成）。 */
+/** Draws one stroke (soft edges included: composited via a reusable scratch canvas + blur filter). */
 function drawOneStroke(
   ctx: CanvasRenderingContext2D,
   s: InpaintStroke,
@@ -91,8 +91,8 @@ function drawOneStroke(
   ctx.restore()
 }
 
-/** 重放笔画到独立 layer（erase 走 destination-out —— 涂抹橡皮擦掉的是
- *  未保存笔画露出底图，mask 橡皮擦掉 mask，两者语义一致）。 */
+/** Replays strokes onto a separate layer (erase goes through destination-out -- for paint, erasing reveals the
+ *  base image under unsaved strokes; for mask, erasing clears the mask -- both share the same semantics). */
 function drawStrokesToLayer(
   ctx: CanvasRenderingContext2D,
   strokes: InpaintStroke[],
@@ -132,13 +132,13 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   })
 }
 
-/** 服务器灰度 mask（255=学 0=不学）→ 画布 mask 层位图（红色 + alpha=不学度）。 */
+/** Server grayscale mask (255=learn 0=don't-learn) -> canvas mask-layer bitmap (red + alpha=don't-learn amount). */
 async function loadMaskBase(url: string, w: number, h: number): Promise<HTMLCanvasElement | null> {
   let img: HTMLImageElement
   try {
     img = await loadImage(url)
   } catch {
-    return null // 404 = 无 mask
+    return null // 404 = no mask
   }
   const c = document.createElement('canvas')
   c.width = w
@@ -149,7 +149,7 @@ async function loadMaskBase(url: string, w: number, h: number): Promise<HTMLCanv
   const data = ctx.getImageData(0, 0, w, h)
   const px = data.data
   for (let i = 0; i < px.length; i += 4) {
-    const v = px[i] // 灰度值（R 通道）
+    const v = px[i] // grayscale value (R channel)
     px[i] = 255
     px[i + 1] = 45
     px[i + 2] = 45
@@ -159,7 +159,7 @@ async function loadMaskBase(url: string, w: number, h: number): Promise<HTMLCanv
   return c
 }
 
-/** 重建 mask 层：底图（服务器已有 mask）+ 本地笔画。 */
+/** Rebuilds the mask layer: base image (existing server mask) + local strokes. */
 function rebuildMaskLayer(
   layer: HTMLCanvasElement,
   base: HTMLCanvasElement | null,
@@ -173,7 +173,7 @@ function rebuildMaskLayer(
   drawMaskStrokes(ctx, strokes, scratchRef)
 }
 
-/** mask 层 → 灰度 PNG（255=学 0=不学）+ 覆盖率。全空 → null。 */
+/** mask layer -> grayscale PNG (255=learn 0=don't-learn) + coverage. Fully empty -> null. */
 async function maskLayerToGray(
   layer: HTMLCanvasElement,
 ): Promise<{ blob: Blob; coverage: number } | null> {
@@ -206,7 +206,7 @@ async function maskLayerToGray(
   return blob ? { blob, coverage } : null
 }
 
-/** 离屏重建 mask 并导出（「保存全部」对非活动图用）。null = mask 为空。 */
+/** Rebuilds and exports the mask offscreen (used by "save all" for the non-active image). null = an empty mask. */
 export async function renderMaskBlob(
   maskBaseUrl: string | null,
   w: number,
@@ -221,7 +221,7 @@ export async function renderMaskBlob(
   return await maskLayerToGray(layer)
 }
 
-/** 离屏重放涂抹：加载原图 → layer 重放笔画（含橡皮）→ 合成 PNG blob。 */
+/** Replays paint offscreen: loads the source image -> replays strokes on a layer (erase included) -> composites a PNG blob. */
 export async function renderInpaintedBlob(
   imageUrl: string,
   w: number,
@@ -255,15 +255,15 @@ function toHex(r: number, g: number, b: number): string {
   return `#${c(r)}${c(g)}${c(b)}`
 }
 
-/** 涂抹主画布：原图分辨率 canvas + useZoomPan 视口（空格 / 中键 pan）。
+/** Main paint canvas: a canvas at source-image resolution + the useZoomPan viewport (space / middle-click pan).
  *
- *  两个数据面（双桶受控）：
- *  - 涂抹笔画（strokes）：直接覆盖像素，重绘顺序 img → strokes。
- *  - mask 笔画（maskStrokes）+ 服务器底图（maskBaseUrl）：合成到独立
- *    maskLayer（红色 alpha 位图），主画布最后以半透明叠加显示。
+ *  Two independently-controlled data planes:
+ *  - Paint strokes (strokes): drawn directly over pixels, redraw order is img -> strokes.
+ *  - Mask strokes (maskStrokes) + server base image (maskBaseUrl): composited onto a separate
+ *    maskLayer (a red-alpha bitmap), overlaid on the main canvas at partial opacity last.
  *
- *  绘制中在主画布增量画预览段（mask 橡皮擦以半透明白示意），pointerup
- *  提交后由 props 变化触发全量重绘校正。
+ *  While drawing, a preview segment is painted incrementally on the main canvas (a mask eraser shows as translucent
+ *  white); pointerup commits it and a prop change then triggers a full redraw to correct it.
  */
 const InpaintCanvas = forwardRef<
   InpaintCanvasHandle,
@@ -274,10 +274,10 @@ const InpaintCanvas = forwardRef<
     mode: InpaintMode
     strokes: InpaintStroke[]
     maskStrokes: InpaintStroke[]
-    /** 服务器已有 mask 的 URL；null = 无底图。 */
+    /** URL of the server's existing mask; null = no base image. */
     maskBaseUrl: string | null
     brush: { color: string; size: number; hardness: number }
-    /** 当前工具是否橡皮擦（涂抹 / 遮罩两模式共用）。 */
+    /** Whether the current tool is the eraser (shared by both paint / mask modes). */
     erase: boolean
     onStrokeEnd: (s: InpaintStroke) => void
     onMaskStrokeEnd: (s: InpaintStroke) => void
@@ -299,12 +299,12 @@ const InpaintCanvas = forwardRef<
   const maskLayerRef = useRef<HTMLCanvasElement | null>(null)
   const maskBaseRef = useRef<HTMLCanvasElement | null>(null)
 
-  // 视口（zoom / pan / fit / 坐标换算）走共享 hook；画笔类场景左键留给
-  // 画笔（primaryButtonPans 缺省 false），pan 由空格 / 中键触发。
+  // The viewport (zoom / pan / fit / coordinate conversion) goes through the shared hook; a brush-tool scene leaves
+  // the left click to the brush (primaryButtonPans defaults to false), pan is triggered by space / middle-click instead.
   const zp = useZoomPan({ contentW: imageW, contentH: imageH })
   const { wrapRef, contentRef, toContentPoint } = zp
 
-  // 落笔时锁定归属（paint / mask），松手按此提交 —— 不事后按 mode 猜
+  // Locks ownership (paint / mask) at pen-down; commits on release using this -- never guesses mode after the fact
   const drawingRef = useRef<{ stroke: InpaintStroke; target: InpaintMode } | null>(null)
 
   const [loaded, setLoaded] = useState(false)
@@ -357,7 +357,7 @@ const InpaintCanvas = forwardRef<
     }
   }, [])
 
-  // 图片加载（imageUrl 变化 = 换图或保存后 mtime 刷新）
+  // Image loading (imageUrl change = a new image or an mtime refresh after saving)
   useEffect(() => {
     let cancelled = false
     setLoaded(false)
@@ -371,7 +371,7 @@ const InpaintCanvas = forwardRef<
         redraw()
       },
       () => {
-        /* 失败留空画布；filmstrip 换图可恢复 */
+        /* Leave the canvas blank on failure; switching images in the filmstrip can recover */
       },
     )
     return () => {
@@ -380,7 +380,7 @@ const InpaintCanvas = forwardRef<
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageUrl, zp.fit, redraw])
 
-  // mask 底图加载（URL 变化 = 换图 / 保存后刷新 / 本地清除→null）
+  // Mask base-image loading (URL change = new image / refresh after saving / local clear -> null)
   useEffect(() => {
     let cancelled = false
     maskBaseRef.current = null
@@ -398,14 +398,14 @@ const InpaintCanvas = forwardRef<
     }
   }, [maskBaseUrl, imageW, imageH])
 
-  // mask 层重建（底图 / 笔画变化）→ 主画布重绘
+  // Mask layer rebuild (base image / strokes changed) -> redraw the main canvas
   useEffect(() => {
     const layer = ensureLayer(maskLayerRef)
     rebuildMaskLayer(layer, maskBaseRef.current, maskStrokes, scratchRef)
     redraw()
   }, [maskStrokes, maskBaseTick, ensureLayer, redraw])
 
-  // 涂抹层重建（undo / redo / 落笔提交 / 清除 —— 含橡皮 composite）
+  // Paint layer rebuild (undo / redo / stroke commit / clear -- including the eraser composite)
   useEffect(() => {
     const layer = ensureLayer(paintLayerRef)
     const ctx = layer.getContext('2d')
@@ -421,7 +421,7 @@ const InpaintCanvas = forwardRef<
       const canvas = canvasRef.current
       const img = imgRef.current
       if (!canvas || !img) return null
-      // 导出不含 mask overlay：干净重建 img + 涂抹层（含橡皮 composite）
+      // Export excludes the mask overlay: cleanly rebuilds img + paint layer (including the eraser composite)
       const out = document.createElement('canvas')
       out.width = canvas.width
       out.height = canvas.height
@@ -446,7 +446,7 @@ const InpaintCanvas = forwardRef<
     },
   }), [ensureLayer])
 
-  // 笔刷圆圈光标（ref 直改 style；直径 = 笔刷 × 当前 scale）
+  // Brush-circle cursor (mutates style on the ref directly; diameter = brush size x current scale)
   const lastPointerRef = useRef<{ x: number; y: number } | null>(null)
   const updateCursor = useCallback((clientX: number, clientY: number) => {
     const cur = cursorRef.current
@@ -462,8 +462,8 @@ const InpaintCanvas = forwardRef<
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // wheel 缩放后光标直径要跟 scale 变（hook 不知道光标 —— 用 zoomPct 变化
-  // + 最后一次指针位置补一次更新）
+  // After a wheel zoom, the cursor's diameter must follow scale (the hook doesn't know about the cursor -- driven
+  // by the zoomPct change + one extra update using the last pointer position)
   useEffect(() => {
     const p = lastPointerRef.current
     if (p) updateCursor(p.x, p.y)
@@ -489,7 +489,7 @@ const InpaintCanvas = forwardRef<
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (!loaded) return
       e.currentTarget.setPointerCapture(e.pointerId)
-      // pan 手势（空格 / 中键）交给视口 hook；本组件只管画笔
+      // Pan gestures (space / middle-click) are handled by the viewport hook; this component only handles the brush
       if (zp.panPointerDown(e)) return
       if (e.button !== 0) return
       if (e.altKey && modeRef.current === 'paint') {
@@ -508,7 +508,7 @@ const InpaintCanvas = forwardRef<
         points: [pt],
       }
       drawingRef.current = { stroke, target: isMask ? 'mask' : 'paint' }
-      // 单点立即可见（预览；橡皮以半透明白示意，松手后全量重绘校正）
+      // A single point is visible immediately (a preview; the eraser shows as translucent white, corrected by a full redraw on release)
       const ctx = canvasRef.current?.getContext('2d')
       if (ctx) {
         ctx.save()
@@ -609,7 +609,7 @@ const InpaintCanvas = forwardRef<
           height={imageH}
           style={{ position: 'absolute', left: 0, top: 0, transformOrigin: '0 0' }}
         />
-        {/* 笔刷圆圈光标（遮罩画笔描红 / 橡皮虚线白） */}
+        {/* Brush-circle cursor (red outline for the mask brush / dashed white for the eraser) */}
         <div
           ref={cursorRef}
           className="absolute pointer-events-none rounded-full"
@@ -627,7 +627,7 @@ const InpaintCanvas = forwardRef<
         )}
       </div>
 
-      {/* readout 细条：zoom / 视图操作 / 光标像素坐标 */}
+      {/* Readout strip: zoom / view controls / cursor pixel coordinates */}
       <div className="shrink-0 flex items-center gap-2 text-[11px] font-mono text-fg-tertiary px-1">
         <span>{zp.zoomPct}%</span>
         <button

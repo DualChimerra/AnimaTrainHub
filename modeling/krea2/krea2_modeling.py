@@ -113,19 +113,19 @@ class Krea2Config:
 
     def __post_init__(self) -> None:
         if self.features <= 0 or self.features % self.heads:
-            raise ValueError("Krea2 features 必须为正数且能被 heads 整除")
+            raise ValueError("Krea2 features must be positive and divisible by heads")
         if self.heads % self.kvheads:
-            raise ValueError("Krea2 heads 必须能被 kvheads 整除")
+            raise ValueError("Krea2 heads must be divisible by kvheads")
         if self.txtdim <= 0 or self.txtdim % self.txtheads:
-            raise ValueError("Krea2 txtdim 必须为正数且能被 txtheads 整除")
+            raise ValueError("Krea2 txtdim must be positive and divisible by txtheads")
         if self.txtheads % self.txtkvheads:
-            raise ValueError("Krea2 txtheads 必须能被 txtkvheads 整除")
+            raise ValueError("Krea2 txtheads must be divisible by txtkvheads")
         if self.tdim <= 0 or self.tdim % 2:
-            raise ValueError("Krea2 tdim 必须为正偶数")
+            raise ValueError("Krea2 tdim must be a positive even number")
         if min(self.layers, self.patch, self.channels, self.txtlayers) <= 0:
-            raise ValueError("Krea2 layers/patch/channels/txtlayers 必须为正数")
+            raise ValueError("Krea2 layers/patch/channels/txtlayers must be positive")
         if self.theta <= 0:
-            raise ValueError("Krea2 theta 必须为正数")
+            raise ValueError("Krea2 theta must be positive")
 
 
 KREA2_CONFIG = Krea2Config()
@@ -192,7 +192,7 @@ class Attention(nn.Module):
         self.heads = heads
         self.kvheads = heads if kvheads is None else kvheads
         if dim % heads or heads % self.kvheads:
-            raise ValueError("Krea2 attention 维度或 GQA heads 不可整除")
+            raise ValueError("Krea2 attention dim or GQA heads is not divisible")
         self.headdim = dim // heads
         self.wq = nn.Linear(dim, self.headdim * heads, bias=bias)
         self.wk = nn.Linear(dim, self.headdim * self.kvheads, bias=bias)
@@ -370,7 +370,7 @@ class SingleStreamDiT(nn.Module):
             6 * (head_dim // 16),
         )
         if sum(axes) != head_dim or any(dim <= 0 or dim % 2 for dim in axes):
-            raise ValueError(f"Krea2 RoPE axes 非法：axes={axes}, head_dim={head_dim}")
+            raise ValueError(f"Invalid Krea2 RoPE axes: axes={axes}, head_dim={head_dim}")
 
         self.posemb = PositionalEncoding(axes, theta=config.theta)
         self.first = nn.Linear(
@@ -428,7 +428,7 @@ class SingleStreamDiT(nn.Module):
             expected = config.txtlayers * config.txtdim
             if context.shape[-1] != expected:
                 raise ValueError(
-                    f"Krea2 context 最后一维应为 {expected}，实际 {context.shape[-1]}"
+                    f"Krea2 context last dim should be {expected}, got {context.shape[-1]}"
                 )
             return context.reshape(
                 context.shape[0],
@@ -441,7 +441,7 @@ class SingleStreamDiT(nn.Module):
             config.txtdim,
         ):
             raise ValueError(
-                "Krea2 context 应为 (B,L,txtlayers,txtdim) 或对应的扁平三维 tensor"
+                "Krea2 context must be (B,L,txtlayers,txtdim) or the equivalent flattened 3D tensor"
             )
         return context
 
@@ -457,21 +457,21 @@ class SingleStreamDiT(nn.Module):
         temporal = x.ndim == 5
         if temporal:
             if x.shape[2] != 1:
-                raise ValueError("Krea2 v1 只支持 T==1 的 5D latent")
+                raise ValueError("Krea2 v1 only supports 5D latents with T==1")
             x = x.squeeze(2)
         if x.ndim != 4:
-            raise ValueError("Krea2 latent 应为 (B,C,H,W) 或 (B,C,1,H,W)")
+            raise ValueError("Krea2 latent must be (B,C,H,W) or (B,C,1,H,W)")
         if x.shape[1] != self.config.channels:
             raise ValueError(
-                f"Krea2 latent channels 应为 {self.config.channels}，实际 {x.shape[1]}"
+                f"Krea2 latent channels should be {self.config.channels}, got {x.shape[1]}"
             )
 
         context = self._normalize_context(context)
         batch, _, original_h, original_w = x.shape
         if context.shape[0] != batch:
-            raise ValueError("Krea2 latent 与 context batch size 不一致")
+            raise ValueError("Krea2 latent and context batch size mismatch")
         if timesteps.ndim != 1 or timesteps.numel() != batch:
-            raise ValueError("Krea2 timesteps 应为 batch 长度的一维 tensor")
+            raise ValueError("Krea2 timesteps must be a 1D tensor of length batch")
 
         patch = self.config.patch
         pad_h = (-original_h) % patch
@@ -501,7 +501,7 @@ class SingleStreamDiT(nn.Module):
         combined_mask = None
         if attention_mask is not None:
             if attention_mask.shape != (batch, text_len):
-                raise ValueError("Krea2 attention_mask 应为 (B,text_len)")
+                raise ValueError("Krea2 attention_mask must be (B,text_len)")
             attention_mask = attention_mask.to(device=x.device, dtype=torch.bool)
             text_mask = attention_mask[:, None, None, :]
             image_mask = torch.ones(

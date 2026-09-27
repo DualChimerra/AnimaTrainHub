@@ -1,7 +1,7 @@
-"""xformers_setup 单测 —— current_status / install / _torch_cuda_index 路径覆盖。
+"""xformers_setup unit tests -- coverage for current_status / install / _torch_cuda_index paths.
 
-参考 test_flash_attention_setup.py 的风格但更简洁（xformers service 比
-flash_attention 简单很多）。
+Follows the style of test_flash_attention_setup.py but simpler (the xformers service is
+much simpler than flash_attention).
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from studio.services.runtime import xformers as xs
 
 
 def test_current_status_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """importlib.metadata 找不到 xformers → installed=False。"""
+    """importlib.metadata can't find xformers -> installed=False."""
     import importlib.metadata as md
     def boom(name: str) -> str:
         raise md.PackageNotFoundError(name)
@@ -37,12 +37,12 @@ def test_current_status_installed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _torch_cuda_index — 与 flash_attention_setup.detect_env 同样从 torch 拿 ABI tag
+# _torch_cuda_index -- gets the ABI tag from torch the same way as flash_attention_setup.detect_env
 # ---------------------------------------------------------------------------
 
 
 def _patch_torch(monkeypatch: pytest.MonkeyPatch, version: str | None) -> None:
-    """注入 / 移除 fake torch 模块（version=None 模拟未装 torch）。"""
+    """Inject / remove a fake torch module (version=None simulates torch not being installed)."""
     if version is None:
         monkeypatch.setitem(sys.modules, "torch", None)  # type: ignore[arg-type]
         return
@@ -52,13 +52,13 @@ def _patch_torch(monkeypatch: pytest.MonkeyPatch, version: str | None) -> None:
 
 
 def test_torch_cuda_index_from_torch_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    """torch.__version__='2.11.0+cu128' → cu128 index URL。"""
+    """torch.__version__='2.11.0+cu128' -> cu128 index URL."""
     _patch_torch(monkeypatch, "2.11.0+cu128")
     assert xs._torch_cuda_index() == "https://download.pytorch.org/whl/cu128"
 
 
 def test_torch_cuda_index_no_cu_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CPU-only torch（无 +cu）→ None；caller 走 PyPI default。"""
+    """CPU-only torch (no +cu) -> None; caller falls back to the PyPI default."""
     _patch_torch(monkeypatch, "2.11.0")
     assert xs._torch_cuda_index() is None
 
@@ -69,19 +69,19 @@ def test_torch_cuda_index_no_torch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# disable_triton_probe — 子进程 env 注入的 triton 探测短路
+# disable_triton_probe -- short-circuits triton probing via subprocess env injection
 # ---------------------------------------------------------------------------
 
 
 def test_triton_probe_disabled() -> None:
-    """无条件设 XFORMERS_FORCE_DISABLE_TRITON=1（app 的 xformers 路径不用 triton）。"""
+    """Unconditionally sets XFORMERS_FORCE_DISABLE_TRITON=1 (the app's xformers path doesn't use triton)."""
     env: dict[str, str] = {}
     xs.disable_triton_probe(env)
     assert env == {"XFORMERS_FORCE_DISABLE_TRITON": "1"}
 
 
 def test_triton_probe_respects_explicit_value() -> None:
-    """用户显式设过（如 =0 强制探测）→ setdefault 不覆盖。"""
+    """If the user has explicitly set it (e.g. =0 to force probing) -> setdefault doesn't override it."""
     env = {"XFORMERS_FORCE_DISABLE_TRITON": "0"}
     xs.disable_triton_probe(env)
     assert env == {"XFORMERS_FORCE_DISABLE_TRITON": "0"}
@@ -97,7 +97,7 @@ def _make_pip_result(returncode: int, stdout: str = "", stderr: str = "") -> Any
 
 
 def test_install_success_with_torch_cu(monkeypatch: pytest.MonkeyPatch) -> None:
-    """成功路径：cmd 含 --index-url cu_tag；返回 status + restart_required。"""
+    """Success path: cmd contains --index-url cu_tag; returns status + restart_required."""
     _patch_torch(monkeypatch, "2.11.0+cu128")
     captured: list[list[str]] = []
     def fake_run(cmd, **_kw):
@@ -112,14 +112,14 @@ def test_install_success_with_torch_cu(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["version"] == "0.0.28"
     assert result["restart_required"] is True
     assert "Successfully installed" in result["stdout_tail"]
-    # cmd 含 --index-url cu128
+    # cmd contains --index-url cu128
     assert "--index-url" in captured[0]
     idx = captured[0].index("--index-url")
     assert captured[0][idx + 1] == "https://download.pytorch.org/whl/cu128"
 
 
 def test_install_no_torch_falls_back_to_pypi(monkeypatch: pytest.MonkeyPatch) -> None:
-    """无 torch / 无 cu 后缀 → 不传 --index-url，走 PyPI default。"""
+    """No torch / no cu suffix -> --index-url is not passed, falls back to the PyPI default."""
     _patch_torch(monkeypatch, None)
     captured: list[list[str]] = []
     def fake_run(cmd, **_kw):
@@ -135,7 +135,7 @@ def test_install_no_torch_falls_back_to_pypi(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_install_pip_failure_raises_with_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
-    """pip exit != 0 → RuntimeError 含 stderr 末尾。"""
+    """pip exit != 0 -> RuntimeError contains the tail of stderr."""
     _patch_torch(monkeypatch, "2.11.0+cu128")
     monkeypatch.setattr(
         xs.subprocess, "run",

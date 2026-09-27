@@ -14,7 +14,7 @@ from ....services.projects import jobs as project_jobs
 
 router = APIRouter()
 
-# 训练后 / 手动评估的 job kind（inline 训练时评估无 job，进训练日志）。
+# Job kinds for post-training / manual evaluation (inline eval during training has no job, goes to the training log).
 _EVAL_JOB_KINDS = ("eval_samples", "eval_clip", "eval_dino", "eval_tag", "eval_ccip")
 
 
@@ -41,14 +41,17 @@ def list_eval_metric_results_endpoint(
 def list_task_eval_jobs_endpoint(
     pid: int, vid: int, task_id: int,
 ) -> dict[str, Any]:
-    """列某 task 的训练后/手动评估 job（eval_samples/clip/dino），给前端按
-    run_id 关联 checkpoint 行 + 取原始日志（job_log_appended / GET /api/jobs/{id}/log）。
+    """List the post-training/manual evaluation jobs (eval_samples/clip/dino) for a task,
+    letting the frontend associate a checkpoint row by run_id + fetch the raw log
+    (job_log_appended / GET /api/jobs/{id}/log).
 
-    job_log_appended 事件不带 task_id，刷新会丢 live 关联，所以靠这个端点重新发现。
-    inline 训练时评估无 job（进训练日志），不在此列。
+    The job_log_appended event carries no task_id, so a refresh loses the live
+    association; this endpoint lets it be rediscovered. Inline eval during training has
+    no job (it goes into the training log), so it's excluded here.
 
-    只返回 **run 仍存在** 的 job：每次「运行评估」会删上一轮 run 文件，旧 job 的 run
-    不在了就过滤掉，合并评估日志永远只剩这次的数据。不改任何 job 状态、不污染历史。
+    Only returns jobs whose **run still exists**: each "run evaluation" deletes the
+    previous run's files, so once an old job's run is gone it's filtered out, leaving the
+    merged eval log with only this run's data. Doesn't change any job status or pollute history.
     """
     _, _, vdir = _version_dir_or_404(pid, vid)
     eval_root = task_eval_dir(task_id)
@@ -63,7 +66,7 @@ def list_task_eval_jobs_endpoint(
             continue
         run_id = params.get("run_id")
         if not run_id or not eval_samples.run_path(vdir, str(run_id), eval_root).exists():
-            continue  # run 已被清空 → 不再显示这个历史 job
+            continue  # run has been cleared -> don't show this historical job anymore
         out.append({
             "id": j.get("id"),
             "kind": j.get("kind"),

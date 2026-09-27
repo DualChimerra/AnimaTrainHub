@@ -1,10 +1,3 @@
-"""find_diffusion_pipe_root shim 行为回归（多模型 PR-2a 后）。
-
-exec-load 与外部 diffusion-pipe checkout 兼容已退役：函数收缩为常量 shim，
-返回 `modeling/anima/`（sister 契约 7 名之一，名字与返回语义保留）。
-本测试沿用 AST 抽函数独立执行的手法，避免 import 整个 model_loading
-（torch 依赖太重），保持单测轻量稳定。
-"""
 from __future__ import annotations
 
 import ast
@@ -52,7 +45,6 @@ def test_diffusion_pipe_root_env_is_ignored_with_warning(tmp_path, monkeypatch):
     logger = _RecordingLogger()
     fn = _make_fn(logger)
     root = fn()
-    # 环境变量不再改变返回值，只打一次弃用 warning
     assert root == REPO_ROOT / "modeling" / "anima"
     assert len(logger.warnings) == 1
     assert "DIFFUSION_PIPE_ROOT" in logger.warnings[0]

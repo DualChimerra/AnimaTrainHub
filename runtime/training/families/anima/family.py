@@ -1,8 +1,10 @@
-"""AnimaFamily —— Anima 族的 ModelFamily 实现（多模型 PR-2b）。
+"""AnimaFamily -- the ModelFamily implementation for the Anima family (multi-model PR-2b).
 
-行为实现分居同目录模块：loader.py（DiT/TE 加载）、forward.py（检查点前向）、
-preset.py（LoRA target）；采样与文本编码当前仍在 training.families.anima.sampling /
-training.families.anima.text_encoding（S3 迁入本目录，方法已收口在此）。
+Behavior implementations live in sibling modules in this directory:
+loader.py (DiT/TE loading), forward.py (checkpointed forward), preset.py
+(LoRA target); sampling and text encoding currently still live in
+training.families.anima.sampling / training.families.anima.text_encoding
+(moved into this directory in S3, methods are funneled through here).
 """
 
 from __future__ import annotations
@@ -16,11 +18,12 @@ from training.families.anima.preset import ANIMA_PRESET
 class AnimaFamily:
     spec = ANIMA_SPEC
 
-    # ── 加载 ─────────────────────────────────────────────────────────────
+    # -- Loading --------------------------------------------------------
     def load_dit(self, path, device, dtype, *,
                  attention_backend: str = "flash_attn", repo_root=None,
                  purpose: str = "train", blocks_to_swap: int = 0):
-        # purpose 是量化推理旋钮（krea2 fp8）；Anima 无量化形态，接受并忽略
+        # purpose is a quantized-inference knob (krea2 fp8); Anima has no
+        # quantized form, so it's accepted and ignored.
         del purpose
         from training.families.anima.loader import load_anima_model
         from training.model_loading import enable_xformers
@@ -35,10 +38,13 @@ class AnimaFamily:
         return model
 
     def swappable_blocks(self, *, checkpoint_path: str | None = None) -> int:
-        """可换出的层数上限（= DiT 主干层数）。block swap 预检搜推荐值要这个上界。
+        """Upper bound on the number of swappable layers (= DiT backbone layer count).
+        The block-swap preflight recommendation needs this upper bound.
 
-        Anima 的层数由 checkpoint 决定（2B=28 层 / 14B=36 层），所以必须给
-        ``checkpoint_path``；读不到返回 0，预检据此整块跳过（退化成旧行为）。
+        Anima's layer count is determined by the checkpoint (2B=28 layers /
+        14B=36 layers), so ``checkpoint_path`` must be given; if it can't be
+        read this returns 0, and the preflight skips the whole check based on
+        that (degrading to the old behavior).
         """
         if not checkpoint_path:
             return 0
@@ -51,12 +57,15 @@ class AnimaFamily:
 
     def swapped_param_ratio(self, blocks_to_swap: int, *,
                             checkpoint_path: str | None = None) -> float:
-        """换出层占全模型参数的比例（显存预算折扣用，krea2 同款语义）。
+        """Fraction of total model parameters held by the swapped-out layers
+        (used for the VRAM budget discount, same semantics as krea2).
 
-        Anima 的层数由 checkpoint 决定（2B=28 层 / 14B=36 层），不能像 krea2
-        那样按固定 config 数 meta 参数 —— 从 safetensors header 数 numel，
-        天然版本无关。未给路径 / 读失败返回 0：护栏退化为保守（按完整模型
-        预算显存，不会误放行）。
+        Anima's layer count is determined by the checkpoint (2B=28 layers /
+        14B=36 layers), so it can't count meta parameters from a fixed config
+        the way krea2 does -- instead it counts numel from the safetensors
+        header, which is naturally version-independent. If no path is given
+        or reading fails, this returns 0: the guard degrades to conservative
+        (budgets VRAM as if for the full model, never wrongly lets it through).
         """
         if blocks_to_swap <= 0 or not checkpoint_path:
             return 0.0
@@ -68,7 +77,8 @@ class AnimaFamily:
             return 0.0
 
     def load_vae(self, path, device, dtype, *, tiling: str = "auto"):
-        # 跨族共享实现（D6）；方法留在 family 上，第 3 族 VAE 不同款时零迁移
+        # Shared implementation across families (D6); kept as a method on
+        # family so a 3rd family with a different VAE needs zero migration.
         from training.vae import load_vae
 
         return load_vae(path, device, dtype, None, tiling=tiling)
@@ -79,34 +89,37 @@ class AnimaFamily:
                   cache_enabled: bool = True):
         from training.families.anima.loader import load_text_encoders
 
-        # purpose 接受并忽略（load_dit 同款）：Anima 的 TE backend 只由调用方
-        # 显式 comfy_qwen 决定——generate 调用面传 purpose 不得覆盖用户选择的
-        # text_encoder_backend（默认 hf）。
+        # purpose is accepted and ignored (same as load_dit): Anima's TE
+        # backend is decided only by the caller's explicit comfy_qwen flag --
+        # the generate call site passing purpose must not override the
+        # user-selected text_encoder_backend (default hf).
         return load_text_encoders(
             text_encoder_path, t5_tokenizer_path, device, dtype,
             comfy_qwen=comfy_qwen,
             t5_fast=t5_fast,
         )
 
-    # ── 文本条件 ─────────────────────────────────────────────────────────
+    # -- Text conditioning ------------------------------------------------
     def prepare_text_cache(self, captions: Iterable[str],
                            extra_prompts: Iterable[str], *, cache_entries=(),
                            cache_root=None, text=None, device=None,
                            dtype=None) -> None:
-        return None  # Anima 每步在线编码（spec.text.strategy="online"），无缓存
+        return None  # Anima encodes online every step (spec.text.strategy="online"), no cache
 
     def encode_text_for_batch(self, text, dit, captions, device, dtype, *,
                               comfy_encoding: bool = True, kv_trim: bool = False,
                               return_t5_attn: bool = False):
-        """每步在线编码（自 loop.py 文本块下沉，行为零变化）。
+        """Online encoding per step (moved down from the loop.py text block, behavior unchanged).
 
-        comfy_encoding=True（默认）：raw caption 进 Qwen；T5 整段字面 tokenize，
-        与测试出图 / 训练预览 conditioning 同一链路。False = legacy A/B 路径。
-        返回 cross —— 对循环 opaque（03 §2.7-4）。
+        comfy_encoding=True (default): raw caption goes into Qwen; T5 tokenizes
+        the whole string literally, same pipeline as test-generation / training
+        preview conditioning. False = the legacy A/B path.
+        Returns cross -- opaque to the loop (03 S2.7-4).
 
-        return_t5_attn=True 时返回 (cross, t5_attn)：NaViT 打包需要逐图
-        attention mask 做 cross-attn padding 截断。navit 是 Anima 能力位（D5），
-        该 kwarg 为族私有、不进 protocol。
+        When return_t5_attn=True, returns (cross, t5_attn): NaViT packing needs
+        a per-image attention mask to truncate cross-attn padding. navit is an
+        Anima capability bit (D5), so this kwarg is family-private and not part
+        of the protocol.
         """
         import torch
         import torch.nn.functional as F
@@ -132,12 +145,12 @@ class AnimaFamily:
             t5_ids = t5_ids.to(device)
             t5_attn = t5_attn.to(device)
             t5_w = t5_w.to(device, dtype=torch.float32)
-            # t5_w 在 preprocess_text_embeds 内乘到 LLMAdapter 输出上（ComfyUI 对齐）
+            # t5_w is multiplied into the LLMAdapter output inside preprocess_text_embeds (ComfyUI parity)
             cross = dit.preprocess_text_embeds(qwen_emb, t5_ids, t5xxl_weights=t5_w)
             if cross.shape[1] < max_len:
                 cross = F.pad(cross, (0, 0, 0, max_len - cross.shape[1]))
             if kv_trim:
-                # KV trim：padding 截到最近有效 token bucket（64/128/256/512）
+                # KV trim: truncate padding down to the nearest valid token bucket (64/128/256/512)
                 _actual = int(t5_attn.sum(dim=-1).max().item())
                 _bucket = max_len
                 for _b in (64, 128, 256, max_len):
@@ -149,10 +162,10 @@ class AnimaFamily:
             return cross, t5_attn
         return cross
 
-    # ── 训练前向 / 采样 ──────────────────────────────────────────────────
+    # -- Training forward / sampling --------------------------------------
     def forward_train(self, dit, noisy, t, cond, *, use_checkpoint: bool = False):
-        """v_pred = f(noisy, t, cond)。pad_mask（concat_padding_mask 私有输入）
-        与 t 形状按摩（(B,)→(B,1)）为族内部事务（03-③）。"""
+        """v_pred = f(noisy, t, cond). pad_mask (concat_padding_mask private
+        input) and reshaping t ((B,)->(B,1)) are family-internal concerns (03-3)."""
         import torch
 
         from training.families.anima.forward import forward_with_optional_checkpoint
@@ -169,14 +182,16 @@ class AnimaFamily:
     def sample_image(self, model, vae, text, prompt, **kwargs):
         from training.families.anima.sampling import sample_image
 
-        # distilled 是蒸馏推理族（Krea2 Turbo）的旋钮；Anima 无蒸馏变体，
-        # 接受并忽略（调用方按统一协议传，无需按族分支）。vram_policy
-        # 同理——Anima 的 TE 常驻编排暂不参与显存策略。
+        # distilled is a knob for distilled-inference families (Krea2
+        # Turbo); Anima has no distilled variant, so it's accepted and
+        # ignored (callers pass it per the unified protocol, no need to
+        # branch by family). Same for vram_policy -- Anima's resident TE
+        # orchestration doesn't participate in the VRAM policy yet.
         kwargs.pop("distilled", None)
         kwargs.pop("vram_policy", None)
         return sample_image(model, vae, *text, prompt, **kwargs)
 
-    # ── LoRA 产物 ────────────────────────────────────────────────────────
+    # -- LoRA output --------------------------------------------------------
     def lora_preset(self) -> dict[str, Any]:
         return ANIMA_PRESET
 
@@ -187,4 +202,4 @@ class AnimaFamily:
         }
 
     def convert_lora_state_dict(self, sd: dict) -> dict:
-        return sd  # kohya 格式即产物格式（04 §7.1），恒等
+        return sd  # kohya format is already the output format (04 S7.1), identity

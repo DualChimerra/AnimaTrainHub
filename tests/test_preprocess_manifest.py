@@ -1,4 +1,4 @@
-"""preprocess_manifest: 项目级 read-only fallback（写路径见 train_* / 见 test_train_manifest_mutations.py）。"""
+"""preprocess_manifest: project-level read-only fallback (write path is in train_* / see test_train_manifest_mutations.py)."""
 from __future__ import annotations
 
 import json
@@ -43,7 +43,7 @@ def test_load_invalid_shape_returns_empty(project_dir: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # resolve / resolve_origin / entry_origin / get_entry
-# 仅保留 thumb endpoint 仍要用的 read 路径。
+# Only keeps the read path still used by the thumb endpoint.
 # ---------------------------------------------------------------------------
 
 
@@ -73,7 +73,7 @@ def test_resolve_origin_returns_derivatives(project_dir: Path) -> None:
     })
     paths = pm.resolve_origin(project_dir, "X.jpg")
     assert sorted(p.name for p in paths) == ["X_c0.png", "X_c1.png"]
-    # 不匹配 → fallback download
+    # No match -> fallback to download
     assert pm.resolve_origin(project_dir, "ghost.jpg") == [
         project_dir / "download" / "ghost.jpg"
     ]

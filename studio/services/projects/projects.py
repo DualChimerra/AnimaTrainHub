@@ -1,14 +1,14 @@
-"""Project 数据模型 + 物理目录 (ADR-0007: project 极简，无过程状态)。
+"""Project data model + physical directories (ADR-0007: project is minimal, no process state).
 
-Project 是 Pipeline 的最外层容器：每次 LoRA 训练对应一个 project，
-包含 download/ 和若干 versions/。slug 一旦生成就不可改（路径锚点）；
-title 和 note 可改。
+Project is the outermost container of the Pipeline: each LoRA training run corresponds to one project,
+containing download/ and any number of versions/. Once generated, slug is immutable (it's the path anchor);
+title and note can be changed.
 
-删除：直接 rmtree 项目目录 + DELETE db 行（CASCADE 清 versions /
-project_jobs）。无回收站、不可恢复 —— UI 层 confirm 提示用户。
+Delete: rmtree the project directory directly + DELETE the db row (CASCADE clears versions /
+project_jobs). No trash bin, not recoverable -- the UI layer confirms with the user first.
 
-归档（v12）：archived_at 非 NULL = 归档，仅做列表软隐藏（目录 / versions /
-任务全部原样）。UI 上"×"先归档，归档视图里再删才走 delete_project。
+Archive (v12): archived_at non-NULL = archived, only a soft hide from listings (directory / versions /
+tasks are all left as-is). In the UI, "x" archives first; deleting again from the archive view is what actually calls delete_project.
 """
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ from studio.domain.errors import DomainError
 
 
 class ProjectError(DomainError):
-    """Project 业务错误（不存在 / 名字非法 / 冲突）。
+    """Project business error (not found / invalid name / conflict).
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    PR-2 C3 added a DomainError base -- the handler auto-translates it into the dual-write envelope.
     """
     default_code = "project.error"
 
@@ -43,13 +43,13 @@ _NON_SLUG = re.compile(r"[^a-z0-9]+")
 
 
 def slugify(title: str) -> str:
-    """转 ASCII 小写 + 连字符。空串 / 全非 ASCII → 'project'。"""
+    """Converts to lowercase ASCII + hyphens. Empty string / all-non-ASCII -> 'project'."""
     s = _NON_SLUG.sub("-", title.lower()).strip("-")
     return s or "project"
 
 
 def _unique_slug(conn: sqlite3.Connection, base: str) -> str:
-    """如果 base 已被占用，加 -2 -3 后缀直到不冲突。"""
+    """If base is already taken, appends -2 -3 etc. suffixes until there's no conflict."""
     n = 1
     candidate = base
     while conn.execute(
@@ -70,7 +70,7 @@ def project_dir(project_id: int, slug: str) -> Path:
 
 
 def _write_project_json(p: dict[str, Any]) -> None:
-    """同步 project.json 到磁盘。active_version_id 等字段冗余存。"""
+    """Syncs project.json to disk. Fields like active_version_id are stored redundantly."""
     pdir = project_dir(p["id"], p["slug"])
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "project.json").write_text(
@@ -100,9 +100,9 @@ def create_project(
         raise ProjectError(
             "Project title is required", code="project.title_required",
         )
-    # 用户可在创建时显式指定 slug（前端已校验为 ASCII）。这里仍统一过一遍
-    # slugify：既归一化大小写 / 非法字符，也防 API 直连绕过前端校验。留空 / 清理
-    # 后为空 → 回退到从 title 派生（全非 ASCII title 仍走 "project" 兜底）。
+    # The user can explicitly specify a slug at creation time (already validated as ASCII by the frontend). This still runs it through
+    # slugify once more: normalizes case / illegal characters, and also guards against API callers bypassing frontend validation. If it ends up
+    # empty after cleanup -> falls back to deriving from title (an all-non-ASCII title still falls back to "project").
     slug = (slug or "").strip()
     base_slug = slugify(slug) if slug else slugify(title)
     final_slug = _unique_slug(conn, base_slug)
@@ -176,8 +176,8 @@ def update_project(
 def set_archived(
     conn: sqlite3.Connection, project_id: int, archived: bool
 ) -> dict[str, Any]:
-    """归档 / 取消归档。只写 archived_at，不动 updated_at —— 恢复后项目
-    在"按活跃时间"排序里回到原来的位置，而不是顶到最前。"""
+    """Archive / unarchive. Only writes archived_at, doesn't touch updated_at -- so after unarchiving, the project
+    returns to its original spot in "sort by activity time" instead of jumping to the front."""
     _must_get(conn, project_id)
     conn.execute(
         "UPDATE projects SET archived_at = ? WHERE id = ?",
@@ -190,7 +190,7 @@ def set_archived(
 
 
 def delete_project(conn: sqlite3.Connection, project_id: int) -> None:
-    """rmtree 项目目录 + DELETE db 行（CASCADE 清掉 versions/project_jobs）。不可恢复。"""
+    """rmtree the project directory + DELETE the db row (CASCADE clears versions/project_jobs). Not recoverable."""
     p = _must_get(conn, project_id)
     src = project_dir(p["id"], p["slug"])
     if src.exists():
@@ -205,8 +205,8 @@ def delete_project(conn: sqlite3.Connection, project_id: int) -> None:
 
 
 def stats_for_project(p: dict[str, Any]) -> dict[str, Any]:
-    """轻量统计：download/ 与 preprocess/ 下的图片数量。version 级统计在 versions.py。"""
-    from ...services.dataset.scan import IMAGE_EXTS  # 复用既有扩展名集
+    """Lightweight stats: image counts under download/ and preprocess/. Version-level stats live in versions.py."""
+    from ...services.dataset.scan import IMAGE_EXTS  # reuse the existing extension set
 
     pdir = project_dir(p["id"], p["slug"])
 

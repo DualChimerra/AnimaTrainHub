@@ -1,18 +1,18 @@
 #!/usr/bin/env python
 """
-验证本地模型是否可以正常加载
-测试 Qwen tokenizer/model 和 T5 tokenizer
+Validate that local models load correctly.
+Tests the Qwen tokenizer/model and the T5 tokenizer.
 """
 import os
 import sys
 from pathlib import Path
 
-# 禁用联网（验证真正离线可用）
+# Disable network access (verify the models are truly usable offline)
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 def test_t5_tokenizer():
-    """测试 T5 tokenizer 加载"""
+    """Test loading the T5 tokenizer."""
     print("=" * 60)
     print("1. Testing T5 Tokenizer...")
     print("=" * 60)
@@ -26,7 +26,7 @@ def test_t5_tokenizer():
         tokenizer = T5Tokenizer.from_pretrained(str(t5_path), local_files_only=True)
         print("   [OK] T5Tokenizer loaded successfully")
         
-        # 测试 tokenize
+        # Test tokenizing
         test_text = "masterpiece, best quality, 1girl, smile"
         tokens = tokenizer(test_text, return_tensors="pt")
         print(f"   [OK] Tokenize test: input_ids shape = {tokens.input_ids.shape}")
@@ -37,7 +37,7 @@ def test_t5_tokenizer():
 
 
 def test_qwen_tokenizer():
-    """测试 Qwen tokenizer 加载"""
+    """Test loading the Qwen tokenizer."""
     print("\n" + "=" * 60)
     print("2. Testing Qwen Tokenizer...")
     print("=" * 60)
@@ -55,7 +55,7 @@ def test_qwen_tokenizer():
         )
         print("   [OK] AutoTokenizer loaded successfully")
         
-        # 测试 tokenize
+        # Test tokenizing
         test_text = "masterpiece, best quality, 1girl, smile"
         tokens = tokenizer(test_text, return_tensors="pt")
         print(f"   [OK] Tokenize test: input_ids shape = {tokens.input_ids.shape}")
@@ -66,7 +66,7 @@ def test_qwen_tokenizer():
 
 
 def test_qwen_model():
-    """测试 Qwen 模型加载（仅检查能否加载，不运行推理）"""
+    """Test loading the Qwen model (only checks that it loads, doesn't run inference)."""
     print("\n" + "=" * 60)
     print("3. Testing Qwen Model Loading...")
     print("=" * 60)
@@ -78,7 +78,7 @@ def test_qwen_model():
     print(f"   Path: {qwen_path}")
     
     try:
-        # 只加载到 CPU，验证文件完整性
+        # Load to CPU only, to verify file integrity
         model = AutoModelForCausalLM.from_pretrained(
             str(qwen_path),
             torch_dtype=torch.float16,
@@ -88,8 +88,8 @@ def test_qwen_model():
         )
         print(f"   [OK] AutoModelForCausalLM loaded successfully")
         print(f"   [OK] Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-        
-        # 释放内存
+
+        # Free memory
         del model
         return True
     except Exception as e:
@@ -98,7 +98,7 @@ def test_qwen_model():
 
 
 def test_encode_workflow():
-    """测试 anima_train.py 中的 encode 函数"""
+    """Test the encode_qwen + tokenize_t5 workflow used in anima_train.py."""
     print("\n" + "=" * 60)
     print("4. Testing encode_qwen + tokenize_t5 workflow...")
     print("=" * 60)
@@ -111,15 +111,15 @@ def test_encode_workflow():
     t5_path = base_path / "t5_tokenizer"
     
     try:
-        # 加载 tokenizers
+        # Load tokenizers
         qwen_tokenizer = AutoTokenizer.from_pretrained(
             str(qwen_path), trust_remote_code=True, local_files_only=True
         )
         t5_tokenizer = T5Tokenizer.from_pretrained(str(t5_path), local_files_only=True)
-        
-        # 测试 prompt
+
+        # Test prompt
         test_prompt = "masterpiece, best quality, newest, safe, 1girl, komazawa_noi, spacetime_kaguya, long hair, smile"
-        
+
         # Qwen tokenize
         qwen_inputs = qwen_tokenizer(
             test_prompt, return_tensors="pt", padding=True,
@@ -148,14 +148,14 @@ def main():
     print("#" * 60 + "\n")
     
     results = []
-    
-    # 运行测试
+
+    # Run tests
     results.append(("T5 Tokenizer", test_t5_tokenizer()))
     results.append(("Qwen Tokenizer", test_qwen_tokenizer()))
     results.append(("Qwen Model", test_qwen_model()))
     results.append(("Encode Workflow", test_encode_workflow()))
-    
-    # 汇总
+
+    # Summary
     print("\n" + "=" * 60)
     print("Summary:")
     print("=" * 60)

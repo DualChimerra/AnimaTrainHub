@@ -1,5 +1,6 @@
-/** R-5 — 数据任务视图（与 GPU 视图同源 /api/queue，resource_class=data）：
- *  分区渲染 / 行点击进统一详情 /queue/:id / 取消走 cancelTask（confirm）。 */
+/** R-5 -- data task view (shares /api/queue with the GPU view, resource_class=data):
+ *  sectioned rendering / row click goes to the unified detail page /queue/:id /
+ *  cancel goes through cancelTask (with confirm). */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -69,7 +70,7 @@ function renderPanel(kind: TaskType | null = null, q?: string) {
 }
 
 describe('DataJobsPanel', () => {
-  it('渲染进行中/历史分区，行显示 kind 标签和项目名', async () => {
+  it('renders active/history sections; each row shows the kind label and project name', async () => {
     vi.spyOn(api, 'listQueueLive').mockResolvedValue([
       makeJobTask({ id: 10, task_type: 'tag', status: 'running' }),
     ])
@@ -83,12 +84,12 @@ describe('DataJobsPanel', () => {
     renderPanel()
 
     await waitFor(() => expect(screen.getByTestId('job-row-10')).toBeInTheDocument())
-    expect(within(screen.getByTestId('job-row-10')).getByText('打标')).toBeInTheDocument()
-    expect(within(screen.getByTestId('job-row-9')).getByText('素材下载')).toBeInTheDocument()
+    expect(within(screen.getByTestId('job-row-10')).getByText('Tagging')).toBeInTheDocument()
+    expect(within(screen.getByTestId('job-row-9')).getByText('Download')).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText(/MyProj/).length).toBeGreaterThan(0))
   })
 
-  it('数据源 = /api/queue resource_class=data（kind/q 透传）', async () => {
+  it('data source is /api/queue resource_class=data (kind/q passed through)', async () => {
     const liveSpy = vi.spyOn(api, 'listQueueLive').mockResolvedValue([])
     const histSpy = vi.spyOn(api, 'listQueueHistory').mockResolvedValue({
       items: [], total: 0, page: 1, page_size: 20,
@@ -103,7 +104,7 @@ describe('DataJobsPanel', () => {
     )
   })
 
-  it('点行 → 跳统一详情页 /queue/{id}（与 GPU 任务同构）', async () => {
+  it('clicking a row navigates to the unified detail page /queue/{id} (isomorphic to GPU tasks)', async () => {
     vi.spyOn(api, 'listQueueLive').mockResolvedValue([makeJobTask({ id: 10 })])
     vi.spyOn(api, 'listQueueHistory').mockResolvedValue({
       items: [], total: 0, page: 1, page_size: 20,
@@ -115,7 +116,7 @@ describe('DataJobsPanel', () => {
     await waitFor(() => expect(screen.getByTestId('task-detail-route')).toBeInTheDocument())
   })
 
-  it('取消需 confirm，确认后调 cancelTask（统一队列取消端点）', async () => {
+  it('cancel requires confirm; confirming calls cancelTask (the unified queue cancel endpoint)', async () => {
     vi.spyOn(api, 'listQueueLive').mockResolvedValue([makeJobTask({ id: 10 })])
     vi.spyOn(api, 'listQueueHistory').mockResolvedValue({
       items: [], total: 0, page: 1, page_size: 20,
@@ -130,11 +131,11 @@ describe('DataJobsPanel', () => {
 
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
     expect(cancelSpy).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByText('取消任务', { selector: 'button[type="submit"]' }))
+    fireEvent.click(screen.getByText('Cancel task', { selector: 'button[type="submit"]' }))
     await waitFor(() => expect(cancelSpy).toHaveBeenCalledWith(10))
   })
 
-  it('done 行没有取消按钮，有跳转按钮', async () => {
+  it('a done row has no cancel button but has a jump button', async () => {
     vi.spyOn(api, 'listQueueLive').mockResolvedValue([])
     vi.spyOn(api, 'listQueueHistory').mockResolvedValue({
       items: [makeJobTask({ id: 9, status: 'done', finished_at: 2000 })],

@@ -1,7 +1,9 @@
-"""自定义本地主模型（custom Anima）：路径解析 + catalog 暴露 + 增删端点。
+"""Custom local main model (custom Anima): path resolution + catalog exposure +
+add/remove endpoints.
 
-覆盖 feat：设置页 PathPicker 注册本地 .safetensors 主模型，驱动训练新建默认
-+ 测试出图（在微调权重上炼丹 / 验证）。
+Covers the feature: the settings page's PathPicker registers a local .safetensors
+main model, driving new training defaults + test generation (training / verifying
+on top of fine-tuned weights).
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from studio.services import models as model_downloader
 
 
 def _secrets(tmp_path: Path, *, selected: str = "1.0", custom: list[str] | None = None):
-    """构造一份 root 指到 tmp_path 的 Secrets（models_root() → tmp_path）。"""
+    """Build a Secrets whose root points at tmp_path (models_root() -> tmp_path)."""
     return secrets.Secrets(models={
         "root": str(tmp_path),
         "selected_anima": selected,
@@ -23,7 +25,7 @@ def _secrets(tmp_path: Path, *, selected: str = "1.0", custom: list[str] | None 
 
 
 # ---------------------------------------------------------------------------
-# selected_anima_transformer_path 解析
+# selected_anima_transformer_path resolution
 # ---------------------------------------------------------------------------
 
 
@@ -42,8 +44,9 @@ def test_resolver_uses_custom_path_when_selected_and_exists(
 def test_resolver_falls_back_to_variant_when_custom_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """选中的 custom 路径文件不存在（被删/移走）→ 回退到当前 variant，不返回死路径。"""
-    ghost = tmp_path / "gone.safetensors"  # 不创建
+    """Selected custom path file does not exist (deleted/moved) -> falls back to the
+    current variant, never returns a dead path."""
+    ghost = tmp_path / "gone.safetensors"  # not created
     monkeypatch.setattr(
         secrets, "load",
         lambda: _secrets(tmp_path, selected=str(ghost), custom=[str(ghost)]),
@@ -73,15 +76,16 @@ def test_default_paths_for_new_version_follows_custom(
     )
     paths = model_downloader.default_paths_for_new_version()
     assert paths["transformer_path"] == str(custom)
-    # 其余三件套仍走标准位置（微调复用同一套 VAE/TE/T5）
+    # The other three components still use the standard location (fine-tune reuses
+    # the same VAE/TE/T5 set)
     assert paths["vae_path"] == str(model_downloader.qwen_image_vae_target(tmp_path))
 
 
 def test_generate_resolver_follows_selected_custom(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """测试/出图页 deps._resolve_model_paths 跟随 selected_anima（含 custom），
-    不再写死 v1.0。"""
+    """The test/generate page's deps._resolve_model_paths follows selected_anima
+    (including custom), no longer hardcoded to v1.0."""
     from studio.api import deps
 
     custom = tmp_path / "ft.safetensors"
@@ -94,20 +98,21 @@ def test_generate_resolver_follows_selected_custom(
 
 
 # ---------------------------------------------------------------------------
-# base_model 本次请求覆盖（先验生成 / 测试出图页「底模」下拉）
+# base_model per-request override (prior generation / test-generate page's "base model" dropdown)
 # ---------------------------------------------------------------------------
 
 
 def test_base_model_override_picks_variant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """override 指定非默认官方 variant → 只换 transformer，无视 selected。"""
+    """override specifies a non-default official variant -> only swaps the
+    transformer, ignoring selected."""
     monkeypatch.setattr(secrets, "load", lambda: _secrets(tmp_path, selected="1.0"))
     paths = model_downloader.default_paths_for_new_version("preview3-base")
     assert paths["transformer_path"] == str(
         model_downloader.anima_main_target(tmp_path, "preview3-base")
     )
-    # 其余三件套仍跟随全局，不受 override 影响
+    # The other three components still follow the global setting, unaffected by the override
     assert paths["vae_path"] == str(model_downloader.qwen_image_vae_target(tmp_path))
 
 
@@ -124,7 +129,8 @@ def test_base_model_override_picks_custom(
 def test_base_model_override_none_follows_selected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """None / 空 → 回退 selected_anima（保持原有「跟随设置」行为）。"""
+    """None / empty -> falls back to selected_anima (preserves the original
+    "follows the setting" behavior)."""
     monkeypatch.setattr(
         secrets, "load", lambda: _secrets(tmp_path, selected="preview2")
     )
@@ -137,8 +143,9 @@ def test_base_model_override_none_follows_selected(
 def test_base_model_override_missing_custom_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """override 给了不存在的 custom 路径 → 回退 selected，不返回死路径。"""
-    ghost = tmp_path / "gone.safetensors"  # 不创建
+    """override given a custom path that does not exist -> falls back to selected,
+    never returns a dead path."""
+    ghost = tmp_path / "gone.safetensors"  # not created
     monkeypatch.setattr(secrets, "load", lambda: _secrets(tmp_path, selected="1.0"))
     resolved = model_downloader.anima_transformer_path_for(str(ghost))
     assert resolved == str(model_downloader.anima_main_target(tmp_path, "1.0"))
@@ -147,7 +154,7 @@ def test_base_model_override_missing_custom_falls_back(
 def test_resolve_model_paths_threads_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """deps._resolve_model_paths(base_model) 透传到 transformer_path。"""
+    """deps._resolve_model_paths(base_model) passes through to transformer_path."""
     from studio.api import deps
 
     monkeypatch.setattr(secrets, "load", lambda: _secrets(tmp_path, selected="1.0"))
@@ -156,7 +163,7 @@ def test_resolve_model_paths_threads_override(
 
 
 # ---------------------------------------------------------------------------
-# catalog 暴露 custom 列表
+# catalog exposes the custom list
 # ---------------------------------------------------------------------------
 
 
@@ -193,13 +200,14 @@ def test_build_catalog_custom_marks_missing_file(
 
 
 # ---------------------------------------------------------------------------
-# 增删端点
+# add/remove endpoints
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def fake_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """内存模拟 secrets 持久化：load 返回当前值，save 落回内存。"""
+    """In-memory simulation of secrets persistence: load returns the current value,
+    save writes back into memory."""
     state = {"s": _secrets(tmp_path)}
     monkeypatch.setattr(secrets, "load", lambda: state["s"])
     monkeypatch.setattr(secrets, "save", lambda s: state.update(s=s))
@@ -219,7 +227,7 @@ def test_add_custom_anima_registers_and_dedupes(
     assert fake_store["s"].models.custom_anima_paths == [str(f)]
     assert any(c["path"] == str(f) for c in cat["anima_main"]["custom"])
 
-    # 重复添加不产生第二条
+    # Adding again does not produce a second entry
     add_model_source(
         "anima", ModelSourceCandidateRequest(kind="local", path=str(f)))
     assert fake_store["s"].models.custom_anima_paths == [str(f)]
@@ -264,7 +272,7 @@ def test_remove_custom_anima_resets_selected_when_current(
     remove_model_source(
         "anima", ModelSourceCandidateRequest(kind="local", path=a))
     assert state["s"].models.custom_anima_paths == [b]
-    # 删的是当前默认 → 重置回最新官方 variant
+    # The one removed is the current default -> resets back to the latest official variant
     assert state["s"].models.selected_anima == model_downloader.LATEST_ANIMA
 
 
@@ -283,4 +291,4 @@ def test_remove_custom_anima_keeps_selected_when_other(
     remove_model_source(
         "anima", ModelSourceCandidateRequest(kind="local", path=b))
     assert state["s"].models.custom_anima_paths == [a]
-    assert state["s"].models.selected_anima == a  # 未动当前默认
+    assert state["s"].models.selected_anima == a  # current default untouched

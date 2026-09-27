@@ -1,4 +1,5 @@
-"""Per-router 请求 / 响应 pydantic 模型集中地（PR-5 起从 server.py inline BaseModel 抽出）。
+"""Central home for per-router request/response pydantic models (extracted from server.py
+inline BaseModels starting in PR-5).
 
-每个文件对应一个 router：api/schemas/presets.py ↔ api/routers/presets.py
+Each file corresponds to one router: api/schemas/presets.py <-> api/routers/presets.py
 """

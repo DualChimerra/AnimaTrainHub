@@ -1,18 +1,20 @@
 #!/usr/bin/env python
-"""Bootstrap helper: 按检测到的 NVIDIA 驱动版本输出 PyTorch wheel index URL。
+"""Bootstrap helper: prints the PyTorch wheel index URL for the detected NVIDIA driver version.
 
-studio.bat / studio.sh 在 venv **首装**时调本脚本，先按 GPU 装对的 torch，再装
-requirements.txt。约束 `torch>=2.0.0` 已被首步满足，pip 不会再覆盖成 PyPI 默认 CPU 版。
+studio.bat / studio.sh calls this script on the **first** venv install, to install
+the right torch build for the GPU before requirements.txt. The `torch>=2.0.0`
+constraint is already satisfied by that first step, so pip won't later overwrite it
+with the default PyPI CPU build.
 
-Stdlib only —— 在 venv 刚装好（只有 pip + setuptools）时也能跑。
+Stdlib only -- must run right after the venv is created (only pip + setuptools present).
 
-输出：
-- 检测到合适驱动 → stdout 一行 URL，如 `https://download.pytorch.org/whl/cu128`
-- 没装 nvidia-smi / 解析失败 / 驱动太旧 → 静默无输出（caller 用 PyPI 默认）
-- 永远 exit 0，不让 bootstrap 因这一项 fail
+Output:
+- Suitable driver detected -> one URL line on stdout, e.g. `https://download.pytorch.org/whl/cu128`
+- nvidia-smi missing / parse failure / driver too old -> silent, no output (caller falls back to PyPI default)
+- Always exits 0, so bootstrap never fails because of this step
 
-驱动→cu wheel 映射：与 studio/services/torch_setup.py:_DRIVER_TO_BEST_CU 同步。
-单独 duplicate 是为了 bootstrap 阶段不依赖 studio.services 子模块加载链。
+Driver -> cu wheel mapping: kept in sync with studio/services/torch_setup.py:_DRIVER_TO_BEST_CU.
+Duplicated here so the bootstrap stage doesn't depend on the studio.services submodule load chain.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ import re
 import subprocess
 import sys
 
-# 注：维护此表时同步更新 studio/services/torch_setup.py:_DRIVER_TO_BEST_CU
+# Note: keep this table in sync with studio/services/torch_setup.py:_DRIVER_TO_BEST_CU
 _DRIVER_TO_CU: list[tuple[int, str]] = [
     (555, "cu128"),
     (550, "cu126"),
@@ -31,7 +33,7 @@ _PYPI_BASE = "https://download.pytorch.org/whl"
 
 
 def detect_driver_major() -> int | None:
-    """跑 nvidia-smi 拿驱动版本主号；失败 / 不存在返回 None。"""
+    """Run nvidia-smi to get the driver major version; returns None on failure / if absent."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
@@ -52,7 +54,7 @@ def detect_driver_major() -> int | None:
 
 
 def select_index_url(driver_major: int | None) -> str | None:
-    """driver 主号 → PyTorch wheel index URL；驱动太旧 / None → None。"""
+    """Driver major version -> PyTorch wheel index URL; too old / None -> None."""
     if driver_major is None:
         return None
     for threshold, tag in _DRIVER_TO_CU:
@@ -64,7 +66,7 @@ def select_index_url(driver_major: int | None) -> str | None:
 def main() -> int:
     url = select_index_url(detect_driver_major())
     if url:
-        # 不带换行 —— shell `for /f` / `$()` 处理时少踩坑
+        # No trailing newline -- avoids pitfalls when shell `for /f` / `$()` capture it
         sys.stdout.write(url)
     return 0
 

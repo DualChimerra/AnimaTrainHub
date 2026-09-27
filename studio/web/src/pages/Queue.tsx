@@ -18,7 +18,7 @@ import { buildTrainingForecast } from '../lib/queueEstimates'
 import { useQueueFormat, type QueueFormat } from '../lib/queueFormat'
 import { jobJumpPath } from './queue/jobUtils'
 
-/** 备注输入上限 —— 与后端 _MAX_NOTE_LEN 对齐（超了后端截断，这里先拦住）。 */
+/** Note input cap -- matches the backend's _MAX_NOTE_LEN (the backend truncates past this; we block it here first). */
 const MAX_NOTE_LEN = 500
 /** Finished tasks shown before "show more" (the list can hold hundreds). */
 const HISTORY_STEP = 30
@@ -67,21 +67,22 @@ export default function QueuePage() {
   const { toast } = useToast()
   const { confirm, prompt } = useDialog()
   const navigate = useNavigate()
-  // 右键菜单（备注 / 采样条）：null = 关闭；否则记录锚点坐标 + 目标 task。
+  // Context menu (note / sample strip): null = closed; otherwise holds anchor coords + target task.
   const [menu, setMenu] = useState<{ x: number; y: number; task: Task } | null>(null)
   // Sample strips open per task on request (the mockup cards carry none by default).
-  const [stripsShown, setStripsShown] = useState<ReadonlySet<number>>(new Set())
+  // Sample strips are shown by default; this holds the ones the user folded.
+  const [stripsHidden, setStripsHidden] = useState<ReadonlySet<number>>(new Set())
   // null = not chosen yet: active tasks when there are any, otherwise everything.
   const [pickedFilter, setFilter] = useState<ListFilter | null>(null)
   const [historyLimit, setHistoryLimit] = useState(HISTORY_STEP)
   const [dragId, setDragId] = useState<number | null>(null)
   const [overId, setOverId] = useState<number | null>(null)
 
-  // ADR 0006：队列挂起状态，banner + holdModal 用。
+  // ADR 0006: queue-hold state, used by the banner + holdModal.
   const [holdState, setHoldState] = useState<QueueHoldState | null>(null)
   const [holdModalOpen, setHoldModalOpen] = useState(false)
   const [pausingTaskId, setPausingTaskId] = useState<number | null>(null)
-  // ADR 0006 Addendum 1 §UI：确认 modal 先于 PauseProgressModal。
+  // ADR 0006 Addendum 1 §UI: confirm modal comes before PauseProgressModal.
   const [pauseConfirmTaskId, setPauseConfirmTaskId] = useState<number | null>(null)
 
   // Data tasks (download / preprocess / tagging / reg build / eval): same task
@@ -94,7 +95,7 @@ export default function QueuePage() {
     try {
       setHoldState(await api.getQueueHold())
     } catch {
-      // 网络错 / 启动期 supervisor 未就绪 → 静默；下一轮 SSE 触发重试。
+      // Network error / supervisor not ready yet at startup → fail silently; the next SSE round triggers a retry.
       setHoldState(null)
     }
   }, [])
@@ -120,8 +121,8 @@ export default function QueuePage() {
 
   useEventStream(
     (evt) => {
-      // ADR 0006 PR-4 — train_loop_started 不改 task.status 但要让 UI 看到
-      // is_pausable=true（解锁暂停按钮）；queue_hold_changed 要刷 banner。
+      // ADR 0006 PR-4 -- train_loop_started doesn't change task.status but the UI needs to see
+      // is_pausable=true (to unlock the pause button); queue_hold_changed needs to refresh the banner.
       if (
         evt.type === 'task_state_changed' ||
         evt.type === 'job_state_changed' ||
@@ -195,7 +196,7 @@ export default function QueuePage() {
     setPauseConfirmTaskId(null)
     await pauseTask(taskId)
   }
-  // hold-and-pause 走的快速路径（HoldQueueModal 内已 confirmed，跳过 PauseConfirmModal）
+  // Fast path for hold-and-pause (already confirmed inside HoldQueueModal, so PauseConfirmModal is skipped)
   const pauseTask = async (taskId: number) => {
     setPausingTaskId(taskId)
     try {
@@ -296,7 +297,7 @@ export default function QueuePage() {
     void applyOrder(ids)
   }
 
-  // ── 备注（_v20 tasks.note）───────────────────────────────────────────────
+  // ── Note (_v20 tasks.note) ───────────────────────────────────────────────
   const editNote = async (task: Task) => {
     const next = await prompt(t('queue.notePrompt', { id: task.id }), {
       title: task.note ? t('queue.noteEdit') : t('queue.noteAdd'),
@@ -320,7 +321,7 @@ export default function QueuePage() {
   }
 
   const toggleStrip = (taskId: number) => {
-    setStripsShown((prev) => {
+    setStripsHidden((prev) => {
       const next = new Set(prev)
       if (next.has(taskId)) next.delete(taskId)
       else next.add(taskId)
@@ -343,7 +344,7 @@ export default function QueuePage() {
     }
   }
 
-  // ADR §4.4 hold 队列：弹 confirmation modal，根据 modal 内决策调 hold + 可选 pause
+  // ADR §4.4 hold queue: pops a confirmation modal, then calls hold + optional pause based on the modal's decision
   const onHoldConfirm = async (decision: HoldDecision) => {
     setHoldModalOpen(false)
     try {
@@ -374,7 +375,7 @@ export default function QueuePage() {
     ...(task.note ? [{ label: t('queue.noteRemove'), tone: 'err' as const, onSelect: () => void saveNote(task, '') }] : []),
   ]
   const stripItem = (task: Task): KebabItem[] => (task.monitor_state_path
-    ? [{ label: stripsShown.has(task.id) ? t('queue.samplesHide') : t('queue.samplesShow'), onSelect: () => toggleStrip(task.id) }]
+    ? [{ label: stripsHidden.has(task.id) ? t('queue.samplesShow') : t('queue.samplesHide'), onSelect: () => toggleStrip(task.id) }]
     : [])
 
   const cardMenu = (task: Task): KebabItem[] => {
@@ -447,7 +448,7 @@ export default function QueuePage() {
       />
 
       <div className="ds-scroll">
-        {/* ADR §4.1 队列挂起 banner — 仅 held=true 时显示。 */}
+        {/* ADR §4.1 queue-hold banner -- shown only when held=true. */}
         {holdState?.held && (
           <div className="ds-note ds-warn" style={{ alignItems: 'center' }} data-testid="queue-hold-banner">
             <span style={{ flex: 1 }}>{t('queue.heldBanner')}</span>
@@ -581,7 +582,7 @@ export default function QueuePage() {
                   ahead={pendingOrder.findIndex((x) => x.id === task.id) + (runningTask ? 1 : 0)}
                   held={holdState?.held === true}
                   fmt={fmt}
-                  showStrip={stripsShown.has(task.id) && !!task.monitor_state_path}
+                  showStrip={!stripsHidden.has(task.id) && !!task.monitor_state_path}
                   draggable={task.status === 'pending' && pendingOrder.length > 1}
                   dragOver={overId === task.id && dragId !== task.id}
                   isFirstWaiting={pendingOrder[0]?.id === task.id}
@@ -633,7 +634,7 @@ export default function QueuePage() {
         />
       </div>
 
-      {/* 右键菜单 —— 备注 + 采样条 + 详情。点任意处 / ESC 关。 */}
+      {/* Context menu -- note + sample strip + details. Closes on any click / ESC. */}
       {menu && (
         <TaskContextMenu
           x={menu.x}
@@ -647,7 +648,7 @@ export default function QueuePage() {
         />
       )}
 
-      {/* ADR Addendum 1 §UI：暂停 confirm modal — 告知用户语义后才调 api。 */}
+      {/* ADR Addendum 1 §UI: pause confirm modal -- calls the API only after the user acknowledges what it means. */}
       {pauseConfirmTaskId !== null && (
         <PauseConfirmModal
           onCancel={() => setPauseConfirmTaskId(null)}
@@ -655,7 +656,7 @@ export default function QueuePage() {
         />
       )}
 
-      {/* ADR §4.3 暂停过程 modal — pausingTaskId 非 null 时全程锁屏。 */}
+      {/* ADR §4.3 pausing-progress modal -- locks the screen for as long as pausingTaskId is non-null. */}
       {pausingTaskId !== null && (
         <PauseProgressModal
           taskId={pausingTaskId}
@@ -664,7 +665,7 @@ export default function QueuePage() {
         />
       )}
 
-      {/* ADR §4.4 挂起 confirmation modal */}
+      {/* ADR §4.4 hold confirmation modal */}
       {holdModalOpen && (
         <HoldQueueModal
           runningTask={runningTask}
@@ -721,8 +722,13 @@ function QueueCard({
   const run = s === 'running'
   const terminal = TERMINAL.has(s)
 
-  const steps = run && monitor?.step != null && monitor.total_steps ? { step: monitor.step, total: monitor.total_steps } : null
-  const pct = steps ? Math.min(100, Math.round((steps.step / steps.total) * 100)) : s === 'done' ? 100 : 0
+  // Where the run got to: live monitor while running, otherwise the last
+  // saved monitor state (paused / stopped / finished runs).
+  const snap = useStepSnapshot(task.id, !run && !!task.monitor_state_path)
+  const src = run ? monitor : snap
+  const steps = src?.step != null && src.total_steps ? { step: src.step, total: src.total_steps } : null
+  const epochs = src?.epoch != null && src.total_epochs ? { n: src.epoch, total: src.total_epochs } : null
+  const pct = s === 'done' ? 100 : steps ? Math.min(100, Math.round((steps.step / steps.total) * 100)) : 0
 
   const badge = (() => {
     switch (s) {
@@ -747,7 +753,7 @@ function QueueCard({
         ? <><b>~{fmt.dur(finishesAt - startsAt)}</b><i>{t('queue.until', { time: fmt.clock(finishesAt) })}</i></>
         : <><b>—</b><i>{t('queue.summaryUnknown')}</i></>
     }
-    if (s === 'paused') return <><b>{t('queue.stepN', { n: task.paused_step ?? 0 })}</b><i>{task.paused_at ? fmt.ago(task.paused_at) : ''}</i></>
+    if (s === 'paused') return <><b>{task.paused_at ? fmt.ago(task.paused_at) : '—'}</b><i>{t('queue.pausedWhen')}</i></>
     if (s === 'scheduled') return <><b>{task.scheduled_at ? fmt.clock(task.scheduled_at) : '—'}</b><i>{t('queue.scheduledStart')}</i></>
     if (terminal && task.started_at && task.finished_at) {
       return <><b>{fmt.dur(task.finished_at - task.started_at)}</b><i>{s === 'done' ? t('queue.finished') : fmt.ago(task.finished_at)}</i></>
@@ -780,23 +786,21 @@ function QueueCard({
     return <button type="button" onClick={stop(onRetry)}>{t('queue.retry')}</button>
   })()
 
-  const stats = (() => {
-    if (run) {
-      return (
-        <>
-          <b>{steps ? `${pct}%` : '—'}</b>
-          {steps && <span>{steps.step.toLocaleString()} / {steps.total.toLocaleString()}</span>}
-          {monitor?.epoch != null && monitor.total_epochs ? <span>{t('queue.epochOf', { n: monitor.epoch, total: monitor.total_epochs })}</span> : null}
-          {monitor?.speed ? <span>{monitor.speed.toFixed(2)} it/s</span> : null}
-        </>
-      )
-    }
-    if (s === 'pending') return <><b>0%</b>{startsAt != null && finishesAt != null && <span>{t('queue.startAt', { time: fmt.clock(startsAt) })}</span>}</>
-    if (s === 'paused') return task.last_state_epoch != null ? <span>{t('queue.resumeFromEpoch', { n: task.last_state_epoch })}</span> : null
-    if (s === 'scheduled') return <b>0%</b>
-    if (s === 'done') return <><b>100%</b>{task.finished_at && <span>{fmt.ago(task.finished_at)}</span>}</>
-    return <b>{s === 'failed' ? t('status.failed') : t('status.canceled')}</b>
-  })()
+  // One line under the bar for every status: step, epoch, speed, then what
+  // happens next — so the numbers always sit in the same place.
+  const stepLabel = steps
+    ? t('queue.stepOf', { n: steps.step.toLocaleString(), total: steps.total.toLocaleString() })
+    : s === 'paused' && task.paused_step != null ? t('queue.stepN', { n: task.paused_step.toLocaleString() }) : null
+  const stats = (
+    <>
+      <b>{s === 'failed' ? t('status.failed') : s === 'canceled' && !steps ? t('status.canceled') : run && !steps ? '—' : `${pct}%`}</b>
+      {stepLabel && <span>{stepLabel}</span>}
+      {epochs && <span>{t('queue.epochOf', { n: epochs.n, total: epochs.total })}</span>}
+      {run && monitor?.speed ? <span>{monitor.speed.toFixed(2)} it/s</span> : null}
+      {s === 'pending' && startsAt != null && finishesAt != null && <span>{t('queue.startAt', { time: fmt.clock(startsAt) })}</span>}
+      {(s === 'paused' || (terminal && task.is_resumable)) && task.last_state_epoch != null && <span className="ds-qnext">{t('queue.resumeFromEpoch', { n: task.last_state_epoch })}</span>}
+    </>
+  )
 
   return (
     <div
@@ -837,12 +841,12 @@ function QueueCard({
         </span>
       </div>
       <div className="ds-qcard-bar">
+        <span className="ds-qcard-stats">{stats}</span>
         <span className="ds-meter">
           {run && !steps
             ? <i className="animate-pulse" style={{ width: '20%', opacity: 0.5 }} />
-            : <i style={{ width: `${pct}%`, ...(s === 'failed' ? { background: 'var(--red-text)' } : {}) }} />}
+            : <i style={{ width: `${pct}%`, ...(s === 'failed' ? { background: 'var(--red-text)' } : s === 'paused' ? { background: '#d3a53a' } : terminal && s !== 'done' ? { background: 'var(--line-3)' } : {}) }} />}
         </span>
-        <span className="ds-qcard-stats">{stats}</span>
       </div>
       {task.error_msg && s === 'failed' && (
         <div className="ds-qcard-note" style={{ color: 'var(--red-text)' }}>
@@ -861,6 +865,21 @@ function QueueCard({
       {showStrip && <TaskSampleStrip taskId={task.id} live={run} />}
     </div>
   )
+}
+
+/** Step / epoch reached by a task that is not running, read once from its
+ *  saved monitor state (one loss point is enough — only the scalars matter). */
+function useStepSnapshot(taskId: number, enabled: boolean): MonitorState | null {
+  const [snap, setSnap] = useState<MonitorState | null>(null)
+  useEffect(() => {
+    if (!enabled) { setSnap(null); return }
+    let cancelled = false
+    api.getMonitorState(taskId, 1)
+      .then((r) => { if (!cancelled) setSnap(r) })
+      .catch(() => { if (!cancelled) setSnap(null) })
+    return () => { cancelled = true }
+  }, [taskId, enabled])
+  return snap
 }
 
 // ── DataTasksCard ───────────────────────────────────────────────────────────
@@ -955,8 +974,9 @@ function DataTasksCard({ live, history, projectTitles, fmt, onOpen, onJump, onCa
 }
 
 // ── TaskContextMenu ─────────────────────────────────────────────────────────
-// 队列行右键弹出的小菜单。定位用 fixed + 视口边界夹紧（靠右/靠下的行不出屏）。
-// 任何一次点击 / 滚动 / ESC 都关闭 —— 菜单本身的点击由条目 onSelect 先跑完。
+// Small popup menu from right-clicking a queue row. Positioned with fixed + clamped to the
+// viewport bounds (so a row near the right/bottom edge doesn't push the menu off-screen).
+// Closes on any click / scroll / ESC -- a click on an item itself runs its onSelect first.
 
 function TaskContextMenu({ x, y, items, onClose }: {
   x: number
@@ -967,7 +987,7 @@ function TaskContextMenu({ x, y, items, onClose }: {
   const ref = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState({ x, y })
 
-  // 挂载后按真实尺寸夹回视口内（菜单高度随条目数变，先渲染再量）。
+  // After mount, clamp back into the viewport using the real size (menu height varies with item count, so we measure after render).
   useEffect(() => {
     const el = ref.current
     if (!el) return
@@ -981,7 +1001,7 @@ function TaskContextMenu({ x, y, items, onClose }: {
   useEffect(() => {
     const close = () => onClose()
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    // capture 阶段 + 下一帧注册：避免打开菜单的那次 contextmenu/click 立刻关掉它。
+    // Registered in the capture phase, on the next frame: avoids the same contextmenu/click that opened the menu immediately closing it.
     const tid = window.setTimeout(() => {
       window.addEventListener('click', close)
       window.addEventListener('contextmenu', close)

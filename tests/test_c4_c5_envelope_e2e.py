@@ -1,9 +1,10 @@
-"""PR-2 C4+C5 端到端 — 真实 router 走完 DomainError handler 后 envelope 形态。
+"""PR-2 C4+C5 end-to-end -- the envelope shape after a real router runs through the DomainError handler.
 
-不仅锁 status code（test_error_response_baseline 已锁），还要锁：
-  - body.detail 仍是 string（前端老路径不破）
-  - body.error.code 是 service-domain 命名 (preset.not_found 等)
-  - body.error.trace_id 跟 X-Trace-Id header 一致
+Locks down more than just the status code (already locked by
+test_error_response_baseline); also locks:
+  - body.detail is still a string (the old frontend path isn't broken)
+  - body.error.code uses service-domain naming (preset.not_found etc.)
+  - body.error.trace_id matches the X-Trace-Id header
 """
 from __future__ import annotations
 
@@ -36,30 +37,30 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(server.app)
 
 
-# ── preset 404 路径（C4 batch 1）───────────────────────────────────────
+# ── preset 404 path (C4 batch 1) ───────────────────────────────────────
 
 
 def test_preset_not_found_envelope(client: TestClient) -> None:
     resp = client.get("/api/presets/__nonexistent__")
     assert resp.status_code == 404
     body = resp.json()
-    # Phase 3：只发 error 信封，无 legacy detail
+    # Phase 3: only the error envelope is sent, no legacy detail
     assert "detail" not in body
     assert body["error"]["code"] == "preset.not_found"
     assert "not found" in body["error"]["message"]
     assert "__nonexistent__" in body["error"]["message"]
-    # trace_id 跟 header 一致
+    # trace_id matches the header
     assert body["error"]["trace_id"] == resp.headers[TRACE_HEADER]
 
 
 def test_preset_name_invalid_envelope_400(client: TestClient) -> None:
-    """PUT 非法 preset 名 — 走 PresetNameInvalidError → 400 / preset.name_invalid。"""
+    """PUT an invalid preset name -- goes through PresetNameInvalidError -> 400 / preset.name_invalid."""
     resp = client.put("/api/presets/bad..slash/name", json={})
-    # 路由匹配可能让这变 404（path 含 / FastAPI 看不到这是 single name）
-    # 我们接受 400 或 404；锁 envelope 形态
+    # route matching may turn this into a 404 (a path containing / makes FastAPI not see this as a single name)
+    # we accept 400 or 404; lock the envelope shape
     body = resp.json()
     assert resp.status_code in (400, 404, 422)
-    # Phase 3：error 信封（422 RequestValidationError 仍是 detail list）
+    # Phase 3: error envelope (422 RequestValidationError is still a detail list)
     assert "error" in body or isinstance(body.get("detail"), list)
-    # 4xx 全部应该有 trace_id header（middleware）
+    # all 4xx responses should carry a trace_id header (middleware)
     assert TRACE_HEADER in resp.headers

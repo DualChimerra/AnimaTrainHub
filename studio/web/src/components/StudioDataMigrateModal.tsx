@@ -1,11 +1,15 @@
-/** studio_data 迁移确认 + 进度 modal（Settings → 系统 → 存储位置）。
+/** studio_data migration confirm + progress modal (Settings -> System -> Storage location).
  *
- * 四态：loading（拉 info 扫描）→ confirm（文件数/大小/顶层明细 + 确认）→
- * running（进度条，SSE 驱动）→ done / error。
+ * Four phases: loading (fetches the scan info) -> confirm (file count / size
+ * / top-level breakdown + confirm) -> running (progress bar, SSE-driven) ->
+ * done / error.
  *
- * running 期间 modal 不可关（一次性维护操作，复制时长有限，用户等完即可；
- * 不引入"后台迁移中再重开看进度"的游离状态）。完成后新位置**重启 server
- * 生效**（指针文件 import 时求值），done 态给「立即重启」。
+ * The modal can't be closed while running (it's a one-shot maintenance
+ * operation with a bounded copy duration; the user just waits it out -- no
+ * "keep migrating in the background, reopen to check progress" limbo state
+ * is introduced). The new location only **takes effect after a server
+ * restart** (the pointer file is resolved at import time), so the done
+ * phase offers "restart now".
  */
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -31,12 +35,13 @@ const EMPTY_PROGRESS: Progress = {
 export default function StudioDataMigrateModal({ target, onClose, onRestart }: {
   target: string
   onClose: () => void
-  /** done 态「立即重启」—— 复用 Settings 页现成的重启 + 健康轮询逻辑 */
+  /** "Restart now" in the done phase -- reuses the Settings page's existing restart + health-poll logic */
   onRestart: () => void
 }) {
   const { t } = useTranslation()
-  // 用户选的是父目录，后端实际把数据复制到 target/studio_data/（display 用，
-  // API 仍传 target，由后端拼接）
+  // The user picks the parent directory; the backend actually copies data to
+  // target/studio_data/ (for display only -- the API still sends `target` and
+  // the backend appends the suffix).
   const sep = target.includes('\\') ? '\\' : '/'
   const destination = target.endsWith(sep) ? `${target}studio_data` : `${target}${sep}studio_data`
   const [phase, setPhase] = useState<Phase>('loading')
@@ -58,7 +63,7 @@ export default function StudioDataMigrateModal({ target, onClose, onRestart }: {
     return () => { cancelled = true }
   }, [])
 
-  // SSE：实时进度 + 完成事件（只在 running 态响应，防外部杂音翻状态）
+  // SSE: live progress + completion events (only acted on while running, to keep unrelated noise from flipping the phase)
   useEventStream((evt) => {
     if (evt.type === 'studio_data_migrate_progress') {
       setProgress({
@@ -77,8 +82,9 @@ export default function StudioDataMigrateModal({ target, onClose, onRestart }: {
       })
     }
   }, {
-    // SSE 断线重连期间 done 事件会丢，running 态会卡死（modal 不可关）——
-    // 重连时冷拉一次状态快照补齐
+    // A done event can be lost while SSE is disconnected/reconnecting, which
+    // would leave the running phase stuck (the modal can't be closed) --
+    // fetch a fresh status snapshot on reconnect to catch up.
     onOpen: () => {
       void api.getStudioDataMigrateStatus().then((s) => {
         setPhase((p) => {
@@ -87,7 +93,7 @@ export default function StudioDataMigrateModal({ target, onClose, onRestart }: {
           if (s.state === 'error') { setError(s.error); return 'error' }
           return p
         })
-      }).catch(() => { /* 下次重连再试 */ })
+      }).catch(() => { /* retry on the next reconnect */ })
     },
   })
 

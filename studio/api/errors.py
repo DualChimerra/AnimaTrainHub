@@ -1,7 +1,8 @@
-"""HTTPException 包装 helper（PR-5 从 server.py 抽出）。
+"""HTTPException wrapper helpers (extracted from server.py in PR-5).
 
-把 paths 模块的 ValueError / 路径不合法异常统一包成 HTTP 400 / 校验路径
-+ data export 文件名解析（用于 /api/preset/export 类下载 endpoint）。
+Wraps the paths module's ValueError / invalid-path exceptions uniformly into
+HTTP 400 / path validation, plus data-export filename resolution (used by
+download endpoints like /api/preset/export).
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from ..paths import DATA_EXPORTS, safe_join, validate_path_component
 
 
 def _safe_join_or_400(base: Path, *parts: str) -> Path:
-    """safe_join 的 HTTPException 版本。把 ValueError 包成 400。"""
+    """HTTPException version of safe_join. Wraps ValueError as 400."""
     try:
         return safe_join(base, *parts)
     except ValueError as exc:
@@ -21,7 +22,8 @@ def _safe_join_or_400(base: Path, *parts: str) -> Path:
 
 
 def _validate_component_or_400(name: str) -> None:
-    """validate_path_component 的 HTTPException 版本（用于不需要 join 的纯名校验）。"""
+    """HTTPException version of validate_path_component (for plain name
+    validation that doesn't need a join)."""
     try:
         validate_path_component(name)
     except ValueError as exc:

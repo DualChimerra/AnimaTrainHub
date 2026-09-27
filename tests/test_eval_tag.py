@@ -1,4 +1,3 @@
-"""Tag-Recall eval metric runner（复用 WD14）。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -62,7 +61,6 @@ def _sample_run(project, version, vdir) -> dict[str, Any]:
 
 
 class _FakeWD14:
-    """known_tags 含 solo/red hair/blue hair；生成图回标固定 {solo, blue hair}。"""
     def is_available(self):
         return True, "ok"
 
@@ -103,7 +101,6 @@ def test_run_tag_job_default_scorer_computes_recall(isolated, monkeypatch) -> No
 
     result = eval_tag.run_tag_job(project, version, vdir, run["run_id"])
 
-    # prompt "solo, red hair" 词表内 = {solo, red hair}；回标 {solo, blue hair} → 命中 solo → 0.5
     assert result["metrics"]["tag_recall"] == 0.5
     state = result["metric_states"]["tag_recall"]
     assert state["status"] == "done"
@@ -116,7 +113,7 @@ def test_run_tag_job_unavailable_when_no_in_vocab_prompt(isolated, monkeypatch) 
 
     class _NoVocab(_FakeWD14):
         def known_tags(self):
-            return ["1girl", "blue hair"]  # 不含 solo / red hair
+            return ["1girl", "blue hair"]
 
     monkeypatch.setattr("studio.services.tagging.wd14.WD14Tagger", _NoVocab)
     result = eval_tag.run_tag_job(project, version, vdir, run["run_id"])

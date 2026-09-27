@@ -183,10 +183,12 @@ export default function FreeCropEditor({
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null)
   useEffect(() => { setNatural(null) }, [image.thumbUrl])
 
-  // 视口（zoom / pan / fit）：size 模式 —— 缩放通过改 wrapper 宽高实现，
-  // rect 的 % 定位自动跟随、px 单位的边框 / handle / label 不缩放；
-  // 所有拖拽数学基于 getBoundingClientRect 实时读取，缩放下自动正确。
-  // 左键留给画框（primaryButtonPans 缺省 false），pan = 空格 / 中键。
+  // Viewport (zoom / pan / fit): "size" mode -- zoom is done by resizing the
+  // wrapper's width/height, so rect %-based positions follow automatically
+  // while px borders / handles / labels stay unscaled; all drag math reads
+  // getBoundingClientRect live, so it stays correct at any zoom level.
+  // Left button is reserved for drawing rects (primaryButtonPans defaults to
+  // false); pan = spacebar / middle button.
   const zp = useZoomPan({
     contentW: (natural ?? { w: image.w, h: image.h }).w,
     contentH: (natural ?? { w: image.w, h: image.h }).h,
@@ -199,7 +201,7 @@ export default function FreeCropEditor({
     rect: CropRect | null,
     handle: DragState['handle'] | null,
   ) => {
-    // 空格 / 中键 = pan 手势，让路给视口（事件冒泡到视口容器处理）
+    // Spacebar / middle button = pan gesture, yield to the viewport (event bubbles up to the viewport container)
     if (e.button === 1 || zp.spaceRef.current) return
     e.preventDefault()
     e.stopPropagation()
@@ -342,16 +344,18 @@ export default function FreeCropEditor({
         }}
         className="cropper-canvas"
         style={{
-          // useZoomPan size 模式控制 width/height（= 原图尺寸 × scale）+
-          // translate 平移；rect overlays（% 定位）随 wrapper 缩放 1:1 对齐，
-          // px 边框 / handle 不缩放。arCss 仅作 onLoad 前的首帧尺寸提示。
+          // useZoomPan's "size" mode drives width/height (= source image size
+          // x scale) plus a translate for panning; rect overlays (%-based)
+          // stay 1:1 aligned with the wrapper's scaling, while px borders /
+          // handles stay unscaled. arCss is only a first-frame size hint
+          // before onLoad fires.
           position: 'absolute',
           left: 0,
           top: 0,
           aspectRatio: arCss,
         }}
         onPointerDown={(e) => {
-          // 空格 / 中键 = pan（冒泡给视口容器）；create 只响应纯左键
+          // Spacebar / middle button = pan (bubbles to the viewport container); create only responds to a plain left click
           if (e.button !== 0 || zp.spaceRef.current) return
           // create on blank-canvas click. img has pointer-events:none so click
           // lands here; rect children stopPropagation in their own handlers.
@@ -466,7 +470,7 @@ export default function FreeCropEditor({
       </div>
       </div>
 
-      {/* readout 细条（对齐涂抹页）：zoom / 适应 / 100% / 操作提示 */}
+      {/* readout strip (matches the inpaint page): zoom / fit / 100% / usage hint */}
       <div className="shrink-0 flex items-center gap-2 text-[11px] font-mono text-fg-tertiary px-1">
         <span>{zp.zoomPct}%</span>
         <button

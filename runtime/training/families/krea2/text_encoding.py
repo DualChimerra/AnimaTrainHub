@@ -59,19 +59,19 @@ def gather_valid_text(hidden_states: Tensor, attention_mask: Tensor) -> list[Ten
     """Gather valid tokens in order, including suffix tokens after interior padding."""
 
     if hidden_states.ndim < 3:
-        raise ValueError("Krea2 hidden_states 必须至少为 (B, seq, features)")
+        raise ValueError("Krea2 hidden_states must be at least (B, seq, features)")
     if attention_mask.ndim != 2:
-        raise ValueError("Krea2 attention_mask 必须为 (B, seq)")
+        raise ValueError("Krea2 attention_mask must be (B, seq)")
     if hidden_states.shape[:2] != attention_mask.shape:
         raise ValueError(
-            "Krea2 hidden_states 与 attention_mask 的 batch/seq 维不一致："
+            "Krea2 hidden_states and attention_mask batch/seq dims disagree: "
             f"{tuple(hidden_states.shape[:2])} != {tuple(attention_mask.shape)}"
         )
 
     mask = attention_mask.to(dtype=torch.bool, device=hidden_states.device)
     gathered = [hidden_states[index][mask[index]] for index in range(mask.shape[0])]
     if any(item.shape[0] == 0 for item in gathered):
-        raise ValueError("Krea2 文本条件不能没有有效 token")
+        raise ValueError("Krea2 text condition cannot have zero valid tokens")
     return gathered
 
 
@@ -84,13 +84,13 @@ def pad_text_conditions(
     """Right-pad variable-length ``(seq, layers, width)`` tensors for one batch."""
 
     if not contexts:
-        raise ValueError("Krea2 文本 batch 不能为空")
+        raise ValueError("Krea2 text batch cannot be empty")
     shape = tuple(contexts[0].shape[1:])
     if contexts[0].ndim != 3 or any(
         item.ndim != 3 or tuple(item.shape[1:]) != shape or item.shape[0] == 0
         for item in contexts
     ):
-        raise ValueError("Krea2 context 必须是非空且层数/宽度一致的 (seq, layers, width)")
+        raise ValueError("Krea2 context must be non-empty (seq, layers, width) tensors with matching layer count/width")
 
     target = torch.device(device)
     max_length = max(item.shape[0] for item in contexts)
@@ -106,17 +106,19 @@ def pad_text_conditions(
 
 
 def _cast_linear_forward(self, input: Tensor) -> Tensor:
-    # ComfyUI manual_cast 语义（ops.py cast_bias_weight）：权重低精度常驻，
-    # 前向 cast 到 input.dtype 计算。fp16→fp32 cast 精确，逐层 cast 与
-    # 整模 upcast 数值逐位一致——显存差别（8.9GB vs 17.8GB）才是取舍点。
+    # ComfyUI manual_cast semantics (ops.py cast_bias_weight): weights stay
+    # resident at low precision, cast to input.dtype for the forward compute.
+    # fp16->fp32 cast is exact, so per-layer casting is bit-identical to
+    # upcasting the whole model -- the real tradeoff is VRAM (8.9GB vs 17.8GB).
     weight = self.weight.to(input.dtype)
     bias = self.bias.to(input.dtype) if self.bias is not None else None
     return torch.nn.functional.linear(input, weight, bias)
 
 
 def _cast_embedding_forward(self, input: Tensor) -> Tensor:
-    # comfy ops Embedding：weight cast 到 compute dtype 再 lookup（row-select
-    # 与 cast 可交换，数值等价）——由此激活流从源头进入 compute dtype 域。
+    # comfy ops Embedding: cast the weight to compute dtype, then look up
+    # (row-select and cast commute, numerically equivalent) -- this is how
+    # the activation stream enters the compute-dtype domain at the source.
     return torch.nn.functional.embedding(
         input,
         self.weight.to(self._krea2_compute_dtype),
@@ -129,12 +131,14 @@ def _cast_embedding_forward(self, input: Tensor) -> Tensor:
 
 
 def patch_manual_cast(model: torch.nn.Module, compute_dtype: torch.dtype) -> int:
-    """ComfyUI manual_cast 等价 patch（sd.py:258 ``set_model_compute_dtype``）。
+    """Patch equivalent to ComfyUI's manual_cast (sd.py:258 ``set_model_compute_dtype``).
 
-    Embedding 输出进入 compute dtype 域后，全部 Linear 逐层把低精度权重
-    cast 到 input.dtype（=compute dtype）计算；RMSNorm / rotary 无需 patch——
-    transformers 实现里 fp32 激活流叠 torch type promotion 与 Comfy 的
-    weight-cast 语义数值一致。返回 patch 的模块数。
+    Once the Embedding output enters the compute-dtype domain, every Linear
+    casts its low-precision weight to input.dtype (=compute dtype) for the
+    compute, layer by layer; RMSNorm / rotary need no patch -- in the
+    transformers implementation, the fp32 activation stream combined with
+    torch's type promotion is numerically equivalent to Comfy's weight-cast
+    semantics. Returns the number of patched modules.
     """
     from training.families.krea2.quant_fp8 import _FP8_TORCH_DTYPES  # noqa: PLC0415
 
@@ -142,8 +146,9 @@ def patch_manual_cast(model: torch.nn.Module, compute_dtype: torch.dtype) -> int
     for module in model.modules():
         if isinstance(module, torch.nn.Linear):
             if module.weight.dtype in _FP8_TORCH_DTYPES:
-                # fp8_scaled 层已挂 dequant 前向（cast 到 input.dtype + 乘
-                # scale = manual_cast 的 fp8 版）；覆盖会丢 scale
+                # fp8_scaled layers already have a dequant forward attached
+                # (cast to input.dtype + multiply by scale = the fp8 version of
+                # manual_cast); overwriting it would lose the scale
                 continue
             module.forward = MethodType(_cast_linear_forward, module)
             patched += 1
@@ -153,20 +158,21 @@ def patch_manual_cast(model: torch.nn.Module, compute_dtype: torch.dtype) -> int
             patched += 1
     if patched:
         logger.info(
-            "Krea2 TE manual_cast：%d 个模块以 %s 计算（权重常驻存储 dtype）",
+            "Krea2 TE manual_cast: %d modules computing in %s (weights stay resident at storage dtype)",
             patched, compute_dtype,
         )
     return patched
 
 
-#: comfy 单文件 TE 的 text 侧键前缀 → HF Qwen3VLForConditionalGeneration 键。
-#: comfy 打包（Comfy-Org qwen3vl_4b_fp8_scaled）把 language_model 直挂
-#: ``model.``；visual 侧（model.visual.*）两边一致零映射。
+#: Text-side key prefixes for comfy's single-file TE -> HF
+#: Qwen3VLForConditionalGeneration keys. The comfy packaging (Comfy-Org
+#: qwen3vl_4b_fp8_scaled) mounts language_model directly under ``model.``;
+#: the visual side (model.visual.*) matches on both sides with no mapping needed.
 _COMFY_TE_TEXT_PREFIXES = ("model.layers.", "model.embed_tokens.", "model.norm.")
 
 
 def _comfy_te_single_file(model_path: Path) -> Path | None:
-    """目录是 comfy 单文件 TE 布局时返回权重文件；HF 分片布局返回 None。"""
+    """Return the weights file if the directory is comfy's single-file TE layout; return None for an HF sharded layout."""
     if (model_path / "model.safetensors.index.json").exists():
         return None
     candidates = sorted(model_path.glob("*.safetensors"))
@@ -179,14 +185,17 @@ def _load_comfy_single_file_te(
     device: torch.device,
     dtype: torch.dtype,
 ):
-    """加载 comfy 单文件布局的 Qwen3-VL（官方 fp8_scaled 形态）。
+    """Load a Qwen3-VL model in comfy's single-file layout (the official fp8_scaled form).
 
-    config/tokenizer 小文件仍来自目录（下载中心 fp8 条目一并下载）；权重键
-    做一条前缀映射（text 侧补 ``language_model.``），``comfy_quant`` 配置
-    blob 丢弃，``weight_scale`` F32 标量收集后经 patch_fp8_linears 挂
-    dequant 前向（与 DiT fp8_scaled 完全同款）。fp8 权重原样常驻；非量化
-    键（embed/norm/visual）cast 到存储 dtype。lm_head 与 embed tied——
-    文件不含该键，load 后 tie_weights() 重绑。
+    Small config/tokenizer files still come from the directory (downloaded
+    together with the fp8 entry by the download hub); weight keys get one
+    prefix mapping (the text side gains ``language_model.``), the
+    ``comfy_quant`` config blob is discarded, and the ``weight_scale`` F32
+    scalars are collected and attached via patch_fp8_linears as a dequant
+    forward (exactly like the DiT's fp8_scaled). fp8 weights stay resident
+    as-is; non-quantized keys (embed/norm/visual) are cast to the storage
+    dtype. lm_head is tied to embed -- the file doesn't contain that key, so
+    tie_weights() re-ties it after loading.
     """
     from safetensors import safe_open
     from transformers import AutoConfig, Qwen3VLForConditionalGeneration
@@ -196,19 +205,20 @@ def _load_comfy_single_file_te(
         patch_fp8_linears,
     )
 
-    logger.info("加载 Krea2 Qwen3-VL（comfy 单文件形态）：%s", weights_file)
+    logger.info("Loading Krea2 Qwen3-VL (comfy single-file form): %s", weights_file)
     config = AutoConfig.from_pretrained(str(model_path), local_files_only=True)
     try:
         from accelerate import init_empty_weights
-    except ImportError as exc:  # pragma: no cover - 环境相关
+    except ImportError as exc:  # pragma: no cover - environment-dependent
         raise RuntimeError(
-            "Qwen3-VL 单文件加载需要 accelerate（transformers 伴生依赖）"
+            "Qwen3-VL single-file loading requires accelerate (a transformers companion dependency)"
         ) from exc
 
-    # init_empty_weights 默认只把 parameters 放 meta；buffers（rotary
-    # inv_freq 等 non-persistent，不在权重文件里）在 CPU 真实构造带正确
-    # 值——纯 torch.device("meta") 上下文会把 buffer 也 meta 化，load 后
-    # 无法恢复（曾致 offload 的 .to("cpu") 撞 meta tensor 崩溃）。
+    # init_empty_weights by default only puts parameters on meta; buffers
+    # (rotary inv_freq etc., non-persistent, not in the weights file) are
+    # constructed for real on CPU with correct values -- a plain
+    # torch.device("meta") context would also meta-ize buffers, which can't
+    # be recovered after loading (this used to crash offload's .to("cpu") on a meta tensor).
     with init_empty_weights():
         model = Qwen3VLForConditionalGeneration(config)
 
@@ -238,17 +248,19 @@ def _load_comfy_single_file_te(
     missing = [k for k in result.missing_keys if k != "lm_head.weight"]
     if missing or unexpected:
         raise ValueError(
-            f"Qwen3-VL comfy 单文件键不匹配：缺少 {missing[:5]}，"
-            f"多出 {unexpected[:5]}"
+            f"Qwen3-VL comfy single-file key mismatch: missing {missing[:5]}, "
+            f"unexpected {unexpected[:5]}"
         )
-    # lm_head 与 embed tied（tie_word_embeddings）——文件不含该键；
-    # transformers 的 tie_weights() 对 meta 构造 + assign 加载不重绑，
-    # 手动指回 embed（零拷贝）。
+    # lm_head is tied to embed (tie_word_embeddings) -- the file doesn't
+    # contain that key; transformers' tie_weights() doesn't re-tie it for a
+    # meta-constructed + assign-loaded model, so point it back at embed
+    # manually (zero-copy).
     out_emb = model.get_output_embeddings()
     if out_emb is not None and out_emb.weight.device.type == "meta":
         out_emb.weight = model.get_input_embeddings().weight
-    # 检查覆盖 parameters + buffers（漏 buffer 曾放过 rotary inv_freq 的
-    # meta 残留：编码侥幸能跑，offload 全模型 .to("cpu") 遍历到即崩）
+    # This check covers parameters + buffers (a missed buffer once left a
+    # leftover meta rotary inv_freq: encoding happened to still run, but
+    # offloading the whole model with .to("cpu") crashed on hitting it)
     leftover_meta = [
         name for name, tensor in [
             *model.named_parameters(), *model.named_buffers(),
@@ -257,14 +269,15 @@ def _load_comfy_single_file_te(
     ]
     if leftover_meta:
         raise ValueError(
-            f"Qwen3-VL 单文件加载后仍有未物化参数：{leftover_meta[:5]}"
+            f"Qwen3-VL single-file load still has unmaterialized parameters: {leftover_meta[:5]}"
         )
-    # buffers 构造在 CPU（init_empty_weights 只 meta 化参数）——搬到目标
-    # device；参数已 assign 就位，.to() 对其 no-op
+    # Buffers are constructed on CPU (init_empty_weights only meta-izes
+    # parameters) -- move them to the target device; parameters are already
+    # assigned in place, so .to() is a no-op for them
     model.to(device)
     if scales:
         patch_fp8_linears(model, scales)
-        logger.info("Qwen3-VL fp8_scaled：%d 层挂 dequant 前向", len(scales))
+        logger.info("Qwen3-VL fp8_scaled: attached a dequant forward to %d layers", len(scales))
     return model.eval().requires_grad_(False)
 
 
@@ -277,16 +290,16 @@ def _default_model_loader(
         from transformers import Qwen3VLForConditionalGeneration
     except ImportError as exc:  # pragma: no cover - dependency error is environment-specific
         raise RuntimeError(
-            "当前 transformers 不含 Qwen3VLForConditionalGeneration；请安装支持 "
-            "Qwen3-VL 的版本"
+            "The installed transformers does not include Qwen3VLForConditionalGeneration; "
+            "please install a version that supports Qwen3-VL"
         ) from exc
 
     if not model_path.is_dir():
-        raise ValueError(f"Krea2 文本编码器必须是 Hugging Face 模型目录：{model_path}")
+        raise ValueError(f"Krea2 text encoder must be a Hugging Face model directory: {model_path}")
     single = _comfy_te_single_file(model_path)
     if single is not None:
         return _load_comfy_single_file_te(model_path, single, device, dtype)
-    logger.info("加载 Krea2 Qwen3-VL 文本编码器：%s", model_path)
+    logger.info("Loading Krea2 Qwen3-VL text encoder: %s", model_path)
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         str(model_path),
         dtype=dtype,
@@ -301,14 +314,14 @@ def _load_tokenizer(model_path: Path):
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:  # pragma: no cover - dependency error is environment-specific
-        raise RuntimeError("Krea2 文本编码需要 transformers") from exc
+        raise RuntimeError("Krea2 text encoding requires transformers") from exc
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)
     prefix_tokens = tokenizer(_PROMPT_PREFIX, add_special_tokens=False)["input_ids"]
     suffix_tokens = tokenizer(_PROMPT_SUFFIX, add_special_tokens=False)["input_ids"]
     if len(prefix_tokens) != _PREFIX_TOKENS or len(suffix_tokens) != _SUFFIX_TOKENS:
         raise ValueError(
-            "Krea2 tokenizer 与 Qwen3-VL-4B-Instruct prompt 模板不兼容："
+            "Krea2 tokenizer is not compatible with the Qwen3-VL-4B-Instruct prompt template: "
             f"prefix={len(prefix_tokens)}, suffix={len(suffix_tokens)}"
         )
     return tokenizer
@@ -336,19 +349,23 @@ class Krea2TextStack:
         self.model_path = Path(model_path)
         self.device = torch.device(device)
         self.dtype = dtype
-        # None = compute 跟随存储 dtype（训练路径现状）；生成场景传 fp32 +
-        # dtype=fp16 复刻 ComfyUI「fp16 存储 + fp32 compute」口径（sd.py:258）
+        # None = compute dtype follows the storage dtype (current training
+        # path); the generate path passes fp32 + dtype=fp16 to replicate
+        # ComfyUI's "fp16 storage + fp32 compute" convention (sd.py:258)
         self.compute_dtype = compute_dtype
-        # 目录是官方 fp8_scaled 单文件形态（comfy 布局）——影响编排层的
-        # TE 上卡显存判据（权重 ~5GB vs fp16 8.9GB）与训练文本缓存指纹
+        # Whether the directory is the official fp8_scaled single-file form
+        # (comfy layout) -- affects the orchestration layer's VRAM budget
+        # decision for loading the TE (~5GB weights vs fp16 8.9GB) and the training text cache fingerprint
         self.is_fp8_storage = _comfy_te_single_file(self.model_path) is not None
         self.cache_enabled = bool(cache_enabled)
         self.tokenizer = tokenizer if tokenizer is not None else _load_tokenizer(self.model_path)
         self._model_loader = model_loader or _default_model_loader
         self._model = None
         self._offloaded = False
-        # fp8 TE 编码的嵌入与 bf16 有量化级差异——指纹区分防缓存混源
-        # （换 TE 精度 → 指纹变 → sidecar 全量重编，一次性）
+        # Embeddings encoded by an fp8 TE differ from bf16 at quantization
+        # level -- distinguishing the fingerprint prevents mixing cache
+        # sources (changing TE precision -> fingerprint changes -> a full,
+        # one-time sidecar re-encode)
         if self.is_fp8_storage:
             text_fingerprint = f"{text_fingerprint}-tefp8"
         self.store = TextCacheStore(text_fingerprint)
@@ -359,17 +376,19 @@ class Krea2TextStack:
         self._caption_entries: dict[str, list[TextCacheEntry]] = {}
         self._prompt_captions: list[str] = []
         self._cache_root: Path | None = None
-        # 在线模式（generate）的 prompt→context 内存 LRU（Comfy conditioning
-        # 节点缓存同款语义）：命中时 TE 完全不动。存 CPU、保原 dtype（fp32
-        # 一条 ≈63MB，容量 16 ≈1GB RAM）——cast 会破坏「首图与缓存命中图
-        # 逐位一致」。cached 模式（训练）不经此路径。
+        # In-memory prompt->context LRU for online mode (generate) (same
+        # semantics as Comfy's conditioning node cache): a hit means the TE
+        # is never touched. Stored on CPU, keeping the original dtype (one
+        # fp32 entry is about 63MB, capacity 16 is about 1GB RAM) -- casting
+        # would break "the first image and a cache-hit image are
+        # bit-identical". The cached mode (training) doesn't use this path.
         self._online_lru: OrderedDict[str, Tensor] = OrderedDict()
         self._online_lru_capacity = 16
 
         if self.max_length <= 0 or not self.selected_layers or self.hidden_width <= 0:
-            raise ValueError("Krea2 文本编码配置必须为正数且 selected_layers 不能为空")
+            raise ValueError("Krea2 text encoding config must be positive and selected_layers cannot be empty")
         if self.cache_batch_size <= 0:
-            raise ValueError("Krea2 cache_batch_size 必须为正数")
+            raise ValueError("Krea2 cache_batch_size must be positive")
 
     @property
     def is_model_loaded(self) -> bool:
@@ -377,7 +396,7 @@ class Krea2TextStack:
 
     @property
     def is_model_on_device(self) -> bool:
-        """TE 当前是否驻留目标设备（编排层判断是否需要腾显存搬它上来）。"""
+        """Whether the TE currently resides on the target device (used by the orchestration layer to decide whether it needs to free VRAM to move it there)."""
         return self._model is not None and not self._offloaded
 
     def _online_lru_get(self, caption: str) -> Tensor | None:
@@ -393,20 +412,26 @@ class Krea2TextStack:
             self._online_lru.popitem(last=False)
 
     def online_conditions_cached(self, captions: Sequence[str]) -> bool:
-        """这批 caption 是否全部命中在线 LRU（编排层 peek：全命中 → 编码
-        阶段 TE 不需要上 GPU，按需让位判断可整体跳过）。"""
+        """Whether this batch of captions all hit the online LRU (an
+        orchestration-layer peek: an all-hit means the TE doesn't need to go
+        to GPU for the encoding stage, so the on-demand yield decision can be
+        skipped entirely)."""
         return (
             not self.cache_enabled
             and all(str(caption) in self._online_lru for caption in captions)
         )
 
     def precache_online_prompts(self, captions: Sequence[str]) -> int:
-        """任务级预编码：把这批 caption 编进在线 LRU（存 CPU）；返回新编码数。
+        """Task-level pre-encode: encode this batch of captions into the
+        online LRU (stored on CPU); returns the count newly encoded.
 
-        XY / 多 prompt generate 的 prompt 集合在任务开始前就封闭——先全部
-        编码再 offload_model()，采样期 TE 归零显存占用（训练两段式加载的
-        推理版）。cached 模式（训练）不适用，no-op。LRU 容量按本批需求
-        抬升（上限 64，一条 ≈30MB CPU RAM），超出部分由逐格惰性路径兜底。
+        The prompt set for XY / multi-prompt generate is closed before the
+        task starts -- encode everything up front, then offload_model(), so
+        the TE uses zero VRAM during sampling (the inference-side version of
+        training's two-stage loading). Doesn't apply to the cached mode
+        (training), no-op there. LRU capacity is raised to fit this batch's
+        needs (capped at 64, about 30MB CPU RAM per entry); anything beyond
+        that falls back to the per-cell lazy path.
         """
         if self.cache_enabled:
             return 0
@@ -427,23 +452,25 @@ class Krea2TextStack:
             self._model = self._model_loader(self.model_path, self.device, self.dtype)
             if self.compute_dtype is not None and self.compute_dtype != self.dtype:
                 patch_manual_cast(self._model, self.compute_dtype)
-            # TE 权重文件（5-18GB）的 mmap 缓存页归还系统（真机换页卡死案例）
+            # Return the TE weight file's (5-18GB) mmap cache pages to the system (a real machine hit a paging freeze from this)
             from training.sysmem import trim_working_set  # noqa: PLC0415
 
             trim_working_set()
         elif self._offloaded:
-            # 上次采样前被 offload 到 CPU（见 offload_model）——搬回目标设备
+            # Was offloaded to CPU before the last sample (see offload_model) -- move back to the target device
             self._model.to(self.device)
             self._offloaded = False
         return self._model
 
     def offload_model(self) -> None:
-        """把 TE 挪到 CPU 给 DiT 腾显存（Comfy parity：free_memory 的
-        「编码后卸载 CLIP 到 offload_device」语义）。
+        """Move the TE to CPU to free VRAM for the DiT (Comfy parity:
+        free_memory's "unload CLIP to offload_device after encoding" semantics).
 
-        Generate 场景 DiT(26.3GB bf16) + Qwen3-VL(8.9GB) 同驻 ≈ 35GB，超出
-        32GB 支持下限——采样前必须让 DiT 独占。下个 prompt 由 ensure_model
-        搬回（GPU↔CPU 秒级，远快于 release 后从盘重载）。
+        In the generate scenario, DiT (26.3GB bf16) + Qwen3-VL (8.9GB)
+        resident together is about 35GB, over the supported 32GB floor --
+        the DiT must have the device to itself before sampling. The next
+        prompt moves it back via ensure_model (GPU<->CPU takes seconds, far
+        faster than reloading from disk after a release).
         """
         if self._model is None or self._offloaded:
             return
@@ -467,10 +494,12 @@ class Krea2TextStack:
         text = [_PROMPT_PREFIX + str(caption) for caption in captions]
         suffix = [_PROMPT_SUFFIX] * len(text)
         if not self.cache_enabled:
-            # 在线模式（generate）不截断：超过训练口径 512 token 的 prompt
-            # 完整进模型——质量后果由用户掌握（不拦截、不静默丢尾巴）。
-            # varlen 链路（gather_valid_text / DiT text_len）对任意长度无
-            # 结构约束；pad 到 batch 内最长即可。
+            # Online mode (generate) does not truncate: a prompt longer than
+            # training's 512-token convention goes into the model in full --
+            # the quality consequences are the user's call (no blocking, no
+            # silently dropping the tail). The varlen chain
+            # (gather_valid_text / DiT text_len) has no structural length
+            # constraint; just pad to the longest in the batch.
             encoded = self.tokenizer(
                 text,
                 truncation=False,
@@ -480,7 +509,8 @@ class Krea2TextStack:
                 return_tensors="pt",
             )
         else:
-            # 训练 cached 模式维持官方训练口径 512 定长（缓存指纹语义不变）
+            # Training's cached mode keeps the official fixed 512-token
+            # training convention (cache fingerprint semantics unchanged)
             encoded = self.tokenizer(
                 text,
                 truncation=True,
@@ -518,8 +548,8 @@ class Krea2TextStack:
         if hidden_states is None or max(self.selected_layers) >= len(hidden_states):
             count = 0 if hidden_states is None else len(hidden_states)
             raise RuntimeError(
-                f"Qwen3-VL 返回 hidden_states 层数不足：{count}，"
-                f"需要索引 {max(self.selected_layers)}"
+                f"Qwen3-VL returned too few hidden_states layers: {count}, "
+                f"need index {max(self.selected_layers)}"
             )
         stacked = torch.stack(
             [hidden_states[index] for index in self.selected_layers], dim=2,
@@ -527,14 +557,16 @@ class Krea2TextStack:
         cropped_mask = mask[:, _PREFIX_TOKENS:]
         contexts = gather_valid_text(stacked, cropped_mask)
         for context in contexts:
-            self._validate_context(context, source="Qwen3-VL 输出")
+            self._validate_context(context, source="Qwen3-VL output")
         return contexts
 
     def _encode_in_chunks(
         self, captions: Sequence[str], *, log_progress: bool = False,
     ) -> dict[str, Tensor]:
-        # log_progress 只在预缓存阶段开（对齐 VAE 缓存的"编码进度"口径）；
-        # 训练中 miss repair 走的也是本函数，那边一两条不刷屏。
+        # log_progress is only turned on during precaching (matching the
+        # VAE cache's "encoding progress" convention); miss repair during
+        # training also goes through this function, and we don't want it
+        # spamming the log there for one or two entries.
         encoded: dict[str, Tensor] = {}
         unique = list(dict.fromkeys(str(caption) for caption in captions))
         next_mark = 10
@@ -546,14 +578,14 @@ class Krea2TextStack:
             if log_progress:
                 done = len(encoded)
                 if done >= next_mark or done == len(unique):
-                    logger.info("  文本编码进度: %d/%d", done, len(unique))
+                    logger.info("  Text encoding progress: %d/%d", done, len(unique))
                     while next_mark <= done:
                         next_mark += 10
         return encoded
 
     def _validate_context(self, context: object, *, source: str) -> Tensor:
         if not isinstance(context, Tensor):
-            raise ValueError(f"{source} 缺少 tensor context")
+            raise ValueError(f"{source} is missing a tensor context")
         expected = (len(self.selected_layers), self.hidden_width)
         if (
             context.ndim != 3
@@ -562,8 +594,8 @@ class Krea2TextStack:
             or not context.is_floating_point()
         ):
             raise ValueError(
-                f"{source} context 必须为非空浮点 (seq, {expected[0]}, {expected[1]})，"
-                f"实际 {tuple(context.shape)} / {context.dtype}"
+                f"{source} context must be a non-empty float (seq, {expected[0]}, {expected[1]}), "
+                f"got {tuple(context.shape)} / {context.dtype}"
             )
         return context
 
@@ -572,7 +604,7 @@ class Krea2TextStack:
             return None
         context = payload.get(_CACHE_TENSOR_KEY)
         try:
-            return self._validate_context(context, source="Krea2 文本缓存")
+            return self._validate_context(context, source="Krea2 text cache")
         except ValueError:
             return None
 
@@ -600,12 +632,12 @@ class Krea2TextStack:
         if self._caption_entries:
             if to_encode:
                 logger.info(
-                    "[text-cache] caption sidecar 命中 %d/%d，需编码 %d 条...",
+                    "[text-cache] caption sidecar hit %d/%d, need to encode %d...",
                     len(contexts), len(self._caption_entries), len(to_encode),
                 )
             else:
                 logger.info(
-                    "[text-cache] caption sidecar 全部命中（%d 条），跳过编码",
+                    "[text-cache] caption sidecar fully hit (%d entries), skipping encoding",
                     len(self._caption_entries),
                 )
         contexts.update(self._encode_in_chunks(to_encode, log_progress=True))
@@ -617,7 +649,7 @@ class Krea2TextStack:
         if not self._prompt_captions:
             return
         if self._cache_root is None:
-            raise ValueError("Krea2 prompt 缓存需要 cache_root")
+            raise ValueError("Krea2 prompt cache requires cache_root")
         payloads: dict[str, dict[str, Tensor]] = {}
         missing = []
         for caption in self._prompt_captions:
@@ -666,7 +698,7 @@ class Krea2TextStack:
 
     def _repair_prompt_bundle(self, required: Sequence[str]) -> dict[str, Tensor]:
         if self._cache_root is None:
-            raise ValueError("Krea2 cached 模式编码未知 prompt 时需要 cache_root")
+            raise ValueError("Krea2 cached mode requires cache_root to encode an unknown prompt")
         self._prompt_captions = list(dict.fromkeys([*self._prompt_captions, *required]))
         contexts: dict[str, Tensor] = {}
         missing = []
@@ -697,7 +729,7 @@ class Krea2TextStack:
 
         caption_list = [str(caption) for caption in captions]
         if not caption_list:
-            raise ValueError("Krea2 文本 batch 不能为空")
+            raise ValueError("Krea2 text batch cannot be empty")
         if not self.cache_enabled:
             unique = list(dict.fromkeys(caption_list))
             contexts: dict[str, Tensor] = {}

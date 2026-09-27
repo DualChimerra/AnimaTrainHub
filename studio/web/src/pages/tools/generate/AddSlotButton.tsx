@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
-/** Sidebar 里「+ 添加 …」按钮（LoRA 槽 / XY 的「+ 添加 Y 轴」共用）：
- *  macket 的 dashed chip，占满整行。 */
+/** The "+ Add..." button in the sidebar (shared by LoRA slots / XY's "+ Add Y axis"):
+ *  the mockup's dashed chip, fills the whole row. */
 export default function AddSlotButton({
   onClick, children,
 }: {

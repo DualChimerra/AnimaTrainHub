@@ -1,10 +1,11 @@
-"""v19 → v20: tasks.note —— 队列任务备注。
+"""v19 -> v20: tasks.note -- queue task note.
 
-加列 `tasks.note TEXT`（NULL / 空串 = 没备注）。用户在队列页右键任一任务写
-一句话（"这次试了 alpha=16"、"数据集换了 v3"），备注跟着 task 走：队列列表
-行上显示徽标，任务详情页 overview 顶部完整显示 + 可编辑。
+Adds column `tasks.note TEXT` (NULL / empty string = no note). Users right-click any task on
+the queue page and write a one-liner (e.g. "tried alpha=16 this time", "swapped dataset to v3");
+the note travels with the task: a badge shows on the queue list row, and the task detail page's
+overview shows it in full at the top, editable.
 
-纯 UI 元数据，不参与调度，也不进 config snapshot。
+Pure UI metadata -- doesn't participate in scheduling and isn't included in the config snapshot.
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""PP6.1 — train_monitor: 文件写入器（HTTP server 已删除）。"""
+"""PP6.1 -- train_monitor: file writer (HTTP server removed)."""
 from __future__ import annotations
 
 import json
@@ -25,9 +25,9 @@ def test_set_state_file_creates_parent(tmp_path: Path) -> None:
 
 
 def test_save_state_silent_when_no_file_set(tmp_path: Path) -> None:
-    """没 set 路径时 save_state 不应抛错 / 不应写盘。"""
+    """save_state should not raise / should not write to disk when no path is set."""
     train_monitor.update_monitor(loss=0.5, step=1)
-    # 不抛即可（写盘内部 try-except 兜底）
+    # just needs to not raise (the disk write is guarded internally by try/except)
 
 
 def test_update_monitor_writes_state_to_file(tmp_path: Path) -> None:
@@ -47,7 +47,7 @@ def test_update_monitor_writes_state_to_file(tmp_path: Path) -> None:
     assert data["lr_history"][0]["lr"] == 1e-4
     assert data["optimizer_metrics_history"][0]["actual_lr"] == 1e-4
     assert data["optimizer_metrics_history"][0]["d"] == 1e-4
-    assert data["start_time"] is not None  # 自动设
+    assert data["start_time"] is not None  # auto-set
 
 
 def test_update_monitor_appends_loss_history(tmp_path: Path) -> None:
@@ -99,7 +99,7 @@ def test_downsample_uniform_short_input_unchanged() -> None:
 
 
 def test_no_http_server_artifacts() -> None:
-    """PP6.1 删除：start_monitor_server / MonitorHandler / HTML_TEMPLATE 不应再存在。"""
+    """PP6.1 removal: start_monitor_server / MonitorHandler / HTML_TEMPLATE should no longer exist."""
     assert not hasattr(train_monitor, "start_monitor_server")
     assert not hasattr(train_monitor, "MonitorHandler")
     assert not hasattr(train_monitor, "HTML_TEMPLATE")

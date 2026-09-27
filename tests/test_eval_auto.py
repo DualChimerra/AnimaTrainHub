@@ -69,7 +69,6 @@ def _fake_generator(run: dict[str, Any], version_dir: Path, progress) -> None:
 
 
 def _make_sample_run(conn, project, version, vdir, task_id: int, ckpt: str):
-    """建一个 task-scoped 评估 run（替代已删的 queue_checkpoint_eval setup）。"""
     return eval_samples.start_job(
         conn, project, version, vdir,
         checkpoint_path=ckpt,
@@ -120,7 +119,6 @@ def test_queue_metric_jobs_for_sample_uses_saved_defaults(isolated) -> None:
 
 
 def test_queue_metric_jobs_for_sample_respects_enabled_metrics(isolated) -> None:
-    """Settings 关掉 dino_i → 只排 eval_clip，不排 eval_dino（registry 门控）。"""
     project, version, vdir = _project_version(isolated)
     _enable_validation(project, version)
     secrets.update({
@@ -211,7 +209,6 @@ def test_after_training_eval_queues_all_checkpoints_by_default(isolated) -> None
         queued = eval_auto.queue_training_finished_eval(conn, task, payload)
         jobs = project_jobs.list_jobs(conn, kind="eval_samples", status="pending")
 
-    # 2 个 checkpoint + 1 个 baseline（纯底模对照）= 3
     assert len(queued) == 3
     assert len(jobs) == 3
     assert sum(1 for _job, r in queued if r.get("baseline")) == 1
@@ -247,12 +244,10 @@ def test_queue_manual_task_eval_bypasses_switch_and_scopes_to_task(isolated) -> 
     ck2 = str(vdir / "output" / "model_epoch2.safetensors")
     ck4 = str(vdir / "output" / "model_epoch4.safetensors")
 
-    # 手动入口无视 per-version 开关照样排队，且写 task-scoped。
     with db.connection_for(isolated["db"]) as conn:
         queued = eval_auto.queue_manual_task_eval(conn, task, [ck2, ck4])
         jobs = project_jobs.list_jobs(conn, kind="eval_samples", status="pending")
 
-    # 2 个 checkpoint + 1 个 baseline（手动入口现在也排 baseline，给 Δ）
     assert len(queued) == 3
     assert len(jobs) == 3
     assert sum(1 for _job, r in queued if r.get("baseline")) == 1
@@ -275,13 +270,11 @@ def test_queue_manual_task_eval_dedupes_and_skips_invalid(isolated) -> None:
     ck2 = str(vdir / "output" / "model_epoch2.safetensors")
 
     with db.connection_for(isolated["db"]) as conn:
-        # 同一 ckpt 传两次去重；output/ 外的路径被丢弃。
         queued = eval_auto.queue_manual_task_eval(
             conn, task, [ck2, ck2, "/etc/passwd"]
         )
         jobs = project_jobs.list_jobs(conn, kind="eval_samples", status="pending")
 
-    # 1 个 checkpoint + 1 个 baseline
     assert len(jobs) == 2
     assert sum(1 for _job, r in queued if r.get("baseline")) == 1
     real = [r for _job, r in queued if not r.get("baseline")]
@@ -323,7 +316,6 @@ def test_supervisor_eval_training_finished_queues_after_task_done(isolated) -> N
 
     with db.connection_for(isolated["db"]) as conn:
         jobs = project_jobs.list_jobs(conn, kind="eval_samples", status="pending")
-    # 1 个 checkpoint + 1 个 baseline
     assert len(jobs) == 2
     assert all(j["params_decoded"]["auto_source"]["trigger"] == "after_training" for j in jobs)
     assert all(j["params_decoded"]["task_id"] == tid for j in jobs)
@@ -333,7 +325,6 @@ def test_supervisor_eval_training_finished_queues_after_task_done(isolated) -> N
 
 
 def test_eval_runs_full_validation_set_no_cap(isolated) -> None:
-    """评估覆盖整个 validation set（无 max_items 截断）：每张图一个 item、各带 reference。"""
     project, version, vdir = _project_version(isolated)
     val = vdir / "validation" / "1_data"
     val.mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,18 @@
-"""Huber loss（constant delta）。
+"""Huber loss (constant delta).
 
-Huber 公式（per-element）：
+Huber formula (per-element):
     L(x) = 0.5 * x^2                 if |x| < delta
     L(x) = delta * (|x| - 0.5*delta) otherwise
 
-相比 MSE 对 outlier 更鲁棒，缓解极端 sample 的梯度爆炸。EDM/Karras /
-kohya-ss 等主流 trainer 都用 constant δ。
+More robust to outliers than MSE, mitigating gradient explosions from
+extreme samples. Mainstream trainers like EDM/Karras / kohya-ss all use a
+constant delta.
 
-**若未来要引入 t-dependent δ schedule，必须附 (a) 论文 DOI / (b) 上游
-trainer 实现链接 / (c) 本项目自跑 ablation 数据**——参考
-[[feedback_verify_paper_before_fixing_algo]]（P0-2 EMA 翻转事故同根）。
+**If a t-dependent delta schedule is introduced in the future, it must come
+with (a) a paper DOI, (b) a link to an upstream trainer implementation, or
+(c) this project's own ablation data** -- see
+[[feedback_verify_paper_before_fixing_algo]] (same root cause as the P0-2 EMA
+flip incident).
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import torch
 
 
 class HuberLoss:
-    """Huber loss with constant delta（per-element，reduction='none'）。"""
+    """Huber loss with constant delta (per-element, reduction='none')."""
 
     def __init__(self, c: float = 0.15):
         self.c = float(c)
@@ -27,7 +30,7 @@ class HuberLoss:
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-        t: torch.Tensor,  # noqa: ARG002 — LossProtocol 一致性，constant huber 不使用
+        t: torch.Tensor,  # noqa: ARG002 -- kept for LossProtocol consistency; unused by constant-delta huber
     ) -> torch.Tensor:
         diff = pred - target
         abs_diff = diff.abs()

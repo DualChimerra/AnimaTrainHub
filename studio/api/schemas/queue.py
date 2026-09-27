@@ -1,4 +1,4 @@
-"""/api/queue 请求 BaseModel（PR-6 commit 6 从 server.py 抽出）。"""
+"""/api/queue request BaseModels (extracted from server.py in PR-6 commit 6)."""
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -10,13 +10,13 @@ class EnqueueRequest(BaseModel):
     config_name: str
     name: Optional[str] = None
     priority: int = 0
-    # 0.17 P-B：计划开始时间（unix 秒）。给了 → task 建成 scheduled，到点由
-    # supervisor 提升为 pending；不给 → 立即 pending（原行为）。
+    # 0.17 P-B: planned start time (unix seconds). If set -> task is created as scheduled and
+    # the supervisor promotes it to pending once due; if omitted -> immediately pending (old behavior).
     scheduled_at: Optional[float] = None
 
 
 class ScheduleTrainingRequest(BaseModel):
-    """POST /api/projects/{pid}/versions/{vid}/queue 可选 body（0.17 P-B）。"""
+    """Optional body for POST /api/projects/{pid}/versions/{vid}/queue (0.17 P-B)."""
     scheduled_at: Optional[float] = None
 
 
@@ -37,8 +37,8 @@ class DeleteOutputsBody(BaseModel):
 
 
 class TaskNoteBody(BaseModel):
-    """PUT /api/queue/{task_id}/note —— 队列任务备注（v20 tasks.note）。
+    """PUT /api/queue/{task_id}/note -- queue task note (v20 tasks.note).
 
-    `note` 传空串 / 只有空白 → 清除备注（存 NULL）。
+    `note` as an empty string / whitespace-only -> clears the note (stored as NULL).
     """
     note: Optional[str] = None

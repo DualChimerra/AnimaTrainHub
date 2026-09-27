@@ -1,30 +1,36 @@
-/** 右侧竖排出图时间线（0.17 P-I：从「只列 done 历史」升级成统一时间线）。
+/** Right-hand vertical generation timeline (0.17 P-I: upgraded from "list done history only"
+ * to a unified timeline).
  *
- * item 两种：
- *  - live（pending / running，来自队列）：占位卡。pending 灰底「排队中」+ ✕；running
- *    脉冲边框「生成中」，点击回到实时视图。
- *  - done（来自 cache/disk 扫盘）：缩略图，点击回看（onSelect(entry)）。
- * live 恒在最上（最新提交的），done 按 createdAt 往下——天然一条时间线。
+ * Two kinds of item:
+ *  - live (pending / running, from the queue): a placeholder card. pending shows a gray
+ *    "queued" badge + a x to cancel; running shows a pulsing border and "generating", and
+ *    clicking it returns to the live view.
+ *  - done (from a cache/disk scan): a thumbnail; clicking it opens that result (onSelect(entry)).
+ * live items always sit on top (most recently submitted), done items flow down by createdAt --
+ * naturally forming one timeline.
  *
- * - 按当前 mode 过滤（single / xy / compare）；live item 的 mode 由父组件按 runsRef 定。
- * - 定高窗口化虚拟滚动（item 同尺寸，uniform stride）：只渲染可见区间 + overscan，
- *   外层 total×stride 占位撑滚动条，item 绝对定位到 idx×stride。
- * - 顶部 [刷新] 重拉 disk-history（多 tab / 外部改盘后手动同步）。
+ * - Filtered by the current mode (single / xy / compare); a live item's mode is decided by the
+ *   parent component from runsRef.
+ * - Fixed-height windowed virtual scrolling (uniform item size/stride): only the visible range +
+ *   overscan is rendered; an outer total*stride placeholder keeps the scrollbar sized correctly,
+ *   and each item is absolutely positioned at idx*stride.
+ * - The [Refresh] button at the top re-fetches disk history (for manual sync across tabs / after
+ *   external disk changes).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Task } from '../../../api/client'
 import { entryBadge, entryDisplayLabel, entryThumbUrl, type HistoryEntry } from './entryAdapter'
 
-// item 84px 方形 + 6px 间距 = 90px stride（0.17：从 56 放大 1.5× —— 原来太小、✕ 易误触、
-// 内部小字看不清）
+// item is a 84px square + 6px gap = 90px stride (0.17: enlarged 1.5x from 56 -- the old size
+// was too small, the x was easy to mis-tap, and the inner text was hard to read)
 // Square thumbs filling the 168px history column (13px padding) + 8px gap.
 const ITEM_SIZE = 142
 const ITEM_STRIDE = 150
 const OVERSCAN = 4
 const VIEWPORT_FALLBACK = 2000
 
-/** 统一时间线一项：进行中（队列 task）或已完成（历史 entry）。 */
+/** One unified timeline item: in progress (a queue task) or complete (a history entry). */
 export type TimelineItem =
   | { kind: 'live'; task: Task; mode: 'single' | 'xy' | 'compare' }
   | { kind: 'done'; entry: HistoryEntry }
@@ -39,9 +45,9 @@ function itemKey(it: TimelineItem): string {
 interface Props {
   items: TimelineItem[]
   mode: 'single' | 'xy' | 'compare'
-  /** 点 done 项回看 / 点 running 项回到实时视图。pending 项不触发（只可取消）。 */
+  /** Clicking a done item reopens it; clicking a running item returns to the live view. pending items don't fire this (they can only be canceled). */
   onSelect: (it: TimelineItem) => void
-  /** 取消某条 pending/running 的 generate。 */
+  /** Cancel a pending/running generate. */
   onCancel: (taskId: number) => void
   onRefresh?: () => Promise<void>
   loading?: boolean
@@ -159,7 +165,7 @@ function HistoryItem({ entry, selected, onSelect }: { entry: HistoryEntry; selec
   )
 }
 
-/** 进行中项：pending 灰占位 + ✕；running 脉冲边框，点击回到实时视图。 */
+/** In-progress item: pending shows a gray placeholder + x; running shows a pulsing border, clicking it returns to the live view. */
 function LiveItem({ task, selected, onSelect, onCancel }: { task: Task; selected: boolean; onSelect: () => void; onCancel: () => void }) {
   const { t } = useTranslation()
   const running = task.status === 'running'

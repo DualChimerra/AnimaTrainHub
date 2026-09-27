@@ -1,21 +1,21 @@
-# Queue 暂停信号链路 Spike 报告
+# Queue Pause Signal Chain Spike Report
 
-**日期**：2026-05-18
-**ADR**：[0006-queue-pause-resume](../adr/0006-queue-pause-resume.md)
-**Spike 脚本**：[`tools/spike/`](../../tools/spike/)
+**Date**: 2026-05-18
+**ADR**: [0006-queue-pause-resume](../adr/0006-queue-pause-resume.md)
+**Spike script**: [`tools/spike/`](../../tools/spike/)
 
-## 结论
+## Conclusion
 
-**ADR §候选方案 A（信号通道 + 复用 handle_interrupt）可行**，主线进 PR-1。
-方案 B（sentinel 文件 IPC）回归 parking lot。
+**ADR §Candidate A (signal channel + reusing `handle_interrupt`) is viable** and moves to PR-1 on the main line.
+Candidate B (sentinel-file IPC) goes back to the parking lot.
 
-## 跑了什么
+## What was run
 
-在 Windows 11 上 spawn 一个模拟训练子进程，按 ADR §后端代码方向把整条信号链
-端到端跑通：
+On Windows 11, a mock training child process was spawned and the full signal
+chain was run end to end, following the ADR §backend code direction:
 
 ```
-parent (supervisor 模拟)             child (training 模拟)
+parent (supervisor mock)             child (training mock)
 ─────────────────────────            ─────────────────────────
 Popen(CREATE_NEW_PROCESS_GROUP)
                           ──spawn──▶ signal.signal(SIGBREAK, h)
@@ -33,93 +33,114 @@ proc.send_signal(CTRL_BREAK_EVENT)
 stdout reader:
   parse __EVENT__:pause_state ◀─────
 proc.wait() → rc=0
-validate 6 个检查
+validate 6 checks
 ```
 
-## 6 项验证结果（两次连跑都全过）
+## Results of the 6 checks (both consecutive runs passed all of them)
 
-| # | 检查 | 结果 |
+| # | Check | Result |
 |---|------|------|
-| 1 | `CTRL_BREAK_EVENT` 送达 `CREATE_NEW_PROCESS_GROUP` 子进程组 | PASS |
-| 2 | `signal.signal(SIGBREAK, handler)` 捕获信号 | PASS（handler 收到 sig=21）|
-| 3 | handler 完整跑完 save + emit + `sys.exit(0)` | PASS（rc=0）|
-| 4 | parent 读到 `__EVENT__:pause_state` 并解析 payload | PASS |
-| 5（附）| pause `.pt` + `.config.json` 各一份落盘 | PASS |
-| 6（附）| `__EVENT__:train_loop_started` 事件能用作 `is_pausable` 信号 | PASS |
+| 1 | `CTRL_BREAK_EVENT` reaches the `CREATE_NEW_PROCESS_GROUP` child process group | PASS |
+| 2 | `signal.signal(SIGBREAK, handler)` catches the signal | PASS (handler received sig=21) |
+| 3 | Handler fully completes save + emit + `sys.exit(0)` | PASS (rc=0) |
+| 4 | Parent reads `__EVENT__:pause_state` and parses the payload | PASS |
+| 5 (extra) | A pause `.pt` + `.config.json` pair is written to disk | PASS |
+| 6 (extra) | The `__EVENT__:train_loop_started` event can serve as the `is_pausable` signal | PASS |
 
-**关键数字**：发信号 → 子进程退出耗时 **0.62 s**（含 0.5 s fake IO sleep）。
-真训练 state 几十~几百 MB，落盘 IO 是大头，但 spike 验证的是信号路径而不是
-IO 性能。
+**Key number**: signal-sent to child-process-exit took **0.62 s** (including a
+0.5 s fake IO sleep). Real training state is tens to hundreds of MB, so disk IO
+dominates in practice — but this spike validates the signal path, not IO
+throughput.
 
-## 关键发现
+## Key findings
 
-### Python Windows 信号映射
+### Python Windows signal mapping
 
-`CTRL_BREAK_EVENT`（OS 层）→ `SIGBREAK`（Python 信号常量值 `21`）。
-**不是 SIGINT**——Python Windows docs 明确指 `CTRL_C_EVENT` 才映射 SIGINT，
-但 `CREATE_NEW_PROCESS_GROUP` 子进程组收不到 `CTRL_C_EVENT`，只收
-`CTRL_BREAK_EVENT`。所以 ADR §`runtime/training/phases/resume.py` 的"Windows
-额外注册 SIGBREAK handler"是必须的，不是可选优化。
+`CTRL_BREAK_EVENT` (OS level) maps to `SIGBREAK` (Python signal constant value
+`21`). **Not SIGINT** — the Python Windows docs explicitly state that only
+`CTRL_C_EVENT` maps to SIGINT, but a `CREATE_NEW_PROCESS_GROUP` child process
+group never receives `CTRL_C_EVENT`, only `CTRL_BREAK_EVENT`. So the ADR's
+requirement that `runtime/training/phases/resume.py` additionally register a
+SIGBREAK handler on Windows is mandatory, not an optional optimization.
 
-### subprocess.Popen + stdout=PIPE 经 line buffering
+### subprocess.Popen + stdout=PIPE goes through line buffering
 
-要在 parent 用 `for raw in proc.stdout:` 实时收事件，必须：
-- 子进程侧：`PYTHONUNBUFFERED=1` 环境 + `print(..., flush=True)` 双保险。
-- 父进程侧：`bufsize=0` 关闭 parent 端的 readahead 缓冲。
+For the parent to receive events in real time via `for raw in proc.stdout:`,
+both sides are required:
+- Child side: the `PYTHONUNBUFFERED=1` environment variable **and**
+  `print(..., flush=True)` as a double safeguard.
+- Parent side: `bufsize=0` to disable the parent's own readahead buffering.
 
-只设一边事件会延迟到几 KB stdout 攒满才看到——spike 第一版没设 bufsize=0
-时，event 行延迟到子进程退出后才出现，差点误判为"事件没发出来"。
+Setting only one side delays events until several KB of stdout accumulate —
+in the first version of the spike, without `bufsize=0`, event lines didn't
+appear until the child process exited, which nearly got misread as "the event
+was never emitted."
 
-### Parent stdout 自身编码
+### Parent stdout's own encoding
 
-跟主项目无关的小坑：Windows shell 默认 codepage（cp936 / cp932）encode 中文
-print 会抛 `UnicodeEncodeError`。`env["PYTHONIOENCODING"] = "utf-8"` 只对
-**子进程**生效，parent 自己得 `sys.stdout.reconfigure(encoding="utf-8")`。
-real supervisor 走的是 `stdout=log_fp`（文件），不打 console，不会遇到。
+A minor pitfall unrelated to the main project: on Windows, the shell's default
+codepage (cp936 / cp932) raises `UnicodeEncodeError` when encoding non-ASCII
+`print` output. `env["PYTHONIOENCODING"] = "utf-8"` only takes effect for the
+**child process** — the parent itself needs
+`sys.stdout.reconfigure(encoding="utf-8")`. The real supervisor writes to
+`stdout=log_fp` (a file) rather than a console, so it never hits this.
 
-## 对落地的影响
+## Impact on the implementation
 
-### 直接采纳
+### Adopted directly
 
-- ADR §`runtime/training/phases/resume.py` 在 Windows 上**必须**额外注册
-  `signal.SIGBREAK`，不能只靠 SIGINT。
-- ADR §`studio/supervisor.py` `_send_pause_signal` 在 Windows 上发
-  `CTRL_BREAK_EVENT`、POSIX 发 `SIGINT`——跟 spike 一致。
-- ADR §`runtime/training/context.py` `handle_interrupt` 完成 save 后 emit
-  `__EVENT__:pause_state` 是必要的——parent 不能光靠 `rc=0` 判断 paused，
-  必须看到事件行（rc 在 Windows wrapper 改写场景下不可靠）。
-- ADR §Cancel 在 Windows 改 `taskkill /T /F`：信号通道**真的**被 pause 独占
-  了，这条决策落地。
+- On Windows, ADR §`runtime/training/phases/resume.py` **must** additionally
+  register `signal.SIGBREAK` — it cannot rely on SIGINT alone.
+- On Windows, ADR §`studio/supervisor.py`'s `_send_pause_signal` sends
+  `CTRL_BREAK_EVENT`, and on POSIX it sends `SIGINT` — consistent with the
+  spike.
+- After ADR §`runtime/training/context.py`'s `handle_interrupt` finishes
+  saving, emitting `__EVENT__:pause_state` is required — the parent cannot
+  determine "paused" from `rc=0` alone; it must observe the event line (`rc`
+  is unreliable under the Windows wrapper's rewriting scenario).
+- On Windows, ADR §Cancel switches to `taskkill /T /F`: the signal channel is
+  **genuinely** reserved exclusively for pause, and this decision is now
+  implemented.
 
-### 不需要兜底方案 B
+### Fallback candidate B is not needed
 
-方案 B（sentinel 文件 IPC）在三方 review 里作为 spike 失败的兜底保留。
-spike 通过 → 方案 B 不进 PR-1 ~ PR-5，留在 ADR §候选方案作为历史决策痕迹。
-如果未来 Windows 行为变化或新平台失效，再回头考虑。
+Candidate B (sentinel-file IPC) was kept as a fallback in the three-way review
+in case the spike failed. Since the spike passed, candidate B does not go into
+PR-1 through PR-5; it stays in the ADR §Candidate solutions section as a
+historical record. It can be revisited if future Windows behavior changes or a
+new platform breaks this approach.
 
-### 仍需 PR-3 集成测覆盖
+### PR-3 integration test coverage is still needed
 
-spike 用 **fake** save（500ms sleep + 几十 KB 文件）跑通了。真 case 几十~
-几百 MB optimizer state + wandb finish + monitor flush，整个 handler 跑
-3 ~ 10 秒不奇怪。ADR §4.3 暂停过程 modal 30s 超时阈值的合理性、IO 慢盘 /
-SSD 写满 / antivirus 锁文件等边界 case，必须在 PR-3 端到端集成测里覆盖，
-不在 spike scope 内。
+The spike used a **fake** save (500ms sleep + tens of KB of files) to validate
+the flow. In the real case, tens to hundreds of MB of optimizer state, a
+wandb finish, and a monitor flush mean the whole handler running for 3-10
+seconds would not be unusual. Whether the ADR §4.3 pause-in-progress modal's
+30s timeout threshold is reasonable, and edge cases like slow disks / a full
+SSD / antivirus file locks, must be covered by the PR-3 end-to-end integration
+tests — they are out of scope for this spike.
 
-## 复现
+## Reproducing
 
 ```bash
 git checkout chore/queue-pause-signal-spike
 python tools/spike/pause_signal_parent.py
 ```
 
-预期：6 项 PASS + `结论: 全部通过 — ADR 方案 A 可行` + `rc=0`。
+Expected: all 6 checks PASS, plus `Conclusion: all passed — ADR candidate A is
+viable`, and `rc=0`.
 
-## Spike 脚本生命周期
+## Spike script lifecycle
 
-PR-0 合入 dev 后留作"曾经验证过方案 A 可行"的可执行证据。下面任一时机
-触发 cleanup PR 删除 `tools/spike/`：
+Once PR-0 merges into dev, the script stays as executable evidence that
+"candidate A was once validated." A cleanup PR removes `tools/spike/` when
+either of the following happens:
 
-- ADR 0006 全套 PR（PR-1 ~ PR-5）合入并生产验证。
-- 或本报告结论翻转（方案 A 在真实链路上不稳）。
+- The full ADR 0006 PR set (PR-1 through PR-5) has merged and been validated
+  in production.
+- Or this report's conclusion is reversed (candidate A turns out unstable on
+  the real signal chain).
 
-本报告独立留存，不随脚本删除——脚本是"怎么验"，报告是"验过了 & 结论"。
+This report is kept independently of the script — the script shows "how it was
+validated," while the report shows "that it was validated, and what the
+conclusion was."

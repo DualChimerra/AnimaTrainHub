@@ -1,11 +1,11 @@
-"""依赖检测、YAML 配置加载、进度条初始化等启动期工具。
+"""Startup-time utilities: dependency detection, YAML config loading, progress bar init.
 
-抽自原 runtime/anima_train.py L60-180（ADR 0003 PR-A）。
+Extracted from the original runtime/anima_train.py L60-180 (ADR 0003 PR-A).
 
-公开函数：
-- ensure_dependencies — 检测并可选自动安装缺失依赖
-- load_yaml_config / apply_yaml_config — YAML 配置 → args 合并
-- init_progress — Rich 进度条初始化
+Public functions:
+- ensure_dependencies -- detect and optionally auto-install missing dependencies
+- load_yaml_config / apply_yaml_config -- YAML config -> args merge
+- init_progress -- Rich progress bar initialization
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 def ensure_dependencies(auto_install: bool = False) -> None:
-    """检测并可选自动安装缺失依赖。"""
+    """Detect and optionally auto-install missing dependencies."""
     required = {
         "numpy": "numpy",
         "PIL": "Pillow",
@@ -59,7 +59,7 @@ def ensure_dependencies(auto_install: bool = False) -> None:
 
 
 def load_yaml_config(config_path):
-    """加载 YAML 配置文件。"""
+    """Load a YAML config file."""
     try:
         import yaml
     except ImportError:
@@ -80,18 +80,22 @@ def load_yaml_config(config_path):
 
 
 def apply_yaml_config(args, config):
-    """将 YAML 与 CLI 显式参数合并，经 TrainingConfig 完整构造后返回新 args。
+    """Merge YAML with explicit CLI arguments and return new args, fully constructed via TrainingConfig.
 
-    config 管线刀 1（R1，docs/design/config-pipeline-refactor.md）：trainer 与
-    Studio 走同一条 pydantic 加载路径 —— 字段迁移 / FAMILY_CONFIG_DEFAULTS
-    族默认 overlay / 互斥与能力校验全部单点生效，本函数不再手工重放迁移
-    （旧 merge_yaml_into_namespace 绕过 validator 年代的产物）。
+    Config pipeline cut 1 (R1, docs/design/config-pipeline-refactor.md): the trainer and
+    Studio now go through the same pydantic loading path -- field migration, the
+    FAMILY_CONFIG_DEFAULTS per-family default overlay, and mutual-exclusion/capability
+    validation all take effect from this single point, so this function no longer
+    manually replays migrations (that was a relic of the old merge_yaml_into_namespace,
+    which bypassed the validator).
 
-    命令行显式参数优先于 YAML：parse_args 以 suppress_defaults 构建 parser，
-    args 只含显式键，优先级是精确判定而非「值==默认值」近似。
+    Explicit command-line arguments take priority over YAML: parse_args builds the
+    parser with suppress_defaults, so args only contains explicitly-set keys --
+    priority is an exact determination, not an approximation based on "value == default".
 
-    校验失败逐条打印到 stderr 后 SystemExit(2) —— 与能力防线同款 fail-fast，
-    supervisor 截 stderr 尾部作为任务错误信息。
+    On validation failure, errors are printed to stderr one by one followed by
+    SystemExit(2) -- the same fail-fast pattern as the capability guard rails; the
+    supervisor captures the tail of stderr as the task's error message.
     """
     from pydantic import ValidationError
 
@@ -102,7 +106,7 @@ def apply_yaml_config(args, config):
         return namespace_from_config(args, dict(config or {}), TrainingConfig)
     except ValidationError as exc:
         errors = exc.errors()
-        print(f"配置校验失败（{len(errors)} 处）:", file=sys.stderr)
+        print(f"Config validation failed ({len(errors)} issue(s)):", file=sys.stderr)
         for err in errors:
             loc = ".".join(str(p) for p in err["loc"]) or "config"
             print(f"  {loc}: {err['msg']}", file=sys.stderr)
@@ -110,17 +114,18 @@ def apply_yaml_config(args, config):
 
 
 def init_progress(show_progress, total_steps):
-    """初始化 Rich 进度条。
+    """Initialize the Rich progress bar.
 
-    返回 `(progress, task_id, kind)`：
-    - 关闭进度时返回 `(None, None, None)`
-    - Rich 可用时返回 `(Progress 实例, task_id, "rich")`
-    - Rich 缺失时返回 `("plain", None, None)`（main() 据此走纯文本进度）
+    Returns `(progress, task_id, kind)`:
+    - `(None, None, None)` when progress is disabled
+    - `(Progress instance, task_id, "rich")` when Rich is available
+    - `("plain", None, None)` when Rich is missing (main() falls back to plain-text progress)
 
-    非 tty（studio spawn 的 pipe）强制降级走 log_every 纯文本分支——
-    rich 在 pipe 下既刷屏又吃掉 step 行（log_every 是 elif），存量
-    config 固化的 ``no_progress: false``（老默认 + 字段现已 hidden）
-    曾让 task log 里一行 step 日志都没有。裸终端 CLI 不受影响。
+    A non-tty (a pipe from a studio spawn) is forced down the log_every plain-text
+    branch -- under a pipe, rich both spams the screen and swallows step lines
+    (log_every is an elif), and a config baked with the old ``no_progress: false``
+    default (the field is now hidden) used to result in zero step log lines in the
+    task log. A bare-terminal CLI is unaffected.
     """
     if not show_progress:
         return None, None, None

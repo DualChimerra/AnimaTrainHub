@@ -1,13 +1,20 @@
-// RuleImpactDialog —— 规则联动改值的确认对话框（刀 2 / R6，D6）。
+// RuleImpactDialog -- confirmation dialog for rule-cascaded value changes
+// (polish pass 2 / R6, D6).
 //
-// 用户改动 gate 字段（如开 InfoNoise、切 optimizer 到 prodigy）触发 disable_when
-// 规则 takeover 时，若有「有损」写值（目标字段当前值 ≠ 将写入值），SchemaForm
-// 在 setField 入口拦截：不让违反态进入表单 state，先弹本对话框列出变更清单
-// （from → to + 领域理由），确认才应用（触发改动 + 全部联动写值一次性提交），
-// 取消则什么都不发生。无损（联动目标本来就在钉值上）时静默应用不弹窗。
+// When the user changes a gate field (e.g. enabling InfoNoise, switching the
+// optimizer to prodigy) and that triggers a disable_when rule takeover, if
+// any of the resulting writes are "lossy" (the target field's current value
+// differs from the value about to be written), SchemaForm intercepts at the
+// setField entry point: it keeps the invalid state out of form state and
+// first shows this dialog listing every change (from -> to + the domain
+// reason). Only on confirm does it apply (the trigger change plus every
+// cascaded write, committed together); cancel does nothing. Lossless changes
+// (the cascade target is already at the pinned value) apply silently with no
+// dialog.
 //
-// FamilySwitchDialog 是同一交互范式的族切换特例（那边要后端重算路径，这边
-// 纯前端元数据求值即可）；UI 骨架保持一致。
+// FamilySwitchDialog is a family-switch special case of the same interaction
+// pattern (it needs the backend to recompute paths, this one is pure
+// frontend metadata evaluation); the UI skeleton stays consistent.
 import { useTranslation } from 'react-i18next'
 import { fieldLabel } from '../lib/schema'
 
@@ -15,12 +22,12 @@ export interface RuleImpactChange {
   field: string
   from: unknown
   to: unknown
-  /** 领域理由（字段 disable_hint / 建议文案），显示在变更行下方。 */
+  /** Domain reason (the field's disable_hint / suggestion text), shown below the change row. */
   reason?: string
 }
 
 interface Props {
-  /** 用户触发的原始改动（gate 字段），显示在标题区。 */
+  /** The user's original triggering change (the gate field), shown in the title area. */
   trigger: { field: string; from: unknown; to: unknown }
   changes: RuleImpactChange[]
   onApply: () => void

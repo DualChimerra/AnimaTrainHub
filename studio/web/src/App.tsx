@@ -37,9 +37,10 @@ import PresetsPage from './pages/tools/Presets'
 import SoupPage from './pages/tools/Soup'
 
 /**
- * 老路径 `/tools/settings?section=…` 的兼容跳转：跳首页同时把抽屉打开（保留
- * section 参数）。Settings 不再有自己的 URL；旧书签 / Topbar 通知按钮链接进
- * 来时不会 404，但落地是抽屉而非整页。
+ * Compatibility redirect for the old `/tools/settings?section=…` path: jumps to
+ * the home page and opens the drawer (keeping the `section` param). Settings no
+ * longer has its own URL; old bookmarks / the Topbar notification button link
+ * here without 404ing, but land on the drawer instead of a full page.
  */
 function SettingsRedirect() {
   const drawer = useSettingsDrawer()
@@ -49,16 +50,18 @@ function SettingsRedirect() {
     const section = new URLSearchParams(location.search).get('section')
     drawer.open(section ? { section } : undefined)
     navigate('/', { replace: true })
-    // 只在 mount 时执行一次；deps 留空是有意的 —— 后续 location.search 变化是
-    // navigate('/') 自己引起的，不要重复触发 open。
+    // Runs once on mount only; the empty deps array is intentional — later
+    // location.search changes are caused by navigate('/') itself, so open()
+    // must not fire again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   return null
 }
 
 /**
- * 老路径 `/queue/:id/log` 和 `/queue/:id/monitor` 的兼容跳转：保留 URL 不删，
- * 转到新 detail 页对应 tab（用 hash 表达 tab）。让书签 / 收藏链接不失效。
+ * Compatibility redirect for the old `/queue/:id/log` and `/queue/:id/monitor`
+ * paths: keeps the URL alive and forwards to the matching tab on the new detail
+ * page (the tab is expressed as a hash), so bookmarks / saved links don't break.
  */
 function QueueDetailRedirect({ tab }: { tab: 'log' | 'monitor' }) {
   const path = window.location.pathname
@@ -69,11 +72,18 @@ function QueueDetailRedirect({ tab }: { tab: 'log' | 'monitor' }) {
   )
 }
 
-/** Sidebar + Topbar 外壳；所有路由 element 渲染进 <Outlet />。
- *  SettingsDrawer 用 fixed inset-0 铺满整个 viewport（含左侧 Sidebar）—— 这样点
- *  backdrop 的任意位置（包括 Sidebar 区域）都会收起抽屉。
- *  列父级 position:relative 保留作 <main> 内 absolute 元素（如任务日志抽屉贴底
- *  footer）的定位锚点。 */
+/** Animation key of a route: project pages share one per project (the steps
+ *  animate inside ProjectLayout), every other page gets its own. */
+function pageKey(path: string): string {
+  return path.match(/^\/projects\/[^/]+/)?.[0] ?? path
+}
+
+/** Sidebar + Topbar shell; every route element renders into <Outlet />.
+ *  SettingsDrawer uses fixed inset-0 to cover the whole viewport (including the
+ *  Sidebar on the left) -- so clicking the backdrop anywhere (Sidebar area
+ *  included) closes the drawer. The column's position:relative stays as the
+ *  anchor for absolute elements inside <main> (e.g. the task log drawer pinned
+ *  to the bottom footer). */
 function RootLayout() {
   // Phone layout: the sidebar leaves the flex row and becomes an off-canvas
   // drawer, so the content column gets the whole width. Nothing about the
@@ -124,7 +134,11 @@ function RootLayout() {
         <div className="ds-main relative overflow-hidden">
           <Topbar mobile={isMobile} onOpenNav={() => setNavOpen(true)} />
           <main style={{ flex: 1, overflow: 'auto' }}>
-            <Outlet />
+            {/* Each top-level page eases in; a project keeps one key so its
+                layout (and loaded project) survives step changes. */}
+            <div key={pageKey(location.pathname)} className="ds-page-anim" style={{ height: '100%' }}>
+              <Outlet />
+            </div>
           </main>
           <SettingsDrawer />
         </div>
@@ -133,10 +147,11 @@ function RootLayout() {
   )
 }
 
-// DataRouter 单例：从经典 BrowserRouter 迁过来是为了让 react-router v6 的
-// useBlocker 可用（BrowserRouter 不支持），TagEdit 等页面的"未保存切页"
-// 提示需要它。结构跟原来一致 —— RootLayout 包 Sidebar/Topbar，业务路由
-// 作为 children 渲染进 <Outlet />。
+// Singleton DataRouter: migrated from the classic BrowserRouter so react-router
+// v6's useBlocker works (BrowserRouter doesn't support it), which pages like
+// TagEdit need for their "unsaved changes" navigation prompt. The structure is
+// unchanged -- RootLayout wraps Sidebar/Topbar, and the app routes render as
+// children into <Outlet />.
 const router = createBrowserRouter(
   [
     {
@@ -157,7 +172,7 @@ const router = createBrowserRouter(
               path: 'v/:vid',
               children: [
                 { path: 'curate', element: <CurationPage /> },
-                // ADR 0010: preprocess 从 project scope 移到 version scope
+                // ADR 0010: preprocess moved from project scope to version scope
                 { path: 'preprocess', element: <PreprocessHub /> },
                 { path: 'edit', element: <TagEditPage /> },
                 { path: 'reg', element: <RegularizationPage /> },
@@ -178,7 +193,7 @@ const router = createBrowserRouter(
     },
   ],
   {
-    // ADR 0012：SPA 挂在根路径，不再用 /studio 子路径前缀。
+    // ADR 0012: the SPA mounts at the root path, no more /studio subpath prefix.
     basename: '/',
     future: { v7_relativeSplatPath: true },
   },
@@ -186,7 +201,7 @@ const router = createBrowserRouter(
 
 export default function App() {
   const [projectCtx, setProjectCtx] = useState<ProjectCtxValue | null>(null)
-  // 跨页保留的"已选中项目"快照（见 ProjectContext 注释）
+  // The "selected project" snapshot kept across pages (see ProjectContext comment)
   const [selectedProject, setSelectedProject] = useState<SelectedProjectValue | null>(null)
 
   return (

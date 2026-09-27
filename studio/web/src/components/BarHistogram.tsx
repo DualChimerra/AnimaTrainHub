@@ -1,13 +1,13 @@
-/** 通用水平 bar histogram —— 复用于：
- *  - Preprocess 像素分布（PixelHist）
- *  - PreprocessCrop 长宽比分布（ArHist）
- *  - Overview 详情 tab 内的同款统计
+/** Generic horizontal bar histogram -- reused by:
+ *  - Preprocess pixel distribution (PixelHist)
+ *  - PreprocessCrop aspect ratio distribution (ArHist)
+ *  - The same stats in the Overview detail tab
  *
- *  渲染：每行 grid 96px label / 1fr 进度条 / 30px 数字
- *  bar 用全局 `.ar-bar` / `.ar-bar-fill` CSS class。
+ *  Rendering: each row is a grid of 96px label / 1fr progress bar / 30px number.
+ *  The bar uses the global `.ar-bar` / `.ar-bar-fill` CSS classes.
  */
 interface HistBin {
-  /** React key（可选，fallback 用 label） */
+  /** React key (optional, falls back to label) */
   key?: string
   label: string
   n: number
@@ -15,7 +15,7 @@ interface HistBin {
 
 interface Props {
   bins: HistBin[]
-  /** bins 为空时的 placeholder 文本 */
+  /** Placeholder text shown when bins is empty */
   emptyHint?: string
 }
 

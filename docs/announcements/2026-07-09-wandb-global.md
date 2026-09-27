@@ -1,20 +1,20 @@
 ---
 date: 2026-07-09
 tag: migration
-title: WandB 配置移入全局设置，曾在训练配置里填过 API Key 的建议轮换
+title: WandB settings moved to global Settings — rotate your API key if you ever put one in a training config
 pin: true
 version: "0.18.0"
 ---
-从 0.18.0 起，WandB 的全部设置（API Key、entity、project、上传行为等）集中在 **设置 → WandB**，以预设方式管理；训练配置里的「WandB（预设覆盖）」参数组已整体移除。
+Starting with 0.18.0, all WandB settings (API key, entity, project, upload behavior, and so on) live in **Settings → WandB** and are managed as presets. The "WandB (per-config override)" group in the training config has been removed entirely.
 
-### 为什么
+### Why
 
-WandB 是账号级配置，不随项目变化；更重要的是，API Key 跟着训练配置走会以明文写进 config.yaml、任务快照、导出的预设与 bundle——这些文件本就用于分享与备份，泄漏面太大。现在 key 只保存在全局 secrets 里，界面上全程打码。
+WandB is account-level configuration — it doesn't vary per project. More importantly, an API key stored in a training config was written in plain text into config.yaml, task snapshots, exported presets and bundles — files that exist precisely to be shared and backed up. The key now lives only in the global secrets store and is masked everywhere in the UI.
 
-### 需要做什么
+### What to do
 
-- **没用过 WandB** → 什么都不用做。
-- **只在全局设置里配置过 WandB** → 升级后自动迁移为「default」预设，**无需操作**。
-- **曾在训练配置里填过 WandB 覆盖参数** → 旧配置载入时这些字段会被忽略（页面会提示忽略了哪些字段）。去 **设置 → WandB** 重新配置；需要按项目区分 entity / project 的，可以建多个预设切换，也支持导入导出。
-- **曾在训练配置里填过 API Key** → **建议去 wandb.ai 重新生成（轮换）API Key**。历史 config.yaml、任务快照、已导出的预设与 bundle 里的明文 key 不会被追改；轮换后旧 key 作废，这些文件里的残留即失效。另外注意不要再把这些历史导出文件分享出去。
-- **命令行直跑训练** → `--wandb_*` 旗标已随字段一起移除，改在 Studio 全局设置里配置（训练时自动注入），或自行设置 `WANDB_*` 环境变量。
+- **You never used WandB** → nothing to do.
+- **You only ever configured WandB in global Settings** → your settings are migrated to a "default" preset automatically. **No action needed.**
+- **You filled in WandB overrides in a training config** → those fields are ignored when the old config loads (the page tells you which fields were dropped). Reconfigure under **Settings → WandB**; if you need different entity / project per project, create multiple presets and switch between them — import / export is supported too.
+- **You ever put an API key in a training config** → **we recommend regenerating (rotating) your API key at wandb.ai**. Old config.yaml files, task snapshots, exported presets and bundles are not rewritten — the plain-text key in them stays on disk. Once rotated, the old key is dead and those leftovers are harmless. Also avoid sharing those older exports.
+- **You run training from the command line** → the `--wandb_*` flags were removed along with the fields. Configure WandB in Studio's global Settings (injected automatically at training time), or set the `WANDB_*` environment variables yourself.

@@ -1,14 +1,14 @@
 import { useTranslation } from 'react-i18next'
 import FieldLabel from '../../../components/ds/FieldLabel'
 
-/** 带 cap 标题的数值 stepper（mockup：输入框 + 右侧「+」按钮；seed 用「随机」按钮）。 */
+/** A numeric stepper with a caption label (mockup: input box + a "+" button on the right; seed uses a "random" button). */
 export default function NumField({ label, tip, value, onChange, min, max, step, onRandom }: {
   label: string
   tip?: string
   value: number
   onChange: (v: number) => void
   min?: number; max?: number; step?: number
-  /** 传入时右侧按钮变成「随机」（seed）。 */
+  /** When passed, the right-side button becomes "random" (seed). */
   onRandom?: () => void
 }) {
   const { t } = useTranslation()

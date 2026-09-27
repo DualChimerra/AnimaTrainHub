@@ -1,5 +1,5 @@
-"""project_jobs 的子进程入口。
+"""Subprocess entry points for project_jobs.
 
-每个 worker 都接受 `--job-id N`，由 supervisor 启动；写日志到
-`studio_data/jobs/{id}.log`，退出码 0 = 成功。
+Each worker accepts `--job-id N`, launched by the supervisor; logs are written to
+`studio_data/jobs/{id}.log`, exit code 0 = success.
 """

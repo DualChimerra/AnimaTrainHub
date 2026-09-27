@@ -1,32 +1,40 @@
-"""统一异常体系（ADR-0009 §4 / PR-2 C1）。
+"""Unified exception hierarchy (ADR-0009 §4 / PR-2 C1).
 
-业务层 (`studio.services.*`) raise DomainError 子类；FastAPI 在 api 层装
-exception_handler 翻成统一 JSON envelope 给前端。router 不再 try/except 翻
-HTTPException（PR-2 C4/C5 渐进迁移现有 380 处）。
+The business layer (`studio.services.*`) raises DomainError subclasses;
+FastAPI's api-layer exception_handler translates them into a unified JSON
+envelope for the frontend. Routers no longer try/except-translate into
+HTTPException (PR-2 C4/C5 is migrating the existing ~380 call sites gradually).
 
-为什么放 `domain/` 而不是 `api/`：
-  - services 反向依赖 api 是反模式（ADR-0008 4 层架构 services → domain，不
-    应该 services → api）。把基类放 domain/errors.py 让 services 可直接
-    raise 而不破层依赖。
-  - api 层只装 exception_handler 注册，不持有错误类定义。
-  - 不引 fastapi 依赖（纯 Python Exception 子类）；api/exception_handlers.py
-    才 import FastAPI / Request / JSONResponse。
+Why this lives in `domain/` and not `api/`:
+  - services depending back on api would be an anti-pattern (ADR-0008's 4-layer
+    architecture is services -> domain, never services -> api). Putting the
+    base class in domain/errors.py lets services raise directly without
+    breaking the layering.
+  - the api layer only registers the exception_handler; it doesn't own the
+    error class definitions.
+  - no fastapi dependency here (pure Python Exception subclasses);
+    api/exception_handlers.py is the one that imports FastAPI / Request /
+    JSONResponse.
 
-文案规约（ADR-0009 §4.1 + B audit 跨D）：
-  - `message` 字段**英文** — 前端用 `code` 查 i18n 表渲染本地化字串；message
-    兜底显示英文。这避开 ADR-0008 §跨D 中文字符串匹配陷阱借 DomainError 复活。
-  - `code` 字段**领域.动作** 命名（`preset.not_found` / `curation.duplicate`）。
-  - 短期（0.12.0）现有 PresetError 等 service 错误的中文 message 仍存在
-    （C3 加 base 不改 message），但**新代码必须**英文 message + i18n code。
+Message conventions (ADR-0009 §4.1 + the B-audit cross-D finding):
+  - the `message` field is **English** -- the frontend looks up `code` in an
+    i18n table to render a localized string; `message` is only the English
+    fallback display. This avoids reviving the ADR-0008 §cross-D
+    Chinese-string-matching trap through DomainError.
+  - the `code` field is named **domain.action** (`preset.not_found` /
+    `curation.duplicate`).
+  - short-term (0.12.0), existing service errors like PresetError still have
+    Chinese messages (C3 only adds the base class, doesn't touch messages),
+    but **new code must** use an English message + i18n code.
 
-用法：
+Usage:
     from studio.domain.errors import NotFoundError, PresetNotFoundError
 
     if not preset_exists(name):
         raise PresetNotFoundError(f"preset {name!r} does not exist",
                                   details={"name": name})
 
-handler 自动翻成（C2 后）：
+The handler translates this automatically into (post-C2):
     HTTP 404
     Headers: X-Trace-Id: <id>
     Body: {
@@ -43,7 +51,7 @@ from typing import Any, ClassVar, Dict, Optional
 
 
 class DomainError(Exception):
-    """业务异常基类。子类化指定 `http_status` + `default_code`。"""
+    """Base class for business exceptions. Subclasses specify `http_status` + `default_code`."""
 
     http_status: ClassVar[int] = 400
     default_code: ClassVar[str] = "domain.error"
@@ -67,51 +75,54 @@ class DomainError(Exception):
         return f"{type(self).__name__}({self.message!r}, code={self.code!r})"
 
 
-# ── 5 个核心子类（ADR-0009 §C round2 §1.1 决策："5 核心而非 7 一次落"）────
+# -- 5 core subclasses (ADR-0009 §C round2 §1.1 decision: "5 core, not 7 all at once") --
 
 
 class NotFoundError(DomainError):
-    """资源不存在 — 404。"""
+    """Resource doesn't exist -- 404."""
     http_status = 404
     default_code = "not_found"
 
 
 class ValidationError(DomainError):
-    """请求字段 / 业务规则校验失败 — 422。
+    """Request field / business rule validation failed -- 422.
 
-    `details` 通常含 `{"field": "...", "reason": "..."}` 给前端字段级提示。
-    跟 fastapi RequestValidationError 区分：RequestValidationError 是 pydantic
-    解析 body 失败；本类是业务层判断（如 "epoch must be > 0"）。
+    `details` usually holds `{"field": "...", "reason": "..."}` for
+    field-level hints in the frontend. Not the same as FastAPI's
+    RequestValidationError: that one is a pydantic body-parsing failure; this
+    class is a business-layer judgment (e.g. "epoch must be > 0").
     """
     http_status = 422
     default_code = "validation"
 
 
 class ConflictError(DomainError):
-    """资源冲突（重名、状态冲突） — 409。"""
+    """Resource conflict (name collision, state conflict) -- 409."""
     http_status = 409
     default_code = "conflict"
 
 
 class AuthError(DomainError):
-    """未认证 — 401。当前 webui 单用户无认证，此类预留给未来多用户场景。"""
+    """Not authenticated -- 401. The webui is currently single-user with no
+    auth; this class is reserved for a future multi-user scenario."""
     http_status = 401
     default_code = "auth"
 
 
 class ForbiddenError(DomainError):
-    """已认证但无权限 — 403。同 AuthError 预留。"""
+    """Authenticated but not authorized -- 403. Reserved, same as AuthError."""
     http_status = 403
     default_code = "forbidden"
 
 
-# ── 子类常用别名（让 service raise 更可读） ──────────────────────────────
+# -- Common subclass aliases (make service-side raises more readable) --
 
 
 class InvalidPathError(ValidationError):
-    """路径越界 / 非法分量 — 400（不是 422 因为 path 是 URL 一部分）。
+    """Path escapes the allowed root / has an invalid component -- 400 (not
+    422, because path is part of the URL).
 
-    `_safe_join_or_400` 触发本类。
+    Raised by `_safe_join_or_400`.
     """
     default_code = "path.invalid"
     http_status = 400
@@ -131,12 +142,12 @@ class PresetConflictError(ConflictError):
 
 
 __all__ = [
-    # 基类
+    # base class
     "DomainError",
-    # 5 核心子类
+    # 5 core subclasses
     "NotFoundError", "ValidationError", "ConflictError",
     "AuthError", "ForbiddenError",
-    # preset / path 常用别名
+    # preset / path aliases
     "InvalidPathError",
     "PresetNotFoundError", "PresetNameInvalidError", "PresetConflictError",
 ]

@@ -1,25 +1,27 @@
-"""把 2026-05-21 ~ 2026-05-24 之间前端 `downloadCurrentPreset` bug 导出的
-"假 yaml 真 toml"预设文件转成真 yaml。
+"""Convert preset files exported by the frontend `downloadCurrentPreset` bug between
+2026-05-21 and 2026-05-24 -- "fake yaml, really TOML" -- into real yaml.
 
-Bug 详情：那 3 天的 Studio 前端在导出预设时调 `generateToml(config)` 生成
-手写 TOML（key = value 平铺 + 多行 `{...}` 假 inline table + null 写成
-`key = `），但 blob MIME / 文件后缀都打了 yaml 标签。server
-`parse_preset_bytes` 仅认 yaml/json，所以这些文件再上传会被拒：
-    "预设格式错误（顶层不是 mapping）"
+Bug details: during those 3 days, the Studio frontend, when exporting a preset, called
+`generateToml(config)` to generate hand-rolled TOML (flat key = value + multi-line `{...}`
+fake inline tables + null written as `key = `), but the blob MIME type / file extension were
+both tagged as yaml. The server's `parse_preset_bytes` only recognizes yaml/json, so
+re-uploading these files gets rejected with:
+    "Invalid preset format (top level is not a mapping)"
 
-新版前端已改走 server `GET /api/presets/{name}/download` 端点直发磁盘上的
-原始 yaml，不再产生此类文件。本工具仅用于救活历史下载文件，不进 server
-依赖链路（avoid 给生产 import 加 TOML parser）。
+The new frontend now goes through the server's `GET /api/presets/{name}/download` endpoint,
+which sends the real yaml straight from disk, and no longer produces files like this. This
+tool exists only to salvage historical downloaded files and is not part of the server's
+dependency chain (avoids adding a TOML parser to production imports).
 
 Usage:
     python tools/preset_toml_to_yaml.py broken1.yaml [broken2.yaml ...]
-        每个文件输出到同目录的 `<stem>.fixed.yaml`，原文件保留。
+        Each file's output goes to `<stem>.fixed.yaml` in the same directory; the original is kept.
     python tools/preset_toml_to_yaml.py --in-place broken.yaml
-        就地覆盖原文件，覆盖前备份为 `<stem>.yaml.toml-bak`。
+        Overwrite the original file in place, backing it up as `<stem>.yaml.toml-bak` first.
     python tools/preset_toml_to_yaml.py --output out.yaml broken.yaml
-        指定输出路径（仅单文件适用）。
+        Specify the output path (only works for a single file).
     python tools/preset_toml_to_yaml.py --no-validate broken.yaml
-        跳过 TrainingConfig 校验（schema 漂移时应急用，默认开启）。
+        Skip TrainingConfig validation (emergency use when the schema has drifted; on by default).
 """
 from __future__ import annotations
 
@@ -33,12 +35,12 @@ import yaml
 
 try:
     import tomllib  # py 3.11+
-except ImportError:  # pragma: no cover - py 3.10 及以下走 tomli 兜底
+except ImportError:  # pragma: no cover - py 3.10 and below fall back to tomli
     try:
         import tomli as tomllib  # type: ignore[import-not-found,no-redef]
     except ImportError:
         sys.stderr.write(
-            "缺 TOML 解析库：py < 3.11 需先 `pip install tomli`。\n"
+            "Missing TOML parser library: py < 3.11 needs `pip install tomli` first.\n"
         )
         sys.exit(2)
 
@@ -46,13 +48,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _preprocess(text: str) -> tuple[str, list[str]]:
-    """修复前端 `generateToml` 产出的非标准 TOML，返回 (cleaned_text, warnings)。
+    """Fix the non-standard TOML produced by the frontend's `generateToml`, returning
+    (cleaned_text, warnings).
 
-    两类已知不合规：
-    - **多行 `{...}` 块**：TOML inline table 必须单行；这里把多行块的每行
-      `k = v` 拼成单行 `{ k = v, k2 = v2 }`。
-    - **空值 `key = `（null/undefined）**：TOML 不允许空 rhs；直接 drop 这些
-      key，由 pydantic 走 schema 默认值 / Optional[None] 兜底。
+    Two known kinds of non-compliance:
+    - **Multi-line `{...}` blocks**: a TOML inline table must be on a single line; here each
+      `k = v` line inside a multi-line block is joined into one line
+      `{ k = v, k2 = v2 }`.
+    - **Empty value `key = ` (null/undefined)**: TOML doesn't allow an empty rhs; these keys
+      are simply dropped, falling back to pydantic's schema defaults / Optional[None].
     """
     warnings: list[str] = []
     out: list[str] = []
@@ -61,7 +65,7 @@ def _preprocess(text: str) -> tuple[str, list[str]]:
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
-        # 多行块开头：`key = {`
+        # Start of a multi-line block: `key = {`
         m = re.match(r"^(\S.*?=\s*)\{\s*$", line)
         if m:
             prefix = m.group(1).rstrip()
@@ -73,18 +77,18 @@ def _preprocess(text: str) -> tuple[str, list[str]]:
                     inner.append(s)
                 j += 1
             if j >= len(lines):
-                # 没找到闭合 } —— 留给 tomllib 报原始错
+                # No closing } found -- leave it for tomllib to report the original error
                 out.append(line)
                 i += 1
                 continue
             out.append(f"{prefix} {{ {', '.join(inner)} }}")
             i = j + 1
             continue
-        # 空值：`key = ` 或 `key =`（rhs 全空白）
+        # Empty value: `key = ` or `key =` (rhs is all whitespace)
         if "=" in stripped and not stripped.startswith("#"):
             k, _, v = stripped.partition("=")
             if v.strip() == "":
-                warnings.append(f"drop 空值 key: {k.strip()}")
+                warnings.append(f"dropped empty-value key: {k.strip()}")
                 i += 1
                 continue
         out.append(line)
@@ -93,32 +97,34 @@ def _preprocess(text: str) -> tuple[str, list[str]]:
 
 
 def _validate(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """走 TrainingConfig.model_validate 规范化；返回 (规范化后的 dict, warnings)。"""
-    # 延迟 import：tool 默认应该能在不装训练栈的环境跑（仅 yaml + tomllib）
+    """Normalize via TrainingConfig.model_validate; returns (normalized dict, warnings)."""
+    # Deferred import: by default this tool should be runnable in an environment without the
+    # training stack installed (just yaml + tomllib)
     try:
         sys.path.insert(0, str(REPO_ROOT))
         from studio.schema import TrainingConfig  # type: ignore[import-not-found]
     except ImportError as exc:
-        return data, [f"跳过 schema 校验（import 失败：{exc}）"]
+        return data, [f"skipped schema validation (import failed: {exc})"]
     try:
         cfg = TrainingConfig.model_validate(data)
     except Exception as exc:
-        # 校验失败不致命：写一份原始数据 + 警告，让用户人工修
-        return data, [f"TrainingConfig 校验失败（已写原始数据，请手工修）：{exc}"]
+        # A validation failure isn't fatal: write the raw data + a warning, and let the user
+        # fix it by hand
+        return data, [f"TrainingConfig validation failed (raw data written, please fix manually): {exc}"]
     return cfg.model_dump(mode="python"), []
 
 
 def convert(text: str, validate: bool = True) -> tuple[str, list[str]]:
-    """主转换：返回 (yaml_text, warnings)。"""
+    """Main conversion: returns (yaml_text, warnings)."""
     warnings: list[str] = []
     cleaned, pre_warns = _preprocess(text)
     warnings.extend(pre_warns)
     try:
         data = tomllib.loads(cleaned)
     except Exception as exc:
-        raise SystemExit(f"TOML 解析失败：{exc}\n（预处理后内容前 200 字符）\n{cleaned[:200]}")
+        raise SystemExit(f"TOML parsing failed: {exc}\n(first 200 chars of preprocessed content)\n{cleaned[:200]}")
     if not isinstance(data, dict):
-        raise SystemExit(f"TOML 顶层不是 mapping，得到 {type(data).__name__}")
+        raise SystemExit(f"TOML top level is not a mapping, got {type(data).__name__}")
     if validate:
         data, val_warns = _validate(data)
         warnings.extend(val_warns)
@@ -130,17 +136,17 @@ def convert(text: str, validate: bool = True) -> tuple[str, list[str]]:
 
 def _convert_file(src: Path, dst: Path, validate: bool, in_place: bool) -> None:
     if not src.exists():
-        raise SystemExit(f"文件不存在：{src}")
+        raise SystemExit(f"File not found: {src}")
     text = src.read_text(encoding="utf-8")
     yaml_text, warnings = convert(text, validate=validate)
     if in_place:
         bak = src.with_suffix(src.suffix + ".toml-bak")
         if bak.exists():
-            raise SystemExit(f"备份目标已存在，先删它再重试：{bak}")
+            raise SystemExit(f"Backup target already exists, delete it first and retry: {bak}")
         src.rename(bak)
-        sys.stderr.write(f"  备份原文件 → {bak}\n")
+        sys.stderr.write(f"  backed up original file -> {bak}\n")
     dst.write_text(yaml_text, encoding="utf-8")
-    sys.stderr.write(f"  写入 → {dst}\n")
+    sys.stderr.write(f"  written -> {dst}\n")
     for w in warnings:
         sys.stderr.write(f"  ⚠ {w}\n")
 
@@ -150,29 +156,29 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("files", nargs="+", type=Path, help="待转换的 .yaml（实为 TOML）文件")
+    ap.add_argument("files", nargs="+", type=Path, help="the .yaml (actually TOML) file(s) to convert")
     ap.add_argument(
         "--in-place", action="store_true",
-        help="就地覆盖原文件，原文件备份为 .yaml.toml-bak",
+        help="overwrite the original file in place, backing it up as .yaml.toml-bak",
     )
     ap.add_argument(
         "--output", type=Path, default=None,
-        help="指定输出路径，仅在传单个文件时生效",
+        help="specify the output path (only takes effect for a single input file)",
     )
     ap.add_argument(
         "--no-validate", action="store_true",
-        help="跳过 TrainingConfig schema 校验（schema 漂移时应急用）",
+        help="skip TrainingConfig schema validation (emergency use when the schema has drifted)",
     )
     args = ap.parse_args(argv)
 
     if args.output and len(args.files) > 1:
-        ap.error("--output 仅支持单文件输入")
+        ap.error("--output only supports a single input file")
     if args.output and args.in_place:
-        ap.error("--output 与 --in-place 互斥")
+        ap.error("--output and --in-place are mutually exclusive")
 
     validate = not args.no_validate
     for src in args.files:
-        sys.stderr.write(f"转换 {src}\n")
+        sys.stderr.write(f"converting {src}\n")
         if args.in_place:
             dst = src
         elif args.output:

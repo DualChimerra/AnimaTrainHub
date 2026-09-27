@@ -1,4 +1,3 @@
-"""PP6.2 — /api/projects/{pid}/versions/{vid}/config/* HTTP。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -64,23 +63,19 @@ def test_get_config_returns_no_config_initially(client: TestClient) -> None:
 def test_get_config_no_config_returns_project_specific_defaults(
     client: TestClient,
 ) -> None:
-    """0.8.2 hotfix：has_config=False 时返回 project_specific_defaults，新建预设
-    预览表单用它展示「fork 后会得到的值」。"""
     pid, vid = _make(client)
     r = client.get(f"/api/projects/{pid}/versions/{vid}/config")
     body = r.json()
     assert body["has_config"] is False
     defaults = body.get("project_specific_defaults")
-    assert defaults is not None, "缺 project_specific_defaults"
-    # 项目特定路径填好了（reg 不存在时 reg_data_dir 是 None）
+    assert defaults is not None, "missing project_specific_defaults"
     assert defaults["data_dir"].endswith("train")
     assert defaults["output_dir"].endswith("output")
-    assert defaults["output_name"], "output_name 不能为空"
-    assert defaults["reg_data_dir"] is None  # reg 还没 build
+    assert defaults["output_name"], "output_name must not be empty"
+    assert defaults["reg_data_dir"] is None
     assert defaults["resume_lora"] is None
-    # 全局模型路径也填好了（绝对路径，from secrets.models.root）
-    assert defaults["transformer_path"], "transformer_path 应填默认模型路径"
-    assert defaults["vae_path"], "vae_path 应填"
+    assert defaults["transformer_path"], "transformer_path should be filled with the default model path"
+    assert defaults["vae_path"], "vae_path should be filled"
     assert defaults["text_encoder_path"]
     assert defaults["t5_tokenizer_path"]
 
@@ -88,9 +83,7 @@ def test_get_config_no_config_returns_project_specific_defaults(
 def test_get_config_defaults_picks_up_reg_when_meta_exists(
     client: TestClient, env
 ) -> None:
-    """reg/meta.json 存在时，project_specific_defaults.reg_data_dir 应指向 reg 目录。"""
     pid, vid = _make(client)
-    # 模拟跑过 reg build → reg/meta.json 写好
     with db.connection_for(env["db"]) as conn:
         p = projects.get_project(conn, pid)
         v = versions.get_version(conn, vid)
@@ -107,16 +100,12 @@ def test_get_config_defaults_picks_up_reg_when_meta_exists(
 def test_get_config_returns_defaults_when_has_config(
     client: TestClient, env
 ) -> None:
-    """has_config=True 时 project_specific_defaults 也要返回 —— 用户在已 fork
-    过预设的 version 上点「+ 新建预设」，前端预览仍需要这个 hint 显示项目路径。"""
     pid, vid = _make(client)
     _seed_preset(env, "tpl", lora_rank=64)
-    # 先 fork → has_config=True
     client.post(
         f"/api/projects/{pid}/versions/{vid}/config/from_preset",
         json={"name": "tpl"},
     )
-    # 加 reg meta，模拟 fork 后跑了 reg build 的常见场景
     with db.connection_for(env["db"]) as conn:
         p = projects.get_project(conn, pid)
         v = versions.get_version(conn, vid)
@@ -128,9 +117,9 @@ def test_get_config_returns_defaults_when_has_config(
     body = r.json()
     assert body["has_config"] is True
     defaults = body.get("project_specific_defaults")
-    assert defaults is not None, "has_config=True 时也应返回 project_specific_defaults"
+    assert defaults is not None, "project_specific_defaults should also be returned when has_config=True"
     assert defaults["reg_data_dir"] == str(vdir / "reg")
-    assert defaults["transformer_path"]  # 模型路径也在
+    assert defaults["transformer_path"]
 
 
 def test_get_config_for_unknown_version_404(client: TestClient) -> None:
@@ -156,9 +145,7 @@ def test_fork_preset_writes_version_config(client: TestClient, env) -> None:
     assert body["from_preset"] == "tpl"
     cfg = body["config"]
     assert cfg["lora_rank"] == 64
-    # 项目特定字段被强制覆盖
     assert cfg["data_dir"].endswith("train")
-    # version.config_name 同步成 informational 来源
     v = client.get(f"/api/projects/{pid}/versions/{vid}").json()
     assert v["config_name"] == "tpl"
 
@@ -178,8 +165,6 @@ def test_fork_preset_unknown_404(client: TestClient) -> None:
 
 
 def test_put_config_keeps_user_values(client: TestClient, env) -> None:
-    """PP10.4：PUT 端点不强制覆盖项目特定字段，让用户改 resume_lora /
-    output_name 等。fork preset 时仍预填项目路径（在 from_preset 端点测覆盖）。"""
     pid, vid = _make(client)
     _seed_preset(env, "tpl")
     client.post(
@@ -193,19 +178,15 @@ def test_put_config_keeps_user_values(client: TestClient, env) -> None:
     r = client.put(f"/api/projects/{pid}/versions/{vid}/config", json=cfg)
     assert r.status_code == 200
     body = r.json()
-    # 用户改的项目特定字段被保留（PP10.4）
     assert body["config"]["output_name"] == "custom_lora"
     assert body["config"]["resume_lora"] == "/tmp/some/lora.safetensors"
-    # 用户改的非项目字段也保留
     assert body["config"]["lora_rank"] == 96
 
 
 def test_fork_preset_still_forces_project_overrides(
     client: TestClient, env
 ) -> None:
-    """PP10.4：换预设时项目特定字段仍然被预填成项目路径（force=True 路径未动）。"""
     pid, vid = _make(client)
-    # preset 故意带错误路径
     _seed_preset(env, "tpl", data_dir="/wrong/path", output_name="wrong_name")
     r = client.post(
         f"/api/projects/{pid}/versions/{vid}/config/from_preset",
@@ -218,8 +199,6 @@ def test_fork_preset_still_forces_project_overrides(
 
 
 def test_put_config_tolerates_invalid_values(client: TestClient, env) -> None:
-    """PR #146 之后 write_version_config 走 _tolerant_validate：非法字段
-    静默回退默认值（不再 400）。和 preset 导入路径行为一致。"""
     pid, vid = _make(client)
     _seed_preset(env, "tpl")
     client.post(
@@ -227,7 +206,7 @@ def test_put_config_tolerates_invalid_values(client: TestClient, env) -> None:
         json={"name": "tpl"},
     )
     cfg = client.get(f"/api/projects/{pid}/versions/{vid}/config").json()["config"]
-    cfg["lora_rank"] = 0  # ge=4 越界 → 回退默认 32
+    cfg["lora_rank"] = 0
     r = client.put(f"/api/projects/{pid}/versions/{vid}/config", json=cfg)
     assert r.status_code == 200
     assert r.json()["config"]["lora_rank"] == 32
@@ -252,10 +231,9 @@ def test_save_as_preset_clears_project_fields(client: TestClient, env) -> None:
     assert r.status_code == 200, r.text
     saved = r.json()
     assert saved["saved_preset"] == "my-tuned"
-    assert saved["config"]["data_dir"] == "./dataset"  # schema 默认
+    assert saved["config"]["data_dir"] == "./dataset"
     assert saved["config"]["lora_rank"] == 128
 
-    # 全局 preset 池里出现 my-tuned
     from studio.services.presets import io as presets_io
     presets = {p["name"] for p in presets_io.list_presets()}
     assert "my-tuned" in presets
@@ -270,11 +248,10 @@ def test_save_as_preset_existing_409(client: TestClient, env) -> None:
     )
     r = client.post(
         f"/api/projects/{pid}/versions/{vid}/config/save_as_preset",
-        json={"name": "tpl"},  # 同名 + 不带 overwrite
+        json={"name": "tpl"},
     )
-    assert r.status_code == 409  # preset.exists → ConflictError (CATALOG 改 400→409)
+    assert r.status_code == 409
     assert r.json()["error"]["code"] == "preset.exists"
-    # overwrite=True 应允许
     r2 = client.post(
         f"/api/projects/{pid}/versions/{vid}/config/save_as_preset",
         json={"name": "tpl", "overwrite": True},
@@ -288,11 +265,10 @@ def test_save_as_preset_without_config_400(client: TestClient) -> None:
         f"/api/projects/{pid}/versions/{vid}/config/save_as_preset",
         json={"name": "x"},
     )
-    assert r.status_code == 400  # version 还没 fork 过任何 preset
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------
-# POST /queue (PP6.3 入队)
 # ---------------------------------------------------------------------------
 
 
@@ -321,13 +297,11 @@ def test_enqueue_creates_task_with_ids_and_config_path(
     expected = task_snapshot.snapshot_config_path(task["id"])
     assert task["config_path"] == str(expected)
     assert expected.exists()
-    # ADR-0007 PR-5: version.status 由 supervisor 在 spawn 时推 training；enqueue 时仍 preparing
 
 
 def test_each_enqueued_task_keeps_model_selected_at_that_moment(
     client: TestClient, env, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """切换全局模型后，旧 task 仍用入队时的模型，新 task 用新模型。"""
     from studio.services import task_snapshot, version_config
 
     pid, vid = _make(client)
@@ -367,7 +341,6 @@ def test_each_enqueued_task_keeps_model_selected_at_that_moment(
 
 
 def test_enqueue_rejects_active_task(client: TestClient, env) -> None:
-    """同 version 已有 pending/running task → 409。"""
     pid, vid = _make(client)
     _seed_preset(env, "tpl")
     client.post(
@@ -383,7 +356,6 @@ def test_enqueue_rejects_active_task(client: TestClient, env) -> None:
 def test_enqueue_with_schedule_creates_scheduled_task(
     client: TestClient, env
 ) -> None:
-    """0.17 P-B：body 带 scheduled_at → task 建成 scheduled。"""
     import time as _time
     pid, vid = _make(client)
     _seed_preset(env, "tpl")
@@ -405,7 +377,6 @@ def test_enqueue_with_schedule_creates_scheduled_task(
 
 
 def test_enqueue_rejects_when_scheduled_active(client: TestClient, env) -> None:
-    """0.17 P-B：version 已有 scheduled task → 再入队（含定时）都 409。"""
     import time as _time
     pid, vid = _make(client)
     _seed_preset(env, "tpl")

@@ -1,23 +1,32 @@
-"""模型根目录迁移 —— 扫描体积 + 后台复制到自定义位置（镜像 studio_data 迁移）。
+"""Models-root migration -- scans the size and copies it to a custom location in
+the background (mirrors the studio_data migration).
 
-流程（前端 Settings → 系统 → 存储位置 → 模型根目录）：
-1. GET  /api/models-root/info          —— 当前/默认位置 + 全量扫描（文件数/字节数/顶层明细）
-2. POST /api/models-root/migrate       —— 校验后起后台线程复制；进度走 SSE
-3. 复制完成 → 更新 `secrets.models.root` → **立即生效**（`models_root()` 每次现读
-   secret，无需重启；区别于 studio_data 的指针文件 + 重启）
+Flow (frontend Settings -> System -> Storage location -> Models root):
+1. GET  /api/models-root/info          -- current/default location + a full scan (file count/bytes/top-level breakdown)
+2. POST /api/models-root/migrate       -- validates, then starts a background copy thread; progress goes over SSE
+3. Copy finishes -> updates `secrets.models.root` -> **takes effect immediately**
+   (`models_root()` reads the secret fresh every time, no restart needed --
+   unlike studio_data's pointer-file-plus-restart approach)
 
-设计要点（与 `studio_data.py` 一致）：
-- **目标是父目录**：用户选任意目录，数据落 `目标/models/`；目标本身不要求为空。
-- **只复制不删除**：旧目录原样保留（用户决策；已有 version 的 yaml 里烤死的旧绝对
-  路径仍可解析）。
-- **单飞**：模块级 lock + 状态单例。
-- 模型权重无 sqlite/wal，无 `.db` backup 分支。
+Design points (consistent with `studio_data.py`):
+- **The target is a parent directory**: the user picks any directory, and data
+  lands at `target/models/`; the target itself is not required to be empty.
+- **Copy only, never delete**: the old directory is left as-is (a deliberate
+  choice; old absolute paths baked into existing versions' yaml files can still
+  resolve).
+- **Single-flight**: a module-level lock + a status singleton.
+- Model weights have no sqlite/wal, so there's no `.db` backup branch.
 
-与 studio_data 的分歧（issue #351）：落地目录已有数据时不再一律拒绝，而是抛
-`TargetConflictError` 让前端弹「跳过 / 覆盖 / 取消」——模型目录常与跑图工具共用，
-「跳过已有文件」的合并迁移终态等于把路径指过去 + 补齐缺失文件。合并模式下失败
-回滚**不能** rmtree（会删掉用户既有数据），改为逐文件 `.part` 原子落盘 + 失败留下
-已复制完成的有效副本（skip 幂等，重跑即续传）；secret 仍只在全部复制完后才切换。
+Where this diverges from studio_data (issue #351): when the target directory
+already has data, it no longer rejects unconditionally -- instead it raises
+`TargetConflictError` so the frontend can pop up a "skip / overwrite / cancel"
+choice. Model directories are often shared with image-generation tools, so a
+merge migration that ends in "skip existing files" is equivalent to just
+pointing the path there and filling in the missing files. A failed rollback in
+merge mode **must not** rmtree (it would delete the user's existing data) --
+instead each file is written atomically via a `.part` temp file, and on
+failure the already-copied valid copies are left in place (skip is idempotent,
+so a rerun just resumes); the secret only switches once the entire copy is done.
 """
 from __future__ import annotations
 
@@ -39,25 +48,28 @@ logger = logging.getLogger(__name__)
 
 PROGRESS_INTERVAL_SECONDS = 0.2
 
-# 落地子目录名固定 —— 不跟随当前位置的目录名（自定义位置可能叫别的）。
+# The landing subdirectory name is fixed -- it doesn't follow the current
+# location's directory name (a custom location might be named anything).
 DATA_DIR_NAME = "models"
 
 Publish = Callable[[dict[str, Any]], None]
 
 
 def default_models_root() -> Path:
-    """`secrets.models.root` 未设时的默认落点（同 `models_root()` 的回退）。"""
+    """The default location when `secrets.models.root` is unset (matches `models_root()`'s fallback)."""
     return REPO_ROOT / "models"
 
 
 # ---------------------------------------------------------------------------
-# 扫描
+# Scanning
 # ---------------------------------------------------------------------------
 
 def scan_models_root(root: Path | None = None) -> dict[str, Any]:
-    """全量扫描模型根目录：总文件数 / 总字节数 + 顶层条目明细（确认 modal 显示用）。
+    """Does a full scan of the models root: total file count / total bytes +
+    top-level entry breakdown (for display in the confirmation modal).
 
-    目录不存在时返回全 0（还没下载过任何模型）。
+    Returns all zeros when the directory doesn't exist (no model has been
+    downloaded yet).
     """
     base = root if root is not None else models_root()
     entries: list[dict[str, Any]] = []
@@ -95,7 +107,7 @@ def scan_models_root(root: Path | None = None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 迁移状态（单例）
+# Migration status (singleton)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -106,7 +118,7 @@ class MigrationStatus:
     total_bytes: int = 0
     done_files: int = 0
     done_bytes: int = 0
-    current_file: str = ""       # 相对路径，进度展示用
+    current_file: str = ""       # relative path, used for progress display
     error: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -129,14 +141,16 @@ def _set_status(**kw: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 校验 + 启动
+# Validation + startup
 # ---------------------------------------------------------------------------
 
 class TargetConflictError(ValueError):
-    """落地目录已有数据且未指定合并策略 —— 需要用户显式三选（跳过/覆盖/取消）。
+    """The target directory already has data and no merge policy was given --
+    the user must explicitly choose one of three options (skip/overwrite/cancel).
 
-    子类化 ValueError 让旧的 `except ValueError` 兜底仍成立；router 捕获本类转
-    409 + code `models_root.target_conflict`，`details` 给前端冲突对话框展示。
+    Subclassing ValueError keeps old `except ValueError` fallbacks working;
+    the router catches this class and converts it to 409 + code
+    `models_root.target_conflict`, with `details` for the frontend's conflict dialog.
     """
 
     def __init__(self, message: str, details: dict[str, Any]) -> None:
@@ -145,7 +159,9 @@ class TargetConflictError(ValueError):
 
 
 def _conflict_details(src: Path, dst: Path) -> dict[str, Any]:
-    """冲突对话框的统计：目标已有文件数/字节数 + 与当前根同名（会被覆盖）的文件数。"""
+    """Stats for the conflict dialog: the target's existing file count/bytes +
+    the count of files with the same name in the current root (which would be
+    overwritten)."""
     existing_files = 0
     existing_bytes = 0
     for f in dst.rglob("*"):
@@ -172,12 +188,17 @@ def _conflict_details(src: Path, dst: Path) -> dict[str, Any]:
 def validate_target(
     target: Path, *, source: Path | None = None, on_conflict: str | None = None
 ) -> Path:
-    """迁移目标校验，不合法抛 ValueError（caller 转 422）；返回实际落地目录。
+    """Validates the migration target, raising ValueError if invalid (the caller
+    converts to 422); returns the actual landing directory.
 
-    target 是用户选的任意目录，数据落 `target/models/`，所以 target 本身不要求
-    为空。规则：绝对路径；target 已存在时必须是目录；落地目录不等于当前位置；
-    落地目录与当前位置互不嵌套。落地目录已有数据时按 on_conflict：None → 抛
-    TargetConflictError（前端弹三选）；"skip" / "overwrite" → 放行合并。
+    target is any directory the user picked; data lands at `target/models/`, so
+    target itself isn't required to be empty. Rules: must be an absolute path;
+    if target already exists it must be a directory; the landing directory
+    can't equal the current location; the landing directory and the current
+    location must not be nested inside each other. When the landing directory
+    already has data, behavior depends on on_conflict: None -> raises
+    TargetConflictError (frontend shows the three-way choice); "skip" /
+    "overwrite" -> allows the merge to proceed.
     """
     if on_conflict not in (None, "skip", "overwrite"):
         raise ValueError(f"Unknown conflict policy {on_conflict!r}")
@@ -213,11 +234,13 @@ def start_migration(
     publish: Publish = bus.publish,
     on_conflict: str | None = None,
 ) -> None:
-    """校验 + 起后台复制线程。已有迁移在跑时抛 RuntimeError（caller 转 409）。
+    """Validates and starts the background copy thread. Raises RuntimeError if a
+    migration is already running (the caller converts to 409).
 
-    on_conflict：落地目录已有数据时的合并策略（"skip" / "overwrite"），None 且
-    有冲突时 validate_target 抛 TargetConflictError。source 参数仅测试注入用；
-    生产走默认（当前 `models_root()`）。
+    on_conflict: the merge policy when the landing directory already has data
+    ("skip" / "overwrite"); if None and there's a conflict, validate_target
+    raises TargetConflictError. The source parameter is for test injection
+    only; production uses the default (the current `models_root()`).
     """
     src = (source if source is not None else models_root()).resolve()
     dst = validate_target(target, source=src, on_conflict=on_conflict)
@@ -242,21 +265,26 @@ def start_migration(
 
 
 def _update_models_root_secret(new_root: Path) -> None:
-    """复制成功后把 `secrets.models.root` 指到新落地目录（立即生效，无需重启）。"""
+    """After a successful copy, points `secrets.models.root` at the new landing
+    directory (takes effect immediately, no restart needed)."""
     cur = secrets.load()
     new_models = cur.models.model_copy(update={"root": str(new_root)})
     secrets.save(cur.model_copy(update={"models": new_models}))
 
 
 # ---------------------------------------------------------------------------
-# 复制线程
+# Copy thread
 # ---------------------------------------------------------------------------
 
 def _copy_atomic(src_file: Path, out: Path) -> None:
-    """copy2 到同目录临时名再 os.replace —— 目标位置永远只有完整文件。
+    """copy2 to a temp name in the same directory, then os.replace -- the target
+    location only ever has complete files.
 
-    合并/覆盖模式下直接 copy2 覆盖，失败会把目标原有的完整权重砸成半截；先写
-    临时名再原子替换，目标要么保持旧文件要么换成新文件。临时文件失败即清。
+    Under merge/overwrite mode, a direct copy2-overwrite would smash the
+    target's existing complete weight file into a half-written one if it
+    failed; writing to a temp name first and then atomically replacing means
+    the target either keeps the old file or switches to the new one entirely.
+    The temp file is cleaned up on any failure.
     """
     part = out.with_name(out.name + ".studio-migrate.part")
     try:
@@ -270,13 +298,13 @@ def _copy_atomic(src_file: Path, out: Path) -> None:
 def _run_migration(
     src: Path, dst: Path, publish: Publish, on_conflict: str | None = None
 ) -> None:
-    # 开跑前记住 dst 是否已有数据：合并模式下 dst 的既有内容是用户的（可能与
-    # 跑图工具共用目录），失败回滚绝不能整树 rmtree —— 据此选回滚策略。
+    # Before starting, remember whether dst already has data: in merge mode dst's existing
+    # content belongs to the user (may share a directory with inference tools); failure rollback must never rmtree the whole tree -- choose the rollback strategy based on this.
     dst_preexisted = dst.is_dir() and any(dst.iterdir())
     try:
         files = [f for f in sorted(src.rglob("*")) if f.is_file()]
         if on_conflict == "skip":
-            # 目标已有同名文件的不复制；进度总量只算真要复制的
+            # Skip files that already exist at the destination; the progress total only counts what actually needs copying
             files = [f for f in files if not (dst / f.relative_to(src)).exists()]
         total_bytes = 0
         for f in files:
@@ -298,8 +326,8 @@ def _run_migration(
                 size = f.stat().st_size
                 _copy_atomic(f, out)
             except FileNotFoundError:
-                # 扫描后被删（如临时文件）—— 跳过，进度可能停在 <100%，无碍
-                logger.info("迁移期间文件消失，跳过: %s", rel)
+                # Deleted after the scan (e.g. a temp file) -- skip; progress may stall below 100%, harmless
+                logger.info("File disappeared during migration, skipping: %s", rel)
                 continue
             done_files += 1
             done_bytes += size
@@ -316,7 +344,7 @@ def _run_migration(
                     "current_file": str(rel),
                 })
 
-        # 复制完整 → 切 secret（立即生效）
+        # Copy complete -> switch secret (takes effect immediately)
         _update_models_root_secret(dst)
         _set_status(state="done", done_files=done_files, done_bytes=done_bytes, current_file="")
         publish({
@@ -327,18 +355,18 @@ def _run_migration(
             "done_bytes": done_bytes,
         })
         logger.info(
-            "模型根目录迁移完成: %s → %s（%d 文件），已更新 secrets.models.root（立即生效）",
+            "Model root migration complete: %s -> %s (%d files); updated secrets.models.root (effective immediately)",
             src, dst, done_files,
         )
     except Exception as exc:
-        logger.exception("模型根目录迁移失败: %s → %s", src, dst)
+        logger.exception("Model root migration failed: %s -> %s", src, dst)
         if dst_preexisted:
-            # 合并模式：dst 的既有数据是用户的，绝不能整树删。已复制完成的文件
-            # 都是完整有效副本（_copy_atomic 保证），留下无害；skip 幂等，重跑即续传。
-            logger.info("目标目录原有数据，保留已复制文件，不回滚: %s", dst)
+            # Merge mode: dst's existing data belongs to the user, never rmtree the whole tree.
+            # Files already copied are complete, valid copies (guaranteed by _copy_atomic), so leaving them is harmless; skip is idempotent, a rerun just resumes.
+            logger.info("Destination directory had pre-existing data; keeping copied files, not rolling back: %s", dst)
         else:
-            # dst 开始前为空 / 不存在，整树清掉等于回到迁移前；
-            # secret 未动；用户的 target 父目录不受影响。
+            # dst was empty/nonexistent before starting, so clearing the whole tree just reverts to the pre-migration state;
+            # the secret wasn't touched, and the user's target parent directory is unaffected.
             shutil.rmtree(dst, ignore_errors=True)
         _set_status(state="error", error=str(exc))
         publish({"type": "models_root_migrate_done", "ok": False, "error": str(exc)})

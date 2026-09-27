@@ -1,19 +1,20 @@
-"""训练监控状态写入器（PP6.1 改造）。
+"""Training monitor state writer (PP6.1 rework).
 
-历史：原本是 HTTP server + JSON 文件双轨。Studio 前端有自己的 monitor 页，
-HTTP server 无用，已删除。本文件现在只负责把训练进度（loss / lr / samples）
-写到一个 JSON 文件，由 `set_state_file(path)` 决定路径。
+History: this used to be a dual-track HTTP server + JSON file setup. The Studio
+frontend has its own monitor page now, so the HTTP server was useless and has been
+removed. This file's only job now is writing training progress (loss / lr / samples)
+to a JSON file, whose path is set by `set_state_file(path)`.
 
-API：
-- `set_state_file(path)` — 设置写入路径（应用启动一次）；不设置则 save_state 静默 no-op
-- `update_monitor(...)` — 训练循环里调，更新 in-memory state 并落盘
-- `restore_monitor_state(...)` — 断点续训恢复历史曲线
-- `get_state()` — 读当前 state（拷贝，避免被外部修改）
-- `_downsample_uniform(points, n)` — 工具：均匀降采样，给前端展示用
+API:
+- `set_state_file(path)` -- set the write path (called once at app startup); if unset, save_state is a silent no-op
+- `update_monitor(...)` -- called from the training loop, updates in-memory state and saves to disk
+- `restore_monitor_state(...)` -- restores historical curves on checkpoint resume
+- `get_state()` -- read the current state (a copy, so external code can't mutate it)
+- `_downsample_uniform(points, n)` -- utility: uniform downsampling for frontend display
 
-状态结构：losses / lr_history / optimizer_metrics_history / samples / epoch /
-total_epochs / step / total_steps / speed / start_time / config（total_epochs 是
-PP6.x 后期补的，老 state 缺失时前端按 0 兜底）。
+State structure: losses / lr_history / optimizer_metrics_history / samples / epoch /
+total_epochs / step / total_steps / speed / start_time / config (total_epochs was added
+later during PP6.x; the frontend falls back to 0 when it's missing from old state).
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-# 全局状态（in-memory）
+# Global state (in-memory)
 MONITOR_STATE: dict[str, Any] = {
     "losses": [],
     "lr_history": [],
@@ -38,15 +39,16 @@ MONITOR_STATE: dict[str, Any] = {
     "config": {},
 }
 
-# 文件输出路径；None = 不写盘（save_state silent no-op）
+# File output path; None = don't write to disk (save_state is a silent no-op)
 _state_file: Optional[Path] = None
 
 
 def set_state_file(path: Optional[Path | str]) -> None:
-    """配置 state JSON 输出路径。None 表示不写盘。
+    """Configure the state JSON output path. None means don't write to disk.
 
-    会确保父目录存在；若已有同路径状态文件则保留（断点续训由
-    `restore_monitor_state` 负责加载历史，此处不读）。
+    Ensures the parent directory exists; if a state file already exists at the same
+    path it's left alone (checkpoint resume loads history via
+    `restore_monitor_state`, this function doesn't read it).
     """
     global _state_file
     if path is None:
@@ -58,8 +60,9 @@ def set_state_file(path: Optional[Path | str]) -> None:
 
 
 def reset_monitor() -> None:
-    """清空 in-memory MONITOR_STATE。daemon 跨 task 复用进程时必调，
-    否则上一 task 的 samples/step/loss 会残留到下一 task。"""
+    """Clear the in-memory MONITOR_STATE. Must be called whenever the daemon reuses
+    a process across tasks, otherwise the previous task's samples/step/loss would
+    leak into the next task."""
     MONITOR_STATE.update({
         "losses": [], "lr_history": [], "optimizer_metrics_history": [],
         "samples": [],
@@ -72,7 +75,7 @@ def reset_monitor() -> None:
 
 
 def save_state() -> None:
-    """把当前 MONITOR_STATE 写到 _state_file（如果配置了）。失败静默吞。"""
+    """Write the current MONITOR_STATE to _state_file (if configured). Failures are silently swallowed."""
     if _state_file is None:
         return
     try:
@@ -87,10 +90,10 @@ def update_monitor(
     total_steps=None, speed=None, sample_path=None, config=None,
     xy=None, optimizer_metrics=None,
 ):
-    """更新监控状态。先更新 step/epoch 等元信息，再追加 loss/lr 点位。
+    """Update the monitor state. Updates step/epoch and other metadata first, then appends loss/lr points.
 
-    `xy`：可选 dict {xi, yi, xv, yv}，仅 generate XY 矩阵 task 用。前端
-    PreviewXYGrid 按它给 cell 找位置。"""
+    `xy`: an optional dict {xi, yi, xv, yv}, used only for the generate XY matrix
+    task. The frontend's PreviewXYGrid uses it to place cells."""
     if epoch is not None:
         MONITOR_STATE["epoch"] = epoch
     if total_epochs is not None:
@@ -149,7 +152,7 @@ def update_monitor(
 
 
 def get_state() -> dict[str, Any]:
-    """读当前 state（浅拷贝；列表本体仍共享，调用方不要原地改）。"""
+    """Read the current state (a shallow copy; the list contents are still shared, callers must not mutate in place)."""
     return MONITOR_STATE.copy()
 
 
@@ -157,7 +160,7 @@ def restore_monitor_state(
     losses=None, lr_history=None, epoch=None, total_epochs=None, step=None,
     total_steps=None, start_time=None, config=None, optimizer_metrics_history=None,
 ):
-    """断点续训：把存档里的历史曲线灌回 in-memory state，再落盘。"""
+    """Checkpoint resume: load the historical curves from the save file back into in-memory state, then persist."""
     if losses is not None:
         MONITOR_STATE["losses"] = losses
     if lr_history is not None:
@@ -180,7 +183,7 @@ def restore_monitor_state(
 
 
 def _downsample_uniform(points: list[Any], target_points: int) -> list[Any]:
-    """均匀降采样到 target_points（保留首尾），适合 loss/lr 长序列展示。"""
+    """Uniformly downsample to target_points (keeping first and last), suitable for displaying long loss/lr sequences."""
     if not isinstance(target_points, int) or target_points <= 0:
         return points
     n = len(points)
@@ -197,7 +200,7 @@ def _downsample_uniform(points: list[Any], target_points: int) -> list[Any]:
 
 
 def reset_state() -> None:
-    """测试用：把 in-memory state 清回初始值。"""
+    """For testing: reset in-memory state back to its initial values."""
     MONITOR_STATE.clear()
     MONITOR_STATE.update({
         "losses": [],

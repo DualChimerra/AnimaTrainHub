@@ -8,7 +8,7 @@ interface Props {
   style?: React.CSSProperties
 }
 
-/** 单 tag 精确补全输入：用于 filter 栏「含 tag」。 */
+/** Single-tag exact-match autocomplete input: used in the filter bar's "has tag". */
 export default function TagAutocomplete({
   value,
   onChange,

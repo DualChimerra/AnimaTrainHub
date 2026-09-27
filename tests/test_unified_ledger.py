@@ -1,6 +1,6 @@
-"""R-2 台账合并（schema 层）：tasks 承接数据作业字段（写路径切换在 R-3）。
+"""R-2 ledger merge (schema layer): tasks now carry data-job fields (write path switch is in R-3).
 
-docs/design/queue-resource-model-0.17.md §5 R-2。
+docs/design/queue-resource-model-0.17.md Section 5, R-2.
 """
 from __future__ import annotations
 
@@ -19,10 +19,11 @@ def dbfile(tmp_path: Path) -> Path:
 
 
 def test_valid_task_types_covers_all_resource_kinds() -> None:
-    """db.VALID_TASK_TYPES 与 supervisor/resources.py 档位映射保持同步。
+    """db.VALID_TASK_TYPES stays in sync with the class mapping in supervisor/resources.py.
 
-    档位归属权威在 resources.py；db 层平铺列出（infrastructure 不反向依赖
-    supervisor）。本断言防两边漂移。
+    Authority for class ownership lives in resources.py; the db layer lists them
+    flat (infrastructure must not depend back on supervisor). This assertion
+    guards against the two drifting apart.
     """
     from studio.supervisor.resources import (
         JOB_KIND_RESOURCE_CLASS,
@@ -33,7 +34,7 @@ def test_valid_task_types_covers_all_resource_kinds() -> None:
 
 
 def test_create_task_accepts_job_kind_with_params(dbfile: Path) -> None:
-    """数据作业类 task：task_type + params + project/version 全字段落库回读。"""
+    """Data-job-class task: task_type + params + project/version round-trip through storage."""
     with db.connection_for(dbfile) as conn:
         tid = db.create_task(
             conn, name="tag v1", config_name="tag",
@@ -49,7 +50,7 @@ def test_create_task_accepts_job_kind_with_params(dbfile: Path) -> None:
 
 
 def test_create_task_defaults_unchanged(dbfile: Path) -> None:
-    """老调用方（不带新参数）行为不变：task_type=train、params NULL。"""
+    """Old callers (without the new params) keep their behavior: task_type=train, params NULL."""
     with db.connection_for(dbfile) as conn:
         tid = db.create_task(conn, name="t", config_name="c")
         task = db.get_task(conn, tid)
@@ -65,7 +66,7 @@ def test_create_task_rejects_unknown_type(dbfile: Path) -> None:
 
 
 def test_params_decoded_in_list_paths(dbfile: Path) -> None:
-    """list_tasks / list_tasks_page 与 get_task 同样带 params_decoded。"""
+    """list_tasks / list_tasks_page carry params_decoded just like get_task."""
     with db.connection_for(dbfile) as conn:
         db.create_task(
             conn, name="dl", config_name="dl",

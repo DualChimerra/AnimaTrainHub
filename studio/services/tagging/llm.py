@@ -421,11 +421,11 @@ class LLMTagger:
         *,
         session: Optional[requests.Session] = None,
     ) -> None:
-        # overrides 可以包含两类键：
-        #   - "current_preset"：切换 active preset id
-        #   - 任意 LLMPresetConfig 字段（base_url / model / endpoint / temperature / ...）
-        # `api_key` 出于安全考虑不允许从 overrides 传（避免泄漏到 task 日志）；要改用
-        # Settings 持久化或显式 secrets.update()。
+        # overrides can contain two kinds of keys:
+        #   - "current_preset": switches the active preset id
+        #   - any LLMPresetConfig field (base_url / model / endpoint / temperature / ...)
+        # `api_key` isn't allowed to be passed via overrides for security reasons (to avoid it leaking into task logs); to change it, use
+        # Settings persistence or explicit secrets.update() instead.
         self._overrides = {
             k: v
             for k, v in (overrides or {}).items()
@@ -435,14 +435,14 @@ class LLMTagger:
         self._session = session or requests.Session()
 
     def _cfg(self) -> "secrets.LLMPresetConfig":
-        """返回最终生效的 active preset（已 apply overrides）。"""
+        """Returns the actual effective active preset (with overrides applied)."""
         tagger_cfg = secrets.load().llm_tagger
-        # 1) 决定 active preset
+        # 1) Decide the active preset
         preset_id = str(self._overrides.get("current_preset") or tagger_cfg.current_preset)
         active = next((p for p in tagger_cfg.presets if p.id == preset_id), None)
         if active is None:
             active = tagger_cfg.active
-        # 2) apply 字段 overrides
+        # 2) apply field overrides
         preset_dict = active.model_dump()
         for k, v in self._overrides.items():
             if k == "current_preset":
@@ -454,9 +454,9 @@ class LLMTagger:
     def is_available(self) -> tuple[bool, str]:
         cfg = self._cfg()
         if not cfg.base_url:
-            return False, "未配置 base_url"
+            return False, "base_url not configured"
         if not cfg.model:
-            return False, "未配置 model"
+            return False, "model not configured"
         return True, f"{cfg.endpoint} · {cfg.model}"
 
     def prepare(self) -> None:
@@ -556,8 +556,8 @@ class LLMTagger:
             else:
                 image = Path(result["image"])
                 out[image] = ", ".join(result.get("tags") or [])
-            # 每张一行，与 LLM 阶段 [progress] 的密度对齐——预打标是纯前置阶段，
-            # 任务进度条不动，日志是用户唯一能确认它在推进的地方。
+            # One line per image, matching the density of the LLM stage's [progress] logs -- pre-tagging is a pure pre-stage,
+            # so the task progress bar doesn't move; the log is the user's only way to confirm it's progressing.
             logger.info("LLM assist: %d/%d pre-tagged", done, total)
         return out
 
@@ -678,10 +678,10 @@ class LLMTagger:
         image_path: Path,
         messages: list["secrets.LLMMessage"],
     ) -> dict[str, Any]:
-        """按 preset.messages 顺序构造 chat-completions messages 数组。
+        """Builds the chat-completions messages array in the order of preset.messages.
 
-        text item → 单条 message；image item → 单条 `{role: user, content: [image_url]}`。
-        相邻同 role 不自动合并（OpenAI 完全 OK；Anthropic 兼容层会自动处理）。
+        A text item -> a single message; an image item -> a single `{role: user, content: [image_url]}`.
+        Adjacent items with the same role aren't auto-merged (fine for OpenAI; the Anthropic compat layer handles it automatically).
         """
         payload_messages: list[dict[str, Any]] = []
         for item in messages:
@@ -707,15 +707,15 @@ class LLMTagger:
         image_path: Path,
         messages: list["secrets.LLMMessage"],
     ) -> dict[str, Any]:
-        """Responses API 限制式适配：
+        """Responses API restricted-form adaptation:
 
-        - 所有 type=text + role=system 的 messages 合并进 instructions（用 \\n\\n 拼接）
-        - 取第一条 type=text + role=user 的 content 作为 user 文本（其他 user/assistant 忽略）
-        - 图片附加到 user content 数组里
+        - all type=text + role=system messages are merged into instructions (joined with \n\n)
+        - the first type=text + role=user content is taken as the user text (other user/assistant items are ignored)
+        - images are appended into the user content array
 
-        OpenAI Responses 自身的 multi-turn input 支持不稳，第三方兼容也参差 ——
-        所以这里采用「单 system + 单 user + image」的保守映射。UI 会在选 responses
-        endpoint 时提示该限制。
+        OpenAI Responses's own multi-turn input support isn't stable, and third-party compat layers vary too --
+        so this uses the conservative "single system + single user + image" mapping. The UI warns about
+        this limitation when the responses endpoint is selected.
         """
         system_texts: list[str] = []
         user_text = ""

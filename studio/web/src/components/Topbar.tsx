@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { playSound } from '../lib/sound'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useProjectCtx } from '../context/ProjectContext'
@@ -17,10 +18,13 @@ const SearchIcon = (
   </svg>
 )
 
-/** 运行模式徽标（本 fork）。点开设置抽屉的运行模式区。
+/** Runtime mode badge (this fork). Opens the settings drawer's runtime mode
+ *  section.
  *
- *  常驻显示而不是"仅 colab 时显示"：模式选错的症状（本地起了 0.0.0.0、云端不
- *  开浏览器）远看都像别的 bug，把当前值一直摆在眼前是最省事的排查入口。 */
+ *  Shown always rather than "only when colab" -- a wrong mode (0.0.0.0 bound
+ *  locally, browser not opening in the cloud) looks like an unrelated bug
+ *  from a distance, so keeping the current value visible is the cheapest way
+ *  to rule it out. */
 function RuntimeModeBadge() {
   const { t } = useTranslation()
   const runtime = useRuntimeModeOptional()
@@ -49,7 +53,7 @@ const QueueIcon = (
 )
 
 
-// ── 格式化工具 ──────────────────────────────────────────────────────────────
+// ── formatting helpers ──────────────────────────────────────────────────────
 
 function formatETA(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`
@@ -156,7 +160,7 @@ export default function Topbar({
       setRunningTask(running.length > 0 ? running[0] : null)
       setPendingCount(pending.length)
     } catch {
-      // 忽略
+      // ignore
     }
   }, [])
 
@@ -166,7 +170,13 @@ export default function Topbar({
 
   useEventStream(
     (evt: StudioEvent) => {
-      if (evt.type === 'task_state_changed') void refreshQueue()
+      if (evt.type === 'task_state_changed') {
+        void refreshQueue()
+        // Background work finishing is worth an audible cue (the Topbar is
+        // mounted on every page, so this fires exactly once per event).
+        if (evt.status === 'done') playSound('notify')
+        else if (evt.status === 'failed') playSound('error')
+      }
     },
     { onOpen: () => void refreshQueue() },
   )
@@ -289,7 +299,7 @@ export default function Topbar({
             </button>
           )}
 
-          {/* 本 fork：公告栏铃铛随 in-app updater/announcements 移除 */}
+          {/* This fork: the announcements bell was removed along with the in-app updater/announcements feature */}
 
           {!mobile && <RuntimeModeBadge />}
 

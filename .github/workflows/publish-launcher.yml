@@ -1,22 +1,26 @@
 name: publish-launcher
 
-# 构建 Windows 版 `AnimaLoraStudio.exe` 并**提交回仓库**。
+# Builds the Windows `AnimaLoraStudio.exe` and **commits it back to the repo**.
 #
-# 为什么 exe 进 git（一般来说二进制不该进）：本 fork 的目标用户是「clone 完
-# 想双击就用」的本机用户。让他们先去 Releases 翻附件、或先装 PyInstaller 自己
-# 编，等于把要省的那一步又加了回来。exe 只有 7MB 且极少变（只在
-# tools/launcher.py 改动时需要重出），代价可以接受。
+# Why the exe goes into git (binaries usually shouldn't): this fork's target users are
+# people who "clone it and want to double-click it right away." Making them first dig
+# through Releases for the attachment, or install PyInstaller and build it themselves,
+# just adds back the step we're trying to save them. The exe is only ~7MB and rarely
+# changes (only needs rebuilding when tools/launcher.py changes), so the cost is
+# acceptable.
 #
-# 为什么必须走 CI 而不是本地编：PyInstaller 产出的是**宿主平台**的可执行文件，
-# 不能交叉编译 —— Windows 的 exe 只能在 Windows 上出。维护者用 Linux/macOS 时
-# 这个 workflow 是唯一的出路。
+# Why this has to go through CI instead of a local build: PyInstaller produces an
+# executable for the **host platform** — it can't cross-compile, so the Windows exe can
+# only be built on Windows. This workflow is the only path for maintainers on
+# Linux/macOS.
 #
-# 手动触发（Actions → publish-launcher → Run workflow）。刻意**不**挂到 push：
-# PyInstaller 的输出不是逐字节可复现的，每次 push 都重出会让仓库无谓地长胖，
-# 而且会和用户的 commit 抢同一分支。
+# Manually triggered (Actions -> publish-launcher -> Run workflow). Deliberately **not**
+# hooked to push: PyInstaller's output isn't byte-for-byte reproducible, so rebuilding on
+# every push would bloat the repo for no reason and would race with users' own commits on
+# the same branch.
 #
-# 常规的「exe 还编得出来吗」守门在 build-launcher.yml（每次改启动器源码时跑，
-# 不提交任何东西）。
+# The routine "does the exe still build" gate lives in build-launcher.yml (runs on every
+# change to the launcher source, commits nothing).
 on:
   workflow_dispatch:
     inputs:
@@ -38,7 +42,8 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # 用支持的最低版本构建，产物的运行时要求才落在我们声明的下限上。
+          # Build with the lowest supported version so the binary's runtime requirements
+          # stay at the floor we claim to support.
           python-version: "3.10"
 
       - name: Install PyInstaller
@@ -47,9 +52,10 @@ jobs:
       - name: Build
         run: python tools/build_launcher.py
 
-      # 冒烟：产物必须真的能跑起来并认出自己在仓库里。--check 不装任何东西。
-      # 提交一个编得出来但一运行就报缺模块的 exe，比不提交更糟 —— 用户拿到的
-      # 是「双击没反应」，而仓库看起来一切正常。
+      # Smoke test: the built binary must actually run and recognize itself inside the
+      # repo. --check installs nothing. Committing an exe that builds fine but errors out
+      # on a missing module at runtime is worse than not committing at all — the user
+      # gets a "double-click does nothing" experience while the repo looks perfectly fine.
       - name: Smoke test
         run: |
           Copy-Item dist\AnimaLoraStudio.exe .\AnimaLoraStudio.exe -Force
@@ -61,9 +67,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f AnimaLoraStudio.exe
-          # PyInstaller 的输出每次都有字节差异（时间戳等），所以这里不能靠
-          # 「有 diff 就提交」判断有没有意义 —— 用 --quiet 只是为了跳过
-          # 「一个文件都没变」这种（理论上不会出现的）空提交。
+          # PyInstaller's output differs byte-for-byte every time (timestamps etc.), so
+          # "there's a diff" can't be used to decide whether committing is meaningful —
+          # --quiet here is only to skip the (theoretically impossible) case where
+          # literally nothing changed, to avoid an empty commit.
           if git diff --cached --quiet; then
             echo "nothing to commit"
             exit 0

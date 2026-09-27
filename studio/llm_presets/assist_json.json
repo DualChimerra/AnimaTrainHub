@@ -1,6 +1,6 @@
 {
   "id": "assist_json",
-  "label": "本地 tagger 辅助 · JSON",
+  "label": "Local tagger assist · JSON",
   "builtin": true,
   "output_format": "json",
   "assist_tagger": "wd14",

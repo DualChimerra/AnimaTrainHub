@@ -1,8 +1,11 @@
-"""Re-export shim — PR-3.8 真实模块 studio.services.models（4-way 拆后改为别名整个包）。
+"""Re-export shim -- PR-3.8's real module is studio.services.models (after the
+4-way split this became an alias for the whole package).
 
-sys.modules 别名让旧路径的 monkeypatch / 私有访问透明转发到 models 包入口；
-原 `from studio.services.models import X` 经由包 __init__.py re-export 仍工作。
-新代码请直接 `from studio.services.models import X`。
+The sys.modules alias transparently forwards old-path monkeypatches / private
+access to the models package entry point; the original
+`from studio.services.models import X` still works via the package's
+__init__.py re-export.
+New code should import directly with `from studio.services.models import X`.
 """
 import sys as _sys
 

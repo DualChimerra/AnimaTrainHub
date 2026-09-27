@@ -1,8 +1,9 @@
-"""NaViT / Patch-n-Pack 块对角打包——token 预算打包器单测。
+"""NaViT / Patch-n-Pack block-diagonal packing -- unit tests for the token-budget packer.
 
-纯 Python（无 torch）：验证 ``pack_indices_by_budget`` / ``pack_indices_ffd_windowed``
-/ ``NavitPackBatchSampler`` 产出的包 (a) 除不可避免的超大单图外 token 总和 ≤ 预算、
-(b) 覆盖每个样本恰好一次、(c) 遵守可选的 per-pack 图片上限、(d) 跨 epoch reshuffle。
+Pure Python (no torch): verifies that the packs produced by ``pack_indices_by_budget`` /
+``pack_indices_ffd_windowed`` / ``NavitPackBatchSampler`` (a) keep the total token count
+<= budget except for unavoidable oversized single images, (b) cover each sample exactly
+once, (c) respect the optional per-pack image cap, and (d) reshuffle across epochs.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from training.dataset import (
 
 
 class _FakeDataset:
-    """暴露 token_count_for_index 的最小数据集（模拟 CachedLatentDataset）。"""
+    """Minimal dataset exposing token_count_for_index (mimics CachedLatentDataset)."""
 
     def __init__(self, token_counts):
         self.token_count_for_index = list(token_counts)
@@ -27,7 +28,7 @@ class _FakeDataset:
 
 
 class _FakeCachedDataset:
-    """模拟 NaViT 路径：token_count_for_index 全 0，每图尺寸在 bucket_for_index = (h, w)。"""
+    """Mimics the NaViT path: token_count_for_index is all 0, each image's size lives in bucket_for_index = (h, w)."""
 
     def __init__(self, latent_shapes):
         self.bucket_for_index = list(latent_shapes)
@@ -148,11 +149,11 @@ def test_sampler_epoch_changes_packing():
     p1 = list(sampler)
     assert sorted(i for p in p0 for i in p) == list(range(len(ds)))
     assert sorted(i for p in p1 for i in p) == list(range(len(ds)))
-    assert p0 != p1  # reshuffle
+    assert p0 != p1  # reshuffled
 
 
 def test_token_counts_derived_from_latent_shape_when_token_count_zero():
-    """NaViT 路径 token_count_for_index 全 0 时，从 bucket_for_index (h//2)*(w//2) 推导。"""
+    """When token_count_for_index is all 0 on the NaViT path, derive it from bucket_for_index as (h//2)*(w//2)."""
     ds = _FakeCachedDataset([(128, 128), (96, 160), (160, 96)])
     counts = dataset_token_counts(ds, patch_spatial=2)
     assert counts == [64 * 64, 48 * 80, 80 * 48]

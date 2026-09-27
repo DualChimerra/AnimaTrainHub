@@ -1,7 +1,3 @@
-"""PR-6 — model_downloader._on_log per-line print。
-PR-S3 — _resolve_endpoint env > secrets > None 优先级。
-MS-1  — _get_download_source / download_flat_ms rename+cleanup 逻辑。
-"""
 from __future__ import annotations
 
 import threading
@@ -14,7 +10,6 @@ from studio.services import models as model_downloader
 
 @pytest.fixture
 def reset_downloads():
-    """每个测试用例独立，避免 _DOWNLOADS 全局状态污染。"""
     with model_downloader._LOCK:
         before = dict(model_downloader._DOWNLOADS)
         model_downloader._DOWNLOADS.clear()
@@ -25,7 +20,6 @@ def reset_downloads():
 
 
 def _wait_done(key: str, timeout: float = 2.0) -> None:
-    """轮询等任务结束（避免依赖 bus / 线程加入）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         with model_downloader._LOCK:
@@ -39,7 +33,6 @@ def _wait_done(key: str, timeout: float = 2.0) -> None:
 def test_on_log_writes_to_ring_buffer_and_stdout(
     reset_downloads, capfd: pytest.CaptureFixture
 ) -> None:
-    """on_log 同时写：(1) ring buffer ds.log，(2) stdout（print(line, flush=True)）。"""
     lines_to_emit = ["downloading file 1", "downloading file 2", "✓ done"]
 
     def fake_fn(on_log):
@@ -50,13 +43,11 @@ def test_on_log_writes_to_ring_buffer_and_stdout(
     model_downloader.start_download_async("test-key", fake_fn)
     _wait_done("test-key")
 
-    # ring buffer 完整保留
     with model_downloader._LOCK:
         ds = model_downloader._DOWNLOADS["test-key"]
         assert ds.status == "done"
         assert ds.log == lines_to_emit
 
-    # stdout 也都拿到（用 capfd 抓 fd 级 stdout，覆盖跨线程 print）
     out = capfd.readouterr().out
     for line in lines_to_emit:
         assert line in out
@@ -68,9 +59,7 @@ def test_on_log_writes_to_ring_buffer_and_stdout(
 
 
 def test_resolve_endpoint_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HF_ENDPOINT 环境变量优先于 secrets。"""
     monkeypatch.setenv("HF_ENDPOINT", "https://my-mirror.example/")
-    # secrets 读到不同值，但应被 env 覆盖
     from studio import secrets
     monkeypatch.setattr(
         secrets, "load",
@@ -84,7 +73,6 @@ def test_resolve_endpoint_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_endpoint_falls_back_to_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无 env 时读 secrets.huggingface.endpoint。"""
     monkeypatch.delenv("HF_ENDPOINT", raising=False)
     from studio import secrets
     monkeypatch.setattr(
@@ -99,7 +87,6 @@ def test_resolve_endpoint_falls_back_to_secrets(
 def test_resolve_endpoint_returns_none_for_empty_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """secrets.huggingface.endpoint='' → None（让 huggingface_hub 用默认 huggingface.co）。"""
     monkeypatch.delenv("HF_ENDPOINT", raising=False)
     from studio import secrets
     monkeypatch.setattr(
@@ -114,7 +101,6 @@ def test_resolve_endpoint_returns_none_for_empty_secrets(
 def test_resolve_endpoint_handles_corrupt_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """secrets.load() 抛异常 → 静默回退 None，不阻断下载。"""
     monkeypatch.delenv("HF_ENDPOINT", raising=False)
     from studio import secrets
 
@@ -128,7 +114,6 @@ def test_resolve_endpoint_handles_corrupt_secrets(
 def test_resolve_endpoint_env_with_whitespace_treated_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """HF_ENDPOINT='  ' (空白) 视作未设；走 secrets 路径。"""
     monkeypatch.setenv("HF_ENDPOINT", "   ")
     from studio import secrets
     monkeypatch.setattr(
@@ -143,11 +128,6 @@ def test_resolve_endpoint_env_with_whitespace_treated_empty(
 def test_on_log_does_not_hold_lock_during_print(
     reset_downloads,
 ) -> None:
-    """print 在锁外：on_log 调用本身不应让 _LOCK 在 I/O 期间被占着。
-
-    检测方式：让 print 阻塞（替成 sleep 兼带计时），同时另一线程尝试拿锁；
-    若锁外执行，并发 acquire 应当能立刻成功。
-    """
     import builtins
 
     print_started = threading.Event()
@@ -170,12 +150,10 @@ def test_on_log_does_not_hold_lock_during_print(
 
     model_downloader.start_download_async("test-lock", fake_fn)
 
-    assert print_started.wait(timeout=2.0), "fake_fn 没进 print"
+    assert print_started.wait(timeout=2.0), "fake_fn did not enter print"
 
-    # 此时 _on_log 应已离开 with _LOCK 块（先写 ring buffer 再 print），
-    # 主线程能在 100ms 内拿到锁
     acquired = model_downloader._LOCK.acquire(timeout=0.1)
-    assert acquired, "_on_log 在 print 期间持锁，违反 PR-6 设计"
+    assert acquired, "_on_log held the lock during print, violating the PR-6 design"
     model_downloader._LOCK.release()
 
     can_finish_print.set()
@@ -183,12 +161,10 @@ def test_on_log_does_not_hold_lock_during_print(
 
 
 # ---------------------------------------------------------------------------
-# MS-1 — ModelScope 下载源选择 + download_flat_ms rename/cleanup 逻辑
 # ---------------------------------------------------------------------------
 
 
 def test_get_download_source_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MODELSCOPE_SOURCE 环境变量优先于 secrets。"""
     monkeypatch.setenv("MODELSCOPE_SOURCE", "modelscope")
     from studio import secrets
 
@@ -200,7 +176,6 @@ def test_get_download_source_env_overrides(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_get_download_source_falls_back_to_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """无 env 时读 secrets.download_source。"""
     monkeypatch.delenv("MODELSCOPE_SOURCE", raising=False)
     from studio import secrets
 
@@ -212,7 +187,6 @@ def test_get_download_source_falls_back_to_secrets(monkeypatch: pytest.MonkeyPat
 
 
 def test_get_download_source_default_huggingface(monkeypatch: pytest.MonkeyPatch) -> None:
-    """secrets 空串时回退 'huggingface'。"""
     monkeypatch.delenv("MODELSCOPE_SOURCE", raising=False)
     from studio import secrets
 
@@ -224,7 +198,6 @@ def test_get_download_source_default_huggingface(monkeypatch: pytest.MonkeyPatch
 
 
 def test_source_for_reads_per_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_source_for 按类型读 download_sources；各类型独立。"""
     from studio import secrets
     from studio.services.models import sources
 
@@ -235,11 +208,10 @@ def test_source_for_reads_per_type(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert sources._source_for("training") == "modelscope"
     assert sources._source_for("wd14") == "huggingface"
-    assert sources._source_for("upscaler") == "huggingface"  # 种子默认
+    assert sources._source_for("upscaler") == "huggingface"
 
 
 def test_source_for_env_overrides_all_types(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MODELSCOPE_SOURCE env 仍是全局强制覆盖（CLI / CI）。"""
     from studio import secrets
     from studio.services.models import sources
 
@@ -255,7 +227,6 @@ def test_source_for_env_overrides_all_types(monkeypatch: pytest.MonkeyPatch) -> 
 def test_per_type_source_routing_is_isolated(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """training=modelscope 只让训练前置走 MS；wd14（=hf）仍走 HF。"""
     from studio import secrets
 
     monkeypatch.delenv("MODELSCOPE_SOURCE", raising=False)
@@ -284,7 +255,7 @@ def test_per_type_source_routing_is_isolated(
     monkeypatch.setattr("studio.services.models.sources.download_flat_ms", fake_ms)
 
     model_downloader.download_anima_vae(tmp_path, on_log=lambda _l: None)
-    assert ms and not hf  # 训练组 → MS
+    assert ms and not hf
 
     hf.clear()
     ms.clear()
@@ -310,7 +281,6 @@ def test_build_catalog_exposes_download_source_options(
 
 
 def test_download_flat_ms_skips_existing(tmp_path: "Path") -> None:
-    """target 已存在时跳过，不调 modelscope API。"""
     target = tmp_path / "model.safetensors"
     target.write_bytes(b"dummy")
 
@@ -319,19 +289,16 @@ def test_download_flat_ms_skips_existing(tmp_path: "Path") -> None:
         "some/repo", "split_files/foo.safetensors", target, on_log=logs.append
     )
     assert ok
-    assert any("已存在" in l for l in logs)
+    assert any("already have" in l for l in logs)
 
 
 def test_download_flat_ms_rename_and_cleanup(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """download_flat_ms 把 model_file_download 落盘的深路径文件移到 target，
-    并清理掉空的中间目录。"""
     target = tmp_path / "model.safetensors"
     repo_subpath = "split_files/text_encoders/qwen_3_06b_base.safetensors"
 
     def fake_download(model_id, file_path, local_dir, **kwargs):
-        # 模拟 modelscope 在 local_dir/repo_subpath 落盘
         dest = tmp_path / file_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"weights")
@@ -352,15 +319,12 @@ def test_download_flat_ms_rename_and_cleanup(
     assert ok, logs
     assert target.exists()
     assert target.read_bytes() == b"weights"
-    # 中间目录应已被清理
     assert not (tmp_path / "split_files").exists()
 
 
 def test_download_qwen3_modelscope_builds_complete_directory(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ModelScope 源下载权重后，仍会从 HF 补齐 tokenizer/config 文件，
-    使 text_encoders/ 成为 transformers 可直接加载的完整目录。"""
     monkeypatch.setenv("MODELSCOPE_SOURCE", "modelscope")
 
     ms_calls: list[tuple[str, str, str]] = []
@@ -406,7 +370,6 @@ def test_download_qwen3_modelscope_builds_complete_directory(
 def test_download_krea2_main_uses_modelscope_comfy_org_mirror(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """训练源选 MS 时从 Comfy-Org/Krea-2 下载对应 bf16 单文件。"""
     monkeypatch.setenv("MODELSCOPE_SOURCE", "modelscope")
     hf_calls: list[tuple[str, str, str]] = []
     ms_calls: list[tuple[str, str, str]] = []
@@ -501,28 +464,23 @@ def test_trigger_routes_krea2_assets_to_async_downloaders(
 
 
 # ---------------------------------------------------------------------------
-# 预处理放大器
 # ---------------------------------------------------------------------------
 
 
 def test_upscaler_path_helpers(tmp_path: "Path") -> None:
-    """upscaler_dir / upscaler_target / find_upscaler 路径布局与存在性判断。"""
     assert model_downloader.upscaler_dir(tmp_path) == tmp_path / "upscalers"
 
     target = model_downloader.upscaler_target("4x-AnimeSharp", tmp_path)
     assert target == tmp_path / "upscalers" / "4x-AnimeSharp.pth"
 
-    # 未下载
     assert model_downloader.find_upscaler("4x-AnimeSharp", tmp_path) is None
 
-    # 已下载
     target.parent.mkdir(parents=True)
     target.write_bytes(b"weights")
     assert model_downloader.find_upscaler("4x-AnimeSharp", tmp_path) == target
 
 
 def test_upscaler_target_unknown_label() -> None:
-    """非法 label 抛 ValueError，避免拼错落到错误路径。"""
     with pytest.raises(ValueError, match="unknown upscaler"):
         model_downloader.upscaler_target("4x-RealNotALabel")
 
@@ -531,13 +489,12 @@ def test_download_upscaler_unknown_label_returns_false() -> None:
     logs: list[str] = []
     ok = model_downloader.download_upscaler("nope", on_log=logs.append)
     assert not ok
-    assert any("未知放大器" in l for l in logs)
+    assert any("Unknown upscaler" in l for l in logs)
 
 
 def test_download_upscaler_delegates_to_download_flat(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """download_upscaler 应走 HF download_flat，参数从 UPSCALER_VARIANTS 取。"""
     calls: list[tuple] = []
 
     def fake_download_flat(repo_id, repo_subpath, target, *, on_log=print):
@@ -547,9 +504,6 @@ def test_download_upscaler_delegates_to_download_flat(
         return True
 
     monkeypatch.setattr("studio.services.models.sources.download_flat", fake_download_flat)
-    # 钉死下载源：_get_download_source 读真实 secrets.json，开发机若配了
-    # modelscope 会走 download_flat_ms 分支（甚至真实下载），patch 落空。
-    # env 优先级最高，保证任何机器上都走 HF 分支。
     monkeypatch.setenv("MODELSCOPE_SOURCE", "huggingface")
 
     ok = model_downloader.download_upscaler("4x-AnimeSharp", tmp_path, on_log=lambda _l: None)
@@ -564,7 +518,6 @@ def test_download_upscaler_delegates_to_download_flat(
 def test_build_catalog_includes_upscalers(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """build_catalog 把 upscalers 段加上；未下载 exists=False；新 schema 字段齐。"""
     from studio import secrets
 
     monkeypatch.setattr(secrets, "load", lambda: secrets.Secrets())
@@ -572,10 +525,9 @@ def test_build_catalog_includes_upscalers(
     assert "upscalers" in cat
     section = cat["upscalers"]
     assert section["default"] == "4x-AnimeSharp"
-    assert section["current"] == "4x-AnimeSharp"  # 默认从 selected_upscaler 来
+    assert section["current"] == "4x-AnimeSharp"
     labels = [v["label"] for v in section["variants"]]
     assert "4x-AnimeSharp" in labels
-    # 新预设也要在
     assert "R-ESRGAN_4x+Anime6B" in labels
     sharp = next(v for v in section["variants"] if v["label"] == "4x-AnimeSharp")
     assert sharp["exists"] is False
@@ -590,7 +542,6 @@ def test_build_catalog_includes_upscalers(
 def test_build_catalog_picks_up_custom_upscaler(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """upscalers/ 下不在预设里的 .pth 文件被列为 kind='custom'。"""
     from studio import secrets
 
     monkeypatch.setattr(secrets, "load", lambda: secrets.Secrets())
@@ -611,7 +562,6 @@ def test_build_catalog_picks_up_custom_upscaler(
 def test_download_upscaler_uses_modelscope_when_configured(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """download_sources['upscaler']='modelscope' → download_upscaler 走 download_flat_ms。"""
     monkeypatch.setenv("MODELSCOPE_SOURCE", "modelscope")
     ms_calls: list[tuple] = []
     hf_calls: list[tuple] = []
@@ -642,7 +592,6 @@ def test_download_upscaler_uses_modelscope_when_configured(
 def test_download_upscaler_fallback_to_ms_when_hf_missing(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R-ESRGAN_4x+Anime6B 没 HF 镜像；source=hf 时也应回退到 MS。"""
     monkeypatch.setenv("MODELSCOPE_SOURCE", "huggingface")
     ms_calls: list[tuple] = []
 
@@ -668,7 +617,6 @@ def test_download_upscaler_fallback_to_ms_when_hf_missing(
 def test_download_upscaler_custom_hf(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """自定义 HF 下载落到 upscalers/{filename}。"""
     calls: list[tuple] = []
 
     def fake_hf(repo_id, subpath, target, *, on_log=print):
@@ -694,13 +642,12 @@ def test_download_upscaler_custom_hf(
 def test_download_upscaler_custom_rejects_bad_ext(
     tmp_path: "Path",
 ) -> None:
-    """非 .pth/.safetensors 扩展名直接拒绝（防穿越 / 误传）。"""
     logs: list[str] = []
     ok = model_downloader.download_upscaler_custom(
         "hf", "foo/bar", "evil.sh", tmp_path, on_log=logs.append
     )
     assert not ok
-    assert any("扩展名" in l for l in logs)
+    assert any("extensions are supported" in l for l in logs)
 
 
 def test_download_upscaler_custom_rejects_bad_source(
@@ -711,11 +658,10 @@ def test_download_upscaler_custom_rejects_bad_source(
         "ftp", "foo/bar", "a.pth", tmp_path, on_log=logs.append
     )
     assert not ok
-    assert any("未知下载源" in l for l in logs)
+    assert any("Unknown download source" in l for l in logs)
 
 
 def test_upscaler_target_accepts_custom_filename(tmp_path: "Path") -> None:
-    """非预设但合法扩展名的 label 视作 custom 文件名。"""
     target = model_downloader.upscaler_target("my-custom.pth", tmp_path)
     assert target == tmp_path / "upscalers" / "my-custom.pth"
 
@@ -729,7 +675,6 @@ def test_upscaler_target_blocks_path_traversal() -> None:
 def test_selected_upscaler_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """selected_upscaler 字段值为空 / 非法 / 不存在文件时回退 DEFAULT_UPSCALER。"""
     from studio import secrets
 
     class Fake:
@@ -738,7 +683,7 @@ def test_selected_upscaler_falls_back_to_default(
     monkeypatch.setattr(secrets, "load", lambda: Fake())
     assert model_downloader.selected_upscaler() == model_downloader.DEFAULT_UPSCALER
 
-    Fake.models.selected_upscaler = "totally-not-a-preset.pth"  # 不存在文件
+    Fake.models.selected_upscaler = "totally-not-a-preset.pth"
     assert model_downloader.selected_upscaler() == model_downloader.DEFAULT_UPSCALER
 
 
@@ -881,18 +826,17 @@ def test_trigger_cltagger_v2_uses_dedicated_repo_and_target(
 
 
 def test_failure_summary_surfaces_gated_hint() -> None:
-    """下载失败 message 必须给出可操作原因（token / 授权），而非通用串。"""
     from studio.services.models import downloader as dl
 
     log = [
         "📥 CLTagger → /models/cltagger",
         "   ✗ model.onnx: 401 Client Error: Cannot access gated repo",
-        "   ↳ 该仓库可能是 gated/private：请到 设置→密钥 填 HuggingFace token 后重试。",
+        "   ↳ this repo may be gated/private: go to Settings -> Secrets and fill in a HuggingFace token, then retry.",
     ]
     msg = dl._failure_summary(log)
     assert "↳" in msg
     assert "token" in msg.lower()
-    assert "✗" in msg  # 同时带上原始错误
+    assert "✗" in msg
 
 
 def test_failure_summary_falls_back_to_last_error() -> None:
@@ -905,14 +849,13 @@ def test_failure_summary_falls_back_to_last_error() -> None:
 def test_failure_summary_generic_when_no_error_line() -> None:
     from studio.services.models import downloader as dl
 
-    assert dl._failure_summary([]) == "下载失败，详见下载日志"
+    assert dl._failure_summary([]) == "Download failed; see the download log for details"
 
 
 def test_download_flat_passes_configured_hf_token(
     tmp_path: "Path",
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """gated/private 仓库需 token：download_flat 应把 secrets 里的 HF token 透传给 hf_hub_download。"""
     import huggingface_hub
     from pathlib import Path
     from studio import secrets
@@ -950,7 +893,6 @@ def test_download_flat_hints_on_gated_auth_error(
     tmp_path: "Path",
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """gated 仓库无授权时，除裸错误外应追加可操作提示（提到 token/授权）。"""
     import huggingface_hub
     from studio import secrets
     from studio.services.models import sources
@@ -977,7 +919,6 @@ def test_download_flat_hints_on_gated_auth_error(
 
 
 # ---------------------------------------------------------------------------
-# eval 指标模型（CLIP / DINO）接入统一下载中心
 # ---------------------------------------------------------------------------
 
 
@@ -997,14 +938,13 @@ def test_build_catalog_includes_eval_metrics(
     assert kinds["ccip"]["size_estimate"] > 0
     assert kinds["clip"]["model_id"] == "openai/clip-vit-base-patch32"
     assert kinds["clip"]["exists"] is False
-    assert kinds["clip"]["size_estimate"] > 0  # 已知模型给下载前预估
+    assert kinds["clip"]["size_estimate"] > 0
     assert kinds["clip"]["target_path"].replace("\\", "/").endswith(
         "eval/clip/openai_clip-vit-base-patch32"
     )
     assert cat["download_source_options"]["eval"] == {
         "current": "huggingface", "available": ["huggingface", "modelscope"]
     }
-    # 指标 registry（Settings 复选框列表）也随 catalog 暴露
     keys = [m["key"] for m in cat["eval_metric_catalog"]]
     assert keys == ["clip_t", "clip_i", "dino_i", "ccip_i", "tag_recall"]
     assert all({"label", "default", "desc", "note"} <= set(m) for m in cat["eval_metric_catalog"])
@@ -1094,7 +1034,7 @@ def test_ensure_ccip_model_skips_when_files_present(
     )
     got = model_downloader.ensure_ccip_model("ccip-x")
     assert got == d
-    assert not called  # 三文件齐全，不触发下载
+    assert not called
 
 
 def test_download_eval_model_routes_modelscope_when_mapped(
@@ -1140,7 +1080,6 @@ def test_download_eval_model_falls_back_to_hf_without_ms_map(
         "studio.services.models.sources.download_snapshot",
         lambda repo, target, *, on_log=print, allow_patterns=None: hf.append(repo) or True,
     )
-    # 自定义 repo 无魔搭映射 → 回退 HuggingFace
     ok = model_downloader.download_eval_model(
         "clip", "some/custom-clip", tmp_path, on_log=lambda _l: None
     )
@@ -1191,7 +1130,6 @@ def test_ensure_eval_model_downloads_when_missing(
 def test_ensure_eval_model_uses_user_local_dir(
     tmp_path: "Path", monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """model_id 是用户填的本地已有目录 → 直接用，不当 repo id 下载。"""
     local = tmp_path / "my-local-clip"
     local.mkdir()
     (local / "config.json").write_text("{}", encoding="utf-8")
@@ -1206,27 +1144,23 @@ def test_ensure_eval_model_uses_user_local_dir(
 
 
 def test_delete_asset_removes_known_targets(tmp_path, monkeypatch):
-    """删除按 model_id 解析服务端 target（文件/目录两形态）；未知 id 报错。"""
     from studio.services import models as m
     from studio.services.models import downloader as dl
 
     monkeypatch.setattr(dl, "models_root", lambda: tmp_path)
 
-    # 文件型：krea2_main variant
     target = tmp_path / "diffusion_models" / "krea2-raw-fp8-scaled.safetensors"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"w")
     m.delete_asset("krea2_main", "raw_fp8")
     assert not target.exists()
 
-    # 目录型：fp8 TE
     te_dir = tmp_path / "text_encoders" / "qwen3vl-4b-fp8"
     te_dir.mkdir(parents=True)
     (te_dir / "w.safetensors").write_bytes(b"w")
     m.delete_asset("krea2_text_encoder_fp8")
     assert not te_dir.exists()
 
-    # 不存在的 target：no-op 不抛
     m.delete_asset("anima_vae")
 
     import pytest as _pytest
@@ -1237,7 +1171,6 @@ def test_delete_asset_removes_known_targets(tmp_path, monkeypatch):
 
 
 def test_delete_asset_tagger_eval_upscaler(tmp_path, monkeypatch):
-    """打标 / eval / 放大器区的删除：目录与文件两形态 + variant 必填校验。"""
     from pathlib import Path
 
     from studio.services import models as m
@@ -1246,14 +1179,12 @@ def test_delete_asset_tagger_eval_upscaler(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl, "models_root", lambda: tmp_path)
 
-    # wd14：整目录（model_id 里的 / 会被 sanitize 成 _）
     wd_dir = tmp_path / "wd14" / "SmilingWolf_wd-eva02-large-tagger-v3"
     wd_dir.mkdir(parents=True)
     (wd_dir / "model.onnx").write_bytes(b"w")
     m.delete_asset("wd14", "SmilingWolf/wd-eva02-large-tagger-v3")
     assert not wd_dir.exists()
 
-    # cltagger：只删该版本子目录，repo 根下其他版本保留
     label, preset = next(iter(CLTAGGER_VERSIONS.items()))
     repo_root = tmp_path / "cltagger" / preset["model_id"].replace("/", "_")
     version_dir = repo_root / Path(preset["model_path"]).parent
@@ -1264,7 +1195,6 @@ def test_delete_asset_tagger_eval_upscaler(tmp_path, monkeypatch):
     assert not version_dir.exists()
     assert (repo_root / "other_version").exists()
 
-    # eval：clip / ccip 各一个目录
     clip_dir = tmp_path / "eval" / "clip" / "openai_clip-vit-base-patch32"
     clip_dir.mkdir(parents=True)
     (clip_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -1277,7 +1207,6 @@ def test_delete_asset_tagger_eval_upscaler(tmp_path, monkeypatch):
     m.delete_asset("eval_ccip", "ccip-caformer-24-randaug-pruned")
     assert not ccip_dir.exists()
 
-    # upscaler：预设 label → 预设 filename；自定义文件名直接删
     from studio.services.models.paths import DEFAULT_UPSCALER, UPSCALER_VARIANTS
 
     up_dir = tmp_path / "upscalers"
@@ -1298,7 +1227,6 @@ def test_delete_asset_tagger_eval_upscaler(tmp_path, monkeypatch):
             m.delete_asset(mid)
     with _pytest.raises(ValueError, match="cltagger"):
         m.delete_asset("cltagger", "bogus")
-    # 自定义 label 的路径穿越保护由 upscaler_target 兜底
     with _pytest.raises(ValueError):
         m.delete_asset("upscaler", "..\\evil.pth")
 

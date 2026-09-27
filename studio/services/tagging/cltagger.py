@@ -1,7 +1,7 @@
-"""CLTagger ONNX 打标。
+"""CLTagger ONNX tagging.
 
-CLTagger 与 WD14 都走本地 onnxruntime，但模型资产和后处理不同：
-CLTagger 使用 `tag_mapping.json`，输出 logits 需 sigmoid，角色标签有单独阈值。
+CLTagger and WD14 both run through local onnxruntime, but their model assets and
+postprocessing differ: CLTagger uses `tag_mapping.json`, its logits need sigmoid, and
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _blacklist_key(tag: str) -> str:
-    """blacklist 比对归一键：下划线↔空格、大小写、首尾空格都不敏感。"""
+    """Normalization key for blacklist matching: insensitive to underscore/space, case, and leading/trailing whitespace."""
     return tag.replace("_", " ").strip().lower()
 
 
@@ -96,9 +96,9 @@ class CLTagger(OnnxTaggerBase):
         base = self._compute_base()
         model_path = base / cfg.model_path
         mapping_path = base / cfg.tag_mapping_path
-        # v2 权重在外部 sidecar model.onnx.data（2GB+）里，必须连它一起校验：
-        # 否则 onnx 图就绪但权重缺失，is_available 会误报"可用"，prepare 时
-        # onnxruntime 才在加载 external data 处炸，错误对用户是黑盒。
+        # v2 weights live in an external sidecar model.onnx.data (2GB+), so it must be validated together:
+        # otherwise the onnx graph is ready but weights are missing, is_available would falsely report "available", and
+        # onnxruntime only blows up at prepare() when loading external data -- a black box for the user.
         required = model_downloader.cltagger_required_files(
             cfg.model_path, cfg.tag_mapping_path
         )
@@ -133,8 +133,8 @@ class CLTagger(OnnxTaggerBase):
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         if not ok:
-            return False, f"需下载模型: {model_path.parent.name}"
-        return True, f"模型: {model_path.parent.name}"
+            return False, f"Model needs downloading: {model_path.parent.name}"
+        return True, f"Model: {model_path.parent.name}"
 
     def prepare(self) -> None:
         if self._session is not None:
@@ -300,7 +300,7 @@ class CLTagger(OnnxTaggerBase):
 
     @staticmethod
     def _sigmoid(x: np.ndarray) -> np.ndarray:
-        # clip ±30 同时吞 ±inf：sigmoid(±30) ≈ 1/0，超界本来也要饱和
+        # clip +-30 also swallows +-inf: sigmoid(+-30) is approx 1/0, saturating past that range is expected anyway
         return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
 
     def _postprocess_one(
@@ -310,11 +310,11 @@ class CLTagger(OnnxTaggerBase):
         assert self._labels is not None
         scores = self._sigmoid(logits)
         out: list[tuple[str, float]] = []
-        # blacklist 比对归一（与 wd14 一致）：下划线↔空格、大小写不敏感。
-        # 注意此处 tag 还是原始下划线形式（输出时才转空格），归一后比对。
+        # Blacklist normalization (same as wd14): insensitive to underscore/space, case.
+        # Note the tag is still in raw underscore form here (converted to spaces only on output), normalize before comparing.
         blacklist = {_blacklist_key(b) for b in cfg.blacklist_tags}
-        # CLTagger 8 category gate：General / Character 走阈值（不在此表里
-        # 始终参与），其余按 cfg 开关；未知 category 当 General 处理。
+        # CLTagger 8-category gate: General / Character always go through the threshold (not in this
+        # table, they always apply); the rest are toggled by cfg; unknown categories are treated as General.
         category_gates = {
             "Copyright": cfg.add_copyright_tag,
             "Artist": cfg.add_artist_tag,

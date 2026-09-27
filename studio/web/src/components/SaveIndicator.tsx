@@ -2,10 +2,11 @@ import { useTranslation } from 'react-i18next'
 import type { SaveStatus } from '../lib/SettingsData'
 
 /**
- * 自动保存状态指示(instant-apply / debounce 自动保存页面共用):
- * saving → 「保存中…」;saved → 「✓ 已保存 hh:mm:ss」带 flash 动画;
- * error → 红色错误;idle 不渲染。原 Settings 页私有组件,刀 2 UX 收尾抽出,
- * Settings 顶栏 / Train 页 header / Presets 页 header 三处共用。
+ * Autosave status indicator (shared by instant-apply / debounce autosave pages):
+ * saving -> "Saving..."; saved -> "Saved hh:mm:ss" with a flash animation;
+ * error -> red error; idle renders nothing. Originally a private Settings-page
+ * component, extracted during UX polish pass 2 and now shared by the Settings
+ * topbar, the Train page header and the Presets page header.
  */
 export default function SaveIndicator({ status }: { status: SaveStatus }) {
   const { t } = useTranslation()
@@ -14,7 +15,7 @@ export default function SaveIndicator({ status }: { status: SaveStatus }) {
   }
   if (status.state === 'saved') {
     const time = new Date(status.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    // key={status.at}：每次保存重挂载 → 重播 flash 动画，连续保存也能一眼看出"又存了"。
+    // key={status.at}: remounts on every save -> replays the flash animation, so back-to-back saves are visibly distinct.
     return (
       <span key={status.at} className="settings-saved-flash text-xs inline-flex items-center gap-1">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">

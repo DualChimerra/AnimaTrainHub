@@ -1,116 +1,116 @@
-# 0009 — 统一日志 + 错误体系（0.12.0）
+# 0009 — Unified logging + error system (0.12.0)
 
-**状态**：Accepted
-**日期**：2026-05-28
-**决策者**：@WalkingMeatAxolotl（三方 agent review：架构师 / 审计员 / 迁移策略师，各两轮）
-**落地**：PR #155 (PR-1 后端基础设施) / PR #156 (PR-2 错误体系) / PR #TBD (PR-3 前端 + CLI 收尾)
+**Status**: Accepted
+**Date**: 2026-05-28
+**Decision makers**: @WalkingMeatAxolotl (three-way agent review: architect / auditor / migration strategist, two rounds each)
+**Landed via**: PR #155 (PR-1 backend infrastructure) / PR #156 (PR-2 error system) / PR #TBD (PR-3 frontend + CLI cleanup)
 
-## 决策
+## Decision
 
-把 5 surface（后端 Python / API HTTP / 前端 React / Subprocess workers / CLI）的日志与错误处理统一到：
+Unify logging and error handling across the 5 surfaces (backend Python / API HTTP / frontend React / subprocess workers / CLI) around:
 
-- **stdlib `logging`** + `concurrent-log-handler`（唯一新依赖，跨进程文件锁）
-- **ContextVar + HTTP header + 子进程 env** 三路同步传 `trace_id`（ULID 26 字符）
-- **`DomainError` 基类** + 5 子类（NotFound / Validation / Conflict / Auth / Forbidden）放 `studio/domain/errors.py`
-- **3 个 `exception_handler`** 统一翻译（DomainError / RequestValidationError / Exception fallback）
-- **错误响应 envelope 走 dual-write**：保 `{"detail": ...}` legacy contract，新增 `{"error": {"code", "message", "trace_id"}}` 平行字段，分 3 release 渐进迁移
-- **3 PR 落地**（后端基础设施 / 错误体系 / 前端+CLI），约 72h ≈ 2 工作周
+- **stdlib `logging`** + `concurrent-log-handler` (the only new dependency, for cross-process file locking)
+- **ContextVar + HTTP header + subprocess env**, three parallel channels propagating `trace_id` (a 26-character ULID)
+- A **`DomainError` base class** + 5 subclasses (NotFound / Validation / Conflict / Auth / Forbidden) in `studio/domain/errors.py`
+- **3 `exception_handler`s** doing the unified translation (DomainError / RequestValidationError / Exception fallback)
+- **Error response envelope via dual-write**: keep the `{"detail": ...}` legacy contract, add a parallel `{"error": {"code", "message", "trace_id"}}` field, migrated gradually over 3 releases
+- **Landing in 3 PRs** (backend infrastructure / error system / frontend+CLI), roughly 72h ≈ 2 working weeks
 
-本 ADR 主要用途：**告诉未来贡献者如何打日志、如何抛错、如何加新 surface 接入这套体系**。
+The main purpose of this ADR: **tell future contributors how to log, how to raise errors, and how to hook a new surface into this system.**
 
-同时关闭 ADR-0008 §"还的债" 第 4 项（"统一 exception handler 替代 4 套 err_code helper"）。
+It also closes item 4 of ADR-0008 §"Debt still owed" ("unified exception handler replacing the 4 separate err_code helpers").
 
 ---
 
-## 背景
+## Background
 
-### 现状（0.11.0 之后）
+### Current state (post-0.11.0)
 
-5 个 surface 的日志/错误处理状态（B agent 审计 31 个问题，P0 × 4 / P1 × 14 / P2 × 13）：
+Logging/error-handling state across the 5 surfaces (agent B's audit found 31 issues: P0 × 4 / P1 × 14 / P2 × 13):
 
-| Surface | 关键痛点 |
+| Surface | Key pain points |
 |---|---|
-| 后端 Python | 21 文件 `getLogger(__name__)` + 101 处 `logger.x` 调用，**0 处 `basicConfig` / FileHandler** → INFO 全被 root WARNING 过滤；`except Exception: pass` 散落 13+ 文件 |
-| API HTTP | **0 个 `exception_handler` 注册**；4 套独立 `_err_code` helper 靠中文字符串匹配（"不存在" → 404）；380 处 router try/except 重复模板 |
-| 前端 React | `ErrorBoundary` 只 `console.error` 不上报；**0 处 `window.onerror` / `unhandledrejection`** |
-| Subprocess workers | 4 worker 用 `print()` 当日志（无 level / ts）；`__EVENT__:` malformed payload 静默丢；`db.tasks.error_msg` 只存 `"exit code 1"` |
-| CLI | 48 处 `print()`，无 verbose 级别控制 |
-| **跨 surface** | **完全无 trace_id / request_id 概念** — 用户操作触发的 "router → service → supervisor → worker → SSE → toast" 全链路无贯穿 ID，oncall 无法 join |
+| Backend Python | 21 files call `getLogger(__name__)` + 101 `logger.x` call sites, **0 `basicConfig` / FileHandler**  → INFO is entirely filtered out by root's WARNING level; `except Exception: pass` scattered across 13+ files |
+| API HTTP | **0 registered `exception_handler`s**; 4 separate `_err_code` helpers relying on matching source-language strings (e.g. matching "not found" text → 404); 380 router try/except sites repeating the same boilerplate |
+| Frontend React | `ErrorBoundary` only does `console.error`, never reports anywhere; **0 `window.onerror` / `unhandledrejection` handlers** |
+| Subprocess workers | 4 workers use `print()` as logging (no level / timestamp); malformed `__EVENT__:` payloads are dropped silently; `db.tasks.error_msg` only ever stores `"exit code 1"` |
+| CLI | 48 `print()` call sites, no verbose-level control |
+| **Cross-surface** | **No trace_id / request_id concept at all** — the full chain triggered by a user action ("router → service → supervisor → worker → SSE → toast") has no ID running through it, making it impossible for on-call to join logs together |
 
-### 触发动机
+### Motivation
 
-- ADR-0008 §"还的债" 第 4 项已经标记要统一 exception handler，但单独做会再次错过 trace_id 这条命脉
-- 0.11.0 重构完成后架构清晰，是引入 cross-cutting 体系的好时机
-- 用户报问题时只能给 task_id，开发者翻 4 处日志（jobs/<id>.log / uvicorn stderr / 浏览器 devtools / daemon ring buffer）反推时间窗口
+- ADR-0008 §"Debt still owed" item 4 already flagged unifying the exception handler, but doing it alone would once again miss the trace_id lifeline
+- After the 0.11.0 refactor, the architecture is now clean — a good time to introduce a cross-cutting system
+- When users report problems they can only give a task_id, and developers have to cross-reference 4 different logs (jobs/<id>.log / uvicorn stderr / browser devtools / the daemon ring buffer) to reconstruct the time window
 
 ---
 
-## 当前结构（本 ADR 落地后）
+## Current structure (after this ADR lands)
 
 ```
 studio/
 ├── infrastructure/
-│   └── logging.py                # ⭐ 新建。单文件 ~200 LOC。
-│                                 # 暴露：setup_logging / bind_trace_id / get_trace_id / new_trace_id
+│   └── logging.py                # ⭐ New. Single file, ~200 LOC.
+│                                 # Exposes: setup_logging / bind_trace_id / get_trace_id / new_trace_id
 │                                 #       TRACE_HEADER / TRACE_ENV / PROCESS_ENV
-│                                 # 内含：JsonLineFormatter / HumanConsoleFormatter / RotatingFileHandler 配置
+│                                 # Contains: JsonLineFormatter / HumanConsoleFormatter / RotatingFileHandler config
 │                                 #       contextvars._trace_id_var / _process_var / _job_id_var / _task_id_var
-│                                 #       第三方库静音 list（asyncio/urllib3/PIL/...）
-│                                 #       uvicorn.access / uvicorn.error handler 接管
+│                                 #       silence list for third-party libraries (asyncio/urllib3/PIL/...)
+│                                 #       takes over the uvicorn.access / uvicorn.error handlers
 │
 ├── domain/
-│   └── errors.py                 # ⭐ 新建。DomainError 基类 + 5 子类。
-│                                 # 不依赖 fastapi，纯 Python；services 可直接 raise
+│   └── errors.py                 # ⭐ New. DomainError base class + 5 subclasses.
+│                                 # No fastapi dependency, pure Python; services can raise it directly
 │
 ├── api/
 │   ├── middleware/
-│   │   └── trace.py              # ⭐ 新建。TraceIdMiddleware（pure ASGI）
-│   │                             # 读 X-Trace-Id header → ContextVar → 写 response header
-│   ├── exception_handlers.py     # ⭐ 新建。register_exception_handlers(app)
-│   │                             # 注册 3 个：DomainError / RequestValidationError / Exception fallback
-│   ├── errors.py                 # 改造。原 4 套 _err_code helper 退化为 thin wrapper（PR-2 内 8 commit 渐进删完）
+│   │   └── trace.py              # ⭐ New. TraceIdMiddleware (pure ASGI)
+│   │                             # reads the X-Trace-Id header → ContextVar → writes it to the response header
+│   ├── exception_handlers.py     # ⭐ New. register_exception_handlers(app)
+│   │                             # registers 3 handlers: DomainError / RequestValidationError / Exception fallback
+│   ├── errors.py                 # Reworked. The old 4 _err_code helpers degrade into thin wrappers (removed incrementally across 8 commits in PR-2)
 │   ├── routers/
-│   │   └── client_errors.py      # ⭐ 新建。POST /api/client-errors（前端 ErrorBoundary 上报）
-│   └── app.py                    # 调 setup_logging("webui") + register_exception_handlers + 装 TraceIdMiddleware
+│   │   └── client_errors.py      # ⭐ New. POST /api/client-errors (frontend ErrorBoundary reporting)
+│   └── app.py                    # calls setup_logging("webui") + register_exception_handlers + installs TraceIdMiddleware
 │
 ├── supervisor/
-│   └── core.py                   # 改造：_popen 注入 ANIMA_TRACE_ID + ANIMA_PROCESS_NAME env
-│                                 #       _finish_slot tail jobs/<id>.log 末 10 行回写 db.tasks.error_msg
-│                                 #       dispatcher spawn 时 var.set(task.request_trace_id)
+│   └── core.py                   # Reworked: _popen injects ANIMA_TRACE_ID + ANIMA_PROCESS_NAME env vars
+│                                 #       _finish_slot tails the last 10 lines of jobs/<id>.log and writes them back to db.tasks.error_msg
+│                                 #       the dispatcher calls var.set(task.request_trace_id) when spawning
 │
 ├── workers/
-│   ├── _base.py                  # 改造：worker_main() 开头调 setup_logging("worker:<kind>/<job_id>")
-│   │                             #       从 ANIMA_TRACE_ID env 读 trace_id bind contextvar
-│   │                             #       reconfigure_console_utf8 收编进 setup_logging
-│   └── *_worker.py               # print → logger（保 __EVENT__: IPC 行不动）
+│   ├── _base.py                  # Reworked: worker_main() calls setup_logging("worker:<kind>/<job_id>") at the top
+│   │                             #       reads trace_id from the ANIMA_TRACE_ID env var and binds the contextvar
+│   │                             #       reconfigure_console_utf8 is folded into setup_logging
+│   └── *_worker.py               # print → logger (the __EVENT__: IPC lines are left untouched)
 │
 ├── services/
-│   └── inference/daemon.py       # 改造：_read_stderr_loop thread 死亡 watchdog（restart 一次或标 STOPPED）
+│   └── inference/daemon.py       # Reworked: _read_stderr_loop thread gets a death watchdog (restarts once or marks STOPPED)
 │
 ├── infrastructure/
-│   ├── event_bus.py              # 改造：_safe_put QueueFull 加 logger.warning（不再静默）
+│   ├── event_bus.py              # Reworked: _safe_put adds logger.warning on QueueFull (no longer silent)
 │   └── migrations/
-│       └── _vN_request_trace.py  # ⭐ 新 migration：tasks 表加 request_trace_id TEXT 列
+│       └── _vN_request_trace.py  # ⭐ New migration: adds a request_trace_id TEXT column to the tasks table
 │
-├── cli.py                        # 改造：加 _say(msg, level="info") wrapper；48 处 print 走 _say
+├── cli.py                        # Reworked: adds a _say(msg, level="info") wrapper; all 48 print sites go through _say
 └── web/src/
-    ├── components/ErrorBoundary.tsx     # 改造：componentDidCatch 上报到 /api/client-errors
-    ├── main.tsx                          # 改造：装 window.addEventListener('error'|'unhandledrejection')
-    ├── lib/errors/setup.ts               # ⭐ 新建。三路捕获 + reportClientError
-    ├── lib/errors/report.ts              # ⭐ 新建。POST 上报（silent swallow on fail）
-    └── api/client.ts                     # 改造：req() / xhrUpload() / importPreset 三处合一吃 X-Trace-Id
-                                          #       toast 显示 "trace ab12cd34" 后缀
+    ├── components/ErrorBoundary.tsx     # Reworked: componentDidCatch reports to /api/client-errors
+    ├── main.tsx                          # Reworked: installs window.addEventListener('error'|'unhandledrejection')
+    ├── lib/errors/setup.ts               # ⭐ New. Three-way capture + reportClientError
+    ├── lib/errors/report.ts              # ⭐ New. POST reporting (silently swallows failures)
+    └── api/client.ts                     # Reworked: req() / xhrUpload() / importPreset consolidated to pick up X-Trace-Id
+                                          #       toasts display a "trace ab12cd34" suffix
 ```
 
-### 5 surface 数据流
+### Data flow across the 5 surfaces
 
 ```
-┌─ 前端 (browser) ─────────────────────────────────────────────────┐
+┌─ Frontend (browser) ─────────────────────────────────────────────┐
 │ ErrorBoundary ─┐                                                  │
 │ window.error  ─┼──► reportClientError ──► POST /api/client-errors │
 │ unhandledrej. ─┘    (attach lastTraceId from atom)               │
 └────────────────────────────────┬─────────────────────────────────┘
-                                  │ HTTP + X-Trace-Id header (双向)
+                                  │ HTTP + X-Trace-Id header (both directions)
 ┌─────────────────────────────────▼────────────────────────────────┐
 │ FastAPI (process="webui")                                        │
 │   TraceIdMiddleware: header → ContextVar → response              │
@@ -125,16 +125,16 @@ studio/
 │ Worker subprocess         │    │ logs/studio.log                  │
 │  setup_logging("worker..")│    │  {ts, level, process, trace_id,  │
 │  ContextVar bind          │    │   logger, msg, exc, extra}       │
-│  stdout ──► supervisor    │    │  rotated *.1 ~ *.5 (50MB 每份)   │
+│  stdout ──► supervisor    │    │  rotated *.1 ~ *.5 (50MB each)   │
 │   redirect log_fp         │    └───────────────────────────────────┘
 └──────────────┬────────────┘                    ▲
-               │ stdout/stderr                    │ 单写到 jobs/<id>.log
-               ▼                                  │ + supervisor logger 也写 studio.log
+               │ stdout/stderr                    │ written only to jobs/<id>.log
+               ▼                                  │ + the supervisor's own logger also writes to studio.log
        logs/jobs/<task_id>.log ───────────────────┘
-       (人读，给 SSE LogTailer + 前端 <pre>)
+       (human-readable, feeds the SSE LogTailer + frontend <pre>)
 ```
 
-层依赖（严格单向）：
+Layer dependencies (strictly one-way):
 
 ```
 api/middleware/  ────►  api/exception_handlers  ────►  domain/errors
@@ -147,226 +147,227 @@ api/middleware/  ────►  api/exception_handlers  ────►  domai
        supervisor/, workers/, cli/
 ```
 
-`domain/errors` 不依赖 fastapi（纯 Exception 子类），让 services 可以 raise 而不反向 import api。
+`domain/errors` has no fastapi dependency (pure Exception subclasses), so services can raise it without importing api backward.
 
 ---
 
-## 三方 review 后的关键裁决
+## Key rulings after the three-way review
 
-| 议题 | 候选 | 最终选择 | 否决理由 |
+| Topic | Candidates | Final choice | Reason for rejection |
 |---|---|---|---|
-| 日志库 | stdlib / loguru / structlog | **stdlib + concurrent-log-handler** | loguru/structlog 是运行期硬依赖；subprocess 启动开销 + caplog 不正交；JSON schema 简单 50 行自写 |
-| `trace_id` 长度/格式 | uuid4 hex[:16] / ULID 26 | **ULID 26**（含 `bg-{ULID}` 后台 spawn 前缀，长度统一） | uuid4 无 lexicographic sort；bg-uuid8 vs ULID 长度不一致 grep 痛 |
-| `trace_id` 传播路径 | header / env / contextvar / db 列 | **四路全开** | header 仅前端拿；env 子进程拿；contextvar 同进程；db 列让 supervisor 后台 dispatcher 拿（请求时刻 ID = spawn 时刻 ID = worker log ID） |
-| 错误 envelope | 新 schema / 保 contract / dual-write | **dual-write**（详 §envelope 渐进迁移） | 前端 3 解析点 + 11 测试断言依赖 `detail`；新 schema 立刻炸；header-only 用户截图不便 |
-| `DomainError` 位置 | api/ / domain/ | **`domain/errors.py`** | services 反向依赖 api 是反模式；domain/ 纯 Exception 子类不带 fastapi |
-| 子类数量 | 5 / 7 / 更多 | **5 核心**（NotFound/Validation/Conflict/Auth/Forbidden） | 7 子类一次落 services 7 文件都要改 base，diff 涨 200+ 行；剩余渐进 |
-| Worker log | 单写 / 双写 | **0.12.0 单写**（worker stdout → supervisor 重定向） | Windows 跨进程文件锁复杂；supervisor `_finish_slot` 回写 `error_msg` 已解决 1.6 痛点；双写到 0.13.x 再演进 |
-| `infrastructure/logging` | 单文件 / 子包 | **单文件 ~200 LOC** | 超 400 LOC 再拆子包；当前体量子包是 ceremony overhead |
-| CLI 输出 | print / logger | **保 print + `_say()` wrapper** | CLI 5s 短命周期落盘价值低；用户终端看 `[studio] ...` 比 logger 默认 format 清爽；capsys 7 文件改"in 模糊匹配"代价低 |
-| 第三方库 logger 噪音 | 一个个 silence / 不管 | **`setup_logging` 内显式 silence list** | 不 silence 合完 root level=INFO 后 stderr 噪音 10×，dev 一小时内 rollback |
-| uvicorn access log | 沿用 uvicorn 自带 / 接管 | **接管为 JSON handler** | access log 跟业务 log 风格割裂，"请求→service→worker" join 不出来 |
+| Logging library | stdlib / loguru / structlog | **stdlib + concurrent-log-handler** | loguru/structlog are hard runtime dependencies; subprocess startup overhead + caplog isn't orthogonal to them; a JSON schema is simple enough to hand-write in 50 lines |
+| `trace_id` length/format | uuid4 hex[:16] / ULID 26 | **ULID 26** (with a `bg-{ULID}` prefix for background spawns, keeping length consistent) | uuid4 has no lexicographic sort; bg-uuid8 vs ULID inconsistent lengths make grep painful |
+| `trace_id` propagation path | header / env / contextvar / db column | **all four at once** | header only reaches the frontend; env reaches subprocesses; contextvar reaches within a process; the db column lets the supervisor's background dispatcher pick it up (request-time ID = spawn-time ID = worker log ID) |
+| Error envelope | new schema / keep contract / dual-write | **dual-write** (see §envelope gradual migration) | 3 frontend parsing sites + 11 test assertions depend on `detail`; a new schema would break immediately; header-only would be inconvenient for user screenshots |
+| `DomainError` location | api/ / domain/ | **`domain/errors.py`** | services depending backward on api is an anti-pattern; domain/ is pure Exception subclasses with no fastapi |
+| Number of subclasses | 5 / 7 / more | **5 core** (NotFound/Validation/Conflict/Auth/Forbidden) | 7 subclasses landing at once would require touching the base in 7 services files, a 200+-line diff; the rest can grow incrementally |
+| Worker logging | single-write / dual-write | **single-write for 0.12.0** (worker stdout → redirected by the supervisor) | cross-process file locking on Windows is complex; the supervisor's `_finish_slot` writing back `error_msg` already resolves pain point 1.6; dual-write can evolve in 0.13.x |
+| `infrastructure/logging` | single file / subpackage | **single file, ~200 LOC** | split into a subpackage once it exceeds 400 LOC; at the current size a subpackage is ceremony overhead |
+| CLI output | print / logger | **keep print + a `_say()` wrapper** | the CLI's short 5-second lifecycle gives little value to persisted logs; users seeing `[studio] ...` in their terminal is cleaner than logger's default format; rewriting the 7 capsys test files to "loose `in` matching" is cheap |
+| Third-party logger noise | silence individually / leave alone | **explicit silence list inside `setup_logging`** | not silencing them means stderr noise increases 10x once root level=INFO, and developers would roll it back within an hour |
+| uvicorn access log | keep uvicorn's own / take it over | **take it over as a JSON handler** | leaving the access log in its own style disconnects it from business logs, making the "request→service→worker" join impossible |
 
 ---
 
-## 错误 envelope 渐进迁移
+## Error envelope gradual migration
 
-| 阶段 | release | 后端 | 前端 |
+| Phase | release | Backend | Frontend |
 |---|---|---|---|
-| Phase 1 | 0.12.0 | dual-write：`{"detail": <legacy>, "error": {"code", "message", "trace_id"}}` | 优先读 `body.error.trace_id` 显 toast；fallback 读 `body.detail` |
-| Phase 2 | 0.13.0 | 所有 `raise HTTPException` 加 deprecation log；front-end 完成全量迁移到 `body.error.*` | 删 `client.ts` 内 `body.detail` 解析路径，只剩单一 `ApiError` |
-| Phase 3 | 0.14.0 | handler 删 `detail` key；测试 5 文件 11 处迁完 | — |
+| Phase 1 | 0.12.0 | dual-write: `{"detail": <legacy>, "error": {"code", "message", "trace_id"}}` | prefers reading `body.error.trace_id` for the toast; falls back to `body.detail` |
+| Phase 2 | 0.13.0 | every `raise HTTPException` gets a deprecation log; frontend fully migrated to `body.error.*` | removes the `body.detail` parsing path in `client.ts`, leaving only a single `ApiError` |
+| Phase 3 | 0.14.0 | handler drops the `detail` key; 11 sites across 5 test files migrated | — |
 
-**关键**：Phase 1 多写 ~30 行（handler 同时填两个 key），给前端 toast trace_id body 可见性提前 3 release。
-
----
-
-## 实施计划（3 PR）
-
-### PR-1: 后端基础设施（~28h / ~6 commit）
-
-| Commit | 内容 |
-|---|---|
-| C1 | 加 `concurrent-log-handler` 依赖；新建空骨架 `infrastructure/logging.py` 仅暴露 `make_studio_log_handler` |
-| C2 | `infrastructure/logging.py` 完整 `setup_logging` + JsonLineFormatter + HumanConsoleFormatter + 第三方库 silence list + uvicorn handler 接管 + utf8 reconfigure |
-| C3 | `api/lifespan.py` + `cli.py` + `workers/_base.py` 三处调用 `setup_logging` |
-| C4 | `infrastructure/logging.py` 加 ContextVar + Filter；`api/middleware/trace.py` 新建 TraceIdMiddleware；`api/app.py` 装 middleware |
-| C5 | `supervisor/core.py:_popen` 注入 ANIMA_TRACE_ID env；新 migration `_vN_request_trace.py` 加 `tasks.request_trace_id` 列；dispatcher 读取并 var.set；API endpoint 入 task 时写 request_trace_id |
-| C6 | workers/*.py print → logger；supervisor `_finish_slot` tail jobs/<id>.log 回写 error_msg（解 B-1.6）；`_on_task_log` malformed event 改 logger.error + emit SSE warning_event（解 B-4.4）；`services/inference/daemon.py:_read_stderr_loop` 加 thread watchdog + restart（解 B-4.5）；`event_bus._safe_put` QueueFull 加 logger.warning（解 B-1.5） |
-
-**前置安全网**（C1 前一个 commit）：
-- `tests/test_error_response_snapshot.py` — 锁现有 20 个 4xx/5xx endpoint 形状
-- `tests/test_log_baseline.py` — caplog 验典型 logger.warning 路径
-- `tests/test_worker_event_protocol.py` — 锁 `__EVENT__:` IPC 前缀过滤行为
-- `tests/test_cli_stdout_baseline.py` — capsys 锁现有 CLI 输出关键字
-- `tests/test_logging_import_inertia.py` — 验 `import studio.infrastructure.logging` 后 sys.excepthook 仍 default + root handlers 数仍 0
-
-**回归网**：全套 `pytest -q tests/` + `npm test --silent` 每 commit 必跑。
-
-**Rollback**：每 commit 单独 revert；revert C5 后 worker 端 `os.environ.get("ANIMA_TRACE_ID")` 永远安全；revert migration 用反向 migration（仅删列）。
-
-### PR-2: 错误体系（~26h / ~5 commit）
-
-| Commit | 内容 |
-|---|---|
-| C1 | `studio/domain/errors.py` 新建 DomainError 基类 + 5 子类（NotFound/Validation/Conflict/Auth/Forbidden），不依赖 fastapi |
-| C2 | `studio/api/exception_handlers.py` 新建 + 注册到 `app.py`：DomainError handler / RequestValidationError handler / Exception fallback handler；dual-write envelope（`{"detail":<legacy>, "error":{"code","message","trace_id"}}`） |
-| C3 | 5 个 service 错误类（PresetError/ProjectError/VersionError/CurationError/TrainIOError）加 DomainError base；4 套 _err_code helper 退化为 thin wrapper |
-| C4 | router try/except 批量迁移 batch 1+2（preset / projects/* domain）— 删 `try: ... except XxxError: raise HTTPException(...)` 三明治，让 raise 直接进 handler |
-| C5 | router try/except batch 3+4（curation / training / queue）；删 4 套 _err_code helper 文件；删 `api/errors.py` 内残留 |
-
-**关键约束**：
-- DomainError `message` 字段规约为**英文** + 前端用 `code` 查 i18n 表（避开 ADR-0008 §跨问题 D 中文匹配陷阱）
-- HTTPException 老路径保 `{"detail": <string>}` 形态不变（trace_id 仅 header 兜底），handler 注册顺序保证 starlette 默认行为不破现有 175 处 raise
-
-**Rollback**：每 commit 单独 revert；hotfix 路径（合后 1 周前端某 toast 解析挂）= 改 `_error_body` 强制 fallback 到 `{"detail": <string>}`（30 分钟 hotfix）。
-
-### PR-3: 前端 + CLI 收尾（~18h / ~5 commit）
-
-| Commit | 内容 |
-|---|---|
-| C1 | `studio/api/routers/client_errors.py` 新建 `POST /api/client-errors`（per-IP 10/min 限流，独立 `client_errors.jsonl`） |
-| C2 | `web/src/lib/errors/{setup.ts, report.ts}` 新建；`main.tsx` 装 `window.error` + `unhandledrejection` 监听 |
-| C3 | `ErrorBoundary.tsx::componentDidCatch` 改造上报；`api/client.ts` 三处 fetch 包装统一吃 X-Trace-Id；toast 显示 `trace ab12cd34` 后缀 |
-| C4 | `cli.py` 加 `_say(msg, level="info")` wrapper；48 处 print 走 `_say`；启动消息保留 print 路径，诊断信息走 logger（`--verbose` 翻开） |
-| C5 | capsys 7 文件改"in 模糊匹配"；ADR-0009 状态改 Accepted；ADR-0008 §"还的债" 第 4 项标 "已并入 ADR-0009" |
+**Key point**: Phase 1 writes ~30 extra lines (the handler fills both keys at once), giving the frontend toast trace_id visibility 3 releases early.
 
 ---
 
-## 不在范围（推迟到 0.13.x+）
+## Implementation plan (3 PRs)
 
-| 项 | 推迟理由 |
+### PR-1: backend infrastructure (~28h / ~6 commits)
+
+| Commit | Content |
 |---|---|
-| `infrastructure/logging.py` 单文件 → 子包 | 当前 ~200 LOC，超 400 触发；纯文件搬动 PR 2h |
-| Worker 单写 → 双写（worker 直接 emit `studio.log`） | `concurrent-log-handler` Windows + OneDrive + Defender 稳定性需先验证；当前单写 + supervisor 回写已经解 1.6 痛点；运维 grep `jobs/*.log studio.log` 也能聚合 |
-| envelope Phase 2/3（删 `detail` legacy key） | 跨 release deprecation 周期，最早 0.13.0 |
-| IndexedDB 离线上报 retry | 前端上报失败 silently swallow 是合理默认；离线场景属于增强 |
-| `jobs/<id>.log` 真 rotation | 单 job 几 MB 量级可控；改 `_finish_slot` 删超 7 天 .log 即可（GC 而非 rotation），独立 follow-up |
-| CLI cmd_run subprocess 不接管 stdout（B-5.2） | 跟 nssm/systemd wrapper 行为相关，本批不动 |
-| CLI cmd_test 无 junit-xml（B-5.3） | DX feature 不是日志体系 |
-| 前端 64 处 `console.error/warn/log` 散落统一（B-3.4） | 跟 i18n epic 一起做 |
-| 中英文错误信息混杂（B 跨 D 完整解决） | i18n 单独 epic；本 ADR 只规约 DomainError message 英文 + code 查表，message 兜底 |
+| C1 | add the `concurrent-log-handler` dependency; create an empty skeleton for `infrastructure/logging.py` exposing only `make_studio_log_handler` |
+| C2 | complete `infrastructure/logging.py`: full `setup_logging` + JsonLineFormatter + HumanConsoleFormatter + third-party silence list + takes over uvicorn handlers + utf8 reconfigure |
+| C3 | 3 call sites — `api/lifespan.py` + `cli.py` + `workers/_base.py` — call `setup_logging` |
+| C4 | `infrastructure/logging.py` gains ContextVar + Filter; new `api/middleware/trace.py` with TraceIdMiddleware; installed in `api/app.py` |
+| C5 | `supervisor/core.py:_popen` injects the ANIMA_TRACE_ID env var; new migration `_vN_request_trace.py` adds the `tasks.request_trace_id` column; the dispatcher reads it and calls var.set; the API endpoint writes request_trace_id when submitting a task |
+| C6 | workers/*.py print → logger; the supervisor's `_finish_slot` tails jobs/<id>.log and writes back error_msg (resolves B-1.6); `_on_task_log` switches malformed events to logger.error + emits an SSE warning_event (resolves B-4.4); `services/inference/daemon.py:_read_stderr_loop` gets a thread watchdog + restart (resolves B-4.5); `event_bus._safe_put` adds logger.warning on QueueFull (resolves B-1.5) |
+
+**Safety net beforehand** (a commit before C1):
+- `tests/test_error_response_snapshot.py` — locks the shape of the 20 existing 4xx/5xx endpoints
+- `tests/test_log_baseline.py` — validates typical `logger.warning` paths via caplog
+- `tests/test_worker_event_protocol.py` — locks the `__EVENT__:` IPC prefix-filtering behavior
+- `tests/test_cli_stdout_baseline.py` — locks the existing CLI output keywords via capsys
+- `tests/test_logging_import_inertia.py` — verifies that after `import studio.infrastructure.logging`, sys.excepthook is still default and the root handler count is still 0
+
+**Regression net**: the full `pytest -q tests/` + `npm test --silent` suite run on every commit.
+
+**Rollback**: each commit can be reverted independently; after reverting C5, `os.environ.get("ANIMA_TRACE_ID")` on the worker side remains safe; the migration is reverted with a reverse migration (column drop only).
+
+### PR-2: error system (~26h / ~5 commits)
+
+| Commit | Content |
+|---|---|
+| C1 | create `studio/domain/errors.py` with the DomainError base class + 5 subclasses (NotFound/Validation/Conflict/Auth/Forbidden), no fastapi dependency |
+| C2 | create `studio/api/exception_handlers.py` and register it in `app.py`: DomainError handler / RequestValidationError handler / Exception fallback handler; dual-write envelope (`{"detail":<legacy>, "error":{"code","message","trace_id"}}`) |
+| C3 | 5 service error classes (PresetError/ProjectError/VersionError/CurationError/TrainIOError) get a DomainError base; the 4 old _err_code helpers degrade into thin wrappers |
+| C4 | migrate router try/except batches 1+2 (preset / projects/* domain) — remove the `try: ... except XxxError: raise HTTPException(...)` sandwiches, letting the raise flow directly into the handler |
+| C5 | migrate router try/except batches 3+4 (curation / training / queue); delete the 4 old _err_code helper files; remove the remnants in `api/errors.py` |
+
+**Key constraints**:
+- The DomainError `message` field is standardized to **English**, and the frontend looks up the localized text via `code` in the i18n table (avoiding the trap from ADR-0008 §cross-cutting issue D of matching source-language strings)
+- The old HTTPException path keeps its `{"detail": <string>}` shape unchanged (trace_id falls back to the header only); the handler registration order preserves starlette's default behavior so the existing 175 raise sites aren't broken
+
+**Rollback**: each commit can be reverted independently; the hotfix path (some frontend toast parsing breaks a week after merge) is patching `_error_body` to force a fallback to `{"detail": <string>}` (a 30-minute hotfix).
+
+### PR-3: frontend + CLI cleanup (~18h / ~5 commits)
+
+| Commit | Content |
+|---|---|
+| C1 | create `studio/api/routers/client_errors.py` with `POST /api/client-errors` (rate-limited to 10/min per IP, writes to an independent `client_errors.jsonl`) |
+| C2 | create `web/src/lib/errors/{setup.ts, report.ts}`; `main.tsx` installs `window.error` + `unhandledrejection` listeners |
+| C3 | rework `ErrorBoundary.tsx::componentDidCatch` to report; the 3 fetch wrappers in `api/client.ts` consolidated to pick up X-Trace-Id; toasts show a `trace ab12cd34` suffix |
+| C4 | add a `_say(msg, level="info")` wrapper to `cli.py`; all 48 print sites go through `_say`; startup messages stay on the print path, diagnostic messages go through logger (enabled by `--verbose`) |
+| C5 | rewrite the 7 capsys test files to use loose `in` matching; mark ADR-0009 as Accepted; mark ADR-0008 §"Debt still owed" item 4 as "folded into ADR-0009" |
 
 ---
 
-## 替代方案（已否决）
+## Out of scope (deferred to 0.13.x+)
 
-### A. 12 PR 极细切分
-最初 C agent 推 8 → 12 PR 方案。否决理由：这不是 25k 行重构（参 ADR-0008 12 PR），是新增 cross-cutting 体系；细切 PR 数 review/合并节奏不匹配，反复合 → 反复 rebase。3 PR 按主题切，每 PR 一个清晰心智模型，stack 依次合并。
+| Item | Reason for deferring |
+|---|---|
+| `infrastructure/logging.py` single file → subpackage | currently ~200 LOC; triggered once it exceeds 400; a pure file-move PR, 2h |
+| Worker single-write → dual-write (worker directly emits `studio.log`) | `concurrent-log-handler` stability on Windows + OneDrive + Defender needs verification first; the current single-write + supervisor write-back already resolves pain point 1.6; ops can also aggregate via `grep jobs/*.log studio.log` |
+| envelope Phase 2/3 (removing the legacy `detail` key) | needs a cross-release deprecation window, earliest 0.13.0 |
+| IndexedDB offline reporting retry | silently swallowing a failed frontend report is a reasonable default; the offline scenario is an enhancement |
+| True rotation for `jobs/<id>.log` | a single job is on the order of a few MB, manageable; changing `_finish_slot` to delete .log files older than 7 days (GC rather than rotation) is a separate follow-up |
+| CLI cmd_run doesn't take over subprocess stdout (B-5.2) | related to nssm/systemd wrapper behavior, not touched in this batch |
+| CLI cmd_test has no junit-xml (B-5.3) | a DX feature, not part of the logging system |
+| Unifying the 64 scattered `console.error/warn/log` sites on the frontend (B-3.4) | to be done alongside the i18n epic |
+| Mixed source-language/English error messages (full resolution of B cross-cutting issue D) | a separate i18n epic; this ADR only standardizes the DomainError message to English + code-based lookup, with message as a fallback |
 
-### B. envelope hard cutover 到 `{"error": {...}}`
-A agent 首轮主张。否决理由：前端 client.ts 3 处 + Presets.tsx 1 处 + 5 测试文件 11 处依赖 `body.detail`；hard cutover 立刻炸 toast；dual-write 给 3 release 渐进窗口。
+---
 
-### C. Worker 双写到 `studio.log` + `jobs/<id>.log`
-A agent 首轮主张。否决理由：Windows 跨进程文件锁复杂（`concurrent-log-handler` 在 OneDrive 同步路径 + Defender 场景未验证）；运维 trace_id grep `jobs/*.log studio.log` 也能聚合；0.13.x 可独立 PR 演进。
+## Rejected alternatives
 
-### D. CLI 全部 print → logger
-A agent 首轮主张。否决理由：CLI 是 5s 短命周期落盘价值低；capsys 7 测试文件重写 caplog 工时 ≈ 4h；用户终端看 `2026-05-28 14:32 [INFO] studio.cli:` 一坨比 `[studio] ...` 难看。
+### A. 12-PR fine-grained split
+Agent C's first-round proposal was 8 → 12 PRs. Rejected because: this isn't a 25k-line refactor (cf. ADR-0008's 12 PRs) — it's adding a new cross-cutting system; splitting into too many PRs mismatches the review/merge cadence, leading to repeated merges → repeated rebases. 3 PRs split by theme, each with a clear mental model, merged as a stack.
+
+### B. Envelope hard cutover to `{"error": {...}}`
+Agent A's first-round proposal. Rejected because: 3 sites in the frontend's client.ts + 1 in Presets.tsx + 11 sites across 5 test files depend on `body.detail`; a hard cutover would break toasts immediately; dual-write gives a 3-release gradual migration window instead.
+
+### C. Worker dual-write to `studio.log` + `jobs/<id>.log`
+Agent A's first-round proposal. Rejected because: cross-process file locking on Windows is complex (`concurrent-log-handler` hasn't been validated on OneDrive-synced paths + with Defender); ops can also aggregate trace_id via `grep jobs/*.log studio.log`; can evolve independently in 0.13.x.
+
+### D. CLI print → logger everywhere
+Agent A's first-round proposal. Rejected because: the CLI has a short 5-second lifecycle, so persisted logs have little value; rewriting the 7 capsys test files to use caplog would take ≈4h; users seeing a blob like `2026-05-28 14:32 [INFO] studio.cli:` in their terminal is uglier than `[studio] ...`.
 
 ### E. loguru / structlog
-A agent 首轮考虑。否决理由：运行期硬依赖污染 requirements；subprocess 启动开销；caplog 不正交（需 `loguru-caplog` shim）；Windows 上 rotation 跟 stdlib 同样有锁问题；JSON schema 简单 50 行自写。
+Agent A's first-round consideration. Rejected because: they're hard runtime dependencies that pollute requirements; subprocess startup overhead; caplog isn't orthogonal to them (needs a `loguru-caplog` shim); rotation on Windows has the same locking issues as stdlib; a JSON schema is simple enough to hand-write in 50 lines.
 
-### F. `infrastructure/logging/` 子包 6 模块
-A agent 首轮主张。否决理由：当前 ~200 LOC 单文件完全 hold；6 文件并行 review 难度反而高；后续超 400 LOC 再纯文件搬动拆，零风险。
+### F. `infrastructure/logging/` as a 6-module subpackage
+Agent A's first-round proposal. Rejected because: the current ~200-LOC single file holds up fine; 6 files in parallel actually make review harder; splitting later once it exceeds 400 LOC is a zero-risk pure file move.
 
 ---
 
-## 后果
+## Consequences
 
-### 好处
+### Benefits
 
-- **跨进程 trace_id 全链路贯穿** — 用户报问题给 toast trace 后缀，`jq 'select(.trace_id=="...")' studio.log` 一行还原 webui → supervisor → worker → 错误抛出时间线
-- **5 surface 统一日志格式** — JSON line 10 固定字段，jq / grep 跨 surface 检索
-- **API 错误响应统一** — DomainError 体系替 4 套字符串匹配 helper，删 4 文件 helper
-- **前端崩溃可观测** — ErrorBoundary + window.onerror + unhandledrejection 三路上报到后端 `client_errors.jsonl`
-- **数据库错误根因可见** — supervisor tail jobs log 回写 `db.tasks.error_msg`，UI Task 列表从 "exit code 1" 升级到 traceback 摘要
-- **关闭 ADR-0008 §"还的债" 第 4 项**
+- **A trace_id runs through the whole cross-process chain** — when a user reports a problem with the toast's trace suffix, `jq 'select(.trace_id=="...")' studio.log` reconstructs the full timeline from webui → supervisor → worker → the point where the error was raised, in one command
+- **Unified log format across all 5 surfaces** — JSON lines with 10 fixed fields, searchable across surfaces with jq / grep
+- **Unified API error responses** — the DomainError system replaces the 4 string-matching helpers, removing 4 helper files
+- **Frontend crashes become observable** — ErrorBoundary + window.onerror + unhandledrejection all report to the backend's `client_errors.jsonl`
+- **Database error root causes become visible** — the supervisor tails the job log and writes back to `db.tasks.error_msg`, upgrading the UI's Task list from "exit code 1" to a traceback summary
+- **Closes ADR-0008 §"Debt still owed" item 4**
 
-### 新增约束
+### New constraints
 
-- 写新 router 时**禁止**手写 `try/except XxxError: raise HTTPException`；改 raise DomainError 子类让 handler 兜
-- 写新 service 错误时**必须**继承 DomainError 子类（或其再子类）
-- 写新 worker 时**必须**调 `setup_logging(process="worker:<kind>/<job_id>")`，不调直接 `print`
-- 写新 fetch 调用**禁止**直接 `fetch(url)`；走 `apiClient.req()` 包装拿 X-Trace-Id 自动注入
-- DomainError `message` 字段**规约英文** + 前端用 `code` 查 i18n（防 ADR-0008 跨问题 D 中文匹配陷阱借 DomainError 复活）
-- 第三方库新加依赖时，如果带 logger，**评估是否加进 silence list**（参考 `infrastructure/logging.py` 内现有列表）
-- 永久保留 `studio.server` shim 不动（参 ADR-0008 §永久保留 4 shim）
+- Writing a new router **must not** hand-write `try/except XxxError: raise HTTPException`; raise a DomainError subclass and let the handler catch it
+- New service-level errors **must** subclass DomainError (or a further subclass of it)
+- New workers **must** call `setup_logging(process="worker:<kind>/<job_id>")` rather than calling `print` directly
+- New fetch calls **must not** call `fetch(url)` directly; go through the `apiClient.req()` wrapper to automatically pick up X-Trace-Id
+- The DomainError `message` field is **standardized to English** + the frontend looks it up via `code` in i18n (preventing ADR-0008's cross-cutting issue D of source-language string matching from resurfacing through DomainError)
+- When adding a new third-party dependency that ships its own logger, **evaluate whether to add it to the silence list** (see the existing list inside `infrastructure/logging.py`)
+- The `studio.server` shim is kept permanently, untouched (see ADR-0008 §permanent 4 shims)
 
-### 还的债（0.13.x+）
+### Debt still owed (0.13.x+)
 
-| 项 | 触发条件 |
+| Item | Trigger condition |
 |---|---|
-| `infrastructure/logging.py` 单文件 → 子包 | 文件超 400 LOC（预期 OpenTelemetry / Sentry 适配器引入时） |
-| Worker 单写 → 双写（emit `studio.log`） | 跨进程查 trace 痛感明显时（运维反馈）+ `concurrent-log-handler` Windows 稳定性验证通过 |
-| envelope Phase 2（deprecation log） | 前端完成 `body.error.*` 全量迁移后 |
-| envelope Phase 3（删 `detail` legacy key） | Phase 2 一个 release 周期后 |
-| `jobs/<id>.log` GC 超 7 天 | 独立 PR ~10 行（不算 rotation） |
-| 中英文错误信息完整规约 | i18n epic 启动时 |
-| 前端 64 处 `console.*` 统一抽象 | i18n epic 启动时 |
-| CLI cmd_run / cmd_test 接管 stdout | wrapper（nssm / systemd）改造时 |
+| `infrastructure/logging.py` single file → subpackage | once the file exceeds 400 LOC (expected when an OpenTelemetry / Sentry adapter is introduced) |
+| Worker single-write → dual-write (emit `studio.log`) | once cross-process trace lookups become a real ops pain point (feedback from ops) + `concurrent-log-handler` Windows stability is validated |
+| envelope Phase 2 (deprecation log) | once the frontend has fully migrated to `body.error.*` |
+| envelope Phase 3 (remove the legacy `detail` key) | one release cycle after Phase 2 |
+| `jobs/<id>.log` GC after 7 days | a separate ~10-line PR (not full rotation) |
+| Full standardization of source-language/English error messages | once the i18n epic starts |
+| Consolidating the 64 scattered frontend `console.*` calls | once the i18n epic starts |
+| CLI cmd_run / cmd_test taking over stdout | when the wrapper (nssm / systemd) is reworked |
 
 ---
 
-## 实施 lessons
+## Implementation lessons
 
-代码 review 时按需引用。完整背景在 git log + PR description。
+Reference these during code review as needed. Full background is in the git log + PR descriptions.
 
-1. **TraceIdMiddleware 必须 pure ASGI 不能 BaseHTTPMiddleware** — starlette
-   0.36+ 后者用 anyio.Stream wrapping，ContextVar 跨 thread 跳跃在 Python
-   3.10+ 有边缘 case。pure ASGI 直接拿 receive/send，ContextVar 在请求生命
-   周期内稳定。（PR-1 C5）
+1. **TraceIdMiddleware must be pure ASGI, not BaseHTTPMiddleware** — in starlette
+   0.36+, the latter wraps things with anyio.Stream, and ContextVar hops across
+   threads have edge cases on Python 3.10+. Pure ASGI reads receive/send directly,
+   keeping the ContextVar stable for the lifetime of the request. (PR-1 C5)
 
-2. **Fallback `Exception` handler 跑在 ServerErrorMiddleware 外层 contextvar 已 reset** —
-   FastAPI `app.add_exception_handler(Exception, ...)` 注册到 ServerError­Middleware
-   (在 TraceIdMiddleware 外层)；DomainError 等具名异常注册到 ExceptionMiddleware
-   (内层 contextvar 仍可用)。fallback 路径必须从 `request.scope["state"]["trace_id"]`
-   读，靠 contextvar 拿不到。统一用 `_trace_id_from(req)` helper 优先 scope state
-   兜底 contextvar。（PR-2 C2）
+2. **The fallback `Exception` handler runs outside ServerErrorMiddleware, where the contextvar has already reset** —
+   FastAPI's `app.add_exception_handler(Exception, ...)` is registered on ServerErrorMiddleware
+   (outside TraceIdMiddleware); named exceptions like DomainError are registered on ExceptionMiddleware
+   (inside, where the contextvar is still available). The fallback path must read
+   `request.scope["state"]["trace_id"]` instead — the contextvar isn't reachable there. Unified via a
+   `_trace_id_from(req)` helper that prefers scope state and falls back to the contextvar. (PR-2 C2)
 
-3. **ContextFilter 装 handler 而非 root logger** — stdlib `Logger.filter` 只在
-   `Logger.handle` 顶层调一次，子 logger propagate 到 root 时**不**调
-   `root.filter`，只调 `root.handlers[*].emit`。Filter 装 logger 上 → 子 logger
-   record 完全绕过。装到每个 handler 才确保所有 record 经过 handler 时都
-   有 ContextVar 注入。（PR-1 C5）
+3. **ContextFilter must be attached to the handler, not the root logger** — stdlib's `Logger.filter` is only
+   called once, at the top of `Logger.handle`; when a child logger propagates up to root, it does
+   **not** call `root.filter`, only `root.handlers[*].emit`. A filter attached to a logger is completely bypassed by
+   child-logger records. Attaching it to every handler ensures every record picks up ContextVar
+   injection as it passes through. (PR-1 C5)
 
-4. **`ANIMA_LOGGING_NO_BOOTSTRAP` env 守卫 + `ANIMA_LOG_DIR` env 隔离** — 业务入口
-   (api/lifespan / cli.main / workers/_base.worker_main) 在被测试触发时会装真
-   file handler 写 repo `studio_data/logs/`，污染 caplog 跟磁盘。conftest
-   session fixture 设两个 env：业务 setup_logging 顶部 early return；
-   ANIMA_LOG_DIR 兜底指向 tmp_path_factory。测 setup_logging 自身的 fixture
-   用 `monkeypatch.delenv` 解除。（PR-1 C4）
+4. **`ANIMA_LOGGING_NO_BOOTSTRAP` env guard + `ANIMA_LOG_DIR` env isolation** — the business entry points
+   (api/lifespan / cli.main / workers/_base.worker_main) install a real
+   file handler writing into the repo's `studio_data/logs/` when triggered by tests, polluting
+   caplog and disk. The conftest session fixture sets two env vars: business setup_logging
+   returns early at the top; ANIMA_LOG_DIR falls back to a tmp_path_factory location. The fixture
+   testing setup_logging itself lifts these with `monkeypatch.delenv`. (PR-1 C4)
 
-5. **db.tasks.request_trace_id 列让 dispatcher 拿请求时刻 trace_id** — supervisor
-   后台 dispatcher tick spawn worker 时**不**在 HTTP request ctx 内，contextvar
-   trace_id 是 None。如果只兜底 `bg-{uuid}` 标后台触发，用户截图 toast 的
-   trace_id (请求时刻) 跟 worker log 的 trace_id (spawn 时刻) 对不上，链路断。
-   修：API endpoint 入 task 时 `get_trace_id()` 写 `tasks.request_trace_id` 列；
-   dispatcher 拉起时读该列注入 worker env。（PR-1 C6）
+5. **The db.tasks.request_trace_id column lets the dispatcher recover the request-time trace_id** — when the supervisor's
+   background dispatcher tick spawns a worker, it is **not** inside an HTTP request context, so the contextvar
+   trace_id is None. If it only fell back to a `bg-{uuid}` marking a background trigger, the trace_id
+   shown in the user's toast screenshot (request time) wouldn't match the one in the worker log (spawn time), breaking the chain.
+   Fix: the API endpoint calls `get_trace_id()` and writes it to the `tasks.request_trace_id` column when submitting a task;
+   the dispatcher reads that column when starting the worker and injects it into the worker's env. (PR-1 C6)
 
-6. **批量替换 print → _say 正则会误伤 _say 自身** — `replace_all "print(f\"[studio] "
-   → "_say(f\""` 把 `_say` 内部实现里的 `print(f"[studio] {msg}", file=...)`
-   也替换了，导致无限递归 + 错误 kwargs。修：`_say` 内部用 `print("[studio] " + str(msg), ...)`
-   字符串拼接而非 f-string 避免 pattern 匹配。（PR-3 C4）
+6. **Bulk-replacing print → _say with a regex accidentally hit _say itself** — `replace_all "print(f\"[studio] "
+   → "_say(f\""` also replaced the `print(f"[studio] {msg}", file=...)` call
+   inside `_say`'s own implementation, causing infinite recursion + wrong kwargs. Fix: `_say`'s internal implementation uses
+   string concatenation, `print("[studio] " + str(msg), ...)`, instead of an f-string, so it doesn't match the pattern. (PR-3 C4)
 
-7. **route_snapshot.json 在新 endpoint 后必须 regenerate** — `test_route_snapshot`
-   按 method+path+name+type 锁死全部 route 集合。新增 `/api/client-errors`
-   时删 snapshot 文件 + 重跑即可生成新 baseline；commit 进 git 锁新基线。
-   （PR-3 C1）
+7. **route_snapshot.json must be regenerated after adding a new endpoint** — `test_route_snapshot`
+   locks the entire route set by method+path+name+type. When adding `/api/client-errors`,
+   delete the snapshot file and rerun to generate a new baseline; commit the new baseline into git.
+   (PR-3 C1)
 
-8. **前端上报 silent swallow 是强约束** — ErrorBoundary 已在 catch state，
-   上报本身失败再 throw → 二次崩溃 → ErrorBoundary 自身死循环。`reportClientError`
-   内全部 `try/catch` 吞（连 `console.warn` 都 try）；fetch keepalive:true 让 tab
-   关闭瞬间也尽量送出。（PR-3 C2/C3）
+8. **Silently swallowing frontend reporting failures is a hard requirement** — ErrorBoundary is already in a
+   catch state, so if the reporting call itself fails and throws → a second crash → ErrorBoundary enters
+   an infinite loop with itself. `reportClientError` wraps everything in
+   `try/catch` (even the `console.warn`); the fetch uses `keepalive:true` so it still tries to send even
+   at the moment the tab closes. (PR-3 C2/C3)
 
 ---
 
-## 参考
+## References
 
-- 三 agent 两轮 review 文档：`tmp/log_unify_agent_{a,b,c}_{architect,audit,migration,round2}.md`
-- 关联 ADR：
-  - [#0008 studio/ 4 层重构（0.11.0）](0008-studio-restructure-0.11.0.md) — §"还的债" 第 4 项已并入本 ADR
-- 关键文件 / 索引（落地后）：
-  - `studio/infrastructure/logging.py` — 日志体系入口
-  - `studio/domain/errors.py` — 错误体系入口
-  - `studio/api/exception_handlers.py` — 3 个 handler 注册点
-  - `studio/api/middleware/trace.py` — trace_id 入口
+- Three-agent two-round review docs: `tmp/log_unify_agent_{a,b,c}_{architect,audit,migration,round2}.md`
+- Related ADRs:
+  - [#0008 studio/ 4-layer refactor (0.11.0)](0008-studio-restructure-0.11.0.md) — §"Debt still owed" item 4 folded into this ADR
+- Key files / index (once landed):
+  - `studio/infrastructure/logging.py` — logging system entry point
+  - `studio/domain/errors.py` — error system entry point
+  - `studio/api/exception_handlers.py` — the 3 handler registration points
+  - `studio/api/middleware/trace.py` — trace_id entry point

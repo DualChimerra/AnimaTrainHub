@@ -1,9 +1,11 @@
 """Strict single-file Krea2 checkpoint inspection and loading.
 
-接受 Comfy/musubi 单文件布局（非 diffusers 分片布局）。**Raw 与 Turbo
-结构全等（同键同形状）——本 loader 对两者一视同仁，无法也不尝试区分**；
-「Turbo 不建议做训练底模」的防呆靠 studio 侧 catalog variant 的 purpose
-元数据（P4-4），不在加载层。
+Accepts the Comfy/musubi single-file layout (not the diffusers sharded
+layout). **Raw and Turbo have identical structure (same keys, same
+shapes) -- this loader treats them identically and cannot, and doesn't try
+to, tell them apart**; the "Turbo isn't recommended as a training base"
+guard lives in the studio-side catalog variant's purpose metadata (P4-4),
+not in the loading layer.
 
 The meta-device + ``assign=True`` loading strategy was adapted from
 kohya-ss/musubi-tuner (Apache-2.0):
@@ -47,9 +49,11 @@ _FLOAT_DTYPES = {
     "F32",
     "F64",
 }
-# fp8 权重原样常驻 + Linear forward 逐层 dequant（quant_fp8）。推理与训练
-# （fp8_base：底模 frozen，LoRA 参数全精度，kohya/musubi 生态标准做法）都
-# 支持——绝不静默 upcast 回 bf16（显存零收益丢精度，A7'/C13）。
+# fp8 weights stay resident as-is + Linear forward dequants layer by layer
+# (quant_fp8). Both inference and training (fp8_base: base model frozen,
+# LoRA params full precision, the kohya/musubi ecosystem's standard approach)
+# are supported -- weights are never silently upcast back to bf16 (that would
+# lose precision for zero VRAM benefit, A7'/C13).
 _FP8_DTYPES = {"F8_E4M3", "F8_E5M2"}
 
 
@@ -64,14 +68,14 @@ class Krea2CheckpointInfo:
 def _checkpoint_path(path: str | Path) -> Path:
     resolved = Path(path).expanduser()
     if not resolved.exists():
-        raise FileNotFoundError(f"Krea2 checkpoint 不存在：{resolved}")
+        raise FileNotFoundError(f"Krea2 checkpoint does not exist: {resolved}")
     if resolved.is_dir():
         raise ValueError(
-            "Krea2 loader 需要单文件 raw.safetensors，不能传 diffusers transformer "
-            f"分片目录：{resolved}"
+            "Krea2 loader needs a single-file raw.safetensors, not a "
+            f"diffusers transformer shard directory: {resolved}"
         )
     if resolved.suffix.lower() != ".safetensors":
-        raise ValueError(f"Krea2 checkpoint 必须是 .safetensors 文件：{resolved}")
+        raise ValueError(f"Krea2 checkpoint must be a .safetensors file: {resolved}")
     return resolved
 
 
@@ -102,11 +106,11 @@ def _choose_prefix(source_keys: list[str], expected_keys: set[str]) -> str:
             for key in source_keys
         )
         hint = (
-            "；检测到 diffusers 风格键，请改用仓库根目录的 raw.safetensors"
+            "; detected diffusers-style keys, use the raw.safetensors from the repo root instead"
             if diffusers_hint
             else ""
         )
-        raise ValueError(f"不是可识别的 Krea2 checkpoint：结构指纹零命中{hint}")
+        raise ValueError(f"Not a recognizable Krea2 checkpoint: zero structural-fingerprint matches{hint}")
     return best_prefix
 
 
@@ -117,7 +121,7 @@ def _normalize_key(key: str, prefix: str) -> str:
 def _format_key_delta(label: str, keys: set[str]) -> str:
     sample = ", ".join(sorted(keys)[:5])
     suffix = " ..." if len(keys) > 5 else ""
-    return f"{label} {len(keys)} 个：{sample}{suffix}"
+    return f"{label} {len(keys)}: {sample}{suffix}"
 
 
 def _inspect(
@@ -127,10 +131,11 @@ def _inspect(
     expected_shapes: dict[str, tuple[int, ...]] | None = None,
     allow_fp8: bool = False,
 ) -> tuple[Krea2CheckpointInfo, dict[str, str], dict[str, str]]:
-    """校验 checkpoint 并返回 (info, 权重键映射, fp8 scale 键映射)。
+    """Validate the checkpoint and return (info, weight key mapping, fp8 scale key mapping).
 
-    ``allow_fp8=True``（推理路径）时：接受 fp8 权重；``{layer}.weight_scale``
-    F32 标量键被单独收集（fp8_scaled 形态），不参与键集比对。
+    When ``allow_fp8=True`` (the inference path): fp8 weights are accepted;
+    ``{layer}.weight_scale`` F32 scalar keys are collected separately (the
+    fp8_scaled form) and excluded from the key-set comparison.
     """
     checkpoint = _checkpoint_path(path)
     if expected_shapes is None:
@@ -143,9 +148,10 @@ def _inspect(
         )
         all_source_keys = list(handle.keys())
         prefix = _choose_prefix(all_source_keys, expected_keys)
-        # fp8_scaled 的 per-layer scale 键：归一后形如 blocks.N.xxx.weight_scale。
-        # 只在 allow_fp8 时剥离；显式 allow_fp8=False 的调用面它们照旧落进
-        # 「多出」报错。
+        # fp8_scaled's per-layer scale keys: after normalization they look like
+        # blocks.N.xxx.weight_scale. Only stripped out when allow_fp8; callers
+        # that explicitly pass allow_fp8=False still get them flagged as
+        # "unexpected".
         scale_to_source: dict[str, str] = {}
         source_keys = []
         for source_key in all_source_keys:
@@ -160,7 +166,7 @@ def _inspect(
         for source_key in source_keys:
             normalized = _normalize_key(source_key, prefix)
             if normalized in normalized_to_source:
-                raise ValueError(f"Krea2 checkpoint 前缀归一后键冲突：{normalized}")
+                raise ValueError(f"Krea2 checkpoint key collision after prefix normalization: {normalized}")
             normalized_to_source[normalized] = source_key
 
         actual_keys = set(normalized_to_source)
@@ -168,9 +174,9 @@ def _inspect(
         unexpected = actual_keys - expected_keys
         errors = []
         if missing:
-            errors.append(_format_key_delta("缺少", missing))
+            errors.append(_format_key_delta("missing", missing))
         if unexpected:
-            errors.append(_format_key_delta("多出", unexpected))
+            errors.append(_format_key_delta("unexpected", unexpected))
 
         shape_mismatches = []
         dtype_mismatches = []
@@ -191,29 +197,29 @@ def _inspect(
                 dtype_mismatches.append(f"{normalized}: {actual_dtype}")
         if fp8_keys and not allow_fp8:
             raise ValueError(
-                f"Krea2 checkpoint 含 fp8 参数（{len(fp8_keys)} 个，如 "
-                f"{fp8_keys[0]}），但调用方要求全精度权重。"
+                f"Krea2 checkpoint contains fp8 params ({len(fp8_keys)}, e.g. "
+                f"{fp8_keys[0]}), but the caller requires full-precision weights."
             )
-        # fp8_scaled 一致性：有 scale 的层权重必须是 fp8；metadata 声明的层
-        # 若既无 fp8 权重也无 scale 属异常文件
+        # fp8_scaled consistency: a layer with a scale must have fp8 weights;
+        # a layer declared in metadata with neither fp8 weights nor a scale is a malformed file
         if allow_fp8:
             fp8_set = set(fp8_keys)
             for layer in scale_to_source:
                 if f"{layer}.weight" not in fp8_set:
-                    errors.append(f"{layer} 带 weight_scale 但权重不是 fp8")
+                    errors.append(f"{layer} has weight_scale but its weight isn't fp8")
             for layer in quant_meta:
                 if f"{layer}.weight" not in fp8_set:
-                    errors.append(f"metadata 声明量化层 {layer} 但权重不是 fp8")
+                    errors.append(f"metadata declares quantized layer {layer} but its weight isn't fp8")
         if shape_mismatches:
             sample = "; ".join(shape_mismatches[:5])
             suffix = " ..." if len(shape_mismatches) > 5 else ""
-            errors.append(f"shape 不匹配 {len(shape_mismatches)} 个：{sample}{suffix}")
+            errors.append(f"{len(shape_mismatches)} shape mismatches: {sample}{suffix}")
         if dtype_mismatches:
             sample = "; ".join(dtype_mismatches[:5])
             suffix = " ..." if len(dtype_mismatches) > 5 else ""
-            errors.append(f"非浮点 tensor {len(dtype_mismatches)} 个：{sample}{suffix}")
+            errors.append(f"{len(dtype_mismatches)} non-float tensors: {sample}{suffix}")
         if errors:
-            raise ValueError("Krea2 checkpoint 结构指纹不匹配；" + "；".join(errors))
+            raise ValueError("Krea2 checkpoint structural fingerprint mismatch; " + "; ".join(errors))
 
     parameter_count = sum(
         math_product(shape) for shape in expected_shapes.values()
@@ -244,18 +250,19 @@ def inspect_krea2_checkpoint(
 ) -> Krea2CheckpointInfo:
     """Validate keys and shapes from the safetensors header without reading payloads.
 
-    bf16 与 fp8（scaled / 纯 cast）两种形态都是合法 checkpoint。
+    Both bf16 and fp8 (scaled / plain cast) are valid checkpoint forms.
     """
     info, _, _ = _inspect(path, config, allow_fp8=True)
     return info
 
 
 def checkpoint_contains_fp8(path: str | Path) -> bool:
-    """轻量探测：safetensors header 里是否有 fp8 权重（不读 payload）。
+    """Lightweight probe: checks the safetensors header for fp8 weights (doesn't read the payload).
 
-    供训练启动期防呆用（fp8 底模 + grad_checkpoint 关闭等组合要 fail-fast，
-    不能等 13GB 加载完才崩）。非 safetensors / 读失败返回 False——真正的
-    结构校验由 loader 兜底。
+    Used for guardrails at training startup (combinations like an fp8 base
+    model + grad_checkpoint disabled need to fail fast, not blow up after a
+    13GB load). Returns False for non-safetensors / read failures -- the real
+    structural check is the loader's job.
     """
     try:
         checkpoint = _checkpoint_path(path)
@@ -269,7 +276,7 @@ def checkpoint_contains_fp8(path: str | Path) -> bool:
 
 
 def _swapped_block_prefixes(config: Krea2Config, blocks_to_swap: int) -> tuple[str, ...]:
-    """被换出的层的 state_dict 键前缀（末尾 N 层，与 PinnedBlockSwap 同口径）。"""
+    """state_dict key prefixes of the swapped-out layers (the last N layers, same convention as PinnedBlockSwap)."""
     if blocks_to_swap <= 0:
         return ()
     first = max(config.layers - blocks_to_swap, 0)
@@ -280,11 +287,13 @@ def _swapped_block_prefixes(config: Krea2Config, blocks_to_swap: int) -> tuple[s
 def _swapped_param_counts(
     blocks_to_swap: int, config: Krea2Config,
 ) -> tuple[int, int]:
-    """(换出层参数量, 全模型参数量)。meta 模型数参数，不读盘、不占显存。
+    """(swapped-out layer param count, full-model param count). Counts params
+    on a meta model, so no disk reads and no VRAM use.
 
-    带缓存：block swap 预检要为 0..28 每个候选值各问一次比例，不缓存就会建
-    29 次 meta 模型。``Krea2Config`` 是 frozen dataclass（可哈希），返回值是
-    两个 int，缓存本身零内存风险。
+    Cached: block-swap preflight asks for the ratio once for each candidate
+    value from 0..28, and without caching that would build 29 meta models.
+    ``Krea2Config`` is a frozen dataclass (hashable), and the return value is
+    two ints, so caching carries zero memory risk.
     """
     prefixes = _swapped_block_prefixes(config, blocks_to_swap)
     with torch.device("meta"):
@@ -300,12 +309,16 @@ def _swapped_param_counts(
 def swapped_param_ratio(
     blocks_to_swap: int, *, config: Krea2Config = KREA2_CONFIG,
 ) -> float:
-    """换出层占全模型参数的比例 —— **显存预算折扣用这个，不要用字节数**。
+    """Fraction of the full model's parameters accounted for by the swapped-out
+    layers -- **use this for the VRAM budget discount, not a byte count**.
 
-    折扣必须 dtype 无关：`check_load_budget` 的 need 来自权重文件实际大小，
-    fp8 checkpoint 只有 bf16 的一半。若折扣按 bf16 字节算，会把 fp8 场景的
-    需求折扣过头（need 13GB 减掉 11.3GB → 以为只要 1.7GB，实际常驻 7.2GB），
-    护栏就形同虚设。按比例乘文件实际大小则两种精度都正确。
+    The discount must be dtype-independent: `check_load_budget`'s need comes
+    from the weight file's actual size, and an fp8 checkpoint is only half
+    the size of bf16. If the discount were computed in bf16 bytes, it would
+    over-discount the fp8 case (need 13GB minus 11.3GB -> thinks only 1.7GB
+    is needed, but 7.2GB is actually resident), making the guardrail
+    meaningless. Multiplying the ratio by the file's actual size is correct
+    for both precisions.
     """
     if blocks_to_swap <= 0:
         return 0.0
@@ -319,11 +332,13 @@ def estimate_swapped_bytes(
     *,
     config: Krea2Config = KREA2_CONFIG,
 ) -> int:
-    """换出层的权重字节数（**pinned 内存预算专用**）。
+    """Byte count of the swapped-out layers' weights (**for the pinned-memory budget only**).
 
-    这里按计算 dtype 估，对 fp8 底模是高估 —— 对 pinned 预算而言高估是安全方向
-    （提前拒绝，不会让用户在锁定内存上翻车）。显存折扣不能用它，见
-    ``swapped_param_ratio`` 的说明。
+    Estimated here using the compute dtype, which overestimates for an fp8
+    base model -- but for the pinned budget, overestimating is the safe
+    direction (rejects early rather than letting the user hit a pinned-memory
+    wall later). Don't use this for the VRAM discount; see
+    ``swapped_param_ratio``'s docstring.
     """
     if blocks_to_swap <= 0:
         return 0
@@ -336,13 +351,17 @@ def _swapped_bytes_from_checkpoint(
     prefixes: tuple[str, ...],
     normalized_to_source: dict,
 ) -> int:
-    """换出层在 checkpoint 里的**实际**字节数（只读 header，不加载数据）。
+    """**Actual** byte count of the swapped-out layers in the checkpoint (header-only read, no data loading).
 
-    必须用实际 dtype 而非计算 dtype：fp8 checkpoint 只有 bf16 的一半，按 bf16
-    估会把 28 层算成 22.6GB（实际 11.3GB），在 37.5GB 内存的机器上撞 60% 安全
-    线被**误拒** —— 恰好挡死 B12 的目标配置。高估在这里不是保守，是假阴性。
+    Must use the actual dtype, not the compute dtype: an fp8 checkpoint is
+    only half the size of bf16, and estimating from bf16 would put 28 layers
+    at 22.6GB (actually 11.3GB), which on a 37.5GB machine would hit the 60%
+    safety line and get **incorrectly rejected** -- exactly blocking B12's
+    target configuration. Overestimating here isn't conservative, it's a
+    false negative.
 
-    header 读不出来时返回 0，由调用方回退到按计算 dtype 的估算。
+    Returns 0 when the header can't be read; the caller falls back to the
+    compute-dtype-based estimate.
     """
     total = 0
     try:
@@ -366,13 +385,19 @@ def _swapped_pinned_bytes(
     normalized_to_source: dict,
     dtype: torch.dtype,
 ) -> int:
-    """换出层**实际将 pin 的**字节数（只读 header），给 ``PinnedPacker`` 做预分配计划。
+    """Byte count that will **actually be pinned** for the swapped-out layers
+    (header-only read), used by ``PinnedPacker`` for its preallocation plan.
 
-    与 ``_swapped_bytes_from_checkpoint``（预算护栏口径 = checkpoint 原始字节）
-    的差别：必须镜像 ``load_krea2_model`` 的落盘规则 —— fp8 张量原样 pin（按
-    checkpoint dtype），其余先 cast 到计算 dtype 再 pin（按 ``dtype`` 算）。
-    计划数字要**精确**：高估即白锁（packer 按它一次性预分配），低估则多开溢出块。
-    header 读不出来返回 0（packer 退化为按需开块，不比逐张量 pin 差）。
+    Differs from ``_swapped_bytes_from_checkpoint`` (whose convention is the
+    budget-guardrail figure = the checkpoint's raw bytes): this must mirror
+    ``load_krea2_model``'s actual write-out rule -- fp8 tensors are pinned
+    as-is (at checkpoint dtype), everything else is first cast to the
+    compute dtype and then pinned (at ``dtype``). The planned number needs to
+    be **exact**: overestimating wastes pinned memory (the packer
+    preallocates it all at once based on this number), underestimating opens
+    extra overflow chunks. Returns 0 when the header can't be read (the
+    packer falls back to allocating chunks on demand, no worse than pinning
+    tensor by tensor).
     """
     compute_size = torch.empty(0, dtype=dtype).element_size()
     total = 0
@@ -393,7 +418,7 @@ def _swapped_pinned_bytes(
     return total
 
 
-#: safetensors dtype 字符串 → 字节宽度（header 里是字符串不是 torch.dtype）
+#: safetensors dtype string -> byte width (the header stores a string, not a torch.dtype)
 _DTYPE_BYTES = {
     "F64": 8, "I64": 8,
     "F32": 4, "I32": 4,
@@ -413,15 +438,17 @@ def _check_swap_budget(
     normalized_to_source: dict,
     checkpoint: Path,
 ) -> None:
-    """换出层落 pinned 之前先过内存预算护栏（B6：失败即报错，不静默降级）。
+    """Check the memory-budget guardrail before writing swapped-out layers to
+    pinned memory (B6: failure raises, no silent degradation).
 
-    在**任何权重读取之前**调用 —— 失败要 fail-fast，不能等搬了一半才炸。
+    Called **before any weight is read** -- failure must be fail-fast, not
+    blow up halfway through the copy.
     """
     from training.sysmem import check_pinned_budget
 
     prefixes = _swapped_block_prefixes(config, blocks_to_swap)
     need = _swapped_bytes_from_checkpoint(checkpoint, prefixes, normalized_to_source)
-    if need <= 0:  # header 读不出：回退到按计算 dtype 估
+    if need <= 0:  # header couldn't be read: fall back to a compute-dtype estimate
         need = estimate_swapped_bytes(blocks_to_swap, dtype, config=config)
     check_pinned_budget(need, blocks=blocks_to_swap)
 
@@ -437,23 +464,30 @@ def load_krea2_model(
 ) -> SingleStreamDiT:
     """Strict-load a single-file Krea2 checkpoint into a frozen meta-created model.
 
-    fp8 权重（纯 cast 与 fp8_scaled 两种形态）推理与训练都接受：fp8 张量
-    原样常驻显存，Linear 前向逐层 dequant 到 compute dtype（ComfyUI parity，
-    见 quant_fp8）。训练即 kohya/musubi 生态的 fp8_base 语义——底模 frozen
-    无梯度，LoRA 参数全精度；显存收益依赖 grad checkpointing（dequant 临时
-    权重随重算段释放），该约束由 trainer 启动期校验强制（phases/models）。
-    ``blocks_to_swap`` > 0 时（block swap，见 docs/design/block-swap.md）：末尾
-    N 层的权重**直接载到 CPU pinned**，不经过显存 —— 这是「12/16GB 消费级卡
-    跑 K2」的前提，若先全量上卡再搬下来，峰值仍等于完整模型。落地后由
-    ``training.block_swap.PinnedBlockSwap`` 就地接管这批 CPU 张量。
+    fp8 weights (both the plain-cast and fp8_scaled forms) are accepted for
+    both inference and training: fp8 tensors stay resident in VRAM as-is, and
+    the Linear forward dequants to the compute dtype layer by layer (ComfyUI
+    parity, see quant_fp8). Training here means the kohya/musubi ecosystem's
+    fp8_base semantics -- the base model is frozen with no gradients, LoRA
+    params are full precision; the VRAM savings depend on grad checkpointing
+    (the temporary dequantized weights get freed at the end of each recompute
+    segment), and that constraint is enforced by a startup check in the
+    trainer (phases/models). When ``blocks_to_swap`` > 0 (block swap, see
+    docs/design/block-swap.md): the last N layers' weights are **loaded
+    directly into CPU pinned memory**, never touching VRAM -- this is what
+    makes "running K2 on a 12/16GB consumer card" possible; loading
+    everything onto the GPU first and then moving it back down would still
+    peak at the full model's size. Once loaded, these CPU tensors are taken
+    over in place by ``training.block_swap.PinnedBlockSwap``.
 
-    ``purpose`` 当前不影响加载行为，保留作调用面语义标注。
+    ``purpose`` currently doesn't affect loading behavior; kept for semantic
+    annotation at call sites.
     """
     if dtype not in {torch.float16, torch.bfloat16, torch.float32, torch.float64}:
-        raise ValueError(f"Krea2 loader 不支持 dtype={dtype}")
+        raise ValueError(f"Krea2 loader does not support dtype={dtype}")
     target_device = torch.device(device)
     if target_device.type == "meta":
-        raise ValueError("Krea2 loader 的目标 device 不能是 meta")
+        raise ValueError("Krea2 loader's target device cannot be meta")
     allow_fp8 = True
 
     model, expected_shapes = _expected_state(config)
@@ -474,9 +508,13 @@ def load_krea2_model(
         _check_swap_budget(
             config, blocks_to_swap, dtype, normalized_to_source, checkpoint,
         )
-        # 换出层不逐张量 pin_memory（host allocator 按 2 的幂取整会白锁 1.47×，
-        # 32GB 内存机器直接撞 Windows 可锁定上限），而是按精确总量一次性预分配
-        # 2 的幂大块再切 view —— 预算护栏过了这里才分配，分配失败即 fail-fast
+        # Swapped-out layers are NOT pinned tensor by tensor (the host
+        # allocator rounds up to a power of 2, wasting up to 1.47x pinned
+        # memory, which on a 32GB machine directly hits Windows' lockable-
+        # memory ceiling). Instead, preallocate large power-of-2 chunks
+        # sized to the exact total and slice views out of them -- allocation
+        # only happens after the budget guardrail passes, and a failed
+        # allocation fails fast.
         from training.block_swap import PinnedPacker
 
         packer = PinnedPacker(_swapped_pinned_bytes(
@@ -488,14 +526,14 @@ def load_krea2_model(
             tensor = handle.get_tensor(source_key)
             if not tensor.is_floating_point():
                 raise ValueError(
-                    f"Krea2 checkpoint 含非浮点参数 {source_key}: {tensor.dtype}"
+                    f"Krea2 checkpoint contains a non-float param {source_key}: {tensor.dtype}"
                 )
-            # 被换出的层不上卡：直接落 CPU pinned（见 docstring）
+            # Swapped-out layers never go to the GPU: they land directly in CPU pinned memory (see docstring)
             swapped = normalized.startswith(swapped_prefixes) if swapped_prefixes else False
             if allow_fp8 and tensor.dtype in (
                 torch.float8_e4m3fn, torch.float8_e5m2,
             ):
-                # fp8 原样常驻（显存收益所在），不 cast dtype
+                # fp8 stays resident as-is (this is where the VRAM savings come from), no dtype cast
                 state_dict[normalized] = (
                     packer.pin(tensor) if swapped
                     else tensor.to(device=target_device)
@@ -520,12 +558,13 @@ def load_krea2_model(
     model.requires_grad_(False)
     if packer is not None:
         logger.info(
-            "block swap pinned：权重 %.2f GB 打包进 %d 块，实际锁定 %.2f GB（溢出块 %d）",
+            "block swap pinned: %.2f GB of weights packed into %d chunks, %.2f GB actually locked (%d overflow chunks)",
             packer.packed_bytes / 1024 ** 3, packer.num_chunks,
             packer.allocated_bytes / 1024 ** 3, packer.overflow_chunks,
         )
     if fp8_scales:
-        # scale 恒放计算设备：换出层的权重此刻在 CPU，跟随它会导致前向 device
-        # 不匹配（见 patch_fp8_linears docstring）
+        # scale always goes on the compute device: swapped-out layers' weights
+        # are on CPU right now, and following them would cause a device
+        # mismatch at forward time (see patch_fp8_linears docstring)
         patch_fp8_linears(model, fp8_scales, device=target_device)
     return model

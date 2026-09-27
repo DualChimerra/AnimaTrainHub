@@ -5,13 +5,13 @@ import { exportXYMatrix } from './exportXY'
 import FullscreenViewer from './FullscreenViewer'
 import { axisLabel, formatAxisValue, type XYAxisDraft } from './xy'
 
-/** PreviewXYGrid 本地 sample 类型。
+/** PreviewXYGrid's local sample type.
  *
- *  `MonitorState['samples']` 结构性可赋值过来（active task 路径，`xy` optional —
- *  非 XY 模式 sample 也复用同一 streaming buffer）；
- *  历史 disk 回看路径补 `imageUrl`（server 已 URL encode 好的 cell URL），
- *  GridCell + FullscreenViewer 都优先 `imageUrl`，否则回退
- *  `api.generateSampleUrl(taskId, filename)`。 */
+ *  `MonitorState['samples']` is structurally assignable to it (the active-task path, where
+ *  `xy` is optional -- non-XY-mode samples reuse the same streaming buffer);
+ *  the disk-history playback path additionally supplies `imageUrl` (a cell URL already
+ *  URL-encoded by the server). GridCell and FullscreenViewer both prefer `imageUrl`,
+ *  falling back to `api.generateSampleUrl(taskId, filename)` otherwise. */
 export interface XYSample {
   path: string
   step?: number
@@ -21,15 +21,16 @@ export interface XYSample {
     xv?: string | number
     yv?: string | number | null
   }
-  /** disk-served 时由 server 给；cache / active task 留空 */
+  /** Given by the server for disk-served entries; left empty for cache / active-task */
   imageUrl?: string
 }
 
-// zoom = 单 cell 物理宽度（px）。固定列宽 → 滚轮 zoom 视觉立即生效；
-// 列总宽 > 容器时横滚（已有 overflow:auto 兜底）。
-// MIN = ZOOM_DEFAULT (100%)：用户决策不允许小于 100%（cell 太小看不清
-// 没意义）；MAX 动态 = 容器宽（保证最大单 cell 占满一屏）；
-// DEFAULT = 200px (100%)。
+// zoom = a single cell's physical width (px). Fixed column width -> wheel-zoom takes visible
+// effect immediately; when the total column width exceeds the container it scrolls horizontally
+// (already backed by overflow:auto).
+// MIN = ZOOM_DEFAULT (100%): by product decision, cells can't go below 100% (smaller cells
+// aren't legible enough to be useful); MAX is dynamic = container width (so a single cell can
+// fill the whole screen at most); DEFAULT = 200px (100%).
 const ZOOM_DEFAULT = 200
 const ZOOM_MIN = ZOOM_DEFAULT
 const ZOOM_STEP = 24
@@ -38,13 +39,15 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
 }
 
-/** XY 模式预览网格：按 monitorState.samples[].xy 排成 N×M（CSS grid）。
+/** XY-mode preview grid: arranges monitorState.samples[].xy into an N x M CSS grid.
  *
- * - 不再限制列数（之前 colsForX 截到 5 → 12 张矩阵只显 10）
- * - gap 2px（用户决策）
- * - cell aspect 1:1，object-cover 填满
- * - 列模板 `60px repeat(xLen, minmax(MIN, 1fr))` 让每行所有 cell 同宽
- *   且至少 MIN 宽，多余空间均分；超出容器宽时整个 grid 横滚
+ * - No longer caps the column count (previously colsForX truncated to 5, so a 12-cell matrix
+ *   only showed 10)
+ * - 2px gap (product decision)
+ * - cells are 1:1 aspect, filled with object-cover
+ * - column template `60px repeat(xLen, minmax(MIN, 1fr))` keeps every cell in a row the same
+ *   width, at least MIN wide, splitting any extra space evenly; the whole grid scrolls
+ *   horizontally once it exceeds the container width
  */
 export default function PreviewXYGrid({
   samples, taskId, xDraft, yDraft, onCellClick, selectedIndices,
@@ -56,14 +59,15 @@ export default function PreviewXYGrid({
   yDraft: XYAxisDraft | null
   onCellClick?: (sampleIdx: number) => void
   selectedIndices?: number[]
-  /** disk 历史回看专用：传 composite 大图 URL → 导出 PNG 按钮直接 anchor download，
-   *  绕过 composeXYMatrix（disk entry 的 cache 早就没了，re-compose 会失败）。
-   *  active task 模式不传 → fallback 走 exportXYMatrix。 */
+  /** Disk-history playback only: pass the composite full-image URL so the export-PNG button can
+   *  just anchor-download it directly, bypassing composeXYMatrix (the disk entry's cache is
+   *  long gone by then, so re-composing would fail). Omitted in active-task mode -> falls back
+   *  to exportXYMatrix. */
   compositeUrl?: string
 }) {
   const { t } = useTranslation()
   const [cellW, setCellW] = useState(ZOOM_DEFAULT)
-  const [maxW, setMaxW] = useState(ZOOM_DEFAULT * 6) // 容器还没 mount 时的兜底值
+  const [maxW, setMaxW] = useState(ZOOM_DEFAULT * 6) // Fallback value before the container has mounted
   const [fullscreenIdx, setFullscreenIdx] = useState<number | null>(null)
   const [exporting, setExporting] = useState(false)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
@@ -74,9 +78,9 @@ export default function PreviewXYGrid({
     setExporting(true)
     setExportMsg(null)
     try {
-      // disk 历史回看：composite 已在磁盘上，直接下载它（不调 composeXYMatrix
-      // —— per-cell URL 跨 task 拉 cache 会 404，且 server 端的 composite
-      // 已经是 pixel-equivalent 的成品）
+      // Disk history playback: the composite is already on disk, download it directly (don't
+      // call composeXYMatrix -- per-cell URLs fetched across tasks would 404 against the cache,
+      // and the server-side composite is already a pixel-equivalent result)
       if (compositeUrl) {
         const a = document.createElement('a')
         a.href = compositeUrl
@@ -105,11 +109,11 @@ export default function PreviewXYGrid({
       setExporting(false)
     }
   }
-  // pan 状态。movedRef 让"拖动过"的 mouseup 不触发 cell click（capture 阶段拦截）
+  // Pan state. movedRef lets a mouseup after "dragging" skip the cell click (intercepted at the capture phase)
   const dragRef = useRef<{ startX: number; startY: number; sX: number; sY: number } | null>(null)
   const movedRef = useRef(false)
 
-  // ZOOM_MAX 动态 = 容器宽（一张图一屏）；ResizeObserver 跟随窗口 / sidebar 变化
+  // ZOOM_MAX is dynamic = container width (one image fills the screen); ResizeObserver tracks window / sidebar changes
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -119,7 +123,7 @@ export default function PreviewXYGrid({
       setCellW((prev) => Math.min(prev, w))
     }
     update()
-    // jsdom 没有 ResizeObserver；测试 env 直接降级为 window resize 监听
+    // jsdom has no ResizeObserver; fall back to a window resize listener in the test environment
     if (typeof ResizeObserver !== 'undefined') {
       const ro = new ResizeObserver(update)
       ro.observe(el)
@@ -129,12 +133,12 @@ export default function PreviewXYGrid({
     return () => window.removeEventListener('resize', update)
   }, [])
 
-  // wheel 必须 native + passive=false 才能 preventDefault
+  // The wheel listener must be native + passive=false for preventDefault to work
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
-      // shift+wheel 让浏览器原生横滚，不 zoom
+      // shift+wheel lets the browser scroll horizontally natively, instead of zooming
       if (e.shiftKey) return
       e.preventDefault()
       const delta = e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP
@@ -146,8 +150,9 @@ export default function PreviewXYGrid({
 
   const onMouseDown: React.MouseEventHandler<HTMLDivElement> = (e) => {
     if (e.button !== 0) return
-    // 所有区域（含 cell button）都进 pan；普通 click 已改成 Ctrl+click 才选
-    // cell，普通点击让位给拖动手势。preventDefault 阻止浏览器原生 img drag。
+    // Every area (including cell buttons) initiates panning; plain click now requires
+    // Ctrl+click to select a cell, so a plain click yields to the drag gesture.
+    // preventDefault stops the browser's native image drag.
     e.preventDefault()
     if (!scrollRef.current) return
     dragRef.current = {
@@ -172,7 +177,7 @@ export default function PreviewXYGrid({
     dragRef.current = null
   }
 
-  // capture 阶段拦截 click：拖动过的 mouseup 不让 cell button 触发 click
+  // Intercept click at the capture phase: a mouseup after a drag must not let the cell button fire a click
   const onClickCapture: React.MouseEventHandler<HTMLDivElement> = (e) => {
     if (movedRef.current) {
       e.stopPropagation()
@@ -216,9 +221,10 @@ export default function PreviewXYGrid({
 
   const selSet = new Set(selectedIndices ?? [])
 
-  // grid 列：固定 cellW（zoom 调它），yDraft 时左侧多一列 axis label。
-  // 用 ${cellW}px 而非 minmax(MIN, 1fr) —— 后者在容器宽时按 1fr 均分，
-  // zoom 就看不出来；固定列宽让滚轮 zoom 视觉立即生效。
+  // Grid columns: fixed cellW (adjusted by zoom); with a yDraft there's an extra axis-label
+  // column on the left. Using `${cellW}px` instead of minmax(MIN, 1fr) matters -- the latter
+  // splits space evenly by 1fr once the container is wide enough, hiding the zoom effect;
+  // a fixed column width makes wheel-zoom take visible effect immediately.
   const labelColW = yDraft ? 60 : 0
   const gridCols = yDraft
     ? `${labelColW}px repeat(${xLen}, ${cellW}px)`
@@ -258,7 +264,7 @@ export default function PreviewXYGrid({
         </div>
       </div>
 
-      {/* grid 自带横向滚动（X 列太多撑爆容器时）+ 滚轮 zoom + 拖动 pan */}
+      {/* Grid has built-in horizontal scroll (when too many X columns overflow the container) + wheel-zoom + drag-pan */}
       <div
         ref={scrollRef}
         className="flex-1 min-h-0 overflow-auto"
@@ -270,7 +276,7 @@ export default function PreviewXYGrid({
         onClickCapture={onClickCapture}
       >
         <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 2 }}>
-          {/* 表头：左上角空白（仅当有 yDraft）+ X 标签 */}
+          {/* Header row: blank top-left corner (only when there's a yDraft) + X labels */}
           {yDraft && <div />}
           {xValues.map((xv, xi) => (
             <div
@@ -283,7 +289,7 @@ export default function PreviewXYGrid({
             </div>
           ))}
 
-          {/* 数据行 */}
+          {/* Data rows */}
           {yValues.map((yv, yi) => (
             <Row
               key={`y-${yi}`}
@@ -336,8 +342,8 @@ export default function PreviewXYGrid({
             onDown={() => {
               if (fullscreenNeighbors?.down != null) setFullscreenIdx(fullscreenNeighbors.down)
             }}
-            // shortcutHint 不传 → FullscreenViewer 按 hasX 动态拼接（单行 /
-            // 单列 / 角落格上不显示无效方向）
+            // shortcutHint is omitted -> FullscreenViewer builds it dynamically from hasX
+            // (invalid directions aren't shown for a single row / single column / corner cell)
           />
         )
       })()}
@@ -406,7 +412,7 @@ function GridCell({
 }: {
   taskId: number
   filename: string | null
-  /** disk-served 时由 server 给的 URL；cache / active task 留空，回退 api.generateSampleUrl */
+  /** URL given by the server for disk-served entries; left empty for cache / active task, falling back to api.generateSampleUrl */
   imageUrl?: string
   sampleIdx: number | null
   isSelected: boolean
@@ -417,16 +423,16 @@ function GridCell({
   const { t } = useTranslation()
   const [errored, setErrored] = useState(false)
 
-  // src 优先 imageUrl（disk 历史 server 给的 URL），否则 fallback 走 cache URL
+  // src prefers imageUrl (the URL served by the server for disk history), else falls back to the cache URL
   const src = imageUrl ?? (filename ? api.generateSampleUrl(taskId, filename) : null)
 
-  // 切 task / src 变（如点击历史回看）时 reset errored，让 img
-  // 重新尝试加载。否则上次 errored=true 残留，新 src 来了仍显示 "..."
+  // Reset errored when task/src changes (e.g. clicking into history playback), so the img
+  // retries loading. Otherwise a stale errored=true would persist and a new src would still show "...".
   useEffect(() => {
     setErrored(false)
   }, [taskId, src])
 
-  // 占位（无 sample / cache miss）：minHeight 撑高让 grid 行不塌缩
+  // Placeholder (no sample / cache miss): minHeight keeps the grid row from collapsing
   if (!src || errored) {
     return (
       <div
@@ -440,7 +446,7 @@ function GridCell({
   return (
     <button
       onClick={(e) => {
-        // 普通 click 让位给 pan（拖动场景）；Ctrl/Cmd+click 才选 cell
+        // A plain click yields to pan (drag scenario); only Ctrl/Cmd+click selects a cell
         if (sampleIdx == null) return
         if (e.ctrlKey || e.metaKey) onClick?.(sampleIdx)
       }}
@@ -451,8 +457,8 @@ function GridCell({
       title={tooltip}
       style={{ minHeight: 80 }}
     >
-      {/* key 加 src 让 src 变化时 React 强制重挂载 img，避免
-          上次失败的浏览器缓存或 onError 状态残留 */}
+      {/* Keying on src forces React to remount the img when src changes, avoiding a
+          leftover failed browser cache entry or onError state from the previous image */}
       <img
         key={src}
         src={src}

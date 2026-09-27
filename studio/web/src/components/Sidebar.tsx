@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { api, PHASE_ORDER, PHASE_SKIPPABLE, type Task, type Version, type VersionPhase, type VersionStatus } from '../api/client'
+import { api, PHASE_ORDER, PHASE_SKIPPABLE, type ProjectSummary, type Task, type Version, type VersionPhase, type VersionStatus } from '../api/client'
 import { splitOptional } from '../lib/labels'
 import { useEventStream, type StudioEvent } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { useSettingsDrawer } from '../lib/SettingsDrawer'
 import { useToast } from './Toast'
+import Popover, { MenuItems } from './ds/Popover'
 
-/** ADR-0007 §11.2 / §11.5: cursor 派生 step 完成态。
+/** ADR-0007 SS11.2 / SS11.5: cursor-derived step completion state.
  *
- * STEPS 顺序（ADR 0010 后）：0 download / 1 curate / 2 preprocess / 3 tag / 4 edit / 5 reg / 6 train
- * 项目级 ①：`download_image_count > 0` 派生
- * version 级 ②-⑦：`PHASE_ORDER.indexOf(STEP_KEY_TO_PHASE[key]) < cursorIdx`
- * （ADR 0010 把 preprocess 从 project scope 移到 version scope，curate 之后）
+ * STEPS order (after ADR 0010): 0 download / 1 curate / 2 preprocess / 3 tag / 4 edit / 5 reg / 6 train
+ * Project-level (1): derived from `download_image_count > 0`
+ * Version-level (2)-(7): `PHASE_ORDER.indexOf(STEP_KEY_TO_PHASE[key]) < cursorIdx`
+ * (ADR 0010 moved preprocess from project scope to version scope, after curate)
  */
 const STEP_KEY_TO_PHASE: Record<string, VersionPhase> = {
   curate:     'curating',
@@ -33,9 +34,9 @@ const PHASE_TO_STEP_KEY: Record<VersionPhase, string> = {
 import { useProjectCtx, useSelectedProject } from '../context/ProjectContext'
 import type { ProjectCtxValue } from '../context/ProjectContext'
 
-/** 侧边栏项目区数据源：在项目页内用 live ProjectContext（带版本管理回调，
- *  interactive=true）；离开后回退到只读粘性快照（interactive=false）。两者都
- *  没有 → null（不渲染项目区）。 */
+/** Sidebar project-section data source: uses the live ProjectContext inside a project page (with version-management
+ *  callbacks, interactive=true); falls back to a read-only sticky snapshot after leaving (interactive=false). If
+ *  neither is available -> null (don't render the project section). */
 type ProjectView =
   | (ProjectCtxValue & { interactive: true })
   | {
@@ -57,6 +58,7 @@ const svg = (d: React.ReactNode, size = 15, w = 1.7) => (
 )
 const I = {
   folder:   svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />),
+  folderSm: svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, 12, 2),
   folderTile: svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, 15, 1.9),
   queue:    svg(<><path d="M4 6h16M4 12h10M4 18h16" /><circle cx="18" cy="12" r="2" fill="currentColor" /></>),
   preset:   svg(<><path d="M6 4v16M12 4v16M18 4v16" /><circle cx="6" cy="9" r="2" fill="#fff" /><circle cx="12" cy="15" r="2" fill="#fff" /><circle cx="18" cy="7" r="2" fill="#fff" /></>),
@@ -73,8 +75,6 @@ const I = {
   collapse: svg(<><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M10 4v16" /><path d="M6.7 10.4 5.1 12l1.6 1.6" /></>, 15, 1.8),
   expand:   svg(<><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M10 4v16" /><path d="M5.1 10.4 6.7 12l-1.6 1.6" /></>, 15, 1.8),
   plus:     svg(<path d="M12 5v14M5 12h14" />, 13, 2),
-  export:   svg(<path d="M12 4v12m0 0-4-4m4 4 4-4M4 20h16" />, 13, 1.8),
-  trash:    svg(<><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14" /></>, 13, 1.8),
   updown:   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#878e89" strokeWidth="2" strokeLinecap="round"><path d="m8 9 4-4 4 4M8 15l4 4 4-4" /></svg>,
   brand:    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="M5 20 12 4l7 16" /><path d="M8.2 13h7.6" /></svg>,
 }
@@ -107,7 +107,7 @@ function NavItem({ to, label, icon, active, collapsed, tail }: {
   )
 }
 
-/** NavItem 的 button 变体 —— 给设置抽屉用，不走路由。 */
+/** Button variant of NavItem -- used by the settings drawer, doesn't go through routing. */
 function NavButton({ onClick, label, icon, active, collapsed }: {
   onClick: () => void; label: string; icon: React.ReactNode; active: boolean; collapsed: boolean
 }) {
@@ -119,143 +119,147 @@ function NavButton({ onClick, label, icon, active, collapsed }: {
   )
 }
 
-// ── version bar（ВЕРСИЯ + pill；hover 才浮现 新建 / 导出 / 删除）────────────
-// 层级锚点：这里是 project scope → version scope 的边界。离开项目页（只读粘性
-// 快照）时退化为只读 pill、action 全部收起；要管理版本回到项目内。
-//   pill：多版本时点击打开切换 popover（title=切换版本）
-//   hover / 键盘 focus 才浮现：[＋新建] [⬇导出] [🗑删除]（删除仅多版本时出现）
+// ── version bar ────────────────────────────────────────────────────────────
+// Project scope → version scope boundary. The pill opens one dropdown: the
+// project's versions to switch between and, at the bottom, "New version".
+// Everything else a version can do (export, delete, fork) lives on the
+// project overview, not here. Outside the project pages (read-only sticky
+// snapshot) the pill is a plain label.
 function VersionBar({ collapsed }: { collapsed: boolean }) {
   const { t } = useTranslation()
   const view = useProjectView()
-  const [switching, setSwitching] = useState(false)
-  const rowRef = useRef<HTMLDivElement | null>(null)
+  const [open, setOpen] = useState(false)
+  const pillRef = useRef<HTMLButtonElement | null>(null)
   if (!view) return null
-  if (collapsed) return null // 折叠态不显示（版本没有独立页面）
+  if (collapsed) return null // not shown when collapsed (versions have no standalone page)
   const { project, activeVersion } = view
-  const multiVersion = project.versions.length > 1
-  const canSwitch = view.interactive && multiVersion
 
   const pillInner = (
     <>
       {I.branch}
       <span className="ds-nm" title={activeVersion?.label}>{activeVersion?.label ?? '—'}</span>
       {activeVersion && <span className={STATUS_DOT[activeVersion.status] ?? 'ds-dot ds-dot-mute'} />}
-      {canSwitch && I.chevD}
+      {view.interactive && I.chevD}
     </>
   )
 
   return (
-    <div ref={rowRef} className="ds-verbar group relative">
+    <div className="ds-verbar">
       <span className="ds-cap">{t('sidebar.versionsLabel')}</span>
-      {canSwitch ? (
-        <button type="button" className="ds-verpill" title={t('sidebar.switchVersion')} aria-expanded={switching} onClick={() => setSwitching((v) => !v)}>
+      {view.interactive ? (
+        <button
+          ref={pillRef}
+          type="button"
+          className="ds-verpill"
+          title={t('sidebar.switchVersion')}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
           {pillInner}
         </button>
       ) : (
         <span className="ds-verpill">{pillInner}</span>
       )}
 
-      {view.interactive && (
-        // 新建 / 导出 / 删除：hover（或键盘 focus）才浮现，平时不占位。
-        <span className="ml-auto hidden group-hover:flex group-focus-within:flex items-center gap-0.5 shrink-0">
-          <VerAction icon={I.plus} title={t('sidebar.newVersion')} onClick={() => view.onCreateVersion()} />
-          <VerAction icon={I.export} title={t('sidebar.exportTitle')} onClick={view.onExportTrain} disabled={view.exporting} />
-          {multiVersion && (
-            <VerAction
-              icon={I.trash}
-              title={t('sidebar.deleteVersionTitle')}
-              danger
-              onClick={() => { if (activeVersion) view.onDeleteVersion(activeVersion.id) }}
+      {open && view.interactive && pillRef.current && (
+        <Popover anchor={pillRef.current} minWidth={230} maxHeight={400} onClose={() => setOpen(false)} ariaLabel={t('sidebar.switchVersion')} style={{ overflow: 'hidden' }}>
+          <div className="ds-menu-head">{t('sidebar.versionsHead', { count: project.versions.length })}</div>
+          <div style={{ maxHeight: 264, overflowY: 'auto' }}>
+            <MenuItems
+              onClose={() => setOpen(false)}
+              items={[...project.versions].sort((x, y) => y.created_at - x.created_at).map((v) => ({
+                label: v.label,
+                icon: <span className={STATUS_DOT[v.status] ?? 'ds-dot ds-dot-mute'} />,
+                checked: v.id === project.active_version_id,
+                onSelect: () => view.onSelectVersion(v.id),
+              }))}
+            />
+          </div>
+          <div className="ds-menu-sep" role="separator" />
+          <MenuItems
+            onClose={() => setOpen(false)}
+            items={[{
+              label: <span className="ds-menu-add">{t('sidebar.newVersion')}</span>,
+              icon: <span style={{ color: 'var(--green-text)', display: 'grid' }}>{I.plus}</span>,
+              onSelect: () => view.onCreateVersion(),
+            }]}
+          />
+        </Popover>
+      )}
+    </div>
+  )
+}
+
+// ── project switcher (the card at the top of the project block) ────────────
+function ProjectSwitcher({ project }: { project: ProjectCtxValue['project'] }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
+  const [items, setItems] = useState<ProjectSummary[] | null>(null)
+  const btnRef = useRef<HTMLButtonElement | null>(null)
+
+  const toggle = () => {
+    if (open) { setOpen(false); return }
+    setOpen(true)
+    api.listProjects().then(setItems).catch(() => setItems([]))
+  }
+
+  const others = (items ?? []).filter((p) => p.archived_at == null)
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className="ds-projcard"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={t('sidebar.switchProject')}
+        onClick={toggle}
+      >
+        <span className="ds-projcard-tile">{I.folderTile}</span>
+        <span className="ds-projcard-txt">
+          <span className="ds-projcard-name" title={project.title}>{project.title}</span>
+          <span className="ds-projcard-slug" title={project.slug}>{project.slug}</span>
+        </span>
+        {I.updown}
+      </button>
+      {open && btnRef.current && (
+        <Popover anchor={btnRef.current} matchWidth minWidth={240} onClose={() => setOpen(false)} ariaLabel={t('sidebar.switchProject')}>
+          <div className="ds-menu-head">{t('sidebar.projectsHead')}</div>
+          {items === null ? (
+            <div style={{ padding: '4px 6px 6px', display: 'grid', gap: 6 }}>
+              <div className="ds-skel" style={{ height: 30 }} />
+              <div className="ds-skel" style={{ height: 30 }} />
+            </div>
+          ) : (
+            <MenuItems
+              onClose={() => setOpen(false)}
+              items={[
+                ...others.map((p) => ({
+                  label: (
+                    <span style={{ display: 'block', minWidth: 0 }}>
+                      <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.title}</span>
+                      <span className="ds-menu-sub">{p.slug}</span>
+                    </span>
+                  ),
+                  icon: <span className="ds-projcard-tile" style={{ width: 22, height: 22, borderRadius: 7, background: p.id === project.id ? 'var(--green)' : 'var(--sunken)', color: p.id === project.id ? 'var(--green-ink)' : 'var(--ink-3)' }}>{I.folderSm}</span>,
+                  checked: p.id === project.id,
+                  tall: true,
+                  onSelect: () => { if (p.id !== project.id) navigate(`/projects/${p.id}`) },
+                })),
+                {
+                  label: t('sidebar.allProjects'),
+                  icon: I.folder,
+                  divider: true,
+                  onSelect: () => navigate('/'),
+                },
+              ]}
             />
           )}
-        </span>
+        </Popover>
       )}
-
-      {switching && view.interactive && (
-        <VersionSwitchPopover
-          versions={project.versions}
-          activeId={project.active_version_id}
-          anchorRef={rowRef}
-          onPick={(vid) => { view.onSelectVersion(vid); setSwitching(false) }}
-          onClose={() => setSwitching(false)}
-        />
-      )}
-    </div>
-  )
-}
-
-/** 版本行的 icon-only action 按钮。 */
-function VerAction({ icon, title, onClick, disabled = false, danger = false }: {
-  icon: React.ReactNode; title: string; onClick: () => void
-  disabled?: boolean; danger?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={title}
-      className={[
-        'w-6 h-6 grid place-items-center rounded-[6px] transition-colors shrink-0',
-        disabled ? 'opacity-40 cursor-default' : 'cursor-pointer',
-        'text-fg-tertiary',
-        !disabled ? (danger ? 'hover:bg-sunken hover:text-err' : 'hover:bg-sunken hover:text-fg-primary') : '',
-      ].join(' ')}
-    >
-      {icon}
-    </button>
-  )
-}
-
-/** 切换版本 popover（照 ResumeFieldPicker 范式：点外 / Esc 关闭，anchor 到版本行）。 */
-function VersionSwitchPopover({ versions, activeId, anchorRef, onPick, onClose }: {
-  versions: Version[]
-  activeId: number | null
-  anchorRef: React.RefObject<HTMLElement | null>
-  onPick: (vid: number) => void
-  onClose: () => void
-}) {
-  const popRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    const onDocClick = (e: MouseEvent) => {
-      if (popRef.current?.contains(e.target as Node)) return
-      if (anchorRef.current?.contains(e.target as Node)) return
-      onClose()
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('mousedown', onDocClick)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDocClick)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [onClose, anchorRef])
-
-  return (
-    <div
-      ref={popRef}
-      className="absolute z-40 left-0 right-0 top-full mt-1 max-h-[300px] overflow-y-auto rounded-[12px] border border-dim bg-elevated shadow-lg p-1"
-    >
-      {versions.map((v) => {
-        const isActive = v.id === activeId
-        return (
-          <button
-            key={v.id}
-            type="button"
-            onClick={() => onPick(v.id)}
-            className={[
-              'w-full text-left px-2 h-8 rounded-[7px] font-mono text-xs flex items-center gap-2 cursor-pointer transition-colors',
-              isActive ? 'bg-sunken text-fg-primary font-medium' : 'text-fg-secondary hover:bg-sunken hover:text-fg-primary',
-            ].join(' ')}
-          >
-            <span className={STATUS_DOT[v.status] ?? 'ds-dot ds-dot-mute'} />
-            <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{v.label}</span>
-            {isActive && <span className="text-accent shrink-0">{I.checkSm}</span>}
-          </button>
-        )
-      })}
-    </div>
+    </>
   )
 }
 
@@ -285,7 +289,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
   currentStep: string | null
   version: Version | null
   collapsed: boolean
-  /** 是否当前正处于该项目的路由内（决定"概览"是否高亮；离开项目页只导航不高亮）。 */
+  /** Whether the route is currently inside this project (decides whether "Overview" is highlighted; leaving the project page only navigates, doesn't highlight). */
   inRoute: boolean
   /** Training progress of the active version, when its task is running. */
   trainPct: number | null
@@ -298,7 +302,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
   const project = view?.project ?? null
   const stats = version?.stats
 
-  // version 级 phase 编号 1-5（每个 version 自己一段流水线）。
+  // Version-level phase numbering 1-5 (each version has its own pipeline).
   const STEPS = [
     { key: 'curate',     labelKey: 'nav.curate',     idx: '1', tail: stats?.train_image_count },
     { key: 'preprocess', labelKey: 'nav.preprocess', idx: '2', tail: project?.preprocess_image_count },
@@ -308,7 +312,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
   ]
 
   const overviewActive = inRoute && currentStep === null
-  // ADR-0007 §11.5 cursor 派生：cursor 之前的 phase = done。
+  // ADR-0007 SS11.5 cursor-derived: phases before the cursor = done.
   // The cursor only means something while the version is being prepared; a
   // trained / training version has every step behind it (same as Overview).
   const cursorPhase: VersionPhase = !version
@@ -322,8 +326,8 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
     return PHASE_ORDER.indexOf(phase) < cursorIdx
   }
 
-  // ADR-0007 §11.5-A: 推进 cursor 的唯一入口 —— 点击 cursor+1 那一行触发。
-  // skippable 调 skip，必经调 advance；校验失败给 warning toast。
+  // ADR-0007 SS11.5-A: the sole entry point for advancing the cursor -- triggered by clicking the cursor+1 row.
+  // Calls skip for skippable phases, advance for mandatory ones; a validation failure shows a warning toast.
   const handleAdvanceToNext = async () => {
     if (!activeVid) return
     const nextIdx = cursorIdx + 1
@@ -333,15 +337,15 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
       const res = isSkippable
         ? await api.skipVersionPhase(Number(pid), Number(activeVid))
         : await api.advanceVersionPhase(Number(pid), Number(activeVid))
-      // SSE 不可达时（如 Colab 代理）version_state_changed 不会推到前端，
-      // cursor 会永远停在旧 phase——主动 reload 兜底，成功失败都要同步。
+      // When SSE is unreachable (e.g. behind a Colab proxy), version_state_changed never reaches the frontend and
+      // the cursor would be stuck on the old phase forever -- an active reload is the fallback, needed on both success and failure.
       await ctx?.reload()
       if (!res.ok) {
         toast(res.reason || t('sidebar.advanceFailed'), 'error')
         return
       }
-      // 用后端返回的 new_phase 导航（而不是本地 cursorIdx+1 推算），防止
-      // 本地 phase 已过期时跳错页。
+      // Navigates using the new_phase returned by the backend (rather than the local cursorIdx+1 guess), to avoid
+      // landing on the wrong page when the local phase is stale.
       const landed = res.new_phase ?? PHASE_ORDER[nextIdx]
       navigate(`/projects/${pid}/v/${activeVid}/${PHASE_TO_STEP_KEY[landed]}`)
     } catch (e) {
@@ -351,16 +355,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
 
   return (
     <>
-      {!collapsed && project && (
-        <Link to={`/projects/${pid}`} className="ds-projcard">
-          <span className="ds-projcard-tile">{I.folderTile}</span>
-          <span className="ds-projcard-txt">
-            <span className="ds-projcard-name" title={project.title}>{project.title}</span>
-            <span className="ds-projcard-slug" title={project.slug}>{project.slug}</span>
-          </span>
-          {I.updown}
-        </Link>
-      )}
+      {!collapsed && project && <ProjectSwitcher project={project} />}
 
       <NavItem to={`/projects/${pid}`} label={t('nav.overview')} icon={I.overview} active={overviewActive} collapsed={collapsed} />
       <NavItem
@@ -381,10 +376,10 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
           const isActive = s.key === currentStep
           const phase = STEP_KEY_TO_PHASE[s.key]
           const phaseIdx = phase != null ? PHASE_ORDER.indexOf(phase) : -1
-          // ADR-0007 §11.5-A: sidebar 是 cursor 推进主通道。
+          // ADR-0007 SS11.5-A: the sidebar is the primary channel for advancing the cursor.
           // - phase_idx < cursorIdx  → done
-          // - phase_idx == cursorIdx → 当前 cursor
-          // - phase_idx == cursorIdx+1 → "下一步"，button，点击触发 advance/skip
+          // - phase_idx == cursorIdx -> the current cursor
+          // - phase_idx == cursorIdx+1 -> "next step", a button, click triggers advance/skip
           // - phase_idx > cursorIdx+1 → disabled
           const isCursorCurrent = phaseIdx === cursorIdx
           const isNextStep = phaseIdx === cursorIdx + 1
@@ -458,12 +453,12 @@ export default function Sidebar({
   const settingsDrawer = useSettingsDrawer()
   const queue = useQueueSnapshot()
 
-  // 路由内的 pid（用于步骤高亮）；离开项目页后回退到粘性快照的项目 id，让项目区
-  // 跨页保留用于导航。
+  // pid within the route (used for step highlighting); falls back to the sticky snapshot's project id after leaving
+  // the project page, so the project section persists across pages for navigation.
   const routePid = location.pathname.match(/^\/projects\/([^/]+)/)?.[1] ?? null
   const urlVid = location.pathname.match(/\/v\/([^/]+)/)?.[1] ?? null
   const stepMatch = location.pathname.match(/\/v\/[^/]+\/([^/]+)$/)
-  // ADR 0010: preprocess 从 project scope 移到 version scope；project scope 只剩 download
+  // ADR 0010: preprocess moved from project scope to version scope; project scope now only has download
   const projectScopeStep = location.pathname.match(/^\/projects\/[^/]+\/(download)$/)?.[1] ?? null
   const currentStep = stepMatch?.[1] ?? projectScopeStep
 
@@ -471,7 +466,7 @@ export default function Sidebar({
   const pid = routePid ?? view?.project.id?.toString() ?? null
   const activeVid = view?.activeVersion?.id?.toString() ?? urlVid
 
-  // 有项目（路由内 live 或粘性快照）就展示项目区
+  // Show the project section whenever there's a project (live in-route or a sticky snapshot)
   const inProject = view !== null && pid !== null
 
   // Training progress for the active version's step tail.

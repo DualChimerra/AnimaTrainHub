@@ -1,9 +1,3 @@
-"""统一模型来源候选端点 + catalog 统一 shape（docs/design/model-source-unification.md）。
-
-POST/DELETE /api/model-sources/{domain}：校验从简（D3）、去重 append、移除不
-动磁盘、移除当前选中回退默认；catalog["model_sources"] 行含能力位
-（removable / deletable），内置 preset 不可移除（D2）。
-"""
 from __future__ import annotations
 
 import json
@@ -18,7 +12,6 @@ from studio.services import models as model_downloader
 
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """secrets.json 与 models_root 都隔离到 tmp_path。"""
     sf = tmp_path / "secrets.json"
     monkeypatch.setattr(secrets, "SECRETS_FILE", sf)
     sf.write_text(
@@ -33,7 +26,6 @@ def _rows(catalog: dict, domain: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# POST — 添加候选
 # ---------------------------------------------------------------------------
 
 
@@ -44,7 +36,6 @@ def test_add_download_candidate_appears_in_catalog(client: TestClient) -> None:
     )
     assert res.status_code == 200
     rows = _rows(res.json(), "wd14")
-    # 内置 preset 在前（不可移除），用户候选在后
     presets = [r for r in rows if r["kind"] == "preset"]
     assert [r["value"] for r in presets] == list(secrets.DEFAULT_WD14_MODELS)
     assert all(not r["removable"] and r["deletable"] for r in presets)
@@ -118,7 +109,7 @@ def test_add_local_wd14_requires_both_files(
     res = client.post(
         "/api/model-sources/wd14", json={"kind": "local", "path": str(d)},
     )
-    assert res.status_code == 400  # 缺 selected_tags.csv
+    assert res.status_code == 400
 
     (d / "selected_tags.csv").write_text("tag", encoding="utf-8")
     res = client.post(
@@ -129,7 +120,7 @@ def test_add_local_wd14_requires_both_files(
     assert len(local) == 1
     assert local[0]["exists"] is True
     assert local[0]["removable"] is True
-    assert local[0]["deletable"] is False   # 本地文件永不从 UI 删除
+    assert local[0]["deletable"] is False
     assert local[0]["download_id"] is None
 
 
@@ -150,12 +141,10 @@ def test_add_local_family_model_requires_safetensors(
         "/api/model-sources/anima", json={"kind": "local", "path": str(f)},
     )
     assert res.status_code == 200
-    # 同步进兼容面（旧端点数据模型）：models.custom
     assert str(f) in secrets.load().models.custom.get("anima", [])
 
 
 # ---------------------------------------------------------------------------
-# DELETE — 移除候选
 # ---------------------------------------------------------------------------
 
 
@@ -174,7 +163,6 @@ def test_remove_candidate_keeps_file_on_disk(
     )
     assert res.status_code == 200
     assert not [r for r in _rows(res.json(), "wd14") if r["kind"] == "local"]
-    # 移除 ≠ 删除：磁盘文件原封不动
     assert (d / "model.onnx").exists()
 
 
@@ -221,7 +209,6 @@ def test_remove_missing_candidate_is_noop(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# catalog 统一 shape — eval 三域
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +227,6 @@ def test_eval_domains_have_preset_row(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 加载器绝对路径支持（local 候选选中值 = 绝对路径）
 # ---------------------------------------------------------------------------
 
 
@@ -268,7 +254,6 @@ def test_upscaler_target_absolute_path_requires_known_ext(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# catalog 统一 shape — upscaler / 主模型族
 # ---------------------------------------------------------------------------
 
 
@@ -287,7 +272,6 @@ def test_upscaler_rows_presets_and_download_candidate(
     assert presets and all(not r["removable"] for r in presets)
     dl = [r for r in rows if r["kind"] == "download"]
     assert len(dl) == 1
-    # value = 文件名（selected_upscaler 语义）；status_key 与扫盘行同格式
     assert dl[0]["value"] == "4x-UltraSharp.pth"
     assert dl[0]["download_id"] == "upscaler_custom"
     assert dl[0]["status_key"] == "upscaler:custom:4x-UltraSharp.pth"
@@ -311,7 +295,6 @@ def test_upscaler_scanned_rows_exclude_registered_candidates(
     )
     rows = _rows(client.get("/api/models/catalog").json(), "upscaler")
     scanned = [r["value"] for r in rows if r["kind"] == "scanned"]
-    # 手放的文件被扫出；已登记为 download 候选的文件不重复出现
     assert scanned == ["manual-drop.pth"]
     dl = [r for r in rows if r["kind"] == "download"]
     assert dl[0]["exists"] is True
@@ -332,7 +315,6 @@ def test_family_rows_download_candidate_value_is_target_path(
     assert presets and presets[0]["download_id"] == "anima_main"
     dl = [r for r in rows if r["kind"] == "download"]
     assert len(dl) == 1
-    # value = 落盘绝对路径（selected 已支持路径语义），下载 variant = repo 内路径
     expected = str(tmp_path / "models" / "diffusion_models" / "my-finetune.safetensors")
     assert dl[0]["value"] == expected
     assert dl[0]["download_id"] == "anima_custom"
@@ -345,7 +327,6 @@ def test_trigger_family_custom_requires_registered_candidate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# catalog 统一 shape — cltagger（三元组合成键 + fork 候选 + 双文件 local）
 # ---------------------------------------------------------------------------
 
 
@@ -365,7 +346,6 @@ def test_cltagger_preset_rows_carry_triple_in_extra(client: TestClient) -> None:
 def test_cltagger_fork_candidate_inherits_current_paths(
     client: TestClient,
 ) -> None:
-    """fork repo 候选：extra 缺省时继承当前双文件相对路径（D4）。"""
     res = client.post(
         "/api/model-sources/cltagger",
         json={"kind": "download", "repo": "someone/cl_tagger_fork"},
@@ -388,7 +368,7 @@ def test_cltagger_local_requires_both_files(
         "/api/model-sources/cltagger",
         json={"kind": "local", "path": str(model)},
     )
-    assert res.status_code == 400  # 缺 tag_mapping_path
+    assert res.status_code == 400
 
     mapping = tmp_path / "map.json"
     mapping.write_text("{}", encoding="utf-8")
@@ -428,7 +408,6 @@ def test_cltagger_remove_current_fork_resets_official(
 def test_legacy_cltagger_fork_model_id_migrates_to_candidate(
     client: TestClient,
 ) -> None:
-    """旧「镜像覆盖」用法（改 model_id 单值）→ 自动迁移为 fork 候选，选中不变。"""
     secrets.update({"cltagger": {"model_id": "old/mirror_fork"}})
     rows = _rows(client.get("/api/models/catalog").json(), "cltagger")
     dl = [r for r in rows if r["kind"] == "download"]

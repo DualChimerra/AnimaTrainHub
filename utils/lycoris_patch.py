@@ -1,25 +1,29 @@
 """LyCORIS LoKr ``rank_dropout`` device bug compatibility patch.
 
-上游 bug：`torch.rand(weight.size(0))` 没传 `device=`，生成 CPU mask，
-与 CUDA weight 相乘时报 device mismatch。仅在 `rank_dropout > 0` 且
-模块处于 training 模式时触发。
+Upstream bug: `torch.rand(weight.size(0))` doesn't pass `device=`, so it produces a
+CPU mask that raises a device mismatch when multiplied with a CUDA weight. Only
+triggered when `rank_dropout > 0` and the module is in training mode.
 
-为什么不只靠 lycoris_adapter.py 的 model.train() hijack：
-- hijack 只保证 sample/eval 时 network 进 eval 模式（不触发 rank_dropout 分支）
-- 但用户若配置 `rank_dropout > 0`，正常 training step 仍走 rank_dropout 分支 ——
-  hijack 不覆盖这条路径，仍会撞 bug
-- 因此包装 ``LokrModule.get_weight``，让 dropout mask 跟随 weight device
+Why we can't rely solely on lycoris_adapter.py's model.train() hijack:
+- The hijack only guarantees the network is in eval mode during sample/eval (which
+  doesn't trigger the rank_dropout branch)
+- But if the user configures `rank_dropout > 0`, a normal training step still goes
+  through the rank_dropout branch -- the hijack doesn't cover this path, so the bug
+  still hits
+- Hence we wrap ``LokrModule.get_weight`` so the dropout mask follows the weight's device
 
-版本守卫：
-- 只对 KNOWN_AFFECTED_VERSIONS 内的版本 patch
-- 其他版本（包括上游已修的版本）log warn 并跳过；避免覆盖上游已 fix 的实现
-- 上游 fix 后请把对应 ``KNOWN_AFFECTED_VERSIONS`` 项删掉
+Version guard:
+- Only patches versions within KNOWN_AFFECTED_VERSIONS
+- Other versions (including ones upstream has already fixed) log a warning and skip;
+  this avoids overwriting an implementation upstream has already fixed
+- Once upstream fixes this, remove the corresponding ``KNOWN_AFFECTED_VERSIONS`` entry
 
-实现刻意不再导入 LyCORIS 的 ``make_kron`` / ``rebuild_tucker`` 等内部函数：
-4.0 把这些实现迁移到了 functional kernel API。包装原方法既保留 4.0 的 fused
-kernel dispatch，也让补丁跨 3.4/4.0 的内部重构保持稳定。
+The implementation deliberately no longer imports LyCORIS internals like
+``make_kron`` / ``rebuild_tucker``: 4.0 moved these implementations to the functional
+kernel API. Wrapping the original method preserves 4.0's fused kernel dispatch while
+keeping the patch stable across 3.4/4.0's internal refactors.
 
-上游 issue：https://github.com/KohakuBlueleaf/LyCORIS/issues —— 待提
+Upstream issue: https://github.com/KohakuBlueleaf/LyCORIS/issues -- to be filed
 """
 from __future__ import annotations
 
@@ -29,25 +33,25 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-# 已知确认受 rank_dropout device bug 影响的 lycoris-lora 版本。
-# 经实测：3.4.0 / 4.0.0 的 `lycoris/modules/lokr.py:get_weight` 走
-# `torch.rand(weight.size(0))`（CPU mask），与 CUDA weight 相乘失败。
+# lycoris-lora versions confirmed to be affected by the rank_dropout device bug.
+# Verified in practice: 3.4.0 / 4.0.0's `lycoris/modules/lokr.py:get_weight` goes
+# through `torch.rand(weight.size(0))` (a CPU mask), which fails when multiplied with a CUDA weight.
 KNOWN_AFFECTED_VERSIONS: frozenset[str] = frozenset({"3.4.0", "4.0.0"})
 
 PatchStatus = Literal[
-    "applied",  # 命中受影响版本，已 patch
-    "skipped_not_installed",  # 没装 lycoris
-    "skipped_version_unknown",  # 装了但版本不在已知受影响集合（warn）
-    "skipped_already_patched",  # 同进程内已 patch，幂等返回
+    "applied",  # matched an affected version, patch applied
+    "skipped_not_installed",  # lycoris not installed
+    "skipped_version_unknown",  # installed but version not in the known-affected set (warn)
+    "skipped_already_patched",  # already patched in this process, idempotent return
 ]
 
 _PATCHED_FLAG = "_anima_lokr_device_patched"
 
 
 def apply_lokr_device_patch() -> PatchStatus:
-    """检查 lycoris-lora 版本并按需 patch LokrModule.get_weight。
+    """Check the lycoris-lora version and patch LokrModule.get_weight as needed.
 
-    幂等：同进程内多次调用只 patch 一次。
+    Idempotent: calling multiple times in the same process only patches once.
     """
     try:
         installed = version("lycoris-lora")
@@ -56,9 +60,9 @@ def apply_lokr_device_patch() -> PatchStatus:
 
     try:
         from lycoris.modules.lokr import LokrModule
-    except Exception as exc:  # pragma: no cover - 装了 lycoris-lora 但 import 异常的边界
+    except Exception as exc:  # pragma: no cover - edge case where lycoris-lora is installed but import fails
         logger.warning(
-            "lycoris-lora %s 已安装但 lycoris.modules.lokr 导入失败: %s；跳过 device patch",
+            "lycoris-lora %s is installed but importing lycoris.modules.lokr failed: %s; skipping device patch",
             installed,
             exc,
         )
@@ -69,14 +73,15 @@ def apply_lokr_device_patch() -> PatchStatus:
 
     if installed not in KNOWN_AFFECTED_VERSIONS:
         logger.warning(
-            "lycoris-lora %s 不在已知受 rank_dropout device bug 影响的版本集合 %s；"
-            "跳过 patch（假定上游已修。若你训练时报 device mismatch，请在 issue 上报版本）",
+            "lycoris-lora %s is not in the set of versions known to be affected by the "
+            "rank_dropout device bug %s; skipping patch (assuming upstream already fixed it. "
+            "If you hit a device mismatch during training, please report your version in the issue)",
             installed,
             sorted(KNOWN_AFFECTED_VERSIONS),
         )
         return "skipped_version_unknown"
 
-    import torch  # noqa: PLC0415  延迟到此处避免顶层 import 副作用
+    import torch  # noqa: PLC0415  deferred here to avoid top-level import side effects
 
     original_get_weight = LokrModule.get_weight
 
@@ -108,7 +113,7 @@ def apply_lokr_device_patch() -> PatchStatus:
     LokrModule.get_weight = _get_weight_fixed
     setattr(LokrModule, _PATCHED_FLAG, True)
     logger.info(
-        "lycoris-lora %s: 已 patch LokrModule.get_weight（rank_dropout device 修复）",
+        "lycoris-lora %s: patched LokrModule.get_weight (rank_dropout device fix)",
         installed,
     )
     return "applied"

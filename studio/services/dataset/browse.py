@@ -1,7 +1,9 @@
-"""文件系统浏览：给前端的「选路径」控件提供数据。
+"""Filesystem browsing: provides data for the frontend's "path picker" control.
 
-仅返回目录信息（不读文件内容）。允许的根白名单可由调用方限定，默认仅
-`REPO_ROOT` 下；显式传入 path 时校验其在白名单内或为绝对路径下的合法位置。
+Only returns directory info (doesn't read file contents). The allowed root
+whitelist can be restricted by the caller, defaulting to under `REPO_ROOT`
+only; when a path is passed explicitly, it's validated to be within the
+whitelist or a valid location under an absolute path.
 """
 from __future__ import annotations
 
@@ -21,18 +23,21 @@ from studio.domain.errors import (
 
 
 class BrowseError(DomainError):
-    """PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。"""
+    """PR-2 C3 adds the DomainError base — the handler auto-translates it into the dual-write envelope."""
     default_code = "browse.error"
 
 
 def list_dir(target: Path, *, allow_outside_repo: bool = False) -> dict[str, Any]:
-    """列出 target 目录下的子目录和文件名。
+    """List the subdirectories and filenames under the target directory.
 
-    target 若指向一个已存在的文件，回退到其父目录并在返回里通过 `selected`
-    字段告诉前端该高亮哪一项（picker 打开到"文件所在目录"是常见用法）。
+    If target points to an existing file, fall back to its parent directory
+    and tell the frontend which item to highlight via the `selected` field
+    in the response (opening the picker to "the file's containing directory"
+    is a common use case).
 
-    所有路径用 POSIX 形式（`/` 分隔符）返回，避免 Windows 反斜杠在前端拼接
-    时与 yaml 里存的 forward-slash 风格混用。
+    All paths are returned in POSIX form (`/` separator), to avoid mixing
+    Windows backslashes with the forward-slash style stored in yaml when the
+    frontend concatenates paths.
     """
     target = target.resolve()
     if not allow_outside_repo:

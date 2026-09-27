@@ -1,14 +1,3 @@
-"""PR-1 C3 — setup_logging 完整实现测试。
-
-覆盖：
-  - JsonLineFormatter 10 字段输出
-  - HumanConsoleFormatter 格式
-  - setup_logging 幂等性
-  - 第三方库 silence list
-  - uvicorn logger 接管
-  - sys.excepthook 注入
-  - reconfigure_console_utf8 不 crash
-"""
 from __future__ import annotations
 
 import json
@@ -31,11 +20,6 @@ from studio.infrastructure.logging import (
 
 @pytest.fixture(autouse=True)
 def reset_logging(monkeypatch: pytest.MonkeyPatch):
-    """每个测试前后 reset，防 sentinel 累加 + 防污染。
-
-    conftest session fixture 设 ANIMA_LOGGING_NO_BOOTSTRAP=1 让业务代码
-    setup_logging 全部 noop。本文件直接测 setup_logging 行为，必须 unset。
-    """
     monkeypatch.delenv("ANIMA_LOGGING_NO_BOOTSTRAP", raising=False)
     _reset_for_tests()
     saved_handlers = list(logging.getLogger().handlers)
@@ -63,7 +47,7 @@ def test_json_formatter_emits_10_required_fields() -> None:
     assert out["process"] == "webui"
     assert out["logger"] == "studio.test"
     assert out["msg"] == "hello world"
-    assert out["trace_id"] is None  # C5 还没注入 ContextVar
+    assert out["trace_id"] is None
 
 
 def test_json_formatter_includes_exception_when_present() -> None:
@@ -129,7 +113,6 @@ def test_setup_logging_writes_to_studio_log(tmp_path: Path) -> None:
     setup_logging("webui", log_dir=tmp_path, console=False)
     logger = logging.getLogger("studio.test_setup_smoke")
     logger.info("smoke")
-    # flush 所有 handler
     for h in logging.getLogger().handlers:
         h.flush()
 
@@ -148,34 +131,29 @@ def test_setup_logging_is_idempotent_for_same_process(tmp_path: Path) -> None:
     setup_logging("webui", log_dir=tmp_path, console=False)
     setup_logging("webui", log_dir=tmp_path, console=False)
     assert len(logging.getLogger().handlers) == handlers_count, (
-        "同 process 重复调 setup_logging 不应累加 handler"
+        "calling setup_logging again for the same process should not stack handlers"
     )
 
 
 def test_setup_logging_different_process_replaces_handlers(tmp_path: Path) -> None:
-    """不同 process 名调（罕见 — pytest reload / worker 进程入口）替换 handler。"""
     setup_logging("webui", log_dir=tmp_path, console=False)
     count_a = len(logging.getLogger().handlers)
     setup_logging("worker:tag/1", log_dir=tmp_path, console=False)
     count_b = len(logging.getLogger().handlers)
-    assert count_b == count_a, "不同 process 名也只装一套 handler（清掉再装）"
+    assert count_b == count_a, "a different process name should also install only one set of handlers (clear then reinstall)"
 
 
 def test_setup_logging_silences_noisy_libs(tmp_path: Path) -> None:
-    """root level=INFO 时第三方库被静音到 WARNING。"""
-    # 先把所有 noisy logger reset 到 NOTSET，setup_logging 应该改成 WARNING
     for n in _NOISY_LOGGERS:
         logging.getLogger(n).setLevel(logging.NOTSET)
     setup_logging("webui", log_dir=tmp_path, console=False, level="INFO")
     for n in _NOISY_LOGGERS:
         assert logging.getLogger(n).level == logging.WARNING, (
-            f"{n} 应被静音到 WARNING，实际 {logging.getLogger(n).level}"
+            f"{n} should be silenced to WARNING, actually {logging.getLogger(n).level}"
         )
 
 
 def test_setup_logging_takes_over_uvicorn_loggers(tmp_path: Path) -> None:
-    """uvicorn.* logger handler 被清空 + propagate=True，让 root JSON handler 接管。"""
-    # 模拟 uvicorn 启动后挂了自己 handler
     uv = logging.getLogger("uvicorn.access")
     fake_h = logging.StreamHandler()
     uv.handlers = [fake_h]
@@ -183,8 +161,8 @@ def test_setup_logging_takes_over_uvicorn_loggers(tmp_path: Path) -> None:
 
     setup_logging("webui", log_dir=tmp_path, console=False)
 
-    assert uv.handlers == [], "uvicorn 自带 handler 应被清空"
-    assert uv.propagate is True, "uvicorn logger 应 propagate 让 root 接管"
+    assert uv.handlers == [], "uvicorn's built-in handlers should be cleared"
+    assert uv.propagate is True, "uvicorn logger should propagate so root can take over"
 
 
 def test_setup_logging_console_false_no_console_handler(tmp_path: Path) -> None:
@@ -192,24 +170,20 @@ def test_setup_logging_console_false_no_console_handler(tmp_path: Path) -> None:
     handlers = logging.getLogger().handlers
     stream_handlers = [h for h in handlers if isinstance(h, logging.StreamHandler)
                        and not isinstance(h, logging.handlers.RotatingFileHandler)]
-    # RotatingFileHandler 是 StreamHandler 子类 — 排除它
     from concurrent_log_handler import ConcurrentRotatingFileHandler
     pure_stream = [h for h in stream_handlers if not isinstance(h, ConcurrentRotatingFileHandler)]
-    assert pure_stream == [], "console=False 不应装任何 stderr handler"
+    assert pure_stream == [], "console=False should not install any stderr handler"
 
 
 def test_setup_logging_installs_sys_excepthook(tmp_path: Path) -> None:
-    """sys.excepthook 被替换为路由到 logger 的版本。"""
     original = sys.excepthook
     setup_logging("webui", log_dir=tmp_path, console=False)
-    assert sys.excepthook is not original, "sys.excepthook 应被替换"
+    assert sys.excepthook is not original, "sys.excepthook should be replaced"
 
 
 def test_setup_logging_excepthook_preserves_keyboardinterrupt(tmp_path: Path,
                                                                 caplog: pytest.LogCaptureFixture) -> None:
-    """Ctrl+C 不应被吞进 logger（用户体验）。"""
     setup_logging("webui", log_dir=tmp_path, console=False)
-    # excepthook 拿到 KeyboardInterrupt 应该走原始 hook 不进 logger
     with caplog.at_level(logging.CRITICAL, logger="studio.unhandled"):
         try:
             raise KeyboardInterrupt()
@@ -217,7 +191,7 @@ def test_setup_logging_excepthook_preserves_keyboardinterrupt(tmp_path: Path,
             etype, evalue, etb = sys.exc_info()
             sys.excepthook(etype, evalue, etb)
     critical_records = [r for r in caplog.records if r.name == "studio.unhandled"]
-    assert critical_records == [], "KeyboardInterrupt 不应路由到 logger.critical"
+    assert critical_records == [], "KeyboardInterrupt should not route to logger.critical"
 
 
 def test_setup_logging_extra_handlers_attached(tmp_path: Path) -> None:
@@ -227,5 +201,4 @@ def test_setup_logging_extra_handlers_attached(tmp_path: Path) -> None:
 
 
 def test_reconfigure_console_utf8_does_not_crash() -> None:
-    """无论 stdout/stderr 是何种 stream 都不应 crash（包括测试下的 pipe）。"""
-    reconfigure_console_utf8()  # 不抛即通过
+    reconfigure_console_utf8()

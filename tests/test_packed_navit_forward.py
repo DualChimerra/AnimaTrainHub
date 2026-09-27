@@ -50,11 +50,11 @@ def _model(dtype):
 
 @requires_cuda
 def test_navit_equals_per_image_dense_forward():
-    """``forward_packed_navit`` ≡ 各图独立走 dense ``forward``（patchify 对齐输出）。
+    """``forward_packed_navit`` == each image run independently through dense ``forward`` (patchify-aligned output).
 
-    per-image 参照改用 dense ``forward``（原先用已删的 ``forward_packed_tokens``）：
-    每张图单独走 dense forward 得预测 latent，用 ``patchify_latents_to_tokens`` 转到
-    与 packed 输出相同的 ``(c pt ph pw)`` 通道序后拼接，对比 ``forward_packed_navit``。
+    The per-image reference now uses dense ``forward`` (previously used the since-removed ``forward_packed_tokens``):
+    each image runs through dense forward on its own to get the predicted latent, then
+    ``patchify_latents_to_tokens`` converts it into the same ``(c pt ph pw)`` channel order as the packed output before concatenating, and the result is compared against ``forward_packed_navit``.
     """
     set_xformers_enabled(True)
     dtype = torch.float16

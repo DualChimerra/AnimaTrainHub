@@ -1,59 +1,43 @@
-# 用自己的权重：底模 / VAE / 文本编码器
+# Using your own weights: base model / VAE / text encoder
 
-设置 → **训练模型** 里每一类权重都可以不用官方下载，改成磁盘上已有的文件：
+In Settings → **Training Models**, every category of weights can be swapped out from the official download for a file you already have on disk:
 
-| 权重 | 形态 | 卡片 |
+| Weight | Form | Card |
 |---|---|---|
-| 主模型（底模，transformer） | 单个 `.safetensors` | Anima 主模型 / Krea 2 主模型 |
-| VAE | 单个 `.safetensors` | Anima VAE（两族共用一份） |
-| 文本编码器（CLIP / Qwen） | transformers **目录**（必须含 `config.json`） | Qwen3-0.6B-Base（Anima）/ Qwen3-VL-4B-Instruct（Krea 2） |
+| Main model (base model, transformer) | Single `.safetensors` | Anima main model / Krea 2 main model |
+| VAE | Single `.safetensors` | Anima VAE (shared by both families) |
+| Text encoder (CLIP / Qwen) | transformers **directory** (must contain `config.json`) | Qwen3-0.6B-Base (Anima) / Qwen3-VL-4B-Instruct (Krea 2) |
 
-## 怎么加
+## How to add one
 
-1. 在对应卡片底部点 **选择文件…** / **选择目录…**，在弹出的浏览器里走到权重所在
-   位置，选中它。
-2. 选中的路径会以一行「本地」候选出现在官方 variant 下面，点它前面的单选按钮
-   即成为默认。
-3. 不想用了点 **注销** —— 只从列表里移除，**磁盘文件原封不动**。注销的正好是
-   当前选中项时，选中值自动回退到官方权重。
+1. At the bottom of the relevant card, click **Choose file…** / **Choose directory…**, browse to where the weights live in the file picker that pops up, and select it.
+2. The selected path appears as a "local" candidate row below the official variant; click its radio button to make it the default.
+3. To stop using it, click **Unregister** — this only removes it from the list, **the file on disk is left untouched**. If the unregistered entry was the currently selected one, the selection automatically falls back to the official weights.
 
-> **路径是「跑 Studio 那台机器」上的路径。** 本地模式下就是你这台电脑；
-> Colab / Kaggle 等云端模式下浏览的是容器磁盘，本机的 `D:\...` 在那边不存在
-> —— 先把权重传到云端盘（或 Drive 挂载点）再选。按钮旁边的灰字会提示当前是
-> 哪种情况。
+> **The path is relative to the machine running Studio.** In local mode that's your own computer; in cloud modes like Colab / Kaggle, the file picker browses the container's disk, so a local `D:\...` path doesn't exist there — upload the weights to the cloud drive (or the Drive mount point) first, then select them. The gray text next to the button tells you which case you're in.
 
-文件被删掉或移走后，解析会自动回落官方落点而不是把死路径写进训练配置；卡片
-上那一行会标成「文件不存在」，单选按钮变灰。
+If a file is deleted or moved, resolution automatically falls back to the official location instead of writing a dead path into the training config; the corresponding row on the card is marked "file not found" and its radio button is grayed out.
 
-## 工作模式（本地底模属于哪个模型族）
+## Working mode (which model family a local base model belongs to)
 
-本地底模那一行有个 **模式** 下拉（Anima / Krea 2）。它决定这份权重按哪个族
-训练，也就决定了：
+The local base model row has a **mode** dropdown (Anima / Krea 2). This determines which family the weights are trained under, which in turn determines:
 
-- 训练配置的族默认值（采样器 / scheduler / timestep 采样 / caption 相关开关，
-  见 `studio/domain/common.py` 的能力矩阵）；
-- 配套解析出的 VAE 与文本编码器路径；
-- 训练页上哪些字段可见（不支持的能力位会隐藏并关闭）。
+- the family defaults for the training config (sampler / scheduler / timestep sampling / caption-related toggles — see the capability matrix in `studio/domain/common.py`);
+- the VAE and text encoder paths resolved alongside it;
+- which fields are visible on the training page (capability bits that aren't supported are hidden and disabled).
 
-社区微调权重通常和它的基座同族：Anima 微调选 Anima，Krea 2 微调选 Krea 2。
-改模式 = 把这条路径从一个族挪到另一个族；原来正被选中的话，会自动在新族里
-保持选中。
+Community fine-tuned weights are usually in the same family as their base: pick Anima for Anima fine-tunes, Krea 2 for Krea 2 fine-tunes. Changing the mode = moving that path from one family to another; if it was currently selected, it stays selected in the new family.
 
-## 什么时候需要动 VAE / 文本编码器
+## When you need to touch the VAE / text encoder
 
-多数人不用动 —— 官方 VAE（`qwen_image_vae`）与官方编码器就是训练用的那份。
-换的典型场景：
+Most people never need to — the official VAE (`qwen_image_vae`) and the official encoder are the ones actually used for training. Typical cases where you would switch:
 
-- 已经在别处（ComfyUI / 其它训练器）下过同一份权重，不想再下一遍 → 直接指过去；
-- 手上有量化 / 精简过的编码器目录，想省显存或省磁盘；
-- 自己做过 VAE 微调。
+- you've already downloaded the same weights elsewhere (ComfyUI / another trainer) and don't want to download them again → point directly to that copy;
+- you have a quantized / trimmed encoder directory and want to save VRAM or disk space;
+- you've done your own VAE fine-tune.
 
-Studio 只校验「文件存在 + 后缀对」和「目录里有 `config.json`」，**不校验架构
-是否匹配**。指一份与底模不配套的编码器（比如给 Anima 指 Qwen3-VL）能加进列表，
-但训练会在加载权重时报错 —— 换回官方那份即可。
+Studio only validates "file exists + extension matches" and "directory contains `config.json`" — it does **not** validate that the architecture matches. Pointing to an encoder that doesn't match the base model (e.g. pointing Qwen3-VL at an Anima setup) can still be added to the list, but training will error out when loading the weights — just switch back to the official one.
 
-## 影响范围
+## Scope of effect
 
-选中值即时生效于：新建 version 的训练配置、测试出图、AI 先验（正则集生成）、
-训练后评估。已经建好的 version 在「自动同步模型路径」开着时（设置里的默认）
-也跟随；关掉这个开关后各 version 保留自己 yaml 里的路径，保证复现。
+The selected value takes effect immediately for: the training config of any newly created version, test image generation, AI priors (regularization set generation), and post-training evaluation. Already-created versions also follow it when "auto-sync model paths" is on (the default in Settings); with that toggle off, each version keeps the path stored in its own yaml, which guarantees reproducibility.

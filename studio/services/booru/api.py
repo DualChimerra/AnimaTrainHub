@@ -1,15 +1,19 @@
-"""Booru API 共用层（PP5）。
+"""Shared Booru API layer (PP5).
 
-`downloader.py`（PP2 单 tag 批量拉）与 `reg_builder.py`（PP5 多 tag 贪心
-迭代）需要同一套 HTTP 原语：搜索、抽 post 字段、拉图。这里把它们集中成
-不依赖 DownloadOptions / RegBuildOptions 的纯函数，避免双轨。
+`downloader.py` (PP2 single-tag bulk pull) and `reg_builder.py` (PP5 multi-tag
+greedy iteration) need the same set of HTTP primitives: search, extract post
+fields, fetch images. This module collects them into pure functions that don't
+depend on DownloadOptions / RegBuildOptions, avoiding duplicate code paths.
 
-约定：
-- `search_posts` 失败抛 `requests.RequestException`（调用方负责 catch）；
-  返回值永远是 list（空 list 表示「这页没有」）。
-- `download_image` 失败抛 `RuntimeError`（包装 PIL / 网络错误）；
-  成功返回最终落盘路径（含 PNG 重命名后的版本）。
-- 不做 retry / sleep / cancel 检测 —— 那些属于上层循环职责。
+Conventions:
+- `search_posts` raises `requests.RequestException` on failure (caller must
+  catch it); the return value is always a list (an empty list means "nothing
+  on this page").
+- `download_image` raises `RuntimeError` on failure (wrapping PIL / network
+  errors); on success it returns the final on-disk path (including the
+  PNG-renamed version, if applicable).
+- No retry / sleep / cancel checks here — those are the caller's loop's
+  responsibility.
 """
 from __future__ import annotations
 
@@ -23,18 +27,23 @@ from PIL import Image
 from ... import __version__
 
 
-# 标识应用身份的 UA。背景（hotfix 0.5.x）：
-# - danbooru 现在挂 Cloudflare bot-protection；不带 UA / 默认 `python-requests/X.Y.Z`
-#   会被直接 403 → CF 挑战页（"Just a moment..."）；
-# - 套 Chrome 浏览器 UA 反而更可疑 ("浏览器但不跑 JS" 模式)，也照 403；
-# - 用应用名 UA 同时能过 CF 过滤 + 符合 danbooru TOS 里 "请使用描述性 User-Agent"
-#   的要求。gelbooru 没那么严但同样建议描述性 UA。
+# UA identifying the app. Background (hotfix 0.5.x):
+# - danbooru now sits behind Cloudflare bot-protection; no UA / the default
+#   `python-requests/X.Y.Z` gets an immediate 403 -> the CF challenge page
+#   ("Just a moment...");
+# - spoofing a Chrome browser UA is actually more suspicious ("browser that
+#   doesn't run JS" pattern) and also gets 403'd;
+# - an app-name UA both passes the CF filter and satisfies danbooru's TOS
+#   requirement to "use a descriptive User-Agent". gelbooru isn't as strict
+#   but a descriptive UA is recommended there too.
 _USER_AGENT_BASE = f"AnimaLoraStudio/{__version__}"
 
 
 def _build_user_agent(username: str = "") -> str:
-    """构造 UA。优先带 (by username) — 符合 danbooru TOS 推荐格式，且后端能
-    把请求归属到具体账户，CF 收紧时不容易被一锅端到匿名 UA。"""
+    """Build the UA. Prefer including (by username) — matches danbooru's
+    recommended TOS format, and lets the backend attribute requests to a
+    specific account, so when CF tightens up we're less likely to get swept
+    in with the anonymous-UA crowd."""
     u = (username or "").strip()
     return f"{_USER_AGENT_BASE} (by {u})" if u else _USER_AGENT_BASE
 
@@ -73,10 +82,11 @@ def search_posts(
     timeout: float = 30.0,
     session: Optional[requests.Session] = None,
 ) -> list[dict[str, Any]]:
-    """通用 booru 搜索。
+    """Generic booru search.
 
-    `tags_query` 是已经拼好的搜索串（多 tag 用空格分隔，含 `-排除`）。
-    返回 posts list（空 list = 这页空 / 到底了）。
+    `tags_query` is an already-assembled search string (multiple tags
+    space-separated, including `-excluded` ones).
+    Returns a list of posts (empty list = this page is empty / reached the end).
     """
     sess = session or requests
     url_base = base_url or default_base_url(api_source)
@@ -131,9 +141,10 @@ def search_posts(
 def post_fields(
     post: dict[str, Any], api_source: str
 ) -> tuple[Optional[str], Optional[str], str, Optional[str]]:
-    """统一抽 (post_id, file_url, file_ext, tags_str)。
+    """Uniformly extract (post_id, file_url, file_ext, tags_str).
 
-    gelbooru 的字段可能在顶层也可能在 `@attributes` 里 —— 兼容两种。
+    gelbooru's fields can be at the top level or nested under `@attributes` —
+    this handles both.
     """
     if api_source == "gelbooru" and "@attributes" in post:
         attrs = post["@attributes"]
@@ -154,7 +165,7 @@ def post_fields(
 def post_dimensions(
     post: dict[str, Any], api_source: str
 ) -> tuple[Optional[int], Optional[int]]:
-    """抽 (width, height)；gelbooru 也兼容 @attributes 嵌套。"""
+    """Extract (width, height); also handles gelbooru's @attributes nesting."""
     if api_source == "gelbooru" and "@attributes" in post:
         attrs = post["@attributes"]
         w = attrs.get("width")
@@ -169,10 +180,11 @@ def post_dimensions(
 
 
 def post_tag_list(post: dict[str, Any], api_source: str) -> list[str]:
-    """抽帖子的 tag 列表（小写、空格→下划线、去重保序）。
+    """Extract the post's tag list (lowercased, space -> underscore, dedup order-preserving).
 
-    gelbooru：`tags` 字段空格分隔字符串。
-    danbooru：`tag_string_general` / `_character` / `_copyright` / `_artist` 拼。
+    gelbooru: the `tags` field is a space-separated string.
+    danbooru: concatenated from `tag_string_general` / `_character` /
+    `_copyright` / `_artist`.
     """
     raw: list[str] = []
     if api_source == "gelbooru":
@@ -212,7 +224,7 @@ def has_alpha(img: Image.Image) -> bool:
 
 
 def flatten_alpha(img: Image.Image) -> Image.Image:
-    """以白底贴掉透明通道。"""
+    """Flatten the alpha channel onto a white background."""
     if img.mode != "RGBA":
         img = img.convert("RGBA")
     bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -231,12 +243,14 @@ def download_image(
     session: Optional[requests.Session] = None,
     username: str = "",
 ) -> Path:
-    """下载单图到 save_path（或 .png 重命名后版本）；失败抛 RuntimeError。
+    """Download a single image to save_path (or its .png-renamed version);
+    raises RuntimeError on failure.
 
-    `username` 用于构造 UA `(by username)`，与 search 路径一致；下载也走
-    Cloudflare，UA 带账户标识能降低被一锅端的风险。
+    `username` is used to build the UA `(by username)`, consistent with the
+    search path; downloads also go through Cloudflare, and a UA carrying an
+    account identifier lowers the risk of being swept up with anonymous UAs.
 
-    返回最终落盘路径。
+    Returns the final on-disk path.
     """
     sess = session or requests
     headers = _download_headers(username)

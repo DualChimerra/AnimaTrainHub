@@ -1,11 +1,3 @@
-"""krea2 TE fp8：官方 comfy 单文件形态加载 + dequant 前向。
-
-官方 qwen3vl_4b_fp8_scaled 是 comfy 单文件布局：权重键是 HF 命名（text
-侧差一个 ``language_model.`` 前缀）、text Linear 为 F8_E4M3 + F32 标量
-weight_scale、visual/embed/norm 保持 bf16。loader 做前缀映射 + scale 收集
-+ patch_fp8_linears（DiT fp8_scaled 完全同款）。TE 精度由目录形态决定
-（selected_te variant 选择），训练文本缓存指纹按形态区分（-tefp8）。
-"""
 from __future__ import annotations
 
 import torch
@@ -27,7 +19,6 @@ class _TinyTe(nn.Module):
 
 
 def _quantize_tiny(model: _TinyTe) -> None:
-    """手工构造 fp8_scaled 形态（per-tensor amax/448 + patch）。"""
     scales = {}
     for name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
@@ -43,14 +34,12 @@ def _quantize_tiny(model: _TinyTe) -> None:
 
 
 def test_fp8_forward_dequants_to_input_dtype_and_casts_bias():
-    """dequant 前向：weight/scale/bias 全 cast 到 input.dtype（TE fp32
-    compute 场景 fp16 bias 必须 cast；DiT 场景 no-op 等价）。"""
     torch.manual_seed(1)
     model = _TinyTe().to(torch.float16)
     _quantize_tiny(model)
     assert model_has_fp8_layers(model)
 
-    x = torch.randn(3, 4, dtype=torch.float32)  # TE compute=fp32（manual_cast）
+    x = torch.randn(3, 4, dtype=torch.float32)
     got = model.proj(x)
 
     expected_weight = (
@@ -64,7 +53,6 @@ def test_fp8_forward_dequants_to_input_dtype_and_casts_bias():
 
 
 def test_fp8_forward_bias_cast_is_noop_when_dtypes_match():
-    """DiT 场景：bias 与 input 同 dtype 时 cast 为恒等（parity 不变）。"""
     torch.manual_seed(2)
     module = nn.Linear(4, 4, bias=True).to(torch.bfloat16)
     with torch.no_grad():
@@ -82,7 +70,6 @@ def test_fp8_forward_bias_cast_is_noop_when_dtypes_match():
 
 
 def test_manual_cast_skips_fp8_linears():
-    """patch_manual_cast 不覆盖 fp8 层的 dequant 前向（覆盖会丢 scale）。"""
     from training.families.krea2.text_encoding import patch_manual_cast
 
     model = _TinyTe().to(torch.float16)
@@ -91,7 +78,7 @@ def test_manual_cast_skips_fp8_linears():
 
     patch_manual_cast(model, torch.float32)
 
-    assert model.proj.forward is fp8_forward  # 未被覆盖
+    assert model.proj.forward is fp8_forward
     x = torch.randn(2, 4, dtype=torch.float32)
     expected_weight = model.proj.weight.to(torch.float32) * model.proj.weight_scale
     expected = torch.nn.functional.linear(
@@ -101,7 +88,6 @@ def test_manual_cast_skips_fp8_linears():
 
 
 # ---------------------------------------------------------------------------
-# comfy 单文件形态（官方 qwen3vl_4b_fp8_scaled）加载
 # ---------------------------------------------------------------------------
 
 
@@ -123,8 +109,6 @@ def _tiny_qwen3vl_config():
 
 
 def _write_comfy_te_file(dir_path, config):
-    """从 tiny HF 模型反向构造 comfy 单文件：language_model 前缀剥掉、text
-    侧 Linear 量化 fp8 + weight_scale + comfy_quant 假 blob，visual 原样。"""
     from safetensors.torch import save_file
     from transformers import Qwen3VLForConditionalGeneration
 
@@ -134,7 +118,7 @@ def _write_comfy_te_file(dir_path, config):
     fp8_layers: list[str] = []
     for key, value in ref.state_dict().items():
         if key == "lm_head.weight":
-            continue  # tied，comfy 文件不含
+            continue
         comfy_key = key
         if key.startswith("model.language_model."):
             comfy_key = "model." + key[len("model.language_model."):]
@@ -174,23 +158,19 @@ def test_comfy_single_file_te_loads_maps_keys_and_patches(tmp_path, monkeypatch)
         te_dir, torch.device("cpu"), torch.float16,
     )
 
-    assert fp8_layers  # fixture 必须真的量化了 text Linear
+    assert fp8_layers
     quantized = {
         name for name, module in model.named_modules()
         if isinstance(module, torch.nn.Linear)
         and module.weight.dtype == torch.float8_e4m3fn
     }
     assert quantized == set(fp8_layers)
-    # visual 原样 fp16（cast 到存储 dtype）；lm_head tied 回 embed
     assert model.model.visual.blocks[0].attn.proj.weight.dtype == torch.float16
     assert model.lm_head.weight.data_ptr() == \
         model.model.language_model.embed_tokens.weight.data_ptr()
     assert all(not p.requires_grad for p in model.parameters())
-    # buffers（rotary inv_freq 等）必须物化——meta 残留曾致 offload 的
-    # .to("cpu") 崩（真机案例：编码侥幸能跑，全模型遍历即崩）
     assert all(b.device.type != "meta" for _, b in model.named_buffers())
-    model.to("cpu")  # offload_model 同款全模型遍历，回归不崩
-    # dequant 数值近似原 bf16 权重
+    model.to("cpu")
     name = fp8_layers[0]
     module = dict(model.named_modules())[name]
     back = module.weight.float() * module.weight_scale
@@ -215,8 +195,6 @@ def test_comfy_single_file_detection(tmp_path):
 
 
 def test_text_stack_fp8_storage_changes_fingerprint(tmp_path):
-    """fp8 单文件目录 → is_fp8_storage=True + 缓存指纹加 -tefp8 后缀
-    （fp8/bf16 编码的嵌入不混源）；HF 目录 → 原指纹。"""
     from tests.test_krea2_text_encoding import _FakeTokenizer
 
     from training.families.krea2.text_encoding import Krea2TextStack

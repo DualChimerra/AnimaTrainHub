@@ -1,7 +1,7 @@
-"""任务队列的 SQLite 持久化。
+"""SQLite persistence for the task queue.
 
-只保存任务索引；config 仍以 YAML 文件为权威源（task.config_name 指向
-studio_data/configs/{config_name}.yaml）。
+Only stores the task index; config still lives in YAML files as the source of truth
+(task.config_name points at studio_data/configs/{config_name}.yaml).
 """
 from __future__ import annotations
 
@@ -16,12 +16,13 @@ from .paths import STUDIO_DB
 
 
 def _journal_mode() -> str:
-    """SQLite journal 模式。默认 WAL（本机盘最快）。
+    """SQLite journal mode. Defaults to WAL (fastest on a local disk).
 
-    环境变量 `ALS_SQLITE_JOURNAL` 可覆盖（如 `TRUNCATE` / `DELETE`）。云端
-    部署若要把整个 studio_data 周期性 rsync 到 Google Drive，建议设 `TRUNCATE`：
-    WAL 会额外维护 `-wal` / `-shm` 边车文件，FUSE 盘上同步 / 复制时容易出现
-    撕裂或丢提交；single-file 的 TRUNCATE 模式只有一个 `studio.db`，复制更安全。
+    Can be overridden via the `ALS_SQLITE_JOURNAL` env var (e.g. `TRUNCATE` / `DELETE`). For
+    cloud deployments that periodically rsync the whole studio_data to Google Drive, `TRUNCATE`
+    is recommended: WAL maintains extra `-wal` / `-shm` sidecar files, which are prone to tearing
+    or lost commits when synced/copied on a FUSE mount; TRUNCATE mode's single `studio.db` file
+    is safer to copy.
     """
     mode = os.environ.get("ALS_SQLITE_JOURNAL", "").strip().upper()
     valid = {"WAL", "TRUNCATE", "DELETE", "PERSIST", "MEMORY", "OFF"}
@@ -48,39 +49,44 @@ CREATE INDEX IF NOT EXISTS idx_tasks_queue
 """
 
 VALID_STATUSES = {"pending", "running", "done", "failed", "canceled", "paused", "scheduled"}
-# `paused` 不进 terminal —— task 已暂停但可被 resume，不算结束态。
+# `paused` doesn't count as terminal -- the task is paused but resumable, not a finished state.
 TERMINAL_STATUSES = {"done", "failed", "canceled"}
-# 队列页分区用的两个有序状态组（0.17 P-A/P-E）：live = 进行中+等待，history = 已结束。
-# 用 tuple 保序，供 SQL `status IN (...)` + 分页。
-# `scheduled`（0.17 P-B 计划任务）进 live —— 在队列页第 4 段展示；dispatcher 只看
-# pending，到点由 supervisor tick 提升（promote_due_scheduled）。
+# The two ordered status groups used to partition the queue page (0.17 P-A/P-E): live = in
+# progress + waiting, history = finished. Kept as a tuple to preserve order for SQL
+# `status IN (...)` + pagination.
+# `scheduled` (0.17 P-B scheduled tasks) is part of live -- shown in the queue page's 4th
+# section; the dispatcher only looks at pending, and the supervisor's tick promotes due ones
+# (promote_due_scheduled).
 LIVE_STATUSES = ("running", "paused", "pending", "scheduled")
 HISTORY_STATUSES = ("done", "failed", "canceled")
-# tasks.task_type 的合法值。R-2/R-3 台账合并：tasks 表是全部工作项的统一台账。
-# 档位归属的权威在 supervisor/resources.py（infrastructure 不反向依赖
-# supervisor，此处平铺列出，tests 有同步断言防漂移）。
+# Valid values for tasks.task_type. R-2/R-3 ledger unification: the tasks table is now the
+# unified ledger for all work items. Resource-tier ownership lives in supervisor/resources.py
+# (infrastructure doesn't depend back on supervisor, so it's listed flat here; tests have a
+# sync assertion to guard against drift).
 GPU_TASK_TYPES = ("train", "reg_ai", "generate")
-# 数据作业 kind（R-3 起写入 tasks）。/api/queue 的 GPU 视图在 R-5 档位化前
-# 默认排除它们（含 no-group 兼容路径，保护 Topbar/Overview/Monitor 不把
-# 数据作业当训练任务）。
+# Data-job kinds (written to tasks starting with R-3). The GPU view of /api/queue excludes
+# these by default until R-5's tiering lands (including a no-group compat path, to keep
+# Topbar/Overview/Monitor from mistaking a data job for a training task).
 JOB_TASK_TYPES = (
     "download", "preprocess", "tag", "reg_build",
     "eval_samples", "eval_clip", "eval_dino", "eval_tag", "eval_ccip",
-    # 本 fork：大 zip 上传走后台 job（Cloudflare 524 workaround）
+    # This fork: large zip uploads go through a background job (Cloudflare 524 workaround)
     "upload",
 )
 VALID_TASK_TYPES = GPU_TASK_TYPES + JOB_TASK_TYPES
 
 
 def connect(path: Optional[Path] = None) -> sqlite3.Connection:
-    """打开连接；调用方负责关闭（建议用 `with connection_for(...)`）。"""
+    """Opens a connection; the caller is responsible for closing it (prefer
+    `with connection_for(...)`)."""
     db_path = path or STUDIO_DB
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA journal_mode={_journal_mode()}")
-    # 多线程（supervisor + HTTP worker）下并发写：锁等待 30s 再 raise，
-    # 避免「database is locked」直接打断入队 / 状态更新。
+    # Concurrent writes across multiple threads (supervisor + HTTP worker): wait up to 30s for
+    # a lock before raising, so "database is locked" doesn't abruptly interrupt an enqueue /
+    # status update.
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
@@ -96,7 +102,8 @@ def connection_for(path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(path: Optional[Path] = None) -> None:
-    """建基础表 + 把 schema 升级到最新版本（PRAGMA user_version 跟踪）。"""
+    """Creates the base tables + upgrades the schema to the latest version (tracked via
+    PRAGMA user_version)."""
     from .migrations import apply_all
 
     with connection_for(path) as conn:
@@ -114,8 +121,8 @@ def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
     if not row:
         return None
     out = dict(row)
-    # R-2：params（kind 专属参数 JSON，_v17）附带解码，消费端免二次 parse
-    # （同 project_jobs DAO 的 params_decoded 约定）。
+    # R-2: decodes params (kind-specific params JSON, _v17) alongside the raw value, so
+    # consumers don't need to re-parse it (same params_decoded convention as the project_jobs DAO).
     if isinstance(out.get("params"), str):
         try:
             import json as _json
@@ -138,26 +145,29 @@ def create_task(
     version_id: Optional[int] = None,
     commit: bool = True,
 ) -> int:
-    """建 pending（或 scheduled）task。
+    """Creates a pending (or scheduled) task.
 
-    ``commit=False`` 仅供需要在同一事务内先写入 task-scoped
-    config 快照的入队端点使用；其他调用保持原有的立即提交行为。
+    ``commit=False`` is only for enqueue endpoints that need to write a task-scoped config
+    snapshot within the same transaction; other callers keep the original immediate-commit
+    behavior.
 
-    R-2 台账合并：tasks 表承接全部工作项。`task_type` 缺省 'train'（老调用方
-    兼容）；数据作业类（download/tag/…）带 `params`（kind 专属参数 JSON）+
-    project_id/version_id 入库。写路径切换（services 从 create_job 改到这里）
-    在 R-3。
+    R-2 ledger unification: the tasks table now holds all work items. `task_type` defaults to
+    'train' (compat for old callers); data-job kinds (download/tag/...) are stored with
+    `params` (kind-specific params JSON) + project_id/version_id. The write-path switch
+    (services moving from create_job to here) happens in R-3.
     """
     if task_type is not None and task_type not in VALID_TASK_TYPES:
         raise ValueError(f"invalid task_type: {task_type!r}")
-    # ADR-0009 PR-1 C6: 入 task 时存当前 ContextVar trace_id（HTTP 请求那一刻
-    # 由 TraceIdMiddleware 已 bind）。无则用 bg-{uuid} 标后台触发（CLI / 测试 /
-    # supervisor 直接拉起）。supervisor dispatcher 后续读这个列 → env 注入
-    # worker 子进程让 worker log 跟用户请求 trace_id 对得上。
+    # ADR-0009 PR-1 C6: stores the current ContextVar trace_id when the task is created (already
+    # bound by TraceIdMiddleware at the moment of the HTTP request). Falls back to bg-{uuid} to
+    # mark a background trigger (CLI / tests / supervisor spawning it directly). The supervisor
+    # dispatcher later reads this column -> injects it into the worker subprocess's env, so the
+    # worker log lines up with the user's request trace_id.
     from .logging import get_trace_id, new_trace_id
     request_trace_id = get_trace_id() or f"bg-{new_trace_id()}"
-    # 0.17 P-B：带 scheduled_at → 建成 scheduled，supervisor tick 到点提升为
-    # pending。过去的时间也照建 —— 下一个 tick（≤1s）自然提升，无需特判。
+    # 0.17 P-B: with scheduled_at set -> created as scheduled, promoted to pending by the
+    # supervisor's tick once due. A time in the past is also fine to create -- the next tick
+    # (<=1s) promotes it naturally, no special-casing needed.
     status = "scheduled" if scheduled_at is not None else "pending"
     import json as _json
     cur = conn.execute(
@@ -182,7 +192,8 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Optional[dict[str, Any]]
 def filter_out_task_types(
     items: list[dict[str, Any]], excluded: tuple[str, ...]
 ) -> list[dict[str, Any]]:
-    """commit 15：从 task 列表里剔掉指定 task_type（默认 task_type='train' 兼容）。"""
+    """commit 15: strips the given task_type(s) out of a task list (defaults task_type to
+    'train' for compat)."""
     return [
         t for t in items
         if (t.get("task_type") or "train") not in excluded
@@ -205,7 +216,8 @@ def list_tasks(
 
 
 def _escape_like(s: str) -> str:
-    """转义 LIKE 元字符（\\ % _），配合 `ESCAPE '\\'` 让搜索按字面匹配。"""
+    """Escapes LIKE metacharacters (\\ % _), used together with `ESCAPE '\\'` so the search
+    matches literally."""
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -216,15 +228,16 @@ def _build_task_filter(
     q: Optional[str],
     types: tuple[str, ...] = (),
 ) -> tuple[str, list[Any]]:
-    """构造 WHERE 子句 + 参数（不含 ORDER/LIMIT），供 count_tasks / list_tasks_page 共用。
+    """Builds the WHERE clause + params (no ORDER/LIMIT), shared by count_tasks / list_tasks_page.
 
-    - statuses：`status IN (...)`（保序 tuple）
-    - types：`COALESCE(task_type,'train') IN (...)`——0.17 P-F 类型过滤（正向包含）
-    - exclude_types：`COALESCE(task_type,'train') NOT IN (...)`——老行 NULL 兜底成
-      'train' 不会被误排除（保证分页 total 准）
-    - q：name / config_name 子串 + 所属项目 title/slug 子串（LIKE + ESCAPE，
-      元字符转义）。R-5：数据作业 name=kind 无搜索价值，靠项目名子查询命中；
-      GPU 任务顺带获得按项目搜索能力
+    - statuses: `status IN (...)` (order-preserving tuple)
+    - types: `COALESCE(task_type,'train') IN (...)` -- 0.17 P-F type filter (positive inclusion)
+    - exclude_types: `COALESCE(task_type,'train') NOT IN (...)` -- old rows' NULL falls back to
+      'train' so they aren't wrongly excluded (keeps pagination totals accurate)
+    - q: substring match on name / config_name + the owning project's title/slug
+      (LIKE + ESCAPE, metacharacters escaped). R-5: a data job's name=kind has no search value,
+      so it's matched via the project-name subquery instead; GPU tasks get project-name search
+      as a side benefit
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -261,7 +274,8 @@ def count_tasks(
     q: Optional[str] = None,
     types: tuple[str, ...] = (),
 ) -> int:
-    """匹配 statuses（+ 可选 types / exclude_types / q）的 task 总数，供分页 total。"""
+    """Total count of tasks matching statuses (+ optional types / exclude_types / q), for
+    pagination totals."""
     where, params = _build_task_filter(
         statuses=statuses, exclude_types=exclude_types, q=q, types=types
     )
@@ -279,9 +293,11 @@ def list_tasks_page(
     limit: Optional[int] = None,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """按 statuses（+ 可选 types / exclude_types / q）取 task，`id DESC`（近的在前）。
+    """Fetches tasks matching statuses (+ optional types / exclude_types / q), `id DESC`
+    (most recent first).
 
-    limit=None 不分页（live 组全量）；给 limit 则 `LIMIT ? OFFSET ?`（history 组）。
+    limit=None means no pagination (the live group is fetched in full); a limit adds
+    `LIMIT ? OFFSET ?` (used for the history group).
     """
     where, params = _build_task_filter(
         statuses=statuses, exclude_types=exclude_types, q=q, types=types
@@ -296,10 +312,11 @@ def list_tasks_page(
 def promote_due_scheduled(
     conn: sqlite3.Connection, now: Optional[float] = None
 ) -> list[int]:
-    """0.17 P-B：把到点的 scheduled task 提升为 pending，返回提升的 id 列表。
+    """0.17 P-B: promotes due scheduled tasks to pending, returns the list of promoted ids.
 
-    supervisor 每个 tick（1s）调一次；scheduled_at 保留不清（记录原计划时间）。
-    调用方负责对返回的每个 id publish task_state_changed(pending)。
+    Called once per supervisor tick (1s); scheduled_at is kept, not cleared (records the
+    original planned time). The caller is responsible for publishing
+    task_state_changed(pending) for each returned id.
     """
     ts = time.time() if now is None else now
     ids = [
@@ -346,7 +363,8 @@ def delete_task(conn: sqlite3.Connection, task_id: int) -> int:
 def reorder(
     conn: sqlite3.Connection, ordered_ids: list[int]
 ) -> None:
-    """按给定 id 顺序重写 priority（首位最高）。仅影响 pending 任务。"""
+    """Rewrites priority to match the given id order (first = highest). Only affects
+    pending tasks."""
     base = len(ordered_ids)
     for i, tid in enumerate(ordered_ids):
         conn.execute(
@@ -357,14 +375,14 @@ def reorder(
 
 
 # ---------------------------------------------------------------------------
-# queue_settings —— kv 表，跨重启保留。ADR 0006 PR-2 引入。
+# queue_settings -- a kv table that persists across restarts. Introduced by ADR 0006 PR-2.
 # ---------------------------------------------------------------------------
 
 _QUEUE_HELD_KEY = "queue.held"
 
 
 def get_queue_held(conn: sqlite3.Connection) -> bool:
-    """队列挂起开关（ADR §3.2）。默认 False（未挂起）。"""
+    """The queue-hold switch (ADR SS3.2). Defaults to False (not held)."""
     row = conn.execute(
         "SELECT value FROM queue_settings WHERE key = ?", (_QUEUE_HELD_KEY,)
     ).fetchone()
@@ -374,7 +392,7 @@ def get_queue_held(conn: sqlite3.Connection) -> bool:
 
 
 def set_queue_held(conn: sqlite3.Connection, held: bool) -> None:
-    """写挂起开关。值序列化成字面量 "true" / "false"。"""
+    """Writes the hold switch. Value is serialized as the literal "true" / "false"."""
     conn.execute(
         "INSERT INTO queue_settings(key, value) VALUES(?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",

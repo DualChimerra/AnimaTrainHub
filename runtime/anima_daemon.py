@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""测试出图常驻 daemon 子进程。
+"""Long-running daemon subprocess for test image generation.
 
-由 studio/services/inference_daemon.py 启动；JSON-over-stdio 协议：
+Started by studio/services/inference_daemon.py; JSON-over-stdio protocol:
   stdin  ← {"id": "<req_id>", "action": "generate"|"unload"|"ping", ...}
   stdout → {"id": "<req_id>"|"_evt", "kind": "ready"|"started"|"image_done"|
              "done"|"error"|"loaded"|"unloaded", ...}
 
-stdout 仅协议；日志全走 stderr（避免污染协议流）。
+stdout carries only the protocol; all logging goes to stderr (to avoid
+polluting the protocol stream).
 
-设计：
-  - 启动后立即推 _evt ready（说明 import / sys.path 完成；模型未加载）
-  - 第一次 generate task 来时 lazy load 模型（30-60s），推 _evt loaded
-  - 后续 task 复用模型 + adapters；adapter 卸载/重 inject 仅在 lora_configs 改变时
-  - 单线程串行处理（一次一个 task）；server 端保证不并发提交
+Design:
+  - Pushes _evt ready right after startup (means import / sys.path setup is
+    done; the model isn't loaded yet)
+  - Lazily loads the model when the first generate task arrives (30-60s),
+    pushes _evt loaded
+  - Subsequent tasks reuse the model + adapters; adapters are only
+    unloaded/re-injected when lora_configs changes
+  - Single-threaded, serial processing (one task at a time); the server side
+    guarantees no concurrent submissions
 
-用法（CLI 调试）：
+Usage (CLI debugging):
     python runtime/anima_daemon.py
-    然后从 stdin 喂一行 JSON：
+    then feed a line of JSON on stdin:
         {"id":"r1","action":"generate","task_id":1,"output_dir":"/tmp/g","config":{...}}
 """
 from __future__ import annotations
@@ -33,8 +38,9 @@ from typing import Any, Optional
 
 import torch
 
-# 同 anima_generate.py 的 sys.path 处理（让 anima_train / studio 可 import）
-# anima_train + train_monitor 都在 runtime/ 下，_THIS_DIR 即够。
+# Same sys.path handling as anima_generate.py (so anima_train / studio can be
+# imported). anima_train + train_monitor both live under runtime/, so
+# _THIS_DIR alone is enough.
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
 for _p in (_THIS_DIR, _REPO_ROOT):
@@ -47,17 +53,19 @@ import anima_train as _T  # noqa: E402
 from studio.domain.comfy_parity import force_comfy_parity_runtime_config  # noqa: E402
 from studio.services.inference.core import LoRAMeta, LoRASpec, apply_loras, read_lora_meta  # noqa: E402
 
-# 预热 transformers.generation → sklearn → scipy.special import 链。
-# transformers 5.x 的 AutoModelForCausalLM.from_pretrained 在 load text encoder
-# 时间接 import 这一串；scipy.special cold import 在 Windows + Python 3.13 + 已
-# 加载 GB 级模型（system RAM 紧张）的环境下可能要几分钟（py-spy 实测）。挪到
-# daemon import 阶段，趁 RAM 还宽松时一次性付掉。
+# Warm up the transformers.generation -> sklearn -> scipy.special import
+# chain. transformers 5.x's AutoModelForCausalLM.from_pretrained
+# transitively imports this chain while loading the text encoder; a cold
+# import of scipy.special on Windows + Python 3.13 + an environment that has
+# already loaded a GB-scale model (system RAM tight) can take several
+# minutes (measured with py-spy). Moved to the daemon's import phase, to pay
+# for it once while RAM is still plentiful.
 try:
     import transformers.generation.candidate_generator  # noqa: F401
 except Exception:
     pass
 
-# 日志走 stderr，stdout 留给协议
+# Logging goes to stderr, stdout is reserved for the protocol
 logging.basicConfig(
     level=logging.INFO,
     stream=sys.stderr,
@@ -68,12 +76,12 @@ logger = logging.getLogger("anima_daemon")
 
 
 # ---------------------------------------------------------------------------
-# 协议输出
+# Protocol output
 # ---------------------------------------------------------------------------
 
 
 def _emit(msg: dict[str, Any]) -> None:
-    """写一条协议消息到 stdout（line-delimited JSON）。"""
+    """Write one protocol message to stdout (line-delimited JSON)."""
     sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
@@ -87,14 +95,16 @@ def _emit_for(req_id: str, kind: str, **extra: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 模型管理（lazy load + cache）
+# Model management (lazy load + cache)
 # ---------------------------------------------------------------------------
 
 
 def _lora_topology(meta: LoRAMeta) -> tuple:
-    # weight_decompose / rs_lora 改了网络结构（前者加 dora_scale 张量、后者改
-    # effective alpha 公式），不同设置不能走热换权重路径，必须重新 inject。
-    # lora_reg_dims 直接改单层 rank → 不同 pattern 配置同 base rank 也不能复用。
+    # weight_decompose / rs_lora change the network structure (the former
+    # adds a dora_scale tensor, the latter changes the effective-alpha
+    # formula), so different settings can't take the hot weight-swap path and
+    # must be re-injected. lora_reg_dims directly changes per-layer rank ->
+    # even the same base rank with a different pattern config can't be reused.
     reg = meta.lora_reg_dims
     reg_key: Any = tuple(sorted(reg.items())) if reg else None
     return (meta.rank, meta.alpha, meta.algo, meta.factor,
@@ -120,7 +130,7 @@ def _reload_adapter_weights(adapter: Any, spec: LoRASpec, device: str, dtype: An
     missing = len(getattr(result, "missing_keys", []) or [])
     unexpected = len(getattr(result, "unexpected_keys", []) or [])
     logger.info(
-        f"已热换 LoRA 权重: {Path(spec.path).name} "
+        f"hot-swapped LoRA weights: {Path(spec.path).name} "
         f"(scale={spec.scale}; missing={missing}, unexpected={unexpected})"
     )
 
@@ -139,12 +149,14 @@ def _move_adapter_to_device(adapter: Any, device: str, dtype: Any) -> None:
 
 
 class GenerationCanceled(BaseException):
-    """取消信号。
+    """Cancel signal.
 
-    刻意继承 BaseException 而非 Exception：取消由 step_callback 在采样步内
-    抛出，而 sampler 对 step_callback 的调用包在 `except Exception: pass`
-    里（回调失败不该毁掉采样）。继承 Exception 会被这层静默吞掉、无法
-    中断采样。所有捕获点都显式写 `except GenerationCanceled`。
+    Deliberately subclasses BaseException rather than Exception: the cancel
+    is raised by step_callback inside the sampling step, and the sampler
+    wraps its call to step_callback in `except Exception: pass` (a callback
+    failure shouldn't wreck the sampling run). Subclassing Exception would
+    get silently swallowed by that layer, making it impossible to interrupt
+    sampling. Every catch site explicitly writes `except GenerationCanceled`.
     """
 
 
@@ -190,11 +202,13 @@ def _torch_dtype_from_precision(value: str | None) -> torch.dtype:
 
 
 class ModelCache:
-    """缓存已加载的模型 / adapters。
+    """Caches the loaded model / adapters.
 
-    第一次 task 进来 load_model_paths()；之后路径不变则复用；adapters
-    在 lora_configs 改变时才重 inject（commit 9 简化：每次都重 inject，
-    成本 ~1-2s/LoRA，相比 30s+ model load 可忽略；后续 commit 优化）。
+    load_model_paths() runs on the first incoming task; if the paths don't
+    change it's reused afterward; adapters are only re-injected when
+    lora_configs changes (commit 9 simplification: re-injects every time,
+    cost ~1-2s/LoRA, negligible compared to a 30s+ model load; to be
+    optimized in a later commit).
     """
 
     def __init__(self) -> None:
@@ -210,37 +224,45 @@ class ModelCache:
         self.text_encoder_backend: Optional[str] = None
         self.t5_tokenizer_backend: Optional[str] = None
         self.ram_guard: bool = False
-        #: TE 先行栈的身份键（family_id, text_encoder_path）——ensure_text_ready
-        #: 据此复用/重建；_load 据此避免重复加载
+        #: Identity key for the TE-first stack (family_id, text_encoder_path)
+        #: -- ensure_text_ready reuses/rebuilds based on this; _load uses it
+        #: to avoid a duplicate load
         self._text_ready_key: Optional[tuple] = None
         self.device: Optional[str] = None
         self.dtype: Any = None
         self.lora_dtype: Any = torch.float32
         self.model: Any = None
         self.vae: Any = None
-        # 族 opaque 文本栈（anima=(qwen_model, qwen_tok, t5_tok) 三元组，
-        # krea2=Krea2TextStack）——只经 family.sample_image 消费，daemon 不拆包
+        # Family-opaque text stack (a (qwen_model, qwen_tok, t5_tok) triple
+        # for anima, Krea2TextStack for krea2) -- only consumed via
+        # family.sample_image, the daemon never unpacks it
         self.text_stack: Any = None
-        # adapters 必须保持引用，否则 forward hook 失效（lycoris closure）
+        # adapters must keep a reference, or the forward hook stops working (lycoris closure)
         self.adapters: list[Any] = []
         self.last_lora_specs: list[LoRASpec] = []
         self.last_lora_metas: list[LoRAMeta] = []
-        # 中间步预览用 latent2rgb 线性投影（见 _decode_latent2rgb_preview）——
-        # 无外部模型 / 无下载，故 CACHE 不再持任何 preview decoder 状态。
+        # latent2rgb linear projection used for intermediate-step previews
+        # (see _decode_latent2rgb_preview) -- no external model / no
+        # download involved, so CACHE holds no preview-decoder state at all.
 
     @property
     def loaded(self) -> bool:
         return self.model is not None
 
     def ensure_text_ready(self, cfg: dict[str, Any]) -> None:
-        """krea2 两段加载第一段：先就绪 TE 栈（不动 DiT）。
+        """krea2's two-stage load, stage one: get the TE stack ready (without touching the DiT).
 
-        TE 先行编排（任务驱动分阶段，训练两段式的推理版）：任务开始先让
-        文本栈就绪 → precache 编码 → 彻底释放 → 才加载 13GB DiT——任一
-        时刻 GPU 上只有一个大模型（受控实测预编码期三者同驻峰值 24.1GB
-        → 错开后 ~15GB，16GB 卡免让位）。TE 参数变化只重建文本栈（在线
-        LRU 随之作废），不再触发全家桶重载。anima 族 no-op（TE 常驻语义
-        走 _load 全家桶）。
+        TE-first orchestration (task-driven staging, the inference-side
+        counterpart of the two-stage training scheme): at the start of a
+        task, get the text stack ready first -> precache-encode -> release
+        it entirely -> only then load the 13GB DiT -- at any given moment
+        only one large model is on the GPU (measured: during the precache
+        stage all three staying resident peaks at 24.1GB -> staggering them
+        drops it to ~15GB, sparing a 16GB card from having to make room).
+        A TE parameter change only rebuilds the text stack (invalidating
+        the online LRU along with it), no longer triggering a full reload
+        of everything. A no-op for the anima family (the TE-resident
+        semantics go through the full reload in _load).
         """
         cfg = force_comfy_parity_runtime_config(
             cfg, force_exact_ksampler_backend=False,
@@ -259,7 +281,7 @@ class ModelCache:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = _torch_dtype_from_precision(cfg.get("mixed_precision", "bf16"))
         family = _T.get_family(family_id)
-        logger.info("loading text encoders (TE 先行) %s", text_encoder_path)
+        logger.info("loading text encoders (TE-first) %s", text_encoder_path)
         self.text_stack = family.load_text(
             text_encoder_path, device, dtype,
             purpose="generate",
@@ -269,7 +291,7 @@ class ModelCache:
         self.text_encoder_path = text_encoder_path
 
     def ensure_loaded(self, cfg: dict[str, Any]) -> None:
-        """按 cfg 决定是否需要 (重新) 加载。路径或后端变了 → 全重载。"""
+        """Decide whether a (re)load is needed based on cfg. A changed path or backend -> full reload."""
         cfg = force_comfy_parity_runtime_config(
             cfg,
             force_exact_ksampler_backend=False,
@@ -285,7 +307,7 @@ class ModelCache:
         text_encoder_path = cfg["text_encoder_path"]
         t5_tokenizer_path = cfg.get("t5_tokenizer_path", "")
 
-        # 路径解析
+        # Path resolution
         repo_root = _T.find_diffusion_pipe_root()
         bases = [Path.cwd(), _THIS_DIR, repo_root]
         transformer_path = _T.resolve_path_best_effort(transformer_path, bases)
@@ -296,7 +318,7 @@ class ModelCache:
 
         self.ram_guard = bool(cfg.get("ram_guard", False))
 
-        # 比较是否需要 reload（换族 = 换整套模型栈，全重载）
+        # Check whether a reload is needed (a family switch = a switch of the whole model stack, full reload)
         needs_reload = (
             not self.loaded
             or self.family_id != family_id
@@ -317,9 +339,10 @@ class ModelCache:
             check_load_budget(
                 self.ram_guard,
                 weight_paths=[transformer_path, vae_path],
-                stage="模型加载",
+                stage="model load",
             )
-            # keep_text：TE 先行栈刚编码完（LRU 已填充），重载不清它
+            # keep_text: the TE-first stack just finished encoding (the LRU
+            # is populated), a reload shouldn't clear it
             self.unload(keep_text=True)
             self._load(
                 family_id=family_id,
@@ -372,8 +395,10 @@ class ModelCache:
         logger.info("loading vae %s", vae_path)
         vae = family.load_vae(vae_path, device, vae_dtype)
 
-        # 族 opaque 文本栈，不拆包。krea2 的 TE 先行栈（ensure_text_ready）
-        # 已就绪且身份匹配时复用——保住预编码 LRU，不重复加载。
+        # Family-opaque text stack, never unpacked. When krea2's TE-first
+        # stack (ensure_text_ready) is already ready and its identity
+        # matches, reuse it -- preserving the precache LRU, avoiding a
+        # duplicate load.
         if (
             family_id == "krea2"
             and self.text_stack is not None
@@ -411,14 +436,16 @@ class ModelCache:
         self.adapters = []
         self.last_lora_specs = []
         self.last_lora_metas = []
-        # 大权重加载完：mmap 文件缓存页（DiT 13-26GB + VAE）归还系统，
-        # 防物理内存紧张机器换页卡死（TE lazy 加载后由 ensure_model 再 trim）
+        # Large weights are loaded now: return the mmap'd file cache pages
+        # (DiT 13-26GB + VAE) to the system, preventing a paging stall on
+        # machines with tight physical memory (TE gets trimmed again by
+        # ensure_model after its own lazy load)
         from training.sysmem import trim_working_set
 
         trim_working_set()
 
     def apply_loras(self, lora_configs: list[dict[str, Any]]) -> list[Any]:
-        """按 lora_configs inject adapters；同结构 checkpoint 切换时只热换权重。"""
+        """Inject adapters based on lora_configs; when switching between checkpoints of the same structure, only hot-swaps the weights."""
         self._move_runtime_to_device()
 
         specs = [
@@ -446,8 +473,8 @@ class ModelCache:
             and len(specs) == len(self.adapters) == len(self.last_lora_metas) == len(current_metas)
             and [_lora_topology(m) for m in current_metas]
             == [_lora_topology(m) for m in self.last_lora_metas]
-            # fp8 merge 句柄无常驻 network 权重可热换，必须 detach（还原
-            # 原始 fp8 权重）后重 merge
+            # An fp8 merge handle has no resident network weights to hot-swap,
+            # must detach (restore the original fp8 weights) and re-merge
             and all(getattr(a, "supports_hot_reload", True) for a in self.adapters)
         )
         if can_hot_reload:
@@ -481,8 +508,10 @@ class ModelCache:
                 self.vae_precision, self.text_encoder_backend,
                 self.t5_tokenizer_backend,
             )
-            # family_id 在 unload() 里被清空，必须先存——漏传曾是隐性
-            # TypeError（_load 的必需参数，P4-4 引入时本路径漏改）
+            # family_id gets cleared inside unload(), so it must be saved
+            # first -- forgetting this once caused a silent TypeError (a
+            # required parameter of _load that this code path missed
+            # updating when P4-4 was introduced)
             saved_family = self.family_id or "anima"
             self.unload()
             self._load(
@@ -514,9 +543,11 @@ class ModelCache:
         if not self.device:
             return
         _move_module_to_device(self.model, self.device)
-        # anima 文本栈是 (qwen_model, qwen_tok, t5_tok) 三元组——采样内部的
-        # decode offload 会把 TE 挪去 CPU，这里搬回。自管 device 的栈
-        # （krea2 的 Krea2TextStack）没有裸模块成员，循环自然 no-op。
+        # anima's text stack is a (qwen_model, qwen_tok, t5_tok) triple --
+        # the decode offload inside sampling moves the TE to CPU, this moves
+        # it back. A stack that manages its own device (krea2's
+        # Krea2TextStack) has no bare module members, so the loop is
+        # naturally a no-op for it.
         if isinstance(self.text_stack, (tuple, list)):
             for member in self.text_stack:
                 if isinstance(member, torch.nn.Module):
@@ -525,16 +556,20 @@ class ModelCache:
             _move_adapter_to_device(adapter, self.device, self.lora_dtype)
 
     def unload(self, *, keep_text: bool = False) -> None:
-        """卸载模型栈。``keep_text``：保留 TE 先行栈（含预编码 LRU）——
-        ensure_loaded 的重载路径用，避免刚编码完的结果被清掉。"""
+        """Unload the model stack. ``keep_text``: keep the TE-first stack
+        (including the precache LRU) -- used by ensure_loaded's reload path,
+        to avoid wiping out results that were just encoded."""
         if not keep_text:
             self.text_stack = None
             self._text_ready_key = None
         if not self.loaded:
-            # 模型未加载 ≠ 显存干净：加载中途 OOM 后 self.model 仍是 None，
-            # 但异常 traceback 的循环引用钉着半上卡的 state_dict（refcount
-            # 收不掉）——手动「释放缓存」落到这个分支时必须无条件清扫，
-            # 否则按钮空转（上游 #499 真机实测 20GB 纹丝不动）。
+            # Model not loaded != VRAM clean: after an OOM partway through
+            # loading, self.model can still be None, but the exception
+            # traceback's reference cycle pins a half-loaded state_dict
+            # (its refcount never drops) -- when the manual "free cache"
+            # action hits this branch it must sweep unconditionally, or the
+            # button spins for nothing (upstream #499, measured on real
+            # hardware: 20GB stayed completely stuck).
             _reclaim_cuda_leftovers()
             return
         logger.info("unloading model")
@@ -550,11 +585,14 @@ class ModelCache:
             gc.collect()
             if torch.cuda.is_available():
                 try:
-                    # cuBLAS workspace 是 C++ 级常驻分配（Python gc 不可见，
-                    # 仅 ~10MB），但会把所在 allocator segment 整段钉住——
-                    # 实测 fp8 采样后 8GB+ reserved 无法被 empty_cache 释放
-                    # （tmp/diag_vram_leak.py 复现）。ComfyUI soft_empty_cache
-                    # 同款处理；内部 API，失败可忽略（下轮加载会复用 cache）。
+                    # The cuBLAS workspace is a C++-level resident
+                    # allocation (invisible to Python's gc, only ~10MB), but
+                    # it pins down the entire allocator segment it lives in
+                    # -- measured: after fp8 sampling, 8GB+ reserved
+                    # couldn't be released by empty_cache (reproduced in
+                    # tmp/diag_vram_leak.py). Same handling as ComfyUI's
+                    # soft_empty_cache; internal API, failure can be
+                    # ignored (the next load will just reuse the cache).
                     torch._C._cuda_clearCublasWorkspaces()
                 except Exception:
                     pass
@@ -564,20 +602,24 @@ class ModelCache:
 
 
 def _reclaim_cuda_leftovers() -> None:
-    """回收不再被业务引用持有、但还占着显存 / pinned 内存的残骸（上游 #499）。
+    """Reclaim VRAM / pinned-memory leftovers that are no longer referenced
+    by business logic but still hold onto memory (upstream #499).
 
-    异常（尤其加载 / 采样中途的 OOM）traceback 与 frame 互相引用，钉住
-    frame locals 里的大张量，必须 gc 才收得掉；empty_cache 再把空闲 block
-    还给驱动。pinned host cache 同理显式归还（没有 cache 时 no-op）。
-    模型本体不受影响——只清「已无主」的部分。
+    An exception's traceback (especially from an OOM partway through
+    loading / sampling) references its frame and vice versa, pinning large
+    tensors sitting in the frame's locals; only gc can free that, and then
+    empty_cache returns the freed blocks to the driver. The pinned host
+    cache is explicitly returned the same way (a no-op if there's no cache).
+    The model itself is unaffected -- only "orphaned" parts are cleared.
     """
     try:
         import gc
         gc.collect()
         if torch.cuda.is_available():
             try:
-                # cuBLAS workspace 会钉住所在 segment（见 unload 内注释），
-                # 先清再 empty_cache 才能整段归还
+                # cuBLAS workspace pins down the segment it lives in (see
+                # the comment inside unload); it must be cleared before
+                # empty_cache can return the whole segment
                 torch._C._cuda_clearCublasWorkspaces()
             except Exception:
                 pass
@@ -596,7 +638,7 @@ CACHE = ModelCache()
 
 
 # ---------------------------------------------------------------------------
-# Generate 实现（复用 anima_generate.py 的循环逻辑）
+# Generate implementation (reuses anima_generate.py's loop logic)
 # ---------------------------------------------------------------------------
 
 
@@ -605,51 +647,60 @@ def _precache_prompts_and_release(
     vram_policy: str,
     phase_callback: Any = None,
 ) -> None:
-    """krea2 任务级 prompt 预编码 + TE 彻底释放（训练两段式的推理版）。
+    """krea2's task-level prompt precache + full TE release (the inference-side counterpart of the two-stage training scheme).
 
-    XY / 多 prompt generate 的 prompt 集合在任务开始前就封闭——先把全部
-    prompt 编进在线 LRU，再**彻底释放** TE（release，非 offload：不留
-    ~5GB CPU 副本；conditioning 已在 LRU，下个任务 LRU miss 再从盘载
-    ~3s）。与 ensure_text_ready 组成 TE 先行编排：首次任务在 DiT 加载前
-    编码，任一时刻 GPU 只有一个大模型。
+    The prompt set for an XY / multi-prompt generate task is closed before
+    the task starts -- encode every prompt into the online LRU first, then
+    **fully release** the TE (release, not offload: doesn't leave behind a
+    ~5GB CPU copy; conditioning is already in the LRU, and the next task's
+    LRU miss just re-loads from disk in ~3s). Together with
+    ensure_text_ready this forms the TE-first orchestration: the first task
+    encodes before the DiT loads, so at any moment only one large model is
+    on GPU.
 
-    - performance 档不释放（用户显式要求全同驻零搬运）。
-    - anima 文本栈（tuple）无此 API，安全跳过。
-    - 预编码失败不阻塞任务：逐格惰性编码路径兜底。
+    - Not released under the performance tier (the user explicitly asked
+      for everything resident, zero transfers).
+    - The anima text stack (a tuple) has no such API, safely skipped.
+    - A precache failure doesn't block the task: the per-cell lazy encode
+      path is the fallback.
     """
     precache = getattr(CACHE.text_stack, "precache_online_prompts", None)
     if not callable(precache):
         return
-    # TE 在此 lazy 加载（fp8 5GB / bf16 8.9GB 的 mmap 读盘）——按 TE 文件
-    # 大小预算 RAM/VRAM。必须在兜底 try 之外：护栏错误要中止任务，不能被
-    # 「退回逐格编码」吞掉后照样加载 TE 卡死。TE 已在卡上时零预算直通。
+    # The TE is lazily loaded here (fp8 5GB / bf16 8.9GB read from an mmap'd
+    # file) -- budget RAM/VRAM based on the TE file size. Must be outside
+    # the fallback try: a guardrail error must abort the task, not get
+    # swallowed by "fall back to per-cell encoding" and still load the TE,
+    # hanging. When the TE is already resident on the card, zero budget
+    # passes straight through.
     from training.sysmem import check_load_budget
 
     te_paths = (
         [] if getattr(CACHE.text_stack, "is_model_loaded", False)
         else [CACHE.text_encoder_path]
     )
-    check_load_budget(CACHE.ram_guard, weight_paths=te_paths, stage="文本编码器加载")
+    check_load_budget(CACHE.ram_guard, weight_paths=te_paths, stage="text encoder load")
     try:
         if phase_callback is not None:
             phase_callback("clip")
         encoded = precache([str(p) for p in prompts])
     except Exception:
-        logger.exception("prompt 预编码失败；退回逐格惰性编码")
+        logger.exception("prompt precache failed; falling back to per-cell lazy encoding")
         return
     if vram_policy != "performance":
         release = getattr(CACHE.text_stack, "release_model", None)
         if callable(release):
             release()
     if encoded:
-        logger.info("krea2 预编码 %d 条 prompt；TE 已释放，采样期零占用", encoded)
+        logger.info("krea2 precached %d prompts; TE released, zero usage during sampling", encoded)
 
 
 def _set_lora_multiplier(adapter: Any, scale: float) -> None:
     if adapter.network is None:
-        # 含 fp8 merge 句柄（network=None）：scale 已烘进权重，逐格设值
-        # 安全跳过（fp8 的 lora_scale 轴由 _cell_lora_configs →
-        # CACHE.apply_loras 重 merge 生效）
+        # An fp8 merge handle (network=None): the scale is already baked
+        # into the weights, safe to skip setting a per-cell value (fp8's
+        # lora_scale axis takes effect via _cell_lora_configs ->
+        # CACHE.apply_loras re-merging)
         return
     adapter.network.multiplier = float(scale)
     for lora in getattr(adapter.network, "loras", []):
@@ -659,7 +710,7 @@ def _set_lora_multiplier(adapter: Any, scale: float) -> None:
 
 def _swap_ckpt_for_axis(spec: dict[str, Any], val: Any,
                         lora_configs: list[dict[str, Any]]) -> None:
-    """axis=lora_ckpt 时把 lora_configs[lora_index].path 改成 val。"""
+    """When axis=lora_ckpt, change lora_configs[lora_index].path to val."""
     if spec.get("axis") != "lora_ckpt":
         return
     idx = int(spec.get("lora_index") or 0)
@@ -677,16 +728,19 @@ def _cell_lora_configs(
     *,
     fp8_scale_axes: bool,
 ) -> list[dict[str, Any]] | None:
-    """组装本格需要重挂载的 lora_configs；无需重挂载时返回 None。
+    """Assemble the lora_configs that this cell needs to re-mount; returns None if no re-mount is needed.
 
-    - lora_ckpt 轴：按 lora_index 换单条 path（bf16/fp8 都走这里）。
-    - lora_scale 轴仅在 fp8 底模（``fp8_scale_axes=True``）时在这里生效：
-      merge 无常驻 network，改强度必须 detach 还原 + 重 merge——
-      CACHE.apply_loras 对 supports_hot_reload=False 的句柄自动走该路径
-      （lora_ckpt 轴同款），specs 相同的格子被去重零成本跳过。bf16 走
-      _apply_axis 的 multiplier 热换，不进这里。
-      全局轴语义：所有条目 scale=cell 值；x/y 都是 scale 轴时 y 后写赢，
-      与 _apply_axis 的 x→y 调用顺序一致。
+    - lora_ckpt axis: swaps a single path by lora_index (applies to both bf16/fp8).
+    - lora_scale axis only takes effect here for an fp8 base model
+      (``fp8_scale_axes=True``): a merge has no resident network, so
+      changing the strength requires detach-and-restore + re-merge --
+      CACHE.apply_loras automatically takes this path for a handle with
+      supports_hot_reload=False (same as the lora_ckpt axis); cells with
+      identical specs get deduped and skipped at zero cost. bf16 uses
+      _apply_axis's multiplier hot-swap instead, and doesn't go through here.
+      Global-axis semantics: every entry gets scale=the cell's value; when
+      both x/y are scale axes, whichever is written second wins, matching
+      _apply_axis's x->y call order.
     """
     x_axis = x_spec.get("axis")
     y_axis = y_spec.get("axis") if y_spec is not None else None
@@ -719,12 +773,14 @@ def _apply_axis(
     cur_cfg_scale: float,
     adapters: list[Any],
 ) -> tuple[int, float]:
-    """处理纯数值/scale 轴。lora_ckpt 不在这处理（需要重新 inject，由
-    _run_xy 单独走 CACHE.apply_loras 路径）。
+    """Handle a plain numeric/scale axis. lora_ckpt is not handled here (it
+    needs a re-injection, handled separately by _run_xy via the
+    CACHE.apply_loras path).
 
-    lora_scale 是**全局轴** —— 把所有 adapter 的 multiplier 都设成 cell 值；
-    原本不同 LoRA 的相对权重会消失，但 UI 上权重轴的语义就是「扫一个绝对值」
-    而非「扫某一条 LoRA 的相对值」。
+    lora_scale is a **global axis** -- it sets every adapter's multiplier to
+    the cell's value; the original relative weighting between different
+    LoRAs disappears, but the weight axis's semantics in the UI are "sweep
+    an absolute value", not "sweep one LoRA's relative value".
     """
     axis_type = axis["axis"]
     if axis_type == "steps":
@@ -738,21 +794,25 @@ def _apply_axis(
 
 
 def _setup_monitor(cfg: dict[str, Any]) -> Any:
-    """初始化 train_monitor（每个 task 一份独立 monitor_state.json）。
+    """Initialize train_monitor (one independent monitor_state.json per task).
 
-    前端通过 SSE monitor_progress 拿 samples + xy 元信息；图本身的
-    bytes 走协议 image_done 事件入 server 内存 cache（commit 10 起）。
-    sample_path 字段写虚拟路径（前端只用 split+pop 拿 filename 来构建
-    /api/generate/{tid}/sample/{fn} URL），磁盘上不会有这个文件。
+    The frontend gets samples + xy metadata via SSE monitor_progress; the
+    image bytes themselves go through the protocol's image_done event into
+    the server's in-memory cache (since commit 10). The sample_path field
+    holds a virtual path (the frontend only does split+pop to get the
+    filename to build the /api/generate/{tid}/sample/{fn} URL); no such
+    file actually exists on disk.
     """
     msf = cfg.get("__monitor_state_file")
     if not msf:
         return None
     try:
         from train_monitor import reset_monitor, set_state_file, update_monitor
-        # 关键：daemon 复用进程跨 task 时 MONITOR_STATE 残留，必须清。
-        # 否则上一 task 的 samples 会混入新 task 的 monitor_state.json，
-        # 前端用 currentTask.id 拼 URL 拿旧 filename → 404 破图。
+        # Important: when the daemon process is reused across tasks,
+        # MONITOR_STATE persists, so it must be cleared. Otherwise the
+        # previous task's samples would leak into the new task's
+        # monitor_state.json, and the frontend building a URL from
+        # currentTask.id with the old filename would get a 404 broken image.
         reset_monitor()
         set_state_file(msf)
         update_monitor(config={
@@ -764,12 +824,12 @@ def _setup_monitor(cfg: dict[str, Any]) -> Any:
         })
         return update_monitor
     except Exception as e:
-        logger.warning("monitor 初始化失败: %s", e)
+        logger.warning("monitor init failed: %s", e)
         return None
 
 
 def _encode_png(img: Any) -> tuple[str, int]:
-    """PIL.Image → PNG bytes → base64 string。返回 (b64_str, raw_byte_size)。"""
+    """PIL.Image -> PNG bytes -> base64 string. Returns (b64_str, raw_byte_size)."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     raw = buf.getvalue()
@@ -777,7 +837,7 @@ def _encode_png(img: Any) -> tuple[str, int]:
 
 
 def _encode_jpeg(img: Any, quality: int = 80) -> tuple[str, int]:
-    """中间步预览编码：JPEG 80% 默认，比 PNG 小 ~5x。返回 (b64_str, byte_size)。"""
+    """Intermediate-step preview encoding: JPEG at 80% by default, ~5x smaller than PNG. Returns (b64_str, byte_size)."""
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=quality)
     raw = buf.getvalue()
@@ -789,20 +849,23 @@ def _build_preview_callback(
     every_n: int,
     cancel_event: threading.Event | None = None,
 ) -> Any:
-    """每步推 preview_step 事件；节流命中时附 latent2rgb 预览图 image_b64。
+    """Pushes a preview_step event every step; attaches a latent2rgb preview image_b64 when the throttle hits.
 
-    用户反馈：进度条始终要可见（"当前在做什么，第几步"），预览图按需。
-    本 callback 拆成两路：
-      - 永远 emit preview_step { step, total } —— 前端进度条
-      - every_n>0 且步命中（含末步）→ latent2rgb decode + 附 image_b64
-    callback 在 daemon 主线程同步执行；空逻辑 ~微秒级，latent2rgb（纯线性
-    投影，无 NN forward）+ JPEG 编码 ~1-2ms。
+    User feedback: the progress bar should always be visible ("what's it
+    doing right now, which step"), the preview image is on-demand. This
+    callback splits into two paths:
+      - always emit preview_step { step, total } -- for the frontend progress bar
+      - when every_n>0 and the step hits (including the last step) -> latent2rgb decode + attach image_b64
+    The callback runs synchronously on the daemon's main thread; the empty
+    path is ~microsecond-scale, latent2rgb (a pure linear projection, no NN
+    forward pass) + JPEG encoding is ~1-2ms.
 
-    cancel_event 注入后每步检查，取消延迟从"整张图"降到"一步"。
+    Once cancel_event is injected, it's checked every step, so cancellation
+    latency drops from "a whole image" to "one step".
     """
     def _cb(step: int, total: int, latent: Any) -> None:
         _raise_if_canceled(cancel_event)
-        # 是否带预览图：preview_every_n_steps>0 + 节流命中（含末步）。
+        # Whether to attach a preview image: preview_every_n_steps>0 + throttle hit (including the last step).
         with_image = False
         b64: Optional[str] = None
         byte_size = 0
@@ -819,31 +882,36 @@ def _build_preview_callback(
     return _cb
 
 
-# latent→RGB 线性投影系数按**当前加载族的 spec** 取（D17 收编进 ModelSpec，
-# 单一来源在 families/latent_spaces.py）。Anima 与 Krea2 同为 Wan2.1 16-ch
-# latent 空间（Qwen-Image VAE：ComfyUI supported_models.py
-# `QwenImage.latent_format = latent_formats.Wan21`）；未来不同 latent 空间的族
-# 接入时预览自动跟随。之前误用 TAEFlux（Flux 解码器）→ 颜色反相，已废弃。
+# The latent->RGB linear projection coefficients are taken from the
+# **currently loaded family's spec** (folded into ModelSpec in D17, single
+# source of truth in families/latent_spaces.py). Anima and Krea2 share the
+# same Wan2.1 16-channel latent space (Qwen-Image VAE: ComfyUI's
+# supported_models.py `QwenImage.latent_format = latent_formats.Wan21`);
+# when a family with a different latent space is added in the future, the
+# preview will automatically follow. Previously mistakenly used TAEFlux (the
+# Flux decoder) -> inverted colors, now deprecated.
 from training.families.latent_spaces import WAN21_F8C16 as _WAN21_F8C16  # noqa: E402
 
-# 预览放大目标（最长边像素）。latent 是 1/8 分辨率（1024²→128²），latent2rgb 直出
-# 128²；放大到 512 让前端铺满时不至于过糊，JPEG 仍很小。
+# Preview upscale target (longest-edge pixels). The latent is at 1/8
+# resolution (1024^2 -> 128^2), latent2rgb produces 128^2 directly; upscaling
+# to 512 keeps it from looking too blurry when the frontend fills its area,
+# and the JPEG is still tiny.
 _PREVIEW_TARGET_PX = 512
 
 
 def _preview_latent_spec():
-    """当前加载族的 LatentSpec；未加载（单测 / 启动早期）回退 Wan21 共享空间。"""
+    """The currently loaded family's LatentSpec; falls back to the shared Wan21 space when nothing is loaded (unit tests / early startup)."""
     family = getattr(CACHE, "family", None)
     return family.spec.latent if family is not None else _WAN21_F8C16
 
 
 def _decode_latent2rgb_preview(latent: Any) -> Optional[Any]:
-    """latent → Wan2.1 latent2rgb 线性投影 → PIL.Image。失败返 None（preview 不阻塞）。
+    """latent -> Wan2.1 latent2rgb linear projection -> PIL.Image. Returns None on failure (preview must never block).
 
-    Anima latent shape：[B, 16, F=1, H, W]。对齐 ComfyUI Latent2RGBPreviewer：
+    Anima latent shape: [B, 16, F=1, H, W]. Matches ComfyUI's Latent2RGBPreviewer:
       x0 = latent[0, :, 0]                          # [16, H, W]
-      rgb[h,w,r] = Σ_c x0[c,h,w]·factors[c,r] + bias[r]
-      img = ((rgb + 1) / 2).clamp(0,1) · 255        # [-1,1] → [0,255]
+      rgb[h,w,r] = sum_c x0[c,h,w]*factors[c,r] + bias[r]
+      img = ((rgb + 1) / 2).clamp(0,1) * 255        # [-1,1] -> [0,255]
     """
     try:
         import numpy as np
@@ -862,7 +930,8 @@ def _decode_latent2rgb_preview(latent: Any) -> Optional[Any]:
             rgb = ((rgb + 1.0) / 2.0).clamp(0.0, 1.0)
             arr = (rgb.cpu().numpy() * 255).astype(np.uint8)  # [H, W, 3]
             img = Image.fromarray(arr)
-            # 放大到 _PREVIEW_TARGET_PX 最长边（保持比例），前端再铺满结果区
+            # Upscale to _PREVIEW_TARGET_PX on the longest edge (keeping
+            # aspect ratio); the frontend then fills the result area
             w, h = img.size
             scale = _PREVIEW_TARGET_PX / max(w, h)
             if scale > 1.0:
@@ -877,7 +946,7 @@ def _decode_latent2rgb_preview(latent: Any) -> Optional[Any]:
 
 
 def _virtual_path(task_id: int, filename: str) -> str:
-    """前端只用 split+pop 拿 filename，所以给个看起来像绝对路径的字符串。"""
+    """The frontend only does split+pop to get the filename, so hand it a string that looks like an absolute path."""
     return f"/anima_gen_{task_id}/{filename}"
 
 
@@ -888,15 +957,18 @@ def _run_generate(
     output_dir: Path,
     cancel_event: threading.Event | None = None,
 ) -> None:
-    """跑一次完整 generate（含可选 XY）。
+    """Run one complete generate (optionally including XY).
 
-    commit 10 起：PNG bytes base64 推 stdout（image_done 事件）→ server
-    侧 InferenceDaemon 入 generate_cache；output_dir 不再写盘（保留参数
-    给 anima_generate.py CLI 用法走 fallback 路径）。
+    Since commit 10: PNG bytes are pushed to stdout as base64 (the
+    image_done event) -> the server-side InferenceDaemon puts them into
+    generate_cache; output_dir is no longer written to disk (the parameter
+    is kept for the anima_generate.py CLI usage's fallback path).
 
-    monitor_state.json 仍写（前端 sample_path SSE 链路兼容），但 sample_path
-    是虚拟路径，磁盘上无对应文件 —— 前端只用它 split+pop 拿 filename 来
-    构建 /api/generate/{tid}/sample/{fn} URL。
+    monitor_state.json is still written (for compatibility with the
+    frontend's sample_path SSE pipeline), but sample_path is a virtual path
+    with no corresponding file on disk -- the frontend only does split+pop
+    on it to get the filename, used to build the
+    /api/generate/{tid}/sample/{fn} URL.
     """
     cfg = force_comfy_parity_runtime_config(
         cfg,
@@ -921,15 +993,21 @@ def _run_generate(
     scheduler: str = cfg.get("scheduler", "simple")
     count: int = max(1, int(cfg.get("count", 1)))
     base_seed: int = int(cfg.get("seed", 0))
-    # 蒸馏推理底模（Krea2 Turbo）：studio 按 catalog variant purpose 检测后注入；
-    # anima family 接受并忽略
+    # Distilled inference base model (Krea2 Turbo): studio injects this
+    # after detecting it via the catalog variant purpose; the anima family
+    # accepts and ignores it
     distilled: bool = bool(cfg.get("distilled", False))
 
-    # phase 上报：加载模型/LoRA 阶段（clip/sample/vae 由 sample_image 内部报）→ 进度条覆盖全流程
+    # phase reporting: model/LoRA loading stage (clip/sample/vae are
+    # reported from inside sample_image) -> the progress bar covers the
+    # whole pipeline
     _emit_for(req_id, "phase", name="load")
-    # TE 先行编排（krea2）：prompt 集合封闭——DiT 加载前先让 TE 栈就绪、
-    # 编码全部 prompt、彻底释放 TE。任一时刻 GPU 只有一个大模型（预编码期
-    # 三者同驻峰值 24.1GB → ~15GB；16GB 卡免让位）。anima 族两步均 no-op。
+    # TE-first orchestration (krea2): the prompt set is closed -- get the TE
+    # stack ready before the DiT loads, encode every prompt, then fully
+    # release the TE. At any moment only one large model is on GPU
+    # (during the precache stage all three staying resident peaks at
+    # 24.1GB -> ~15GB; spares a 16GB card from having to make room). Both
+    # steps are no-ops for the anima family.
     CACHE.ensure_text_ready(cfg)
     _precache_prompts_and_release(
         [*prompts, negative_prompt],
@@ -939,8 +1017,9 @@ def _run_generate(
     CACHE.ensure_loaded(cfg)
     adapters = CACHE.apply_loras(cfg.get("lora_configs", []))
 
-    # 进度推送：永远建 callback 推 preview_step（含 step/total）；
-    # preview_every_n_steps>0 时附 image_b64 中间预览图（commit 14）。
+    # Progress push: always builds a callback that pushes preview_step
+    # (including step/total); when preview_every_n_steps>0, attaches an
+    # intermediate preview image_b64 (commit 14).
     preview_every = int(cfg.get("preview_every_n_steps", 0) or 0)
     preview_callback = _build_preview_callback(req_id, preview_every, cancel_event)
 
@@ -1051,11 +1130,13 @@ def _run_xy(
     y_values = y_spec["values"] if y_spec else [None]
     distilled: bool = bool(cfg.get("distilled", False))
 
-    # fp8 底模的 LoRA 是 merge 进权重的（无常驻 network），lora_scale 轴
-    # 不能 multiplier 热换——逐格走 detach 还原 + 重 merge
-    # （_cell_lora_configs 组装 → CACHE.apply_loras，lora_ckpt 轴同款）。
-    # 每个不同 scale 值一次全模型重 merge：scale 放 Y 轴时每行只 merge
-    # 一次（specs 去重），放 X 轴则每格一次。
+    # An fp8 base model's LoRA is merged into the weights (no resident
+    # network), so the lora_scale axis can't hot-swap via multiplier --
+    # each cell goes through detach-and-restore + re-merge
+    # (_cell_lora_configs assembles the config -> CACHE.apply_loras, same
+    # as the lora_ckpt axis). Every distinct scale value triggers one
+    # full-model re-merge: when scale is on the Y axis, each row only
+    # merges once (specs deduped); on the X axis, once per cell.
     fp8_model = False
     if CACHE.model is not None:
         from training.families.krea2.quant_fp8 import model_has_fp8_layers
@@ -1064,15 +1145,16 @@ def _run_xy(
 
     if base_seed == 0:
         base_seed = random.randint(0, 2**31 - 1)
-        logger.info("XY 共享种子（cfg.seed=0 随机化）: %d", base_seed)
+        logger.info("XY shared seed (cfg.seed=0 randomized): %d", base_seed)
 
     base_scales = [float(s.scale) for s in CACHE.last_lora_specs]
     base_lora_paths = [str(s.path) for s in CACHE.last_lora_specs]
     total = len(x_values) * len(y_values)
     _emit_for(req_id, "started", task_id=task_id, total=total)
 
-    # XY 无 prompt 轴——prompt/negative 已由 _run_generate 的 TE 先行编排
-    # 统一预编码并释放 TE，此处逐格全 LRU 命中，无需重复。
+    # XY has no prompt axis -- prompt/negative have already been uniformly
+    # precached and released by _run_generate's TE-first orchestration; each
+    # cell hits the LRU here, no duplicate work needed.
 
     img_idx = 0
     image_done_count = 0
@@ -1080,10 +1162,12 @@ def _run_xy(
     for yi, yv in enumerate(y_values):
         for xi, xv in enumerate(x_values):
             _raise_if_canceled(cancel_event)
-            # lora_ckpt 换文件 /（fp8 时）lora_scale 换强度：组装本格
-            # lora_configs 调 CACHE.apply_loras —— detach 还原 + 重挂载
-            # （bf16 reinject / fp8 重 merge）。base_paths/base_scales 是
-            # 循环外快照，格间互不污染。
+            # lora_ckpt swaps the file / (under fp8) lora_scale swaps the
+            # strength: assemble this cell's lora_configs and call
+            # CACHE.apply_loras -- detach-and-restore + re-mount (bf16
+            # reinject / fp8 re-merge). base_paths/base_scales is a
+            # snapshot taken outside the loop, so cells never contaminate
+            # each other.
             lora_configs = _cell_lora_configs(
                 x_spec, y_spec, xv, yv, base_lora_paths, base_scales,
                 fp8_scale_axes=fp8_model,
@@ -1191,8 +1275,10 @@ def _run_generate_worker(
         failed = True
     finally:
         if failed:
-            # 必须在 except 块结束（异常对象被隐式 del）之后清扫，traceback
-            # 钉住的 frame locals（如 OOM 时半上卡的 state_dict）才收得掉
+            # Must sweep only after the except block ends (the exception
+            # object is implicitly deleted), or the frame locals pinned by
+            # the traceback (e.g. a half-loaded state_dict from an OOM)
+            # can't be freed
             _reclaim_cuda_leftovers()
         _pop_cancel(req_id)
         with _ACTIVE_WORKER_LOCK:
@@ -1218,7 +1304,7 @@ def _start_generate_worker(req_id: str, task_id: int, cfg: dict[str, Any], outpu
 
 
 # ---------------------------------------------------------------------------
-# 主循环
+# Main loop
 # ---------------------------------------------------------------------------
 
 

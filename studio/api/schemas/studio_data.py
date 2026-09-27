@@ -1,9 +1,9 @@
-"""studio_data 迁移请求模型。"""
+"""studio_data migration request model."""
 from __future__ import annotations
 
 from pydantic import BaseModel
 
 
 class StudioDataMigrateRequest(BaseModel):
-    """迁移目标父目录（绝对路径；数据落 `target/studio_data/`，目标不要求为空）。"""
+    """Target parent directory (absolute path; data lands in `target/studio_data/`; target need not be empty)."""
     target: str

@@ -1,15 +1,20 @@
 import { useLayoutEffect, type RefObject } from 'react'
 
-/** textarea 随内容自动撑高，无上限；最小高度 = rows 属性决定的初始高度。
+/** Grows a textarea to fit its content with no upper bound; the minimum
+ * height is whatever the `rows` attribute produces initially.
  *
- * 先把 height 重置为 auto 让浏览器回落到 rows 高度，再设为 scrollHeight —
- * 内容少时 scrollHeight 被 clientHeight 托底，正好回到 rows 最小高度。
- * 配合 className 加 resize-none overflow-hidden（手动拖拽会被下次输入覆盖，
- * 干脆禁掉；hidden 防止撑高瞬间滚动条闪烁）。
+ * First resets height to auto so the browser falls back to the rows height,
+ * then sets it to scrollHeight -- when content is short, scrollHeight is
+ * floored by clientHeight, which lands exactly back at the rows minimum.
+ * Pair this with resize-none overflow-hidden in className (manual drag-resize
+ * would just get overwritten on the next keystroke anyway, so it's disabled
+ * outright; hidden prevents a scrollbar flash during the height change).
  *
- * 元素在 display:none 容器里时（如未激活的 tab 分页）scrollHeight=0，此时直接
- * bail，别把高度压成 0；ResizeObserver 会在它重新可见（尺寸 0→实际）时回调重算，
- * 避免切回该 tab 后 textarea 塌缩。
+ * When the element sits inside a display:none container (e.g. an inactive
+ * tab pane), scrollHeight is 0 -- bail out immediately rather than
+ * collapsing the height to 0. ResizeObserver will fire and recompute once
+ * it becomes visible again (size 0 -> actual), so the textarea doesn't stay
+ * collapsed after switching back to that tab.
  */
 export function useAutoGrowTextarea(
   ref: RefObject<HTMLTextAreaElement>,
@@ -19,18 +24,19 @@ export function useAutoGrowTextarea(
     const el = ref.current
     if (!el) return
     const fit = () => {
-      // offsetParent===null ⇒ 自身或祖先 display:none，scrollHeight 不可信，先不动高度
+      // offsetParent===null => self or an ancestor is display:none, scrollHeight is unreliable, leave the height alone
       if (el.offsetParent === null) return
       el.style.height = 'auto'
-      // scrollHeight 不含 border；box-sizing: border-box 下补回去，否则每次少
-      // 2px 出现滚动条
+      // scrollHeight excludes the border; add it back for box-sizing:
+      // border-box, otherwise a scrollbar appears 2px short each time
       const border = el.offsetHeight - el.clientHeight
-      // 额外加一行行高：给右下角的 token 计数角标留空间（内容贴底时不重叠）
+      // Add one extra line height: leaves room for the token-count badge in
+      // the bottom-right corner (so it doesn't overlap content flush with the bottom)
       const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20
       el.style.height = `${el.scrollHeight + border + lineHeight}px`
     }
     fit()
-    // 监听尺寸变化：tab 切换让元素从隐藏变可见时重算，宽度变化（换行影响高度）时也重算
+    // Watch for size changes: recomputes when a tab switch makes the element go from hidden to visible, and also on width changes (which affect height via line wrapping)
     const ro = new ResizeObserver(fit)
     ro.observe(el)
     return () => ro.disconnect()

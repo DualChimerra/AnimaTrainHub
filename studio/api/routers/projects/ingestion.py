@@ -1,15 +1,15 @@
-"""图片获取 + 预处理（PR-6.5 commit 3 从 server.py 抽出）。
+"""Image fetching + preprocessing (extracted from server.py in PR-6.5 commit 3).
 
-14 routes：
+14 routes:
 
-  下载 / 上传 (5)
-    POST /api/projects/{pid}/download/estimate    booru count API 估算
-    POST /api/projects/{pid}/download             启动 booru 下载 job
-    POST /api/projects/{pid}/upload               多文件本地上传 (单图 / zip)
-    POST /api/projects/{pid}/upload-from-path     服务端可见路径导入单图 / zip
-    GET  /api/projects/{pid}/download/status      最近 download job + log_tail
+  download / upload (5)
+    POST /api/projects/{pid}/download/estimate    estimate via booru count API
+    POST /api/projects/{pid}/download             start a booru download job
+    POST /api/projects/{pid}/upload               local multi-file upload (single image / zip)
+    POST /api/projects/{pid}/upload-from-path     import single image / zip from a server-visible path
+    GET  /api/projects/{pid}/download/status      most recent download job + log_tail
 
-  预处理 (13)
+  preprocessing (13)
     POST /api/projects/{pid}/preprocess/start
     GET  /api/projects/{pid}/preprocess/status
     GET  /api/projects/{pid}/preprocess/files
@@ -22,9 +22,9 @@
     DELETE /api/projects/{pid}/versions/{vid}/preprocess/mask
     POST /api/projects/{pid}/preprocess/files/reset
     POST /api/projects/{pid}/preprocess/files/restore
-    GET  /api/projects/{pid}/preprocess/thumb     [Deprecated] 兼容旧 URL
+    GET  /api/projects/{pid}/preprocess/thumb     [Deprecated] kept for old URL compatibility
 
-注：duplicates scan / apply（preprocess 子域）属于 commit 4（curation），不在本文件。
+Note: duplicates scan / apply (a preprocess sub-domain) belongs to commit 4 (curation), not this file.
 """
 from __future__ import annotations
 
@@ -73,9 +73,10 @@ logger = logging.getLogger(__name__)
 
 @router.post("/api/projects/{pid}/download/estimate")
 def estimate_download(pid: int, body: EstimateRequest) -> dict[str, Any]:
-    """先调 booru 的 count API 估算命中数，再让用户决定 count。
+    """Call the booru's count API to estimate hits, then let the user decide the count.
 
-    返回 -1 表示未知（API 不支持精确计数）；前端按「下载全部」处理。
+    Returns -1 for unknown (the API doesn't support an exact count); the frontend treats
+    that as "download all".
     """
     if body.api_source not in {"gelbooru", "danbooru"}:
         raise ValidationError(
@@ -170,25 +171,26 @@ def start_download(pid: int, body: DownloadRequest) -> dict[str, Any]:
     return job
 
 
-_UPLOAD_CHUNK = 1 << 20  # 1 MiB 流式落盘块
+_UPLOAD_CHUNK = 1 << 20  # 1 MiB streaming write chunk
 
 
 def _staging_root() -> Path:
-    """上传暂存根目录 = STUDIO_DATA/uploads。
+    """Upload staging root = STUDIO_DATA/uploads.
 
-    用 ``project_jobs.JOB_LOGS_DIR.parent`` 派生（而非直接 STUDIO_DATA 常量），
-    这样测试 monkeypatch JOB_LOGS_DIR 时暂存目录也跟着进 tmp，不污染仓库。
+    Derived from ``project_jobs.JOB_LOGS_DIR.parent`` (rather than the STUDIO_DATA constant
+    directly), so that when tests monkeypatch JOB_LOGS_DIR the staging dir follows it into
+    tmp too, instead of polluting the repo.
     """
     return project_jobs.JOB_LOGS_DIR.parent / "uploads"
 
 
 def _safe_name(name: str) -> str:
-    """剥掉路径段，只留 basename（防穿越）。"""
+    """Strip path segments, keep only the basename (prevents path traversal)."""
     return (name or "").replace("\\", "/").rsplit("/", 1)[-1]
 
 
 async def _stage_upload_files(files: list[UploadFile], staging_dir: Path) -> int:
-    """把上传文件流式落到 staging_dir（分块，不整包进内存）。返回落盘文件数。"""
+    """Stream uploaded files to staging_dir (chunked, never loaded fully into memory). Returns the file count written."""
     staging_dir.mkdir(parents=True, exist_ok=True)
     n = 0
     for f in files:
@@ -207,19 +209,20 @@ async def _stage_upload_files(files: list[UploadFile], staging_dir: Path) -> int
 
 
 def _publish_upload_log(pid: int, line: str) -> None:
-    """推一行上传阶段日志给 SSE 订阅者（前端 TaskLogDrawer 显示）。
+    """Publish one upload-stage log line to SSE subscribers (shown in the frontend's TaskLogDrawer).
 
-    `accept_many` 的 on_log 回调每 25 张 / 5s / 慢图触发一次（节流，不刷屏）。
-    跟 logger.info 并存：前者给用户看，后者落 studio.log 给 debug 用。
+    `accept_many`'s on_log callback fires every 25 images / 5s / on a slow image (throttled,
+    to avoid flooding). Coexists with logger.info: the former is for the user, the latter goes
+    to studio.log for debugging.
     """
     bus.publish({"type": "project_upload_log", "project_id": pid, "line": line})
 
 
 def _publish_upload_state(pid: int, status: str) -> None:
-    """推 upload 状态转换（running / done / failed）给 SSE 订阅者。
+    """Publish an upload state transition (running / done / failed) to SSE subscribers.
 
-    LogSource.status 用这个驱动 TaskLogDrawer 的徽标 + 自动展开（live 进入
-    automatic open；终态保持展开但不再 auto-open）。
+    LogSource.status uses this to drive TaskLogDrawer's badge + auto-expand (opens
+    automatically while live; stays expanded but stops auto-opening once terminal).
     """
     bus.publish({"type": "project_upload_state", "project_id": pid, "status": status})
 
@@ -228,12 +231,13 @@ def _publish_upload_state(pid: int, status: str) -> None:
 async def upload_local_files(
     pid: int, files: list[UploadFile] = File(...),
 ) -> dict[str, Any]:
-    """本地上传：单图 / zip 包 / 同名 .txt caption → 后台 job 处理。
+    """Local upload: single image / zip / matching .txt caption -> handled by a background job.
 
-    端点只把上传文件**流式落到 staging 目录**就立刻创建 upload job 返回（秒级），
-    真正的解压 / convert_to_png / caption 配对在 upload_worker 后台跑。这样大 zip
-    不会卡在同步请求里触发 Cloudflare 100s 超时（524）。前端轮询
-    `upload/status` 看进度 + 结果。
+    The endpoint just **streams the uploaded files to a staging dir** and immediately returns
+    an upload job (sub-second); the actual unzip / convert_to_png / caption pairing runs in
+    upload_worker in the background. This way a large zip doesn't stall inside the synchronous
+    request and trip Cloudflare's 100s timeout (524). The frontend polls `upload/status` for
+    progress + results.
     """
     if not files:
         raise ValidationError(
@@ -242,7 +246,7 @@ async def upload_local_files(
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
     if not p:
-        raise HTTPException(404, f"项目不存在: id={pid}")
+        raise HTTPException(404, f"Project not found: id={pid}")
 
     staging_dir = _staging_root() / f"{pid}_{uuid.uuid4().hex}"
     try:
@@ -252,7 +256,7 @@ async def upload_local_files(
         raise
     if staged == 0:
         shutil.rmtree(staging_dir, ignore_errors=True)
-        raise HTTPException(400, "没有有效文件名")
+        raise HTTPException(400, "No valid filenames")
 
     with db.connection_for() as conn:
         job = project_jobs.create_job(
@@ -267,7 +271,7 @@ async def upload_local_files(
 
 @router.post("/api/projects/{pid}/upload-from-path")
 def upload_local_file_from_path(pid: int, body: UploadFromPathBody) -> dict[str, Any]:
-    """从 server 可见路径导入单图 / zip → 后台 upload job（不拷贝、不删原文件）。"""
+    """Import a single image / zip from a server-visible path -> background upload job (no copy, doesn't delete the original)."""
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
     if not p:
@@ -285,7 +289,7 @@ def upload_local_file_from_path(pid: int, body: UploadFromPathBody) -> dict[str,
             code="path.not_found", details={"path": body.path},
         )
     if not src.is_file():
-        raise HTTPException(400, "请选择文件")
+        raise HTTPException(400, "Please select a file")
 
     with db.connection_for() as conn:
         job = project_jobs.create_job(
@@ -300,14 +304,15 @@ def upload_local_file_from_path(pid: int, body: UploadFromPathBody) -> dict[str,
 
 @router.get("/api/projects/{pid}/upload/status")
 def upload_status(pid: int) -> dict[str, Any]:
-    """最近一条 upload job + log_tail + 结果（added/skipped）。
+    """Most recent upload job + log_tail + result (added/skipped).
 
-    前端上传完字节后轮询这里：job 终态前显示「处理中」，done 后用 result 弹
-    added/skipped 汇总并刷新图库；failed 显示 error_msg。
+    The frontend polls this after uploading bytes: shows "processing" before the job reaches
+    a terminal state, then on done pops the added/skipped summary from result and refreshes
+    the gallery; on failed shows error_msg.
     """
     with db.connection_for() as conn:
         if not projects.get_project(conn, pid):
-            raise HTTPException(404, f"项目不存在: id={pid}")
+            raise HTTPException(404, f"Project not found: id={pid}")
         job = project_jobs.latest_for(conn, project_id=pid, kind="upload")
     if not job:
         return {"job": None, "log_tail": "", "result": None}
@@ -349,15 +354,15 @@ def download_status(pid: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# ADR 0010 — train-scope preprocess endpoint 群
+# ADR 0010 -- train-scope preprocess endpoint group
 #
-# `/api/projects/{pid}/versions/{vid}/preprocess/*` —— scope 收窄到 train 集合，
-# 调 *_train 服务函数。
+# `/api/projects/{pid}/versions/{vid}/preprocess/*` -- scope narrowed to the train set,
+# calls the *_train service functions.
 # ---------------------------------------------------------------------------
 
 
 def _resolve_pv_or_404(pid: int, vid: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    """拿 (project, version) 校验项目+版本存在且 vid 属于 pid。"""
+    """Fetch (project, version), validating both exist and vid belongs to pid."""
     with db.connection_for() as conn:
         p = projects.get_project(conn, pid)
         if not p:
@@ -376,10 +381,10 @@ def _resolve_pv_or_404(pid: int, vid: int) -> tuple[dict[str, Any], dict[str, An
 def start_preprocess_train(
     pid: int, vid: int, body: PreprocessStartRequest,
 ) -> dict[str, Any]:
-    """ADR 0010 train scope: 对 versions/{label}/train/{folder}/ 跑 upscale。
+    """ADR 0010 train scope: run upscale on versions/{label}/train/{folder}/.
 
-    跟老 `start_preprocess` 同样的 body schema + validation；worker 看
-    job.version_id 派发到 _run_upscale_train。
+    Same body schema + validation as the old `start_preprocess`; the worker looks at
+    job.version_id and dispatches to _run_upscale_train.
     """
     if body.mode not in ("all", "selected", "all_force"):
         raise ValidationError(
@@ -440,7 +445,7 @@ def start_preprocess_train(
 
 @router.get("/api/projects/{pid}/versions/{vid}/preprocess/status")
 def preprocess_status_train(pid: int, vid: int) -> dict[str, Any]:
-    """最新 train-scope preprocess job + 日志尾 + train summary。"""
+    """Latest train-scope preprocess job + log tail + train summary."""
     p, v = _resolve_pv_or_404(pid, vid)
     with db.connection_for() as conn:
         job = project_jobs.latest_for(
@@ -465,11 +470,12 @@ def preprocess_status_train(pid: int, vid: int) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/versions/{vid}/preprocess/files")
 def list_preprocess_files_train(pid: int, vid: int) -> dict[str, Any]:
-    """train scope: 列 versions/{label}/train/ 全部图 + manifest 元数据。
+    """train scope: list all images under versions/{label}/train/ + manifest metadata.
 
-    新模型下 list_pending / list_processed 二元概念消失（详 ADR 0010
-    §Manifest schema v2）；统一返回 `images` 列表，前端按 entry 字段差异
-    渲染状态徽章。response 仍含 `summary` 跟老 endpoint 一致。
+    Under the new model, the list_pending / list_processed binary concept is gone (see ADR
+    0010 §Manifest schema v2); a unified `images` list is returned instead, and the frontend
+    renders status badges based on differences in entry fields. The response still includes
+    `summary`, matching the old endpoint.
     """
     p, v = _resolve_pv_or_404(pid, vid)
     return {
@@ -480,7 +486,7 @@ def list_preprocess_files_train(pid: int, vid: int) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/versions/{vid}/preprocess/duplicates/removed")
 def list_duplicate_removed_train(pid: int, vid: int) -> dict[str, Any]:
-    """train scope: 「已删除」tab 列被去重审核标记的 manifest entries。"""
+    """train scope: list manifest entries flagged by dedup review for the "Removed" tab."""
     p, v = _resolve_pv_or_404(pid, vid)
     return {
         "images": preprocess_svc.list_duplicate_removed_workspace_train(
@@ -491,8 +497,8 @@ def list_duplicate_removed_train(pid: int, vid: int) -> dict[str, Any]:
 
 @router.get("/api/projects/{pid}/versions/{vid}/preprocess/crop/workspace")
 def list_crop_workspace_train_endpoint(pid: int, vid: int) -> dict[str, Any]:
-    """train scope: 裁剪页工作集 = train/{folder}/{image} 全部 + 像素尺寸 +
-    processed 标记。"""
+    """train scope: crop-page working set = all of train/{folder}/{image} + pixel size +
+    processed flag."""
     p, v = _resolve_pv_or_404(pid, vid)
     return {"images": preprocess_svc.list_crop_workspace_train(p, v["label"])}
 
@@ -501,8 +507,8 @@ def list_crop_workspace_train_endpoint(pid: int, vid: int) -> dict[str, Any]:
 def start_preprocess_crop_train(
     pid: int, vid: int, body: PreprocessCropRequest,
 ) -> dict[str, Any]:
-    """train scope: 创建 crop job。`crops` 的源文件名是 train rel path
-    （`"1_data/X.png"`，跟 list_crop_workspace_train 返回 `name` 一致）。"""
+    """train scope: create a crop job. `crops`'s source filenames are train-relative paths
+    (`"1_data/X.png"`, matching the `name` returned by list_crop_workspace_train)."""
     if not body.crops:
         raise ValidationError(
             "No crop regions provided",
@@ -527,11 +533,11 @@ async def inpaint_save_train_endpoint(
     name: str = Form(...),
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
-    """train scope 涂抹保存：前端 canvas 整图导出（PNG）覆盖 `train/{name}`。
+    """train scope inpaint save: frontend exports the full canvas (PNG) to overwrite `train/{name}`.
 
-    同步写盘（无 job）；产物统一 `{folder}/{stem}.png`、manifest 标
-    processed=True（详 core.inpaint_save_train）。PIL 编码大图有秒级耗时，
-    走 threadpool 不堵 event loop。
+    Written to disk synchronously (no job); the output is always `{folder}/{stem}.png`, and
+    the manifest is marked processed=True (see core.inpaint_save_train). PIL encoding a large
+    image can take seconds, so it runs in a threadpool to avoid blocking the event loop.
     """
     p, v = _resolve_pv_or_404(pid, vid)
     data = await file.read()
@@ -544,8 +550,9 @@ async def inpaint_save_train_endpoint(
 
 @router.get("/api/projects/{pid}/versions/{vid}/preprocess/mask")
 def get_mask_train_endpoint(pid: int, vid: int, name: str) -> FileResponse:
-    """训练 mask sidecar（灰度 PNG，尺寸=源图）。无 mask → 404（前端以此
-    区分「从未画过」）。前端带 mask_mtime cache-buster，这里只挂 no-cache。"""
+    """Training mask sidecar (grayscale PNG, same size as the source image). No mask -> 404
+    (the frontend uses this to distinguish "never painted"). The frontend appends a
+    mask_mtime cache-buster, so this only needs no-cache."""
     p, v = _resolve_pv_or_404(pid, vid)
     path = preprocess_svc.mask_file_train(p, v["label"], name=name)
     if path is None:
@@ -565,7 +572,7 @@ async def put_mask_train_endpoint(
     name: str = Form(...),
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
-    """写入训练 mask（前端 mask 层导出的灰度 PNG）。同步写盘无 job。"""
+    """Write the training mask (grayscale PNG exported from the frontend's mask layer). Synchronous disk write, no job."""
     p, v = _resolve_pv_or_404(pid, vid)
     data = await file.read()
     res = await run_in_threadpool(
@@ -577,7 +584,7 @@ async def put_mask_train_endpoint(
 
 @router.delete("/api/projects/{pid}/versions/{vid}/preprocess/mask")
 def delete_mask_train_endpoint(pid: int, vid: int, name: str) -> dict[str, Any]:
-    """删除训练 mask（= 该图恢复全图正常学习）。"""
+    """Delete the training mask (= this image reverts to normal full-image training)."""
     p, v = _resolve_pv_or_404(pid, vid)
     res = preprocess_svc.mask_delete_train(p, v["label"], name=name)
     _publish_project_state(p)
@@ -586,9 +593,10 @@ def delete_mask_train_endpoint(pid: int, vid: int, name: str) -> dict[str, Any]:
 
 @router.post("/api/projects/{pid}/versions/{vid}/preprocess/files/reset")
 def reset_preprocess_files_train(pid: int, vid: int) -> dict[str, Any]:
-    """train scope: 清空 train manifest 状态（**不动** train/ 物理文件，详
-    ADR 0010 §train_clear_all 决策）。下游 list_train_images 仍能列物理图，
-    只是 entry 元数据没了；UI 走未处理状态徽章。
+    """train scope: clear train manifest state (**does not touch** the physical files in
+    train/, see ADR 0010 §train_clear_all decision). list_train_images downstream can still
+    list the physical images; only the entry metadata is gone. The UI falls back to the
+    "unprocessed" status badge.
     """
     p, v = _resolve_pv_or_404(pid, vid)
     pdir = projects.project_dir(p["id"], p["slug"])
@@ -601,9 +609,9 @@ def reset_preprocess_files_train(pid: int, vid: int) -> dict[str, Any]:
 def restore_preprocess_files_train(
     pid: int, vid: int, body: PreprocessRestoreRequest,
 ) -> dict[str, Any]:
-    """train scope restore: 从 `download/{entry.origin}` 复制覆盖回
-    `train/{name}`。返回 `{restored, missing, no_origin}` 三组（详 ADR 0010
-    §Restore 语义）；`no_origin` 给前端三选项 UI [拖入替换 / 保留 / 移除] 用。
+    """train scope restore: copy from `download/{entry.origin}` back over `train/{name}`.
+    Returns three groups, `{restored, missing, no_origin}` (see ADR 0010 §Restore semantics);
+    `no_origin` feeds the frontend's three-option UI [drag in a replacement / keep / remove].
     """
     if not body.names:
         return {"restored": [], "missing": [], "no_origin": []}

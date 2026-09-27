@@ -76,14 +76,14 @@ def test_run_sample_preserves_empty_negative_and_passes_seed(monkeypatch, tmp_pa
     ctx.family.sample_image = fake_sample_image
     sample_runner.run_sample(ctx, prompt="1girl", sample_path=tmp_path / "sample.png")
 
-    # 对齐 ComfyUI：空负面就是空，不注入隐式默认串
+    # Match ComfyUI: an empty negative stays empty, no implicit default string is injected
     assert records[-1]["negative_prompt"] == ""
     assert records[-1]["seed"] == 123
     assert "comfy_parity" not in records[-1]
 
 
 def test_run_sample_clears_tlora_timestep_mask_before_sampling(monkeypatch, tmp_path) -> None:
-    """#215 T-LoRA：sample 前必须清训练态 mask（merge 冲突解法的回归锚）。"""
+    """#215 T-LoRA: the training-mode mask must be cleared before sampling (regression anchor for the merge-conflict fix)."""
     ctx = _ctx()
     ctx.family.sample_image = lambda *a, **k: FakeImage()
     sample_runner.run_sample(ctx, prompt="1girl", sample_path=tmp_path / "sample.png")

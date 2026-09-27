@@ -1,13 +1,3 @@
-"""PR-1 C5 — trace_id ContextVar + Middleware + Filter 验证。
-
-覆盖：
-  - new_trace_id() 格式与稳定性
-  - bind / get / reset 基本 API
-  - ContextFilter 注入 trace_id 到 LogRecord
-  - TraceIdMiddleware：读 X-Trace-Id / 生成新 / 写回 response header
-  - 跨 endpoint 的 contextvar 隔离（一个请求 bind 不污染其它）
-  - HTTP 错误响应也带 X-Trace-Id（middleware 在所有响应外层）
-"""
 from __future__ import annotations
 
 import logging
@@ -40,7 +30,7 @@ def test_new_trace_id_is_24_hex_chars() -> None:
 
 def test_new_trace_id_is_unique() -> None:
     ids = {new_trace_id() for _ in range(100)}
-    assert len(ids) == 100, "uuid4-based id 应几乎不冲突"
+    assert len(ids) == 100, "uuid4-based ids should almost never collide"
 
 
 # ── bind / get / reset ───────────────────────────────────────────────────
@@ -58,7 +48,7 @@ def test_bind_and_get_trace_id() -> None:
         assert get_trace_id() == "test-trace-001"
     finally:
         reset_trace_id(token)
-    assert get_trace_id() is None, "reset 后应回到 None"
+    assert get_trace_id() is None, "should be back to None after reset"
 
 
 # ── ContextFilter ─────────────────────────────────────────────────────────
@@ -80,7 +70,6 @@ def test_context_filter_injects_trace_id_into_record() -> None:
 
 
 def test_context_filter_does_not_overwrite_existing_trace_id() -> None:
-    """如果 caller 显式 logger.info(..., extra={"trace_id": "X"}) 已经设了，filter 不改。"""
     f = ContextFilter()
     record = logging.LogRecord(
         name="x", level=logging.INFO, pathname="/x.py", lineno=1,
@@ -128,21 +117,19 @@ def test_middleware_adds_trace_id_header_to_response(client: TestClient) -> None
     resp = client.get("/api/health")
     assert resp.status_code == 200
     assert TRACE_HEADER in resp.headers, (
-        f"middleware 应给所有响应加 {TRACE_HEADER}；实际 headers: {dict(resp.headers)}"
+        f"middleware should add {TRACE_HEADER} to every response; actual headers: {dict(resp.headers)}"
     )
     tid = resp.headers[TRACE_HEADER]
     assert len(tid) == 24
 
 
 def test_middleware_echoes_client_trace_id(client: TestClient) -> None:
-    """前端传 X-Trace-Id → 后端用该值，response 回带同样 id。"""
     custom_tid = "client-provided-trace-id-x"
     resp = client.get("/api/health", headers={TRACE_HEADER: custom_tid})
     assert resp.headers[TRACE_HEADER] == custom_tid
 
 
 def test_middleware_generates_new_when_client_omits(client: TestClient) -> None:
-    """client 不传 → 后端生成新 24 字符 hex。"""
     resp = client.get("/api/health")
     tid = resp.headers[TRACE_HEADER]
     assert len(tid) == 24
@@ -150,7 +137,6 @@ def test_middleware_generates_new_when_client_omits(client: TestClient) -> None:
 
 
 def test_middleware_isolates_trace_id_between_requests(client: TestClient) -> None:
-    """连续两个请求 trace_id 不同 — 验证 ContextVar 不 leak。"""
     r1 = client.get("/api/health")
     r2 = client.get("/api/health")
     assert r1.headers[TRACE_HEADER] != r2.headers[TRACE_HEADER]
@@ -159,21 +145,18 @@ def test_middleware_isolates_trace_id_between_requests(client: TestClient) -> No
 def test_middleware_adds_trace_id_on_4xx_response(client: TestClient,
                                                     tmp_path: Path,
                                                     monkeypatch: pytest.MonkeyPatch) -> None:
-    """4xx 错误响应也必须带 trace_id（debug 价值最大的场景）。"""
     from studio.services.presets import io as presets_io
     monkeypatch.setattr(presets_io, "USER_PRESETS_DIR", tmp_path / "presets")
     resp = client.get("/api/presets/__nonexistent_for_trace_test__")
     assert resp.status_code == 404
-    assert TRACE_HEADER in resp.headers, "4xx 也必须带 trace_id 给用户截图"
+    assert TRACE_HEADER in resp.headers, "4xx responses must also carry trace_id for user screenshots"
     assert len(resp.headers[TRACE_HEADER]) == 24
 
 
-# ── Filter 装到 setup_logging 后 record 自动带 ──────────────────────────
 
 
 def test_setup_logging_filter_picks_up_contextvar(tmp_path: Path,
                                                     monkeypatch: pytest.MonkeyPatch) -> None:
-    """setup_logging 后 logger.x 调用自动带 trace_id 进 JSON line。"""
     monkeypatch.delenv("ANIMA_LOGGING_NO_BOOTSTRAP", raising=False)
     _reset_for_tests()
     from studio.infrastructure.logging import setup_logging, STUDIO_LOG_NAME

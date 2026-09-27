@@ -1,4 +1,3 @@
-"""PP1 — projects.py: slug 唯一性、目录创建、硬删除。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,7 +26,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_slugify_basic() -> None:
     assert projects.slugify("Cosmic Kaguya") == "cosmic-kaguya"
     assert projects.slugify("  Mixed-Case 123  ") == "mixed-case-123"
-    assert projects.slugify("中文名") == "project"  # 全非 ASCII → fallback
+    assert projects.slugify("имя") == "project"
     assert projects.slugify("") == "project"
     assert projects.slugify("a/b/c") == "a-b-c"
 
@@ -43,27 +42,21 @@ def test_unique_slug_appends_suffix(isolated) -> None:
 
 
 def test_create_uses_explicit_slug(isolated) -> None:
-    """显式 slug 覆盖 title 派生；和 title 派生共用同一唯一性命名空间。"""
     with db.connection_for(isolated["db"]) as conn:
-        # 全中文 title 但显式给 ASCII slug → 文件夹名可读，不再塌成 project
-        p = projects.create_project(conn, title="甘雨", slug="ganyu")
+        p = projects.create_project(conn, title="Ганюй", slug="ganyu")
         assert p["slug"] == "ganyu"
-        assert p["title"] == "甘雨"  # title 原样保留中文
-        # 显式 slug 仍过 slugify 归一化（大小写 / 非法字符 / 防 API 绕过前端）
+        assert p["title"] == "Ганюй"
         q = projects.create_project(conn, title="x", slug="My Cool/Name")
         assert q["slug"] == "my-cool-name"
-        # 显式 slug 与 title 派生撞名 → 照样走 -N 后缀
-        r = projects.create_project(conn, title="Ganyu")  # 派生 slug=ganyu
+        r = projects.create_project(conn, title="Ganyu")
         assert r["slug"] == "ganyu-2"
 
 
 def test_create_blank_slug_falls_back_to_title(isolated) -> None:
-    """slug 留空 / 纯空白 / 清理后为空 → 回退到从 title 派生。"""
     with db.connection_for(isolated["db"]) as conn:
         a = projects.create_project(conn, title="Hello World", slug="   ")
         assert a["slug"] == "hello-world"
-        # 全中文 + 留空 slug → 仍走 project 兜底（现状不变）
-        b = projects.create_project(conn, title="中文名", slug="")
+        b = projects.create_project(conn, title="имя", slug="")
         assert b["slug"] == "project"
 
 
@@ -78,22 +71,20 @@ def test_create_creates_directory_layout(isolated) -> None:
     pdir = projects.project_dir(p["id"], p["slug"])
     assert pdir.exists()
     assert (pdir / "download").is_dir()
-    assert (pdir / "preprocess").is_dir()  # 预处理阶段产物目录
+    assert (pdir / "preprocess").is_dir()
     assert (pdir / "versions").is_dir()
     assert (pdir / "project.json").exists()
-    # ADR-0007 PR-5: project 无 stage 字段（DB 列还在但会随 v9 destructive 删）
     assert p["note"] == "abc"
 
 
 def test_stats_counts_download_and_preprocess(isolated) -> None:
-    """stats_for_project 同时返回 download / preprocess 图片数。"""
     with db.connection_for(isolated["db"]) as conn:
         p = projects.create_project(conn, title="StatTest")
     pdir = projects.project_dir(p["id"], p["slug"])
 
     (pdir / "download" / "a.png").write_bytes(b"x")
     (pdir / "download" / "b.jpg").write_bytes(b"x")
-    (pdir / "download" / "ignore.txt").write_bytes(b"x")  # 非图
+    (pdir / "download" / "ignore.txt").write_bytes(b"x")
     (pdir / "preprocess" / "a.png").write_bytes(b"x")
 
     s = projects.stats_for_project(p)
@@ -108,7 +99,6 @@ def test_create_rejects_empty_title(isolated) -> None:
 
 
 def test_update_writes_project_json(isolated) -> None:
-    """ADR-0007 PR-5: stage 已删；只剩 note / title / active_version_id 可 PATCH。"""
     with db.connection_for(isolated["db"]) as conn:
         p = projects.create_project(conn, title="X")
         projects.update_project(conn, p["id"], note="updated")

@@ -1,6 +1,6 @@
-"""PR-S1a — tools/select_torch_index.py bootstrap helper。
+"""PR-S1a -- tools/select_torch_index.py bootstrap helper.
 
-不真跑 nvidia-smi，用 monkeypatch 模拟。
+Doesn't actually run nvidia-smi; uses monkeypatch to simulate it.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _HELPER_PATH = _REPO_ROOT / "tools" / "select_torch_index.py"
 
 @pytest.fixture
 def helper_module():
-    """通过文件路径手动加载 helper —— tools/ 不是 package（无 __init__.py）。"""
+    """Manually load the helper by file path -- tools/ isn't a package (no __init__.py)."""
     spec = importlib.util.spec_from_file_location(
         "_select_torch_index_for_test", _HELPER_PATH
     )
@@ -27,20 +27,20 @@ def helper_module():
 
 
 # ---------------------------------------------------------------------------
-# select_index_url: driver 主号 → URL
+# select_index_url: driver major version -> URL
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("major,expected_tag", [
-    (596, "cu128"),  # 用户实测驱动
+    (596, "cu128"),  # driver a user actually tested
     (570, "cu128"),
-    (555, "cu128"),  # 边界
-    (554, "cu126"),  # 边界下方
+    (555, "cu128"),  # boundary
+    (554, "cu126"),  # just below the boundary
     (550, "cu126"),
     (549, "cu124"),
     (545, "cu124"),
     (470, "cu118"),
-    (469, None),     # 太旧
+    (469, None),     # too old
     (None, None),
 ])
 def test_select_index_url(helper_module, major, expected_tag) -> None:
@@ -52,7 +52,7 @@ def test_select_index_url(helper_module, major, expected_tag) -> None:
 
 
 # ---------------------------------------------------------------------------
-# detect_driver_major: nvidia-smi 解析
+# detect_driver_major: nvidia-smi parsing
 # ---------------------------------------------------------------------------
 
 
@@ -98,7 +98,7 @@ def test_detect_driver_major_garbage_output(
 def test_detect_driver_major_first_line_when_multi_gpu(
     helper_module, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nvidia-smi 多卡时一行一个；用第一个就行（同机驱动版本一致）。"""
+    """nvidia-smi prints one line per card on multi-GPU machines; using the first is fine (driver version matches across cards on one machine)."""
     monkeypatch.setattr(
         helper_module.subprocess, "run",
         lambda *a, **k: MagicMock(returncode=0, stdout="555.86\n555.86\n", stderr=""),
@@ -107,14 +107,14 @@ def test_detect_driver_major_first_line_when_multi_gpu(
 
 
 # ---------------------------------------------------------------------------
-# main(): 端到端 + 输出格式
+# main(): end-to-end + output format
 # ---------------------------------------------------------------------------
 
 
 def test_main_outputs_url_no_trailing_newline(
     helper_module, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """shell 用 $() / for /f 取输出；末尾不带换行避免歧义。"""
+    """shell captures output with $() / for /f; no trailing newline, to avoid ambiguity."""
     monkeypatch.setattr(helper_module, "detect_driver_major", lambda: 555)
     rc = helper_module.main()
     assert rc == 0
@@ -135,7 +135,7 @@ def test_main_outputs_nothing_when_no_driver(
 def test_main_outputs_nothing_when_driver_too_old(
     helper_module, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """旧驱动（< 470）→ 静默 → caller 走 PyPI 默认（CPU torch）。"""
+    """Old driver (< 470) -> silent -> caller falls back to the PyPI default (CPU torch)."""
     monkeypatch.setattr(helper_module, "detect_driver_major", lambda: 460)
     rc = helper_module.main()
     assert rc == 0
@@ -143,12 +143,12 @@ def test_main_outputs_nothing_when_driver_too_old(
 
 
 # ---------------------------------------------------------------------------
-# 与 studio.services.torch_setup 的映射保持一致
+# kept consistent with studio.services.torch_setup's mapping
 # ---------------------------------------------------------------------------
 
 
 def test_mapping_matches_torch_setup_canonical(helper_module) -> None:
-    """helper 里的 _DRIVER_TO_CU 必须与 torch_setup 的源一致（避免 drift）。"""
+    """The helper's _DRIVER_TO_CU must match torch_setup's source (to avoid drift)."""
     from studio.services.runtime.torch import _DRIVER_TO_BEST_CU
     canonical = [(int(thresh), tag) for thresh, tag in _DRIVER_TO_BEST_CU]
     assert helper_module._DRIVER_TO_CU == canonical

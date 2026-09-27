@@ -1,7 +1,7 @@
-"""MSE loss：包装 F.mse_loss(reduction='none')，提供 LossProtocol 接口。
+"""MSE loss: wraps F.mse_loss(reduction='none'), exposing the LossProtocol interface.
 
-跟 PR-A/B/C 之前的 loop.py 行为字节级一致（同 pred/target/t 输入下，
-mse.compute() 输出等价于 F.mse_loss(reduction='none')）。
+Byte-for-byte equivalent to the pre-PR-A/B/C loop.py behavior (given the same
+pred/target/t inputs, mse.compute() matches F.mse_loss(reduction='none')).
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 
 class MseLoss:
-    """Stateless MSE：不依赖 t，纯转发给 F.mse_loss。"""
+    """Stateless MSE: doesn't depend on t, just forwards to F.mse_loss."""
 
     def compute(
         self,
@@ -23,5 +23,5 @@ class MseLoss:
 
 
 def build(args) -> MseLoss:
-    """MSE 没有专属字段，args 用不到（保持签名一致便于 dispatch）。"""
+    """MSE has no dedicated fields, so args is unused (kept for a consistent dispatch signature)."""
     return MseLoss()

@@ -1,15 +1,17 @@
-// preset-helpers.ts —— Presets 页面 / Train 页面共享的预设相关工具。
-// 拆出来避免 Train.tsx 加内联「新建预设」表单时把这几样复制一份。
+// preset-helpers.ts -- preset-related utilities shared by the Presets page
+// and the Train page.
+// Split out so Train.tsx's inline "new preset" form doesn't need its own copy.
 import type { ConfigData, SchemaResponse } from '../api/client'
 
-/** 预设名合法字符：字母 / 数字 / _ / -。/api/presets/<name> 路由对名字
- * 也按这个集合校验。 */
+/** Legal preset-name characters: letters / digits / _ / -. The
+ * /api/presets/<name> route validates names against this same set. */
 export const PRESET_NAME_RE = /^[A-Za-z0-9_\-]+$/
 
 const DESC_KEY = 'studio.preset.descriptions'
 
-/** 预设副标题（"描述"）走 localStorage 按 name 索引存。后端 schema 里 preset
- * 没有 description 字段；这是纯前端展示用的辅助文案。 */
+/** The preset subtitle ("description") is stored in localStorage, indexed by
+ * name. The backend preset schema has no description field; this is a
+ * purely frontend-display helper string. */
 export function loadPresetDescriptions(): Record<string, string> {
   try {
     const raw = localStorage.getItem(DESC_KEY)
@@ -27,7 +29,7 @@ export function savePresetDescriptions(d: Record<string, string>) {
   }
 }
 
-/** 从 schema 抽默认值字典。新建预设时表单的初始内容。 */
+/** Extracts the default-value dict from the schema. Used as the form's initial content when creating a new preset. */
 export function defaultsFromSchema(schema: SchemaResponse | null): ConfigData {
   if (!schema) return {}
   const out: ConfigData = {}
@@ -37,12 +39,16 @@ export function defaultsFromSchema(schema: SchemaResponse | null): ConfigData {
   return out
 }
 
-/** `base` 不撞 `existing` 任何一个名字时直接返回 `base`；否则尝试 `base_1`、
- * `base_2`…… 找到第一个未被占用的返回。
+/** Returns `base` directly if it doesn't collide with any name in
+ * `existing`; otherwise tries `base_1`, `base_2`, ... and returns the first
+ * one that's free.
  *
- * 用在「项目页一键新建预设」自动命名上 —— base 形如 `<project_slug>_<version_label>`，
- * 重名（用户之前为同 version 创建过）时加下划线后缀，PRESET_NAME_RE 兼容。
- * 上限 999 兜底；999 个同名场景不现实，超过返回带 timestamp 后缀避免死循环。
+ * Used for auto-naming in the project page's one-click "new preset" -- base
+ * looks like `<project_slug>_<version_label>`; on a name collision (the user
+ * already created one for the same version before) an underscore suffix is
+ * appended, staying compatible with PRESET_NAME_RE. Capped at 999 as a
+ * safety net; 999 same-name collisions is unrealistic, and past that it
+ * returns a timestamp-suffixed name to avoid an infinite loop.
  */
 export function generateUniquePresetName(
   base: string,

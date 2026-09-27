@@ -289,11 +289,13 @@ def _resolve_qwen_safetensors_path(qwen_path: str | Path) -> Path:
 
 
 def select_encoder_state_dict(expected_keys, state_dict, *, source: str = "") -> dict:
-    """过滤 checkpoint state dict 到 encoder 实际需要的 key 集。
+    """Filter the checkpoint state dict down to the key set the encoder actually needs.
 
-    HF Qwen3 checkpoint 变体可能带 encoder 用不到的额外权重（如非 tied
-    embeddings 的 lm_head.weight）。缺失 key 硬错（权重不完整出图必坏）；
-    多余 key 过滤并记日志——直接 strict=True 喂全量 dict 会在这类变体上误炸。
+    HF Qwen3 checkpoint variants may carry extra weights the encoder doesn't
+    use (e.g. lm_head.weight for non-tied embeddings). Missing keys are a
+    hard error (incomplete weights always break generation); extra keys are
+    filtered out with a log message -- feeding the full dict straight into
+    strict=True would blow up on these variants.
     """
     import logging
 

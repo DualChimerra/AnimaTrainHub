@@ -1,6 +1,6 @@
-"""studio_data 自定义位置：指针解析 + 扫描 + 迁移复制线程。
+"""Custom studio_data location: pointer resolution + scanning + migration copy thread.
 
-全部用 tmp_path，不碰真 studio_data（测试卫生：不依赖机器状态）。
+Everything uses tmp_path and never touches the real studio_data (test hygiene: no dependency on machine state).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from studio.services import studio_data as svc
 
 
 # ---------------------------------------------------------------------------
-# resolve_studio_data —— 指针文件解析
+# resolve_studio_data -- pointer file resolution
 # ---------------------------------------------------------------------------
 
 def test_resolve_no_pointer_returns_default(tmp_path: Path) -> None:
@@ -59,7 +59,7 @@ def _make_tree(root: Path) -> None:
     (root / "presets").mkdir()
     (root / "presets" / "a.yaml").write_bytes(b"y" * 20)
     (root / "secrets.json").write_bytes(b"{}")
-    # sqlite 伴生文件不计入 / 不复制
+    # sqlite companion files are not counted / not copied
     (root / "studio.db-wal").write_bytes(b"w" * 100)
     (root / "studio.db-shm").write_bytes(b"s" * 100)
 
@@ -90,7 +90,7 @@ def test_validate_rejects_relative(tmp_path: Path) -> None:
 
 
 def test_validate_rejects_same_path(tmp_path: Path) -> None:
-    # 当前位置就是 tmp_path/studio_data，再选 tmp_path 当目标 → 落地目录撞上自己
+    # the current location is already tmp_path/studio_data; picking tmp_path as the target -> the landing dir collides with itself
     src = tmp_path / "studio_data"
     src.mkdir()
     with pytest.raises(ValueError, match="the same as"):
@@ -98,12 +98,12 @@ def test_validate_rejects_same_path(tmp_path: Path) -> None:
 
 
 def test_validate_rejects_nested_both_ways(tmp_path: Path) -> None:
-    # 落地目录（target/studio_data）嵌进当前位置
+    # the landing dir (target/studio_data) is nested inside the current location
     src = tmp_path / "sd"
     src.mkdir()
     with pytest.raises(ValueError, match="nested inside each other"):
         svc.validate_target(src / "inner", source=src)
-    # 当前位置嵌进落地目录
+    # the current location is nested inside the landing dir
     nested_src = tmp_path / "studio_data" / "inner"
     nested_src.mkdir(parents=True)
     with pytest.raises(ValueError, match="nested inside each other"):
@@ -111,7 +111,7 @@ def test_validate_rejects_nested_both_ways(tmp_path: Path) -> None:
 
 
 def test_validate_accepts_nonempty_target(tmp_path: Path) -> None:
-    # 目标本身非空没关系 —— 数据落 target/studio_data/ 子目录
+    # it's fine for the target itself to be non-empty -- data lands in the target/studio_data/ subdirectory
     src = tmp_path / "sd"
     src.mkdir()
     tgt = tmp_path / "tgt"
@@ -149,12 +149,12 @@ def test_validate_accepts_empty_or_absent(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 迁移复制线程（_run_migration 直接同步调，避免依赖线程时序）
+# migration copy thread (_run_migration is called synchronously and directly, to avoid depending on thread timing)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def _reset_status():
-    """模块级状态单例在测试间互相污染，逐测试重置。"""
+    """The module-level state singleton leaks across tests, so it's reset per test."""
     yield
     svc._status = svc.MigrationStatus()
 
@@ -163,7 +163,7 @@ def test_migration_copies_tree_and_writes_pointer(tmp_path: Path) -> None:
     src = tmp_path / "sd"
     src.mkdir()
     _make_tree(src)
-    # 真 sqlite：迁移走 backup API，产物必须能打开且数据一致
+    # real sqlite: migration goes through the backup API; the result must be openable with consistent data
     with sqlite3.connect(str(src / "studio.db")) as conn:
         conn.execute("CREATE TABLE t (v TEXT)")
         conn.execute("INSERT INTO t VALUES ('hello')")
@@ -204,8 +204,8 @@ def test_migration_failure_cleans_target_and_keeps_pointer_absent(
     events: list[dict] = []
     svc._run_migration(src, dst, events.append, ptr)
 
-    assert not dst.exists()          # 半截目标已清掉
-    assert not ptr.exists()          # 指针没写 —— 重启后仍用旧位置
+    assert not dst.exists()          # the half-written target has been cleaned up
+    assert not ptr.exists()          # the pointer wasn't written -- still uses the old location after restart
     done = [e for e in events if e["type"] == "studio_data_migrate_done"]
     assert len(done) == 1 and done[0]["ok"] is False
     status = svc.migration_status()
@@ -238,7 +238,7 @@ def test_start_migration_rejects_concurrent(tmp_path: Path, monkeypatch: pytest.
 def test_start_migration_lands_in_studio_data_subdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """目标传父目录（可非空），复制线程拿到的落地目录是 target/studio_data/。"""
+    """Passing a parent directory as the target (which may be non-empty), the copy thread's landing directory is target/studio_data/."""
     src = tmp_path / "sd"
     src.mkdir()
     (src / "f.txt").write_text("x")
@@ -253,7 +253,7 @@ def test_start_migration_lands_in_studio_data_subdir(
 
     tgt = tmp_path / "tgt"
     tgt.mkdir()
-    (tgt / "existing.bin").write_text("y")  # 非空目标也接受
+    (tgt / "existing.bin").write_text("y")  # a non-empty target is also accepted
     svc.start_migration(tgt, source=src, publish=lambda e: None,
                         pointer_file=tmp_path / "ptr.json")
     assert finished.wait(5)

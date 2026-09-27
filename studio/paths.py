@@ -1,8 +1,9 @@
-"""Re-export shim — PR-7 真实模块 studio.infrastructure.paths。
+"""Re-export shim -- the real module is studio.infrastructure.paths (PR-7).
 
-sys.modules 别名让旧路径的 monkeypatch / 私有访问透明转发到真实模块
-（同 PR-3 services/ shim 模式）。新代码请直接
-`from studio.infrastructure.paths import X`。
+The sys.modules alias makes monkeypatching / private access through the old
+path transparently forward to the real module (same shim pattern as the PR-3
+services/ shim). New code should use `from studio.infrastructure.paths import X`
+directly.
 """
 import sys as _sys
 

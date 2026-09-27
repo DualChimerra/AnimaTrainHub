@@ -1,5 +1,5 @@
 /**
- * PR-3 C2 — installGlobalErrorHandlers + reportClientError 单测。
+ * PR-3 C2 — unit tests for installGlobalErrorHandlers + reportClientError.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reportClientError, setLastApiTraceId } from './report'
@@ -47,7 +47,7 @@ describe('reportClientError', () => {
 
   it('silently swallows fetch rejection (no throw)', async () => {
     fetchSpy.mockImplementation(() => Promise.reject(new Error('network down')))
-    // 不应 throw
+    // Should not throw
     expect(() => reportClientError({ kind: 'manual', message: 'm' })).not.toThrow()
   })
 

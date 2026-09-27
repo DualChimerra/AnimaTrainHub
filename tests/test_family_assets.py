@@ -1,4 +1,3 @@
-"""studio 侧 FAMILY_ASSETS registry + secrets selected 泛化（多模型 PR-4）。"""
 
 from __future__ import annotations
 
@@ -11,7 +10,6 @@ from studio.services.models.families import FAMILY_ASSETS, get_assets
 
 
 def test_family_assets_cover_runtime_families():
-    """下载资产可先于训练实现落地，但已支持训练的族绝不能缺下载清单。"""
     from studio.domain.common import FAMILY_CAPABILITIES
     from training.families import SPECS
 
@@ -34,7 +32,6 @@ def test_anima_assets_surface():
 
 
 def test_krea2_assets_surface_uses_shared_vae_and_isolated_text_dir(monkeypatch):
-    # 隔离真实 secrets：断言硬编码官方文件名，开发机 selected 切 raw_fp8 会假红
     from studio import secrets
 
     monkeypatch.setattr(secrets, "load", lambda: secrets.Secrets(models={
@@ -50,11 +47,9 @@ def test_krea2_assets_surface_uses_shared_vae_and_isolated_text_dir(monkeypatch)
     assert paths["t5_tokenizer_path"] == ""
 
 
-# ── default_paths_for_new_version 按族派发（多模型 P4-1）───────────────────
 
 
 def test_default_paths_dispatches_by_family():
-    """门面函数经 registry 派发；无 family 参数 = anima（老调用方零迁移）。"""
     from studio.services import models as model_downloader
 
     anima = model_downloader.default_paths_for_new_version()
@@ -67,8 +62,6 @@ def test_default_paths_dispatches_by_family():
 
 
 def test_krea2_default_paths_ignore_inference_selected(tmp_path, monkeypatch):
-    """Settings 选中 turbo（purpose=inference，为 Generate 页选的推理底模）时，
-    新训练 version 的默认主权重不静默跟随，落回 training variant（Raw）。"""
     from studio import secrets
     from studio.services import models as model_downloader
 
@@ -77,15 +70,12 @@ def test_krea2_default_paths_ignore_inference_selected(tmp_path, monkeypatch):
     }))
     paths = model_downloader.default_paths_for_new_version(family="krea2")
     assert paths["transformer_path"].endswith("krea2-raw-bf16.safetensors")
-    # 显式 base_model 传 turbo = 用户显式选择，尊重（A1：不加底模白名单）
     explicit = model_downloader.default_paths_for_new_version(
         "turbo", family="krea2")
     assert explicit["transformer_path"].endswith("krea2-turbo-bf16.safetensors")
 
 
 def test_krea2_default_paths_follow_selected_te(tmp_path, monkeypatch):
-    """selected_te=fp8 → 训练/出图默认 text_encoder_path 指向 fp8 单文件目录；
-    缺失/非法回退 bf16 目录。"""
     from studio import secrets
     from studio.services import models as model_downloader
 
@@ -103,7 +93,6 @@ def test_krea2_default_paths_follow_selected_te(tmp_path, monkeypatch):
 
 
 def test_krea2_default_paths_respect_custom_selected(tmp_path, monkeypatch):
-    """selected 是注册的本地 custom 权重（社区微调等，无 purpose 元数据）→ 尊重。"""
     from studio import secrets
     from studio.services import models as model_downloader
 
@@ -119,7 +108,6 @@ def test_krea2_default_paths_respect_custom_selected(tmp_path, monkeypatch):
 
 
 def test_catalog_sections_shape(tmp_path):
-    """输出键与旧 build_catalog 内联实现一致（前端零改动的契约）。"""
     sections = get_assets("anima").catalog_sections(tmp_path, ModelsConfig())
     assert set(sections) == {"anima_main", "anima_vae", "qwen3", "t5_tokenizer"}
     assert sections["anima_main"]["selected"] == "1.0"
@@ -166,7 +154,6 @@ def test_krea2_catalog_sections_report_raw_turbo_and_text_encoder(tmp_path):
     }
 
 
-# ── secrets selected 泛化（迁移语义三向）─────────────────────────────────
 
 def test_secrets_legacy_key_migrates():
     cfg = ModelsConfig.model_validate({"selected_anima": "preview2"})
@@ -175,8 +162,6 @@ def test_secrets_legacy_key_migrates():
 
 
 def test_secrets_incoming_legacy_key_overrides_merged_dict():
-    # settings PUT：merged dict 同时带旧 selected（来自当前 dump）与入站
-    # selected_anima（来自前端）→ 入站键必须赢
     cfg = ModelsConfig.model_validate({
         "selected": {"anima": "1.0"},
         "selected_anima": "preview3-base",
@@ -185,7 +170,6 @@ def test_secrets_incoming_legacy_key_overrides_merged_dict():
 
 
 def test_secrets_dump_keeps_read_compat():
-    # 前端读 sec.models.selected_anima —— computed_field 保证 dump 里有此键
     dumped = ModelsConfig().model_dump()
     assert dumped["selected_anima"] == "1.0"
     assert dumped["selected"] == {"anima": "1.0"}

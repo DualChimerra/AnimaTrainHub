@@ -28,7 +28,7 @@ interface Ctx {
 
 type Filter = 'all' | 'pending' | 'edited'
 
-/** 统一编辑历史条目：涂抹与 mask 笔画共用一条时间线。 */
+/** Unified edit-history entry: paint and mask strokes share a single timeline. */
 interface HistoryEntry {
   kind: InpaintMode
   stroke: InpaintStroke
@@ -50,16 +50,17 @@ function splitRel(name: string): { folder: string; filename: string } {
   }
 }
 
-/** 状态模型对齐裁剪页：双数据面双桶（strokesByImage / maskStrokesByImage），
- *  随便切图改动都留在内存，保存按当前模式分发（§9 决策 2）。只有活动图挂
- *  真实 canvas，「保存全部」对非活动图走离屏重放。 */
+/** The state model mirrors the crop page: two data planes, two buckets (strokesByImage /
+ *  maskStrokesByImage). Switching images freely keeps changes in memory; saving dispatches
+ *  based on the current mode (§9 decision 2). Only the active image mounts a real canvas;
+ *  "save all" replays off-screen for inactive images. */
 export default function PreprocessInpaintPage() {
   const { t } = useTranslation()
   const { project, activeVersion, reload } = useOutletContext<Ctx>()
   const { toast } = useToast()
   const vid = activeVersion?.id ?? 0
 
-  // ────── Workspace data（复用 crop workspace：name + w/h + mtime + mask_mtime）──────
+  // ────── Workspace data (reuses the crop workspace: name + w/h + mtime + mask_mtime) ──────
   const [images, setImages] = useState<CropWorkspaceItem[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -78,10 +79,10 @@ export default function PreprocessInpaintPage() {
   useEffect(() => { void refreshWorkspace() }, [refreshWorkspace])
 
   // ────── Editor state ──────
-  // 统一编辑历史：涂抹与 mask 笔画混合入同一时间线 —— 模式只是笔刷，
-  // dirty / undo / 保存都跨模式共用，切模式不改变页面状态语义。
+  // Unified edit history: paint and mask strokes are mixed into the same timeline -- mode is just
+  // the brush; dirty / undo / save are all shared across modes, so switching modes doesn't change the page's state semantics.
   const [mode, setMode] = useState<InpaintMode>('paint')
-  // 画笔 / 橡皮跨模式共用：涂抹橡皮擦未保存笔画，遮罩橡皮擦 mask
+  // Brush / eraser shared across modes: paint eraser removes unsaved strokes, mask eraser erases the mask
   const [erase, setErase] = useState(false)
   const [activeName, setActiveName] = useState<string | null>(null)
   const [historyByImage, setHistoryByImage] = useState<Record<string, HistoryEntry[]>>({})
@@ -124,7 +125,7 @@ export default function PreprocessInpaintPage() {
     [activeHistory],
   )
 
-  /** dirty 图集合 = 任一数据面有未保存笔画（保存全部 / filter / 计数共用）。 */
+  /** dirty image set = any data plane has unsaved strokes (shared by save-all / filter / count). */
   const editedNames = useMemo(
     () => Object.entries(historyByImage)
       .filter(([, h]) => h.length > 0)
@@ -155,7 +156,7 @@ export default function PreprocessInpaintPage() {
     return api.maskUrl(project.id, vid, im.name) + `&_=${im.mask_mtime}`
   }, [project.id, vid])
 
-  // ────── Stroke mutations（统一时间线，undo/redo 跨模式）──────
+  // ────── Stroke mutations (unified timeline, undo/redo shared across modes) ──────
   const pushRecentColor = useCallback((hex: string) => {
     setRecentColors((prev) => [hex, ...prev.filter((c) => c !== hex)].slice(0, 8))
   }, [setRecentColors])
@@ -235,8 +236,8 @@ export default function PreprocessInpaintPage() {
     pushRecentColor(hex)
   }, [setBrush, pushRecentColor])
 
-  // ────── Save（保存 = 该图全部未保存改动，两个数据面一次写完）──────
-  /** 保存成功后从历史滤掉对应数据面的 entries（redo 时间线随之作废）。 */
+  // ────── Save (save = all unsaved changes for this image, both data planes written in one go) ──────
+  /** After a successful save, filter the corresponding data plane's entries out of history (invalidating the redo timeline). */
   const clearSavedKind = useCallback((name: string, kind: InpaintMode) => {
     setHistoryByImage((prev) => ({
       ...prev,
@@ -245,9 +246,10 @@ export default function PreprocessInpaintPage() {
     setRedoByImage((prev) => ({ ...prev, [name]: [] }))
   }, [])
 
-  /** 单图两面保存。涂抹先行 —— 产物可能改名（X.jpg→X.png），mask 的 PUT
-   *  必须用新 name（旧源文件已删，服务端按 name 校验源图存在）。
-   *  返回保存后的 name（无涂抹改动时原样）。 */
+  /** Saves both planes for a single image. Paint goes first -- the result may be renamed
+   *  (X.jpg→X.png), so the mask's PUT must use the new name (the old source file is already
+   *  deleted; the server validates the source image exists by name).
+   *  Returns the post-save name (unchanged if there were no paint edits). */
   const saveImageBoth = useCallback(async (
     im: CropWorkspaceItem,
     paintStrokes: InpaintStroke[],
@@ -286,7 +288,7 @@ export default function PreprocessInpaintPage() {
     if (activeHistory.length === 0) return
     setBusy(true)
     try {
-      // 活动图用挂载中的 canvas 导出（所见即所得），非活动图才走离屏重放
+      // The active image exports from its mounted canvas (WYSIWYG); only inactive images go through off-screen replay
       const newName = await saveImageBoth(
         activeImage, activePaintStrokes, activeMaskStrokes,
         {
@@ -370,192 +372,143 @@ export default function PreprocessInpaintPage() {
       belowHeader={<PreprocessToolsBar current="inpaint" projectId={project.id} versionId={vid} />}
     >
       <PreprocessCard current="inpaint" projectId={project.id} versionId={vid}>
-        <div className="ds-pp-toolbar">
-            <>
-              {/* 保存 = 两个数据面的全部未保存改动；文案 / 可用性不随模式变 */}
+        <div className="ds-pp-toolbar" style={{ justifyContent: 'flex-start' }}>
+          <div className="ds-pills" role="group">
+            {(['all', 'pending', 'edited'] as const).map((k) => (
               <button
+                key={k}
                 type="button"
-                onClick={() => void saveAll()}
-                disabled={busy || editedNames.length === 0}
-                className="ds-ctl ds-ghost"
+                onClick={() => setFilter(k)}
+                className={`ds-pill${filter === k ? ' ds-is-active' : ''}`}
+                aria-pressed={filter === k}
               >
-                {t('preprocessInpaint.saveAll', { n: editedNames.length })}
+                {t(`preprocessInpaint.filter.${k}`)} <span className="ds-count">{counts[k]}</span>
               </button>
-              <button
-                type="button"
-                onClick={() => void saveActive()}
-                disabled={busy || activeHistory.length === 0}
-                className="ds-btn-primary"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z" />
-                </svg>
-                <span>{t('preprocessInpaint.saveActive')}</span>
-              </button>
-            </>
-        </div>
-        <div className="ds-pp-body">
-          <div className="flex flex-col h-full gap-3 min-h-0 m-h-auto">
-            <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden m-h-auto">
-              <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm flex-wrap">
-                <div className="flex items-center gap-1">
-                  {(['all', 'pending', 'edited'] as const).map((k) => (
-                    <button
-                      key={k}
-                      onClick={() => setFilter(k)}
-                      className={
-                        'px-2 py-0.5 rounded-full text-xs transition-colors ' +
-                        (filter === k
-                          ? 'bg-accent-soft text-accent font-semibold'
-                          : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
-                      }
-                    >
-                      {t(`preprocessInpaint.filter.${k}`)} {counts[k]}
-                    </button>
-                  ))}
-                </div>
-                {activeImage && (
-                  <span className="text-fg-tertiary text-xs font-mono ml-2">
-                    {activeImage.name} · {activeImage.w}×{activeImage.h}
-                  </span>
-                )}
-                <span className="flex-1" />
-                <button
-                  onClick={undo}
-                  disabled={!activeName || activeHistory.length === 0}
-                  className="btn btn-ghost btn-sm"
-                  title="Ctrl+Z"
-                >↶ {t('preprocessInpaint.undo')}</button>
-                <button
-                  onClick={redo}
-                  disabled={!activeName || activeRedo.length === 0}
-                  className="btn btn-ghost btn-sm"
-                  title="Ctrl+Shift+Z"
-                >↷ {t('preprocessInpaint.redo')}</button>
-                <button
-                  onClick={clearActive}
-                  disabled={!activeName || activeHistory.length === 0}
-                  className="btn btn-ghost btn-sm"
-                >{t('preprocessInpaint.clearActive')}</button>
-              </header>
-
-              <div className="flex-1 min-h-0 overflow-hidden p-3 m-h-auto m-p-sm">
-                {loading && (
-                  <p className="text-fg-tertiary text-sm">{t('preprocessInpaint.loading')}</p>
-                )}
-                {!loading && images.length === 0 && (
-                  <p className="text-fg-tertiary text-sm">
-                    {t('preprocessInpaint.emptyWorkspace')}{' '}
-                    <Link to={`/projects/${project.id}/v/${vid}/preprocess`} className="text-accent hover:underline">
-                      {t('preprocessInpaint.goToOverview')}
-                    </Link>
-                  </p>
-                )}
-
-                {activeImage && (
-                  <div
-                    className="grid gap-3 h-full min-h-0 pp-editor-grid"
-                    style={{ gridTemplateColumns: '220px minmax(0, 1fr) 260px' }}
-                  >
-                    <Filmstrip
-                      items={filteredImages}
-                      activeName={activeName}
-                      onSelect={setActiveName}
-                      thumbUrl={(im) => {
-                        const { folder, filename } = splitRel(im.name)
-                        return api.versionThumbUrl(
-                          project.id, vid, 'train', filename, folder, 256,
-                        ) + `&_=${im.mtime}`
-                      }}
-                      emptyHint={t(`preprocessInpaint.filmstripEmpty.${filter}`)}
-                      renderOverlay={(im) => {
-                        const hist = historyByImage[im.name] ?? []
-                        const hasPaint = hist.some((h) => h.kind === 'paint')
-                        const hasMask = im.mask_mtime != null
-                          || hist.some((h) => h.kind === 'mask')
-                        if (!hasPaint && !hasMask) return null
-                        return (
-                          <span className="fs-badge">
-                            {hasPaint ? '✎' : ''}{hasMask ? 'M' : ''}
-                          </span>
-                        )
-                      }}
-                    />
-
-                    <div className="min-w-0 min-h-0 overflow-hidden">
-                      <InpaintCanvas
-                        key={activeImage.name}
-                        ref={canvasRef}
-                        imageUrl={rawUrl(activeImage)}
-                        imageW={activeImage.w}
-                        imageH={activeImage.h}
-                        mode={mode}
-                        strokes={activePaintStrokes}
-                        maskStrokes={activeMaskStrokes}
-                        maskBaseUrl={maskBaseUrlFor(activeImage)}
-                        brush={brush}
-                        erase={erase}
-                        onStrokeEnd={onStrokeEnd}
-                        onMaskStrokeEnd={onMaskStrokeEnd}
-                        onPickColor={onPickColor}
-                      />
-                    </div>
-
-                    <ToolPanel
-                      mode={mode}
-                      setMode={setMode}
-                      erase={erase}
-                      setErase={setErase}
-                      brush={brush}
-                      setBrush={setBrush}
-                      recentColors={recentColors}
-                    />
-                  </div>
-                )}
-              </div>
-            </section>
+            ))}
           </div>
+          {activeImage && (
+            <span className="ds-crop-imginfo" title={activeImage.name}>
+              <b>{activeImage.name}</b> · {activeImage.w}×{activeImage.h}
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          <span className="ds-actgroup">
+            <button type="button" className="ds-ico" onClick={undo} disabled={!activeName || activeHistory.length === 0} title={`${t('preprocessInpaint.undo')} · Ctrl+Z`} aria-label={t('preprocessInpaint.undo')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg>
+            </button>
+            <button type="button" className="ds-ico" onClick={redo} disabled={!activeName || activeRedo.length === 0} title={`${t('preprocessInpaint.redo')} · Ctrl+Shift+Z`} aria-label={t('preprocessInpaint.redo')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 14 5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></svg>
+            </button>
+          </span>
+          <button
+            type="button"
+            onClick={clearActive}
+            disabled={!activeName || activeHistory.length === 0}
+            className="ds-ctl"
+          >{t('preprocessInpaint.clearActive')}</button>
+          {/* Save = all unsaved changes across both data planes; label / availability don't change with mode */}
+          <button
+            type="button"
+            onClick={() => void saveAll()}
+            disabled={busy || editedNames.length === 0}
+            className="ds-ctl"
+          >
+            {t('preprocessInpaint.saveAll', { n: editedNames.length })}
+          </button>
+          <button
+            type="button"
+            onClick={() => void saveActive()}
+            disabled={busy || activeHistory.length === 0}
+            className="ds-btn-primary"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z" />
+            </svg>
+            <span>{t('preprocessInpaint.saveActive')}</span>
+          </button>
         </div>
+
+        {loading && (
+          <div className="ds-pp-body"><p className="ds-muted" style={{ fontSize: 12.5, margin: 0 }}>{t('preprocessInpaint.loading')}</p></div>
+        )}
+        {!loading && images.length === 0 && (
+          <div className="ds-pp-body">
+            <div className="ds-empty">
+              {t('preprocessInpaint.emptyWorkspace')}
+              <Link to={`/projects/${project.id}/v/${vid}/preprocess`} style={{ color: 'var(--green-text)', fontWeight: 500 }}>
+                {t('preprocessInpaint.goToOverview')}
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {activeImage && (
+          <div className="ds-crop-grid pp-editor-grid">
+            <Filmstrip
+              items={filteredImages}
+              activeName={activeName}
+              onSelect={setActiveName}
+              thumbUrl={(im) => {
+                const { folder, filename } = splitRel(im.name)
+                return api.versionThumbUrl(
+                  project.id, vid, 'train', filename, folder, 256,
+                ) + `&_=${im.mtime}`
+              }}
+              emptyHint={t(`preprocessInpaint.filmstripEmpty.${filter}`)}
+              renderOverlay={(im) => {
+                const hist = historyByImage[im.name] ?? []
+                const hasPaint = hist.some((h) => h.kind === 'paint')
+                const hasMask = im.mask_mtime != null
+                  || hist.some((h) => h.kind === 'mask')
+                if (!hasPaint && !hasMask) return null
+                return (
+                  <span className="fs-badge">
+                    {hasPaint ? '✎' : ''}{hasMask ? 'M' : ''}
+                  </span>
+                )
+              }}
+            />
+
+            <div className="ds-crop-canvas">
+              <InpaintCanvas
+                key={activeImage.name}
+                ref={canvasRef}
+                imageUrl={rawUrl(activeImage)}
+                imageW={activeImage.w}
+                imageH={activeImage.h}
+                mode={mode}
+                strokes={activePaintStrokes}
+                maskStrokes={activeMaskStrokes}
+                maskBaseUrl={maskBaseUrlFor(activeImage)}
+                brush={brush}
+                erase={erase}
+                onStrokeEnd={onStrokeEnd}
+                onMaskStrokeEnd={onMaskStrokeEnd}
+                onPickColor={onPickColor}
+              />
+            </div>
+
+            <div className="ds-crop-side">
+              <ToolPanel
+                mode={mode}
+                setMode={setMode}
+                erase={erase}
+                setErase={setErase}
+                brush={brush}
+                setBrush={setBrush}
+                recentColors={recentColors}
+              />
+            </div>
+          </div>
+        )}
       </PreprocessCard>
     </StepShell>
   )
 }
 
 // ---------------------------------------------------------------------------
-// Tool panel（right side）
+// Tool panel (right side)
 // ---------------------------------------------------------------------------
-
-/** 胶囊 radio（视觉对齐设置页更新通道的 vs-channel-radio：圆点 + 文字）。 */
-function RadioPill({
-  on, label, onClick,
-}: {
-  on: boolean
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={on}
-      onClick={onClick}
-      className={
-        'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs transition-colors ' +
-        (on
-          ? 'border-accent text-accent bg-accent-soft'
-          : 'border-dim text-fg-secondary bg-transparent hover:bg-overlay')
-      }
-    >
-      <span
-        className={
-          'w-[7px] h-[7px] rounded-full border border-current shrink-0 ' +
-          (on ? 'bg-current' : 'bg-transparent')
-        }
-      />
-      {label}
-    </button>
-  )
-}
 
 function ToolPanel({
   mode,
@@ -576,65 +529,60 @@ function ToolPanel({
 }) {
   const { t } = useTranslation()
   const [recentOpen, setRecentOpen] = useState(false)
+  const hardness = Math.round(brush.hardness * 100)
   return (
-    <div className="bg-sunken border border-subtle rounded-md flex flex-col h-full min-h-0 overflow-hidden">
-      <div className="flex flex-col gap-2 p-2.5 flex-1 min-h-0 overflow-y-auto">
-        <h3 className="caption">{t('preprocessInpaint.panelTitle')}</h3>
-        {/* 模式 / 工具两行 radio（样式对齐设置页更新通道） */}
-        <div className="flex items-center gap-1.5 text-xs" role="radiogroup">
-          <span className="text-fg-tertiary shrink-0 w-10">{t('preprocessInpaint.modeLabel')}</span>
-          {(['paint', 'mask'] as const).map((m) => (
-            <RadioPill
-              key={m}
-              on={mode === m}
-              label={t(`preprocessInpaint.mode.${m}`)}
-              onClick={() => setMode(m)}
-            />
-          ))}
+    <section className="ds-crop-panel">
+      <header className="ds-crop-panel-head">
+        <span className="ds-crop-panel-title">{t('preprocessInpaint.panelTitle')}</span>
+      </header>
+      <div className="ds-ip-body">
+        <div className="ds-ip-row">
+          <span className="ds-ip-label">{t('preprocessInpaint.modeLabel')}</span>
+          <div className="ds-seg" role="radiogroup" aria-label={t('preprocessInpaint.modeLabel')}>
+            {(['paint', 'mask'] as const).map((m) => (
+              <button key={m} type="button" role="radio" aria-checked={mode === m} className={`ds-seg-item${mode === m ? ' ds-is-active' : ''}`} onClick={() => setMode(m)}>
+                {t(`preprocessInpaint.mode.${m}`)}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="flex items-center gap-1.5 text-xs" role="radiogroup">
-          <span className="text-fg-tertiary shrink-0 w-10">{t('preprocessInpaint.toolLabel')}</span>
-          <RadioPill
-            on={!erase}
-            label={t('preprocessInpaint.toolBrush')}
-            onClick={() => setErase(false)}
-          />
-          <RadioPill
-            on={erase}
-            label={t('preprocessInpaint.toolEraser')}
-            onClick={() => setErase(true)}
-          />
+        <div className="ds-ip-row">
+          <span className="ds-ip-label">{t('preprocessInpaint.toolLabel')}</span>
+          <div className="ds-seg" role="radiogroup" aria-label={t('preprocessInpaint.toolLabel')}>
+            <button type="button" role="radio" aria-checked={!erase} className={`ds-seg-item${!erase ? ' ds-is-active' : ''}`} onClick={() => setErase(false)}>{t('preprocessInpaint.toolBrush')}</button>
+            <button type="button" role="radio" aria-checked={erase} className={`ds-seg-item${erase ? ' ds-is-active' : ''}`} onClick={() => setErase(true)}>{t('preprocessInpaint.toolEraser')}</button>
+          </div>
         </div>
 
         {mode === 'paint' && (
-          <div className="flex items-center gap-1.5 text-xs">
-            <span className="text-fg-tertiary shrink-0 w-10">{t('preprocessInpaint.brushColor')}</span>
-            <input
-              type="color"
-              value={brush.color}
-              onChange={(e) => setBrush((p) => ({ ...p, color: e.target.value }))}
-              className="flex-1 min-w-0 h-7 p-0 border border-subtle rounded cursor-pointer bg-transparent"
-              title={t('preprocessInpaint.colorWheel')}
-            />
-            <button
-              type="button"
-              onClick={() => setRecentOpen((v) => !v)}
-              disabled={recentColors.length === 0}
-              className={
-                'btn btn-ghost btn-sm justify-center shrink-0 ' +
-                (recentOpen ? 'bg-overlay text-fg-primary' : '')
-              }
-              style={{ width: 56 }}
-              title={t('preprocessInpaint.recentColors')}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6a7 7 0 1 1 7 7 6.98 6.98 0 0 1-4.9-2l-1.42 1.42A8.96 8.96 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" />
-              </svg>
-            </button>
+          <div className="ds-ip-row">
+            <span className="ds-ip-label">{t('preprocessInpaint.brushColor')}</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <label className="ds-ip-swatch" style={{ background: brush.color }} title={t('preprocessInpaint.colorWheel')}>
+                <input
+                  type="color"
+                  value={brush.color}
+                  onChange={(e) => setBrush((p) => ({ ...p, color: e.target.value }))}
+                  aria-label={t('preprocessInpaint.colorWheel')}
+                />
+              </label>
+              <span className="ds-kpi-meta" style={{ width: 58 }}>{brush.color}</span>
+              <button
+                type="button"
+                onClick={() => setRecentOpen((v) => !v)}
+                disabled={recentColors.length === 0}
+                className={`ds-iconbtn${recentOpen ? ' ds-is-open' : ''}`}
+                style={{ width: 30, height: 30 }}
+                title={t('preprocessInpaint.recentColors')}
+                aria-label={t('preprocessInpaint.recentColors')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l3 2" /></svg>
+              </button>
+            </span>
           </div>
         )}
         {mode === 'paint' && recentOpen && recentColors.length > 0 && (
-          <div className="flex items-center gap-1 flex-wrap">
+          <div className="ds-ip-recent">
             {recentColors.map((c) => (
               <button
                 key={c}
@@ -643,25 +591,25 @@ function ToolPanel({
                   setBrush((p) => ({ ...p, color: c }))
                   setRecentOpen(false)
                 }}
-                className={
-                  'w-5 h-5 rounded border transition-transform hover:scale-110 ' +
-                  (c === brush.color ? 'border-accent' : 'border-dim')
-                }
+                className={`ds-ip-dot${c === brush.color ? ' ds-is-on' : ''}`}
                 style={{ backgroundColor: c }}
                 title={c}
+                aria-label={c}
               />
             ))}
           </div>
         )}
 
-        <label className="flex items-center gap-1.5 text-xs">
-          <span className="text-fg-tertiary shrink-0 w-10">{t('preprocessInpaint.brushSize')}</span>
+        <div className="ds-ip-slider">
+          <span className="ds-ip-label">{t('preprocessInpaint.brushSize')}</span>
           <input
             type="range"
             min={1} max={400} step={1}
             value={brush.size}
             onChange={(e) => setBrush((p) => ({ ...p, size: Number(e.target.value) }))}
-            className="flex-1 min-w-0"
+            className="ds-range"
+            style={{ '--p': `${((brush.size - 1) / 399) * 100}%` } as React.CSSProperties}
+            aria-label={t('preprocessInpaint.brushSize')}
           />
           <input
             type="number"
@@ -670,32 +618,34 @@ function ToolPanel({
             onChange={(e) => setBrush((p) => ({
               ...p, size: Math.max(1, Math.min(400, Number(e.target.value) || 1)),
             }))}
-            className="input input-mono text-sm shrink-0"
-            style={{ width: 56, padding: '2px 6px' }}
+            className="ds-inp"
+            style={{ width: 62, height: 28 }}
           />
-        </label>
-        <label className="flex items-center gap-1.5 text-xs">
-          <span className="text-fg-tertiary shrink-0 w-10">{t('preprocessInpaint.brushHardness')}</span>
+        </div>
+        <div className="ds-ip-slider">
+          <span className="ds-ip-label">{t('preprocessInpaint.brushHardness')}</span>
           <input
             type="range"
             min={0} max={100} step={5}
-            value={Math.round(brush.hardness * 100)}
+            value={hardness}
             onChange={(e) => setBrush((p) => ({ ...p, hardness: Number(e.target.value) / 100 }))}
-            className="flex-1 min-w-0"
+            className="ds-range"
+            style={{ '--p': `${hardness}%` } as React.CSSProperties}
+            aria-label={t('preprocessInpaint.brushHardness')}
           />
           <input
             type="number"
             min={0} max={100} step={5}
-            value={Math.round(brush.hardness * 100)}
+            value={hardness}
             onChange={(e) => setBrush((p) => ({
               ...p,
               hardness: Math.max(0, Math.min(100, Number(e.target.value) || 0)) / 100,
             }))}
-            className="input input-mono text-sm shrink-0"
-            style={{ width: 56, padding: '2px 6px' }}
+            className="ds-inp"
+            style={{ width: 62, height: 28 }}
           />
-        </label>
+        </div>
       </div>
-    </div>
+    </section>
   )
 }

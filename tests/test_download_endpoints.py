@@ -1,4 +1,3 @@
-"""PP2 — /api/projects/{pid}/download + /api/jobs/* HTTP。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,8 +18,6 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(server.db, "STUDIO_DB", dbfile)
     monkeypatch.setattr(secrets, "SECRETS_FILE", tmp_path / "secrets.json")
-    # 上传 endpoint 默认会按 gelbooru.convert_to_png 走 PIL 重编码；这里关掉，让
-    # 现有用 raw bytes 的上传测试继续验证原始拷贝分支。convert 路径用专门测试。
     secrets.update(
         {
             "gelbooru": {
@@ -40,10 +37,10 @@ class _StubSupervisor:
     def __init__(self) -> None:
         self.canceled: list[int] = []
 
-    def cancel(self, jid: int) -> bool:  # R-5 台账合并后 queue cancel 走 supervisor.cancel
+    def cancel(self, jid: int) -> bool:
         return self.cancel_job(jid)
 
-    def is_task_pausable(self, tid: int) -> bool:  # GET /api/queue/{id} 需要
+    def is_task_pausable(self, tid: int) -> bool:
         return False
 
     def cancel_job(self, jid: int) -> bool:
@@ -85,7 +82,6 @@ def test_start_download_creates_job_and_advances_stage(
     job = resp.json()
     assert job["status"] == "pending"
     assert job["kind"] == "download"
-    # ADR-0007 PR-5: project 无 stage 字段；download 状态由 job + UI 实时扫派生
 
 
 def test_start_download_rejects_empty_tag(client: TestClient) -> None:
@@ -99,7 +95,6 @@ def test_start_download_rejects_empty_tag(client: TestClient) -> None:
 def test_start_download_requires_credentials(
     client: TestClient, isolated, monkeypatch
 ) -> None:
-    # gelbooru 缺凭据：拒绝
     monkeypatch.setattr(
         secrets, "has_credentials_for",
         lambda src: False if src == "gelbooru" else True,
@@ -116,7 +111,6 @@ def test_start_download_requires_credentials(
 def test_start_download_danbooru_does_not_require_credentials(
     client: TestClient, isolated, monkeypatch
 ) -> None:
-    """Danbooru 匿名也能跑，端点不应在缺凭据时阻挡。"""
     monkeypatch.setattr(
         secrets, "has_credentials_for",
         lambda src: True if src == "danbooru" else False,
@@ -132,7 +126,6 @@ def test_start_download_danbooru_does_not_require_credentials(
 def test_estimate_endpoint_returns_count(
     client: TestClient, isolated, monkeypatch
 ) -> None:
-    """estimate 端点：通过 mock downloader.estimate 返回固定数量。"""
     from studio.services.booru import downloader as dl
     monkeypatch.setattr(dl, "estimate", lambda opts: 42)
     p = _make_project(client)
@@ -206,7 +199,6 @@ def test_get_job_log_returns_tail(client: TestClient, isolated) -> None:
     log_path = Path(job["log_path"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
-    # R-5 后统一走 /api/logs/{id}（无 tail 参数，前端自截）
     r = client.get(f"/api/logs/{job['id']}").json()
     assert r["content"].splitlines()[-2:] == ["c", "d"]
 
@@ -265,7 +257,7 @@ def test_delete_files_removes_image_and_metadata(client: TestClient) -> None:
     (pdir / "a.booru.txt").write_text("tags", encoding="utf-8")
     (pdir / "a.txt").write_text("more tags", encoding="utf-8")
     (pdir / "a.json").write_text("{}", encoding="utf-8")
-    (pdir / "b.png").write_bytes(b"img2")  # 不在删除列表
+    (pdir / "b.png").write_bytes(b"img2")
 
     r = client.post(
         f"/api/projects/{p['id']}/files/delete",
@@ -275,12 +267,10 @@ def test_delete_files_removes_image_and_metadata(client: TestClient) -> None:
     body = r.json()
     assert body["deleted"] == ["a.png"]
     assert body["missing"] == []
-    # a.png 及其全部 metadata 都不在了
     assert not (pdir / "a.png").exists()
     assert not (pdir / "a.booru.txt").exists()
     assert not (pdir / "a.txt").exists()
     assert not (pdir / "a.json").exists()
-    # b.png 不动
     assert (pdir / "b.png").exists()
 
 
@@ -334,11 +324,6 @@ def _zip_bytes(entries: dict[str, bytes]) -> bytes:
 
 
 def _run_upload(client: TestClient, pid: int, files: list) -> dict:
-    """POST /upload（异步：返回 pending job）→ 同步跑 upload_worker → 标 done →
-    返回 /upload/status JSON（含 result）。
-
-    把端点 + worker + status 串起来验证，等价于生产里 supervisor 调度 worker。
-    """
     from studio.workers import upload_worker
 
     r = client.post(f"/api/projects/{pid}/upload", files=files)
@@ -356,7 +341,6 @@ def _run_upload(client: TestClient, pid: int, files: list) -> dict:
 
 
 def test_upload_returns_pending_job(client: TestClient) -> None:
-    """端点秒回 pending job（不再同步处理），避免大 zip 触发 Cloudflare 524。"""
     p = _make_project(client)
     r = client.post(
         f"/api/projects/{p['id']}/upload",
@@ -388,13 +372,11 @@ def test_upload_zip_extracts_images(client: TestClient) -> None:
         [("files", ("pack.zip", blob, "application/zip"))],
     )
     body = st["result"]
-    # skip.txt 的 stem 没有对应图片 → 当孤立 caption 跳过
     assert sorted(body["added"]) == ["a.jpg", "b.png"]
     assert any("skip.txt" in s["name"] for s in body["skipped"])
 
 
 def test_upload_zip_pairs_txt_caption(client: TestClient) -> None:
-    """zip 内 png + 同 stem .txt → caption 随图落盘（kohya 风格）。"""
     p = _make_project(client)
     blob = _zip_bytes({"a.png": b"AA", "a.txt": b"1girl, solo"})
     st = _run_upload(
@@ -426,14 +408,13 @@ def test_upload_skip_existing(client: TestClient) -> None:
         [("files", ("x.png", b"new", "image/png"))],
     )
     assert st["result"]["added"] == []
-    assert st["result"]["skipped"][0]["reason"] == "已存在，跳过"
+    assert st["result"]["skipped"][0]["reason"] == "already exists, skipped"
     assert (pdir / "x.png").read_bytes() == b"old"
 
 
 def test_upload_convert_to_png_renames_and_dedups(
     client: TestClient,
 ) -> None:
-    """gelbooru.convert_to_png=True：上传 1.png + 1.jpg（不同图）→ 1.png + 1_1.png。"""
     import io as _io
 
     from PIL import Image
@@ -476,14 +457,11 @@ def test_upload_404_for_unknown_project(client: TestClient) -> None:
 
 def test_upload_400_for_no_files(client: TestClient) -> None:
     p = _make_project(client)
-    # FastAPI 在没有任何 files= 表单时返回 422（schema validation），
-    # 此测验证 422/400 两者皆可接受作为「客户端错」。
     r = client.post(f"/api/projects/{p['id']}/upload")
     assert r.status_code in (400, 422)
 
 
 def test_upload_staging_cleaned_after_worker(client: TestClient) -> None:
-    """worker 处理完应删掉 staging 暂存目录。"""
     from studio.services.projects import jobs as _jobs
 
     p = _make_project(client)

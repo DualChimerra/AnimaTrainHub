@@ -1,13 +1,16 @@
 /**
- * LLM tagger 配置工作区 — 按 "LLM Settings redesign.html" 设计稿实现。
+ * LLM tagger config workspace -- implemented per the "LLM Settings redesign.html" mockup.
  *
- * 布局：preset bar 顶部 + workspace 双栏 grid (360px 左 / 1fr 右) + savebar 底部。
- * 左栏: 连接 (01) / 采样参数 (03) / 图片预处理 (04) 三张独立 card 纵向堆叠
- * 右栏: Prompt 模板 (02) composer 大 card
+ * Layout: preset bar on top + a two-column workspace grid (360px left / 1fr
+ * right) + a savebar at the bottom.
+ * Left column: three independent cards stacked vertically -- Connection (01) /
+ * Sampling parameters (03) / Image preprocessing (04)
+ * Right column: the Prompt template (02) composer, a large card
  *
- * 设计决策：
- * - 不做"预览请求 JSON" / "试跑一张" / token 价格统计（按用户决定）
- * - savebar 只保留「放弃修改」按钮；保存依赖全局 Settings 顶部"保存"按钮
+ * Design decisions:
+ * - No "preview request JSON" / "test run one" / token price stats (per the user's decision)
+ * - The savebar only keeps a "discard changes" button; saving relies on the
+ *   global Settings page's top "Save" button
  */
 import type { TFunction } from 'i18next'
 import { Trans, useTranslation } from 'react-i18next'
@@ -30,7 +33,7 @@ function presetLabel(preset: LLMPreset, t: TFunction): string {
 }
 
 interface Props {
-  /** 卡片内顶部的 section 标题；与 SettingsSection 的 h2 视觉对齐。 */
+  /** Section title at the top of the card; visually aligned with SettingsSection's h2. */
   title?: string
   currentPreset: LLMPreset
   serverCurrentPreset?: LLMPreset
@@ -48,7 +51,7 @@ interface Props {
   onTestConnection: () => void
 }
 
-// ── 设计图字段 → 设计 token 直接映射的样式常量 ─────────────────────────
+// -- Style constants mapping mockup fields directly to design tokens -----------------------
 const inputStyle: React.CSSProperties = {
   width: '100%',
   background: 'var(--bg-sunken)',
@@ -81,7 +84,7 @@ export default function LLMTaggerWorkspace(props: Props) {
     onTestConnection,
   } = props
 
-  // dirty diff: 比较 currentPreset (draft) 与 serverCurrentPreset (落盘)
+  // dirty diff: compares currentPreset (draft) against serverCurrentPreset (persisted)
   const dirtyCount = useMemo(() => {
     if (!serverCurrentPreset) return 0
     const keys: (keyof LLMPreset)[] = [
@@ -94,7 +97,7 @@ export default function LLMTaggerWorkspace(props: Props) {
     for (const k of keys) {
       const a = currentPreset[k]
       const b = serverCurrentPreset[k]
-      // api_key 显示为 MASK 时视为未改
+      // Treated as unchanged when api_key is displayed as MASK
       if (k === 'api_key' && a === MASK) continue
       if (JSON.stringify(a) !== JSON.stringify(b)) n += 1
     }
@@ -102,12 +105,12 @@ export default function LLMTaggerWorkspace(props: Props) {
   }, [currentPreset, serverCurrentPreset])
 
   return (
-    // 整个 LLM 模块外层 — title + preset bar + workspace 5 个 section 包裹在同一个 card 里
+    // Outer wrapper for the whole LLM module -- title + preset bar + the workspace's 5 sections all live in the same card
     <div
       className="bg-surface border border-subtle"
       style={{ borderRadius: 'var(--r-lg)', overflow: 'hidden' }}
     >
-      {/* 标题与 SettingsSection 的 h2 对齐：text-sm font-semibold + p-4 间距 */}
+      {/* Title aligned with SettingsSection's h2: text-sm font-semibold + p-4 spacing */}
       {title && (
         <h2
           className="text-sm font-semibold text-fg-primary m-0"
@@ -132,12 +135,12 @@ export default function LLMTaggerWorkspace(props: Props) {
         dirtyCount={dirtyCount}
       />
 
-      {/* workspace 双栏 grid：左 360px 三个 section 纵向 / 右 1fr composer 撑满 */}
+      {/* Workspace two-column grid: left 360px with three stacked sections / right 1fr composer fills the rest */}
       <div
         className="grid items-stretch"
         style={{ gridTemplateColumns: '360px 1fr' }}
       >
-        {/* LEFT column：3 section 用 border-bottom 分隔，整列右边 border 跟右栏分隔 */}
+        {/* LEFT column: the 3 sections are separated by border-bottom; the whole column has a right border separating it from the right column */}
         <div
           className="flex flex-col"
           style={{ borderRight: '1px solid var(--border-subtle)' }}
@@ -155,7 +158,7 @@ export default function LLMTaggerWorkspace(props: Props) {
           <AdvancedSection preset={currentPreset} onUpdate={onUpdatePreset} />
         </div>
 
-        {/* RIGHT column：composer 撑满高度；messages 区域内部滚动 */}
+        {/* RIGHT column: composer fills the full height; the messages area scrolls internally */}
         <ComposerSection preset={currentPreset} onUpdate={onUpdatePreset} />
       </div>
     </div>
@@ -229,7 +232,7 @@ function PresetBar({
               {t('llmWorkspace.builtin')}
             </span>
           )}
-          {/* 用 select 覆盖整个 pick 让用户能切换；select 透明 */}
+          {/* A select overlays the whole pick control so the user can switch it; the select itself is transparent */}
           <select
             value={currentPresetId}
             onChange={(e) => onSelectPreset(e.target.value)}
@@ -261,7 +264,7 @@ function PresetBar({
             />
           </span>
         )}
-        {/* 编辑当前 preset label */}
+        {/* Edit the current preset's label */}
         <input
           type="text"
           value={currentPreset.label}
@@ -372,7 +375,7 @@ function ConnectionSection({
         </Field>
 
         <Field label={t('llmWorkspace.endpointStyle')}>
-          {/* 测试连接按钮内联在 Segmented 末尾；结果走 toast 通知，不在 UI 常驻。 */}
+          {/* Test-connection button sits inline at the end of the Segmented control; the result is shown via a toast, not kept on screen. */}
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
               <Segmented
@@ -398,8 +401,8 @@ function ConnectionSection({
 }
 
 // ── Sampling section (03) ───────────────────────────────────────────────
-// ── 高级参数：默认折叠的 details 面板，包住 03 采样 + 04 图片预处理 ──────
-// 折叠时显示 summary 行（temp / max / max-side / q）；展开后内部完整渲染两个 sub-section。
+// -- Advanced params: a details panel collapsed by default, wrapping 03 Sampling + 04 Image preprocessing ------
+// Shows a summary line (temp / max / max-side / q) when collapsed; both sub-sections render fully when expanded.
 function AdvancedSection({ preset, onUpdate }: {
   preset: LLMPreset
   onUpdate: <K extends keyof LLMPreset>(field: K, value: LLMPreset[K]) => void
@@ -411,7 +414,7 @@ function AdvancedSection({ preset, onUpdate }: {
         className="cursor-pointer list-none flex items-center justify-between gap-2"
         style={{
           padding: '11px 16px 10px',
-          // 用 SectionHeader 同款下边框；展开时由内层 SamplingSection 自带 border 继续分隔。
+          // Same bottom border style as SectionHeader; when expanded, the inner SamplingSection's own border continues the separation.
           borderBottom: '1px solid var(--border-subtle)',
         }}
       >
@@ -428,8 +431,8 @@ function AdvancedSection({ preset, onUpdate }: {
           <Step>⚙</Step>
           <span>{t('llmWorkspace.advanced')}</span>
         </h3>
-        {/* summary 值：折叠时显示当前关键数值（紧凑形式，避免 360px 左栏装不下）。
-         * truncate + min-w-0 让超长时优雅省略而不是把标题挤竖。 */}
+        {/* Summary value: shows the current key numbers when collapsed (compact form, so it fits the 360px left column).
+         * truncate + min-w-0 makes it ellipsize gracefully instead of forcing the title to wrap. */}
         <span
           className="group-open:hidden truncate min-w-0"
           style={{
@@ -442,7 +445,7 @@ function AdvancedSection({ preset, onUpdate }: {
           {preset.temperature} · {preset.max_tokens}t · c{preset.concurrency} · m{preset.max_requests_per_minute || 0} · {preset.max_side}px · q{preset.jpeg_quality}
         </span>
       </summary>
-      {/* 展开内容：03 采样 + 04 图片预处理 原样堆叠 */}
+      {/* Expanded content: 03 Sampling + 04 Image preprocessing stacked as-is */}
       <SamplingSection preset={preset} onUpdate={onUpdate} bottomBorder />
       <ImageSection preset={preset} onUpdate={onUpdate} />
     </details>
@@ -568,7 +571,7 @@ function ImageSection({ preset, onUpdate, bottomBorder }: {
 }
 
 // ── Composer section (02) — the hero ────────────────────────────────────
-// 高度撑满左栏总高（grid items-stretch + h-full）；messages 区域内部滚动。
+// Height fills the left column's total height (grid items-stretch + h-full); the messages area scrolls internally.
 function ComposerSection({ preset, onUpdate }: {
   preset: LLMPreset
   onUpdate: <K extends keyof LLMPreset>(field: K, value: LLMPreset[K]) => void
@@ -579,7 +582,7 @@ function ComposerSection({ preset, onUpdate }: {
       className="flex flex-col"
       style={{ height: '100%', minHeight: 0, overflow: 'hidden' }}
     >
-      {/* composer-tabbar — 固定高 */}
+      {/* composer-tabbar -- fixed height */}
       <div
         className="flex items-center justify-between shrink-0"
         style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-subtle)' }}
@@ -627,7 +630,7 @@ function ComposerSection({ preset, onUpdate }: {
         </div>
       </div>
 
-      {/* msg-list — flex-1 + 内滚 */}
+      {/* msg-list -- flex-1 + scrolls internally */}
       <div
         className="flex-1 min-h-0 overflow-y-auto"
         style={{ padding: '14px 16px' }}
@@ -654,7 +657,7 @@ function ComposerSection({ preset, onUpdate }: {
 
 // ── Reusable primitives ─────────────────────────────────────────────────
 
-/** 左栏内的一个 section（无独立 border + radius；section 之间用 bottomBorder 分隔）。 */
+/** A section within the left column (no separate border + radius; sections are separated by bottomBorder). */
 function Section({ children, bottomBorder }: {
   children: React.ReactNode
   bottomBorder?: boolean

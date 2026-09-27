@@ -1,4 +1,4 @@
-"""共享响应常量 / 响应工厂（PR-5 起从 server.py 抽出）。"""
+"""Shared response constants / response factories (extracted from server.py starting with PR-5)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,8 +8,9 @@ from fastapi.responses import FileResponse
 
 from ..services.dataset import thumb_cache
 
-# /api/state 在 task_id 不存在 / 没 task / state.json 缺失时返回的空 state，
-# 保持前端 monitor 页能稳定渲染（不报错也不显示 "loading"）。
+# The empty state /api/state returns when task_id doesn't exist / there's no
+# task / state.json is missing, so the frontend monitor page can render
+# stably (no error, and doesn't just show "loading").
 EMPTY_STATE: dict[str, Any] = {
     "losses": [],
     "lr_history": [],
@@ -25,21 +26,28 @@ EMPTY_STATE: dict[str, Any] = {
 
 
 def _thumb_response(src: Path, size: int, immutable: bool = False) -> FileResponse:
-    """统一 thumb 响应：弱 etag（基于 src mtime+size）。
+    """Unified thumbnail response: weak etag (based on src mtime+size).
 
-    默认 `no-cache 强制重验`：早先用 `max-age=86400` 会让浏览器记住所有响应
-    24h，包括重启过渡期的失败响应；用户视角就是「重启后图片加载不了」。改用
-    etag + no-cache 后，浏览器每次发条件请求，命中走 304 几 ms。
+    Defaults to `no-cache, must-revalidate`: an earlier version used
+    `max-age=86400`, which made the browser remember every response for 24h,
+    including failed responses from a restart transition period — from the
+    user's perspective, "images won't load after a restart." Switching to
+    etag + no-cache means the browser sends a conditional request every time,
+    and a hit resolves via a 304 in a few ms.
 
-    `immutable=True`：内容一旦写就不会变（且 URL 已是稳定唯一 key，如训练
-    采样图 `?task_id=N` + 带 epoch/step 的文件名）。此时用
-    `max-age=1y, immutable` 让浏览器**完全不再回源**——云端走 cloudflared
-    隧道时，每张图省掉一次 RTT 的 304 往返，监控页采样图条秒开、重开不再
-    重新加载。重启过渡期的隐患不适用：只有 `.exists()` 命中、真返回图片时
-    才发这个头，404 / 失败响应不带缓存头。
+    `immutable=True`: for content that never changes once written (and whose
+    URL is already a stable, unique key — e.g. training sample images with
+    `?task_id=N` plus a filename that includes epoch/step). In that case,
+    `max-age=1y, immutable` lets the browser **never revalidate at all** —
+    when accessed over a cloudflared tunnel in the cloud, this saves a 304
+    round trip per image, so sample images on the monitor page load nearly
+    instantly and don't reload on reopen. The restart-transition concern
+    doesn't apply here: this header is only sent when `.exists()` hits and an
+    actual image is returned; 404 / failure responses carry no cache header.
 
-    PR-6：从 server.py 抽到 api/responses.py 给 samples router 和 server.py 内的
-    project_thumb（PR-6.5 之前还留 server.py）共用。
+    PR-6: extracted from server.py into api/responses.py, shared by the
+    samples router and the project_thumb in server.py (which stayed in
+    server.py until PR-6.5).
     """
     out = thumb_cache.get_or_make_thumb(src, size)
     try:

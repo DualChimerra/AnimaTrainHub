@@ -1,30 +1,33 @@
-# 0004 — 预处理状态用单 manifest 替代「双 bucket + per-image sidecar」
+# 0004 — Replace preprocessing state's "dual bucket + per-image sidecar" with a single manifest
 
-**状态**：Superseded by [0010](0010-preprocess-train-scope.md)（2026-06-04 — 预处理已下沉 version 级 train scope；本 ADR 的项目级 `preprocess/` + `preprocess/manifest.json` 写路径已删，仅保留只读 fallback 给 0010 §`ensure_train_manifest` 老项目迁移用）
-**日期**：2026-05-15
-**决策者**：@WalkingMeatAxolotl
+**Status**: Superseded by [0010](0010-preprocess-train-scope.md) (2026-06-04 — preprocessing has moved down to version-level train scope; this ADR's project-level `preprocess/` + `preprocess/manifest.json` write path has been removed, keeping only a read-only fallback for 0010 §`ensure_train_manifest` to migrate old projects)
+**Date**: 2026-05-15
+**Decision makers**: @WalkingMeatAxolotl
 
-## 背景
+## Background
 
-PR #69 给 AnimaLoraStudio 加了"预处理"阶段（放大器 + 智能跳过策略）。落地后产生
-两个 UX / 架构问题：
+PR #69 added a "preprocess" stage to AnimaLoraStudio (an upscaler + a smart-skip
+strategy). Once shipped, it produced two UX / architecture problems:
 
-### 1. UX：磁盘结构被原样翻译成 UI
+### 1. UX: disk layout translated verbatim into the UI
 
-当前流水线在磁盘上是两层平行目录：
+The current pipeline is two parallel directory levels on disk:
 
 ```
 projects/{id}-{slug}/
-  download/      原图
-  preprocess/    产物 PNG + 每张图旁 {name}.preprocess.json sidecar
+  download/      original images
+  preprocess/    output PNGs + a {name}.preprocess.json sidecar next to each image
 ```
 
-前端 `Preprocess.tsx` 跟磁盘一一映射：「未处理 grid」对应 `download/` 里没有产物的图，
-「已处理 grid」对应 `preprocess/` 里有产物的图。用户必须**打开预处理 tab 才能"发现"
-有多少图需要处理**，而且页面上"两个网格"的视觉模型暗示了"两份图"，跟用户脑里
-「我的数据集 = 一套图」的心智模型不符。
+The frontend `Preprocess.tsx` maps 1:1 onto disk: the "unprocessed grid"
+corresponds to images in `download/` with no output, and the "processed grid"
+corresponds to images with output in `preprocess/`. The user **has to open the
+preprocess tab to "discover" how many images need processing**, and the "two
+grids" visual model on the page implies "two sets of images," which doesn't
+match the user's mental model of "my dataset = one set of images."
 
-下游接缝更暴露这个问题。`studio/curation.py:98-109` 的 `_active_left_dir`：
+Downstream seams expose this problem further. `studio/curation.py:98-109`'s
+`_active_left_dir`:
 
 ```python
 def _active_left_dir(pdir):
@@ -34,91 +37,121 @@ def _active_left_dir(pdir):
     return pdir / "download", "download"
 ```
 
-「preprocess/ 非空 → 用 preprocess/，否则用 download/」**全有或全无**。
-意味着用户没法 mix——比如「100 张里只想 upscale 那 20 张小图，剩下 80 张用原图」
-做不到（一旦 preprocess/ 有产物，整批左侧都切到 preprocess/，那 80 张就缺源
-被过滤掉了）。
+"if preprocess/ is non-empty, use preprocess/, otherwise use download/" is
+**all-or-nothing**. It means users cannot mix — for example, "of these 100
+images, I only want to upscale the 20 small ones, and use the original 80 as
+is" isn't possible (once preprocess/ has any output, the entire left-side
+batch switches to preprocess/, and those 80 images end up filtered out for
+lacking a source there).
 
-`left_source` 字段被泄漏到前端 API（`tests/test_curation_endpoints.py:78` assert
-这个字段），前端拿来切 thumbnail URL builder——又一处把磁盘结构暴露给客户端。
+The `left_source` field leaks into the frontend API (asserted by
+`tests/test_curation_endpoints.py:78`), and the frontend uses it to branch the
+thumbnail URL builder — yet another place exposing disk layout to the client.
 
-### 2. 架构：状态散在 N 个 sidecar 里
+### 2. Architecture: state scattered across N sidecars
 
-`studio/services/upscaler.py:353` 每张处理完写 `{name}.png.preprocess.json`：
+`studio/services/upscaler.py:353` writes a `{name}.png.preprocess.json` after
+processing each image:
 
 ```json
 {"source": "...", "model": "...", "scale": 4, "src_size": [W,H], "dst_size": [W,H],
  "action": "upscale", "elapsed_seconds": 12.3, ...}
 ```
 
-`studio/preprocess.py:list_processed` 列图时逐张读 sidecar 拼成响应。这套有几个问题：
+`studio/preprocess.py:list_processed` reads each sidecar individually when
+listing images and assembles a response from them. This has several problems:
 
-- **没有"用户决定"状态**：sidecar 只在 worker 跑完才落，但 sidecar 缺失 ≠ "用户决定
-  跳过"——可能只是没跑过、也可能跑失败被删了。无法表达「这张图我**故意**不处理，
-  用原图」的语义
-- **批量操作贵**：1000 张图列一次要 1000 次 stat + 1000 次 JSON parse
-- **没有原子性**：单张状态没事，但「重置该项目预处理状态」要 1000 次 unlink，中途
-  ctrl-c 会留下半干净的目录
-- **「还原」逻辑分散**：要删 PNG + 删 sidecar 两处，少删一个就状态错乱
+- **No "user decision" state**: a sidecar is only written once a worker
+  finishes, but a missing sidecar does not mean "the user chose to skip
+  it" — it could simply never have run, or run and failed and been deleted.
+  There's no way to express "I **deliberately** don't want this image
+  processed, use the original."
+- **Bulk operations are expensive**: listing 1000 images means 1000 stats and
+  1000 JSON parses.
+- **No atomicity**: a single image's state is fine, but "reset this project's
+  preprocessing state" requires 1000 unlinks, and a ctrl-c mid-way leaves a
+  half-clean directory.
+- **"Restore" logic is scattered**: it has to delete both the PNG and the
+  sidecar; missing one leaves the state inconsistent.
 
-### 3. 用户提出的目标心智模型
+### 3. The target mental model the user proposed
 
-用户原话：
+In the user's own words:
 
-> 创建版本的时候直接在 preprocess 文件夹创建副本，没改过的图可以用 json 表示状态
-> 来占位，后续筛选从 download 拿去实际文件，修改过的图创建副本，筛选从 preprocess 拿，
-> 在用户的眼里没有 preprocess，只有一个文件夹。
+> When a version is created, make a copy directly in the preprocess folder;
+> unmodified images can use JSON to represent their placeholder state;
+> downstream filtering pulls the actual file from download, and modified
+> images get a copy created, with filtering pulling from preprocess. In the
+> user's eyes there's no "preprocess," just one folder.
 
-要的是**一份图 + 每张图的处理状态**，磁盘结构对用户不可见。
+What's wanted is **one set of images + a per-image processing state**, with
+the disk layout invisible to the user.
 
-设计讨论中追加的约束：
+Constraints added during the design discussion:
 
-- preprocess/ 保持 **project 级**（不下沉到 version 级）——理由：upscale 几百张是
-  真贵，跨版本复用预处理结果远比"每版独立预处理"更符合实际工作流（用户更多在
-  iterate 数据集组合 + 训练超参，预处理决定通常一次确定）
-- **一个 manifest 文件**记录所有状态，**不是** N 个 sidecar
-- **没有"删除"状态**——筛选阶段不勾即可，预处理页不引入"删图"语义，避免混淆"删原图
-  还是删产物"
-- **无版本号字段**——YAGNI，真要 migrate schema 那天再加
-- **隐式 original**：manifest 里没记的图默认 = 用原图，manifest 只存非默认决定
+- preprocess/ stays **project-level** (not pushed down to version-level) —
+  reason: upscaling hundreds of images is genuinely expensive, and reusing
+  preprocessing results across versions fits the real workflow far better
+  than "preprocess independently per version" (users mostly iterate on
+  dataset composition + training hyperparameters, and preprocessing
+  decisions are usually settled once).
+- **One manifest file** records all state, **not** N sidecars.
+- **No "deleted" state** — unchecking in the filtering stage is enough; the
+  preprocess page doesn't introduce a "delete image" semantic, to avoid
+  confusing "delete the original vs. delete the output."
+- **No version field** — YAGNI; add it the day a schema migration is actually
+  needed.
+- **Implicit original**: an image not recorded in the manifest defaults to
+  using the original; the manifest only stores non-default decisions.
 
-## 候选方案
+## Candidate solutions
 
-### 方案 A — 现状维持
+### Candidate A — keep the status quo
 
-继续用 `_active_left_dir` 双 bucket + sidecar。
+Keep using `_active_left_dir`'s dual bucket + sidecar approach.
 
-- 优点：0 工时
-- 缺点：上述 UX + 架构问题都不动；将来加"用户跳过该图"语义无处放
-- **拒绝**
+- Pros: zero effort
+- Cons: none of the UX/architecture problems above are addressed; there's
+  nowhere to put a future "user skipped this image" semantic
+- **Rejected**
 
-### 方案 B — preprocess 下沉到 version 级 + 同样 N 个 sidecar
+### Candidate B — push preprocess down to version-level + the same N sidecars
 
-`versions/{label}/preprocess/`，每版独立。
+`versions/{label}/preprocess/`, independent per version.
 
-- 优点：v1 不预处理 / v2 全 upscale 这种对照实验可做；筛选/打标/训练全 version 级一致
-- 缺点：跨版本复用预处理结果**做不了**——同一批图在 v1 处理完，v2 还要重处理一遍
-  几百张 upscale，每次几十分钟。这是预处理这一阶段最贵的成本
-- **拒绝**（被用户明确否决：「不改 version 级，不然每次都要重新处理」）
+- Pros: enables comparisons like "v1 unprocessed / v2 fully upscaled"; keeps
+  filtering/tagging/training consistent at the version level throughout
+- Cons: reusing preprocessing results across versions becomes **impossible**
+  — the same batch of images, once processed for v1, would have to be
+  reprocessed for v2, hundreds of upscales taking tens of minutes each time.
+  This is the most expensive part of the preprocessing stage
+- **Rejected** (explicitly vetoed by the user: "don't move it to version
+  level, or it'll have to be reprocessed every time")
 
-### 方案 C — project 级单 manifest + 隐式 original（**选中**）
+### Candidate C — project-level single manifest + implicit original (**chosen**)
 
-- 一个 `projects/{id}/preprocess/manifest.json` 记录**非默认决定**
-- 「manifest 没记」= 用 `download/` 原图（隐式 original）
-- 「manifest 里有 `kind: processed`」= 用 `preprocess/{name}.png`（实际副本）
-- Resolver 一个函数，所有下游（thumbnail / curation / 打标 / 训练 materialize）调它
-- 优点：UX 单 grid + 状态徽章；下游接缝从「双 bucket fallback」坍缩成「resolver 查表」；
-  per-image 状态可表达；批量列图一次 JSON read 完事
-- 代价：需要 supervisor 串行写 manifest（防并发）；migration 老 sidecar
-- 详细落地见下节
+- A single `projects/{id}/preprocess/manifest.json` records **non-default
+  decisions**
+- "Not recorded in the manifest" = use the `download/` original (implicit
+  original)
+- "Manifest has `kind: processed`" = use `preprocess/{name}.png` (an actual
+  copy)
+- A single resolver function, called by every downstream consumer
+  (thumbnail / curation / tagging / training materialize)
+- Pros: single-grid UX + status badges; downstream seams collapse from "dual
+  bucket fallback" to "a resolver lookup"; per-image state becomes
+  expressible; bulk listing is a single JSON read
+- Cost: needs the supervisor to serialize manifest writes (to prevent
+  concurrency issues); needs to migrate old sidecars
+- Full implementation details in the next section
 
-## 决策
+## Decision
 
-选**方案 C**。
+**Candidate C** is chosen.
 
 ### Manifest schema
 
-`projects/{id}/preprocess/manifest.json`：
+`projects/{id}/preprocess/manifest.json`:
 
 ```json
 {
@@ -139,163 +172,211 @@ def _active_left_dir(pdir):
 }
 ```
 
-- key = 产物文件名（始终 `.png`）
-- value.kind 当前只有 `"processed"` 一种；未来可扩展（如 `"cropped"`、`"masked"`）
-- 隐式 original 不写 entry
-- **无 `version` 字段**：要扩 schema 那天，老文件无字段 = 当 v0
+- key = output file name (always `.png`)
+- `value.kind` currently only has one value, `"processed"`; it can be
+  extended later (e.g. `"cropped"`, `"masked"`)
+- Implicit originals get no entry
+- **No `version` field**: on the day the schema is extended, old files
+  without the field are treated as v0
 
-### Resolver 单点
+### Single-point resolver
 
-`studio/services/preprocess_manifest.py:resolve(project, name)` → `Path | None`：
+`studio/services/preprocess_manifest.py:resolve(project, name)` → `Path | None`:
 
 ```python
 def resolve(project_dir, name):
     m = load_manifest(project_dir)
     entry = m["images"].get(name)
     if entry is None:
-        return project_dir / "download" / name   # 隐式 original
+        return project_dir / "download" / name   # implicit original
     if entry["kind"] == "processed":
-        return project_dir / "preprocess" / name  # 副本
+        return project_dir / "preprocess" / name  # copy
     raise ValueError(f"unknown kind: {entry['kind']}")
 ```
 
-所有读图入口（thumbnail / curation 左侧 / copy_to_train）走这一个函数。
-**删除 `_active_left_dir` / `list_left_source` / API 响应里的 `left_source`**。
+Every image-reading entry point (thumbnail / curation left side /
+copy_to_train) goes through this single function.
+**Remove `_active_left_dir` / `list_left_source` / `left_source` from the API
+response**.
 
-### 并发写：supervisor 单消费者
+### Concurrent writes: single-consumer supervisor
 
-所有 manifest mutation 通过 `studio/services/preprocess_manifest.py:_with_lock`
-（threading.Lock 进程内串行 + 原子 tmp+rename 落盘）。两个写源都走这个：
+All manifest mutations go through
+`studio/services/preprocess_manifest.py:_with_lock` (an in-process
+`threading.Lock` for serialization + atomic tmp+rename writes to disk). Both
+write sources use this:
 
-- 预处理 worker 跑完一张 → `add_processed(project_id, name, meta)`
-- 用户点"还原" → `restore(project_id, name)`（删 entry + 删 PNG）
+- Preprocess worker finishes an image → `add_processed(project_id, name, meta)`
+- User clicks "restore" → `restore(project_id, name)` (deletes the entry +
+  deletes the PNG)
 
-进程内 lock 而非文件锁的理由：服务端单进程，CLI 不会绕过去写 manifest（CLI 没有
-预处理工作流）。如果未来需要跨进程，再升级到 `portalocker`。
+Reasoning for an in-process lock rather than a file lock: the server is a
+single process, and the CLI never bypasses it to write the manifest (the CLI
+has no preprocessing workflow). If cross-process access is needed in the
+future, upgrade to `portalocker`.
 
-### 「未列出」语义
+### "Not listed" semantics
 
-list_pending / list_processed 改为读 manifest + download dir 做 diff：
+`list_pending` / `list_processed` are changed to read the manifest and diff
+against the download dir:
 
-- `download/foo.png` 存在 + manifest 无 entry → "未处理"（pending）
-- `download/foo.png` 存在 + manifest 有 entry → "已处理"（processed），缩略图走 preprocess/foo.png
-- `download/foo.png` 不存在 + manifest 有 entry → 孤儿（产物但源已删），UI 标 orphan
-- `download/foo.png` 不存在 + manifest 无 entry → 不存在的图，不返回
+- `download/foo.png` exists + no manifest entry → "unprocessed" (pending)
+- `download/foo.png` exists + manifest has an entry → "processed", thumbnail
+  reads from preprocess/foo.png
+- `download/foo.png` doesn't exist + manifest has an entry → orphan (output
+  exists but the source was deleted), UI marks it as orphan
+- `download/foo.png` doesn't exist + no manifest entry → the image doesn't
+  exist, not returned
 
 ### Migration
 
-旧项目里有 `*.preprocess.json` sidecar（按 `studio/preprocess.py:48` 的 `SIDECAR_SUFFIX`
-约定写在 preprocess/ 下）。第一次访问该 project 的 preprocess 数据时：
+Old projects have `*.preprocess.json` sidecars (written under preprocess/ per
+the `SIDECAR_SUFFIX` convention in `studio/preprocess.py:48`). On first access
+to that project's preprocess data:
 
-1. 检测 `manifest.json` 是否存在；存在 → 跳过 migration
-2. 扫 `preprocess/*.preprocess.json` → 聚合写成 manifest.json
-3. 老 sidecar 文件**保留不删**（防御性回滚 + 0 删除风险）；新代码不再读它们
+1. Check whether `manifest.json` exists; if so, skip migration
+2. Scan `preprocess/*.preprocess.json` → aggregate them into manifest.json
+3. Old sidecar files are **kept, not deleted** (defensive rollback + zero
+   deletion risk); new code no longer reads them
 
-Migration 是幂等的：manifest 存在就直接返回，不再尝试。
+Migration is idempotent: if the manifest already exists, it just returns
+without retrying.
 
-### UI 模型
+### UI model
 
-`Preprocess.tsx` 从「双 grid」改成「单 grid + 状态徽章」：
+`Preprocess.tsx` changes from "dual grid" to "single grid + status badge":
 
 ```
-共 N 张 · 未处理 X · 已处理 Y                    [全部] [未处理] [已处理]
+N total · Unprocessed X · Processed Y                [All] [Unprocessed] [Processed]
 
 ┌─[img]─┐ ┌─[img]─┐ ┌─[img]─┐
-│  ⊘ 待 │ │ ✓ 4x │ │  ⊘ 待 │
+│ ⊘ Pending│ │ ✓ 4x │ │ ⊘ Pending│
 └───────┘ └───────┘ └───────┘
 
-┌─ 待处理 X 张 · [模型 ▾] [tile 256] [开始预处理] ─┐
+┌─ X pending · [model ▾] [tile 256] [Start preprocessing] ─┐
 ```
 
-「还原」按钮放在已处理图的预览/编辑 overlay 里；同时支持多选批量还原。
+The "restore" button lives in the preview/edit overlay of a processed image;
+it also supports multi-select bulk restore.
 
-### 外部删 download 文件不做特殊处理
+### No special handling for externally deleted download files
 
-用户在 OS 文件管理器里删 `download/foo.png`：
+If a user deletes `download/foo.png` in the OS file manager:
 
-- manifest 里没 entry → resolver 返 None → 下游 skip，不报错
-- manifest 里有 entry → preprocess/foo.png 仍存在，下游照常拿；UI 标 orphan
+- No manifest entry → resolver returns None → downstream skips it, no error
+- Manifest has an entry → preprocess/foo.png still exists, downstream reads
+  it as usual; UI marks it as orphan
 
-**不做主动 reconcile**——这是用户行为，不做"自动清理"，避免吃掉用户没想删的状态。
+**No active reconciliation is performed** — this is user action, and we don't
+do "auto cleanup," to avoid eating state the user didn't intend to remove.
 
-## 理由
+## Rationale
 
-**为什么 single manifest 而非保留 N sidecar 但补一个总览文件**：DRY，状态只有一处真理。
-两套并存意味着 update 时要两边同步，必然漂移。
+**Why a single manifest instead of keeping N sidecars plus an overview file**:
+DRY — state has one single source of truth. Keeping both means every update
+has to keep the two in sync, which inevitably drifts.
 
-**为什么 project 级而不下沉到 version 级**：用户的真实工作流决定的——「预处理一次，
-跨多版本复用数据集组合 + 训练超参」是常态，「为不同版本做不同预处理」是稀有需求。
-后者将来真要做可以加 version override 字段（manifest 内嵌 per-version branches），
-但 v1 不预投资。
+**Why project-level instead of pushed down to version-level**: driven by the
+user's real workflow — "preprocess once, reuse across multiple versions with
+different dataset compositions + hyperparameters" is the common case, while
+"different preprocessing per version" is rare. If the latter is ever truly
+needed, a version-override field can be added (per-version branches nested in
+the manifest), but it's not pre-invested in v1.
 
-**为什么隐式 original 而不全显式占位**：
+**Why implicit original instead of an explicit placeholder for everything**:
 
-- 节省 manifest 体积（1000 张图里改 50 张 → 50 条 entry）
-- 「没决定」和「决定用原图」两种状态自然合并——用户语义上没区别
-- 「新增图自动算未处理」不需要额外回填代码
+- Saves manifest size (changing 50 out of 1000 images → 50 entries)
+- "No decision" and "decided to use the original" naturally merge into one
+  state — there's no semantic difference to the user
+- "Newly added images automatically count as unprocessed" needs no extra
+  backfill code
 
-**为什么没有「删除」状态**：用户明确说 v1 不要。"在预处理页删图"会让用户困惑
-"删的是哪个目录"。删图是筛选阶段的事：不勾它，不进 train/。
+**Why no "deleted" state**: the user explicitly said not to include it in v1.
+"Deleting an image on the preprocess page" would confuse users about "which
+directory is this deleting from." Deleting images belongs to the filtering
+stage: uncheck it, and it doesn't go into train/.
 
-**为什么没有 version 字段**：YAGNI。Schema 改是稀有事件，真要改可以加字段并按
-「没字段 = v0」处理老文件。提前加 `"version": 1` 是占位仪式感，没解决任何真问题。
+**Why no version field**: YAGNI. Schema changes are rare; when one is truly
+needed, a field can be added and old files treated as "missing field = v0."
+Adding `"version": 1` preemptively is just ceremony without solving a real
+problem.
 
-**为什么 supervisor 串行而非文件锁**：服务端单进程，没跨进程写者。文件锁是为了
-应对多进程 / 外部 CLI 同时写——这个场景不存在。降级到 threading.Lock 简单 90%。
+**Why a serializing supervisor instead of a file lock**: the server is a
+single process with no cross-process writer. File locks exist to handle
+multiple processes / an external CLI writing simultaneously — that scenario
+doesn't exist here. Falling back to `threading.Lock` is 90% simpler.
 
-## 后果
+## Consequences
 
-### 好处
+### Benefits
 
-- 用户视角磁盘抽象消失：UI 只有「一套图 + 状态徽章」
-- 下游 (`curation.py` / `server.py` 缩略图 / `copy_to_train`) 接缝坍缩到 `resolver()` 单点
-- per-image 状态有了显式 schema，将来加「裁剪 / mask / 标记跳过」都是 manifest 加 kind
-- 批量列图从 O(N) stat+JSON-parse 降到 O(1) 读 manifest
-- 「重置该项目预处理」原子化（rm preprocess/ + 重写空 manifest）
+- The disk abstraction disappears from the user's view: the UI shows only
+  "one set of images + status badges"
+- Downstream seams (`curation.py` / `server.py` thumbnails / `copy_to_train`)
+  collapse to a single `resolver()` call
+- Per-image state now has an explicit schema; adding "crop / mask / mark as
+  skipped" later is just a new manifest kind
+- Bulk listing drops from O(N) stat+JSON-parse to O(1) manifest read
+- "Reset this project's preprocessing" becomes atomic (rm preprocess/ +
+  rewrite an empty manifest)
 
-### 代价 / 新增约束
+### Costs / new constraints
 
-- **所有 manifest 写必须经 `_with_lock`**——任何旁路写都会丢更新。代码 review
-  时需要把住这条
-- **Migration 入口要正确**：第一次访问该 project 预处理数据时触发；如果有路径绕过
-  入口直接读 manifest，需要再补 migration 调用
-- **老 sidecar 不删但被忽略**：磁盘占用增加（每张 ~500B），可接受。下次大版本可
-  考虑 v2 一并清理
-- **测试覆盖面变大**：需要单测 manifest schema / 原子写 / migration / 并发写
+- **Every manifest write must go through `_with_lock`** — any bypass write
+  will lose updates. Code review needs to enforce this
+- **The migration entry point must be correct**: it triggers on first access
+  to that project's preprocess data; if any code path bypasses that entry
+  point and reads the manifest directly, it needs its own migration call
+  added
+- **Old sidecars are kept but ignored**: disk usage increases slightly
+  (~500B per image), which is acceptable. A future major version could clean
+  them up
+- **Larger test surface**: needs unit tests for manifest schema / atomic
+  writes / migration / concurrent writes
 
-### 还的债 / 未来扩展
+### Debt taken on / future extensions
 
-- 如果真要做 version 级预处理 override（用户改主意），manifest 内嵌一层
-  `version_overrides: {v1: {bar.png: {kind: "skip"}}}` 即可，project 级 entry 仍为
-  baseline——不需要重新设计存储
-- 如果真要做"用户故意不预处理"显式占位（区分"还没决定"和"决定跳过"），
-  加 `kind: "skip"`——但 v1 不引入
-- 跨进程写如果将来真出现（如独立的预处理 daemon），从 `threading.Lock` 升到
-  `portalocker.Lock`，逻辑外壳不变
+- If version-level preprocessing overrides are ever truly needed (the user
+  changes their mind), nest a `version_overrides:
+  {v1: {bar.png: {kind: "skip"}}}` layer in the manifest, with the
+  project-level entries remaining the baseline — no storage redesign needed
+- If an explicit placeholder for "the user deliberately skipped
+  preprocessing" (distinguishing "not yet decided" from "decided to skip")
+  is ever truly needed, add `kind: "skip"` — but it's not introduced in v1
+- If cross-process writes ever become necessary (e.g. an independent
+  preprocessing daemon), upgrade from `threading.Lock` to
+  `portalocker.Lock` — the surrounding logic stays the same
 
-## 参考
+## References
 
-- 触发讨论的 PR：[#69 feat(preprocess): 预处理 stage（放大器）](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio/pull/69)
-- 影响的代码：`studio/curation.py` `_active_left_dir`、`studio/preprocess.py` `list_processed`、
-  `studio/services/upscaler.py:353` sidecar 写入、`studio/web/src/pages/project/steps/Preprocess.tsx` 双 grid
-- 设计讨论：本 session 2026-05-15
+- The PR that triggered this discussion: [#69 feat(preprocess): preprocessing stage (upscaler)](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio/pull/69)
+- Affected code: `studio/curation.py` `_active_left_dir`, `studio/preprocess.py` `list_processed`,
+  `studio/services/upscaler.py:353` sidecar writes, `studio/web/src/pages/project/steps/Preprocess.tsx` dual grid
+- Design discussion: this session, 2026-05-15
 
 ---
 
-## Addendum 1 — 裁剪 stage 引入 + manifest schema 简化（2026-05-21）
+## Addendum 1 — introducing the crop stage + simplifying the manifest schema (2026-05-21)
 
-**触发**：PR 引入预处理第二阶段「裁剪」（一图可多裁，需要 `X.png → X_c0.png / X_c1.png`
-fan-out 派生），原 schema 的"产物名 → 处理过程 meta"模型不够用：派生项不是直接 1:1
-对应一张 download 原图，需要更明确的 origin 追溯。详见
-[`docs/design/preprocess-crop-design.md`](../design/preprocess-crop-design.md)。
+**Trigger**: a PR introduced a second preprocessing stage, "crop" (one image
+can be cropped multiple times, producing fan-out derivatives like
+`X.png → X_c0.png / X_c1.png`), and the original schema's "output name →
+processing-step metadata" model was no longer sufficient: derivatives aren't
+in a direct 1:1 relationship with a single download original, and clearer
+origin tracing is needed. See
+[`docs/design/preprocess-crop-design.md`](../design/preprocess-crop-design.md)
+for details.
 
-讨论中用户明确表态过度设计：rect 坐标 / target AR / action 分类 / VRAM 估算这类
-"过程信息"一旦写盘就丢，不应该 persist。最终选了极简 schema 起手，老字段读时兼容、
-写时丢弃，几个 minor 版本后逐步 deprecate。
+During the discussion, the user explicitly called out over-engineering: rect
+coordinates / target AR / action classification / VRAM estimation are all
+"process information" that becomes stale the moment it's written to disk, and
+shouldn't be persisted. The final choice was a minimal schema to start with;
+old fields are read for compatibility but dropped on write, and deprecated
+gradually over the following minor releases.
 
-### Schema 演进（v0 → v1，read-compat 双跑）
+### Schema evolution (v0 → v1, read-compat dual support)
 
-**v1（新写）**：entry 只剩三个字段。
+**v1 (new writes)**: entries keep only three fields.
 
 ```json
 {
@@ -307,88 +388,115 @@ fan-out 派生），原 schema 的"产物名 → 处理过程 meta"模型不够�
 }
 ```
 
-- `origin` = download/ 下原图名。**Multi-crop 派生**的 entry 多个共享同一 origin
-- `kind` 字段**不再写入**。entry 存在即"已处理"（v0 里 kind 一直只有 `processed` 一种，
-  本来就是死字段；将来真有"未来状态"再加 `state` 字段，不要复活 `kind`）
-- 老的 `source / model / scale / action / target_area / src_size / dst_size /
-  elapsed_seconds` 字段**全部不再写**——属于过程信息，写盘后应该丢
+- `origin` = the original image name under download/. Multiple **multi-crop
+  derivative** entries can share the same origin
+- The `kind` field is **no longer written**. An entry existing means
+  "processed" (in v0, `kind` only ever had one value, `processed`, so it was
+  effectively dead already; if a real "future state" is ever needed, add a
+  `state` field — don't revive `kind`)
+- The old `source / model / scale / action / target_area / src_size /
+  dst_size / elapsed_seconds` fields are **no longer written at all** — they
+  are process information and should be dropped once written to disk
 
-**v0（老读）**：保留 read-compat 至少 3 个 minor 版本。
+**v0 (old reads)**: read-compat is kept for at least 3 minor releases.
 
-- 缺 `origin` → 用 `source` 字段顶上（语义相同，只是更名）
-- 缺 `source` → 用 entry key 兜底（= 1:1 同名场景）
-- `kind` 字段如果存在且 ≠ `"processed"`，仍按 v0 规则视为未来扩展，resolver 返 None
-- 老的 model/scale/... 字段读到就透传给前端（sidebar 还能显示），但下次任何 mutation
-  会把 entry 重写成 v1 schema，老字段丢失
+- Missing `origin` → falls back to the `source` field (same meaning, just
+  renamed)
+- Missing `source` → falls back to the entry key (= the 1:1 same-name case)
+- If a `kind` field is present and is not `"processed"`, it's still treated
+  per the v0 rule as a future extension, and the resolver returns None
+- Old model/scale/... fields, if present, are still passed through to the
+  frontend when read (the sidebar can still display them), but any
+  subsequent mutation rewrites the entry as v1 schema, dropping the old
+  fields
 
-旧 sidecar `*.preprocess.json` 的迁移逻辑（`ensure_manifest`）保留不动——已经聚合成
-manifest entry 的老格式仍在 read-compat 覆盖范围内。
+The old sidecar (`*.preprocess.json`) migration logic (`ensure_manifest`)
+stays unchanged — old formats already aggregated into manifest entries remain
+covered by read-compat.
 
-### 新增 API
+### New API
 
-`studio/services/preprocess_manifest.py` 加三个：
+Three additions to `studio/services/preprocess_manifest.py`:
 
-| 函数 | 作用 |
+| Function | Purpose |
 |---|---|
-| `entry_origin(entry, fallback)` | 从 entry 提取 origin，处理 v0/v1 schema 兼容 |
-| `resolve_origin(project_dir, download_name)` | 反向 resolve：给 download/X，返回 preprocess/ 里所有 origin 匹配的派生（multi-crop 一对多）；无匹配则回退 download |
-| `replace_with_crops(project_dir, source_name, outputs)` | 原子替换：把 source_name 自身 + 所有 origin 指向 source_name 的 entry 整批删，写入 N 个新 entry。供裁剪 worker 在 fan-out 时调用 |
+| `entry_origin(entry, fallback)` | Extracts origin from an entry, handling v0/v1 schema compatibility |
+| `resolve_origin(project_dir, download_name)` | Reverse resolve: given download/X, returns every derivative in preprocess/ whose origin matches (multi-crop is one-to-many); falls back to download if there's no match |
+| `replace_with_crops(project_dir, source_name, outputs)` | Atomic replace: deletes source_name itself plus every entry whose origin points to source_name, and writes N new entries in one batch. Called by the crop worker during fan-out |
 
-`resolve(name)` 接口本身不变。
+The `resolve(name)` interface itself is unchanged.
 
-### 下游消费者改动
+### Downstream consumer changes
 
-- `studio/preprocess.py:list_pending` —— 按 origin 集合比对（不再按 stem），handle
-  multi-crop fan-out 的"已处理"判定（任一 entry origin == download/X.jpg → 不算 pending）
-- `studio/preprocess.py:summary` —— 同 origin 集合判定
-- `studio/curation.py:copy_to_train` —— 用 `resolve_origin()` fan-out 复制多裁剪产物
-  到 train/{folder}，文件名按 preprocess 实际产物名（含 `_c0`/`_c1` 后缀），metadata
-  按 stem 匹配
-- `studio/server.py` thumbnail endpoint —— 同样 `resolve_origin()`，multi-crop 时取第一个
-  preprocess 派生展示
+- `studio/preprocess.py:list_pending` — compares by origin set (no longer by
+  stem), handling the "processed" determination for multi-crop fan-out (if
+  any entry's origin == download/X.jpg, it doesn't count as pending)
+- `studio/preprocess.py:summary` — same origin-set determination
+- `studio/curation.py:copy_to_train` — uses `resolve_origin()` to fan-out copy
+  multiple crop derivatives into train/{folder}, with filenames matching
+  preprocess's actual output names (including the `_c0`/`_c1` suffixes), and
+  metadata matched by stem
+- `studio/server.py` thumbnail endpoint — likewise uses `resolve_origin()`,
+  and for multi-crop shows the first preprocess derivative
 
-### 文件命名约定（fan-out）
+### File naming convention (fan-out)
 
-- N=1 裁剪 → 覆盖 `preprocess/{stem}.png`（同名覆盖，origin 不变）
-- N>1 裁剪 → 写 `preprocess/{stem}_c0.png` / `{stem}_c1.png` ...，删原 `{stem}.png`
-- `{stem}_c0.png` 再多裁 → `{stem}_c0_c0.png` / `{stem}_c0_c1.png`（链式后缀；origin
-  始终指向最初的 download 原图）
+- N=1 crop → overwrites `preprocess/{stem}.png` (same-name overwrite, origin
+  unchanged)
+- N>1 crops → writes `preprocess/{stem}_c0.png` / `{stem}_c1.png` ..., and
+  deletes the original `{stem}.png`
+- Cropping `{stem}_c0.png` again → `{stem}_c0_c0.png` / `{stem}_c0_c1.png`
+  (chained suffixes; origin always points back to the very first download
+  original)
 
-### 还原（restore）语义不变
+### Restore semantics unchanged
 
-`restore(names)` 仍是删 entry + 删对应 preprocess/ 文件。multi-crop 派生的 entry 各自
-独立可还原（删 `Y_c0.png` 不影响 `Y_c1.png`）。整图回退到 download 原图 = 删该图所有
-origin 派生的 entry。
+`restore(names)` still deletes the entry + the corresponding preprocess/
+file. Multi-crop derivative entries can each be restored independently
+(deleting `Y_c0.png` doesn't affect `Y_c1.png`). Reverting a whole image to
+its download original = deleting every entry derived from that image's
+origin.
 
-### Stage 不强制时序
+### Stages don't enforce an ordering
 
-「放大 → 裁剪 → 放大 → 裁剪」是合法链路：每个 stage 都是对 `preprocess/` 当前状态的
-覆盖，没有 partial undo。原 ADR §「未来扩展」里假设的 `kind: cropped` / `kind: masked`
-分类**不采用**——所有产物 entry 是同一类 (`origin + mtime + size`)，stage 信息只在
-worker 运行时存在，不进 manifest。
+"Upscale → crop → upscale → crop" is a valid chain: each stage overwrites the
+current state of `preprocess/`, with no partial undo. The `kind: cropped` /
+`kind: masked` classification assumed in the original ADR's §"Future
+extensions" section is **not adopted** — all output entries are the same
+type (`origin + mtime + size`); stage information exists only while a worker
+is running and never enters the manifest.
 
-### 跟训练 ARB 桶的对齐
+### Alignment with training ARB buckets
 
-裁剪聚类的 target AR 内部 snap 到训练桶（`runtime/training/dataset.py:BucketManager`
-的前端 TS 镜像 `studio/web/src/lib/trainBuckets.ts`），但 UI 标签仍显示 pretty AR。
-这个跟 manifest schema 无关，纯前端逻辑，仅在此点一笔。详见
-[`preprocess-crop-design.md §7`](../design/preprocess-crop-design.md)。
+The crop clustering's target AR is internally snapped to training buckets
+(`runtime/training/dataset.py:BucketManager`, mirrored on the frontend in TS
+by `studio/web/src/lib/trainBuckets.ts`), but the UI label still displays a
+pretty AR. This is unrelated to the manifest schema — it's purely frontend
+logic, noted here only in passing. See
+[`preprocess-crop-design.md §7`](../design/preprocess-crop-design.md) for
+details.
 
-### 防漂移
+### Anti-drift measure
 
-backend Python `BucketManager` 和 frontend TS `trainBuckets.ts` 必须保持算法 + 默认
-参数同步。两边代码顶部互引注释 + TS 单测断言桶数严格 == 37（默认参数下 Python 输出
-也是 37）。改一边漏改另一边 → CI 红。
+The backend Python `BucketManager` and the frontend TS `trainBuckets.ts` must
+keep their algorithm + default parameters in sync. Both sides cross-reference
+each other in a comment at the top of the file, plus a TS unit test asserting
+the bucket count is exactly 37 (the Python output is also 37 under the
+default parameters). Changing one side without the other fails CI.
 
-### 老 schema 读支持的退役时间
+### Retirement timeline for old-schema read support
 
-`origin` v1 schema 在 dev 跑通后 dev → master 合并发版即可观测。Read-compat for v0：
+The v1 `origin` schema becomes observable once dev merges to master after
+running clean on dev. Read-compat for v0:
 
-- v1 schema 引入后 3 个 minor 版本仍读 v0 字段（兜底兼容 0.7-0.9 时期写的老 entry）
-- 老用户首次访问 preprocess 数据触发 `ensure_manifest` 迁移；之后任何 mutation 把
-  老 entry 重写成 v1
-- 之后版本（约 1.0+）可清理 `entry_origin()` 里的 `source` 兜底分支 + 删
-  `_scan_legacy_sidecars()`
+- For 3 minor releases after the v1 schema is introduced, v0 fields are still
+  read (as a fallback for old entries written during the 0.7-0.9 era)
+- An old user's first access to preprocess data triggers the
+  `ensure_manifest` migration; after that, any mutation rewrites old entries
+  as v1
+- In a later release (around 1.0+), the `source` fallback branch in
+  `entry_origin()` and `_scan_legacy_sidecars()` can be removed
 
-不写明确的 deprecation timeline 在代码里，避免用户被"必须升级"压力。等到要清的那天
-看实际使用数据决定。
+No explicit deprecation timeline is written into the code, to avoid pressuring
+users with a "must upgrade" feeling. When the day comes to clean it up, decide
+based on actual usage data.

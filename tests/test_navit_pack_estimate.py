@@ -1,8 +1,10 @@
-"""compute_navit_pack_estimate：NaViT 打包模式的 steps/epoch 预估数据源。
+"""compute_navit_pack_estimate: the data source behind the steps/epoch estimate in NaViT packing mode.
 
-打包走真 NavitPackBatchSampler（非算法拷贝），扫描规则与 compute_bucket_histogram
-同源。回归背景：训练页步数预估用「样本 ÷ batch_size」在 navit 下失真（batch_size
-不参与分批），1536px 数据集预估 2520 实际 5040。
+Packing goes through the real NavitPackBatchSampler (not an algorithm copy); the scan
+rules share their source with compute_bucket_histogram. Regression background: the
+training page's step estimate of "samples / batch_size" is distorted under navit
+(batch_size doesn't participate in batching) -- a 1536px dataset estimated 2520 but
+actually ran 5040.
 """
 from __future__ import annotations
 
@@ -21,10 +23,10 @@ def _img(d: Path, names, size=(64, 64), caption=True) -> None:
 
 
 def test_native_one_image_per_pack(tmp_path: Path) -> None:
-    # 本 bug 场景：单图 token > budget/2 → 任何两图都装不下 → 包数 = 样本数
+    # This bug's scenario: single-image token > budget/2 -> no two images ever fit together -> pack count = sample count
     pytest.importorskip("torch")
     from studio.services.projects.versions import compute_navit_pack_estimate
-    _img(tmp_path / "1_data", ["a", "b", "c"])  # 64×64 → 4×4 = 16 token
+    _img(tmp_path / "1_data", ["a", "b", "c"])  # 64x64 -> 4x4 = 16 tokens
     out = compute_navit_pack_estimate(
         [tmp_path], [1024], native_resolution=True, token_budget=24,
     )
@@ -36,7 +38,7 @@ def test_native_one_image_per_pack(tmp_path: Path) -> None:
 def test_native_packs_fill_budget(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     from studio.services.projects.versions import compute_navit_pack_estimate
-    _img(tmp_path / "1_data", ["a", "b", "c"])  # 16 token each
+    _img(tmp_path / "1_data", ["a", "b", "c"])  # 16 tokens each
     out = compute_navit_pack_estimate(
         [tmp_path], [1024], native_resolution=True, token_budget=48,
     )
@@ -52,29 +54,29 @@ def test_repeat_expands_samples(tmp_path: Path) -> None:
     out = compute_navit_pack_estimate(
         [tmp_path], [1024], native_resolution=True, token_budget=16,
     )
-    assert out["samples"] == 10  # 2 图 × repeat 5
-    assert out["packs_per_epoch"] == 10  # budget 恰好单图 → 每包 1
+    assert out["samples"] == 10  # 2 images x repeat 5
+    assert out["packs_per_epoch"] == 10  # budget exactly fits one image -> 1 per pack
 
 
 def test_arb_bucket_tokens_without_native(tmp_path: Path) -> None:
-    # 非 native：token 按 ARB 桶尺寸 (w//16)*(h//16)，与 latent 形状推导同口径
+    # Non-native: tokens follow the ARB bucket size (w//16)*(h//16), the same convention used to derive the latent shape
     pytest.importorskip("torch")
     from studio.services.projects.versions import compute_navit_pack_estimate
     _img(tmp_path / "1_data", ["a", "b"], size=(1024, 1024))
     out = compute_navit_pack_estimate(
         [tmp_path], [1024], native_resolution=False, token_budget=8192,
     )
-    # 1024×1024 桶 → 64×64 = 4096 token；8192 预算装 2 张
+    # 1024x1024 bucket -> 64x64 = 4096 tokens; 8192 budget fits 2 images
     assert out["token_min"] == out["token_max"] == 4096
     assert out["samples"] == 2
     assert out["packs_per_epoch"] == 1
-    assert out["sizes"] == []  # 非 native 不出尺寸直方图（桶直方图已有）
+    assert out["sizes"] == []  # non-native doesn't emit a size histogram (bucket histogram already has it)
 
 
 def test_native_downscale_over_budget(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     from studio.services.projects.versions import compute_navit_pack_estimate
-    _img(tmp_path / "1_data", ["big"], size=(256, 256))  # 16×16 = 256 token
+    _img(tmp_path / "1_data", ["big"], size=(256, 256))  # 16x16 = 256 tokens
     out = compute_navit_pack_estimate(
         [tmp_path], [1024], native_resolution=True, token_budget=64,
     )
@@ -95,7 +97,7 @@ def test_uncaptioned_images_skipped(tmp_path: Path) -> None:
 
 
 def test_reg_dir_joins_the_pool(tmp_path: Path) -> None:
-    # reg 集与 main 拼进同一打包池（MergedDataset 语义）
+    # reg set and main are joined into the same packing pool (MergedDataset semantics)
     pytest.importorskip("torch")
     from studio.services.projects.versions import compute_navit_pack_estimate
     _img(tmp_path / "train" / "1_data", ["a"])

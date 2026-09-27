@@ -38,7 +38,7 @@ const MOCK_VERSION: Version = {
   output_lora_path: null, note: null, trigger_word: '',
 }
 const MOCK_PROJECT: ProjectDetail = {
-  id: 3, slug: 'ganyu', title: '甘雨', active_version_id: 7,
+  id: 3, slug: 'ganyu', title: 'Ganyu', active_version_id: 7,
   active_version_label: 'v1', active_version_status: 'preparing',
   active_version_phase: 'curating', created_at: 0, updated_at: 0,
   archived_at: null, note: null, versions: [MOCK_VERSION],
@@ -50,7 +50,7 @@ const V2: Version = {
   ...MOCK_VERSION, id: 8, label: 'v2-exp', status: 'completed', phase: 'ready',
 }
 
-// live 态（项目内）：注入带回调的 ProjectContext（interactive=true）。
+// Live state (inside a project): injects a ProjectContext with callbacks (interactive=true).
 function renderLive(path: string, ctx: ProjectCtxValue) {
   return render(
     <MemoryRouter
@@ -87,115 +87,107 @@ function makeCtx(versions: Version[]): ProjectCtxValue {
 describe('Sidebar (PP0)', () => {
   it('shows main items + tools with all 5 destinations', () => {
     renderAt('/')
-    // 主导航
-    expect(screen.getByRole('link', { name: /项目/ })).toHaveAttribute(
+    // main nav
+    expect(screen.getByRole('link', { name: /Projects/ })).toHaveAttribute(
       'href',
       '/'
     )
-    expect(screen.getByRole('link', { name: /队列/ })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /Queue/ })).toHaveAttribute(
       'href',
       '/queue'
     )
-    // 工具区（重设计后没有 "工具" 分组 label，只是用 border-top 分隔）
-    expect(screen.getByRole('link', { name: /预设/ })).toHaveAttribute(
+    // tools area (redesign dropped the "Tools" group label, just a border-top divider now)
+    expect(screen.getByRole('link', { name: /Presets/ })).toHaveAttribute(
       'href',
       '/tools/presets'
     )
-    expect(screen.getByRole('link', { name: /监控/ })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /Monitor/ })).toHaveAttribute(
       'href',
       '/tools/monitor'
     )
-    // 设置不再是路由 link，而是打开右侧抽屉的 button；没有 href
-    expect(screen.getByRole('button', { name: /设置/ })).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: /设置/ })).toBeNull()
+    // Settings is no longer a route link, just a button that opens the right-hand drawer; no href
+    expect(screen.getByRole('button', { name: /Settings/ })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Settings/ })).toBeNull()
   })
 
   it('marks the active route', () => {
     renderAt('/tools/presets')
-    const link = screen.getByRole('link', { name: /预设/ })
-    // 活跃 link 带 ds-is-active（2026 设计：白底卡片 + 细描边）
+    const link = screen.getByRole('link', { name: /Presets/ })
+    // active link carries ds-is-active (2026 design: white card background + thin border)
     expect(link.className).toMatch(/ds-is-active/)
-    // 非活跃 link 没有
-    const queue = screen.getByRole('link', { name: /队列/ })
+    // inactive link doesn't
+    const queue = screen.getByRole('link', { name: /Queue/ })
     expect(queue.className).not.toMatch(/ds-is-active/)
   })
 
   it('does not include the removed Datasets link', () => {
     renderAt('/')
-    expect(screen.queryByRole('link', { name: /数据集/ })).toBeNull()
-    expect(screen.queryByRole('link', { name: /配置/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Datasets/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /Config/ })).toBeNull()
   })
 
-  // 粘性"已选中项目"：离开项目页（如在队列页）后项目区仍保留，用于跨页导航
+  // Sticky "selected project": leaving the project page (e.g. to the queue page) keeps the
+  // project section around, for cross-page navigation.
   it('keeps the selected project section on a global page (queue)', () => {
     renderAt('/queue', STICKY)
-    // 项目名仍显示
-    expect(screen.getByText('甘雨')).toBeInTheDocument()
-    // 概览链接指向该项目，可点回去
-    const overview = screen.getByRole('link', { name: /概览/ })
+    // project name still shows
+    expect(screen.getByText('Ganyu')).toBeInTheDocument()
+    // overview link points back to that project, clickable
+    const overview = screen.getByRole('link', { name: /Overview/ })
     expect(overview).toHaveAttribute('href', '/projects/3')
   })
 
   it('does not highlight overview when off the project route', () => {
     renderAt('/queue', STICKY)
-    // 在队列页：队列高亮，概览不高亮（inRoute 门控，避免 currentStep===null 误判）
-    const queue = screen.getByRole('link', { name: /队列/ })
+    // on the queue page: queue is highlighted, overview is not (gated by inRoute, to avoid
+    // a false positive from currentStep === null)
+    const queue = screen.getByRole('link', { name: /Queue/ })
     expect(queue.className).toMatch(/ds-is-active/)
-    const overview = screen.getByRole('link', { name: /概览/ })
+    const overview = screen.getByRole('link', { name: /Overview/ })
     expect(overview.className).not.toMatch(/ds-is-active/)
   })
 
   it('shows no project section without a sticky selection', () => {
     renderAt('/queue')
-    expect(screen.queryByText('甘雨')).toBeNull()
-    expect(screen.queryByRole('link', { name: /概览/ })).toBeNull()
+    expect(screen.queryByText('Ganyu')).toBeNull()
+    expect(screen.queryByRole('link', { name: /Overview/ })).toBeNull()
   })
 
-  // 只读态（离开项目）：版本行只显示 label，四个 action 全部收起
-  it('read-only version row off the project route: no action buttons', () => {
+  // Read-only state (outside the project): the version row shows only the label, the switch
+  // pill is not interactive.
+  it('read-only version row off the project route: no switch pill', () => {
     renderAt('/queue', STICKY)
     expect(screen.getByText('v1')).toBeInTheDocument()
-    expect(screen.queryByTitle('切换版本')).toBeNull()
-    expect(screen.queryByTitle('新版本')).toBeNull()
-    expect(screen.queryByTitle('打包导出当前版本训练集')).toBeNull()
-    expect(screen.queryByTitle('删除此版本（移到回收站）')).toBeNull()
+    expect(screen.queryByTitle('Switch version')).toBeNull()
   })
 })
 
 describe('Sidebar version row (live / in project)', () => {
-  it('single version: new + export present, switch + delete hidden', () => {
+  it('single version: switch pill opens a popover with just "New version"', () => {
     renderLive('/projects/3', makeCtx([MOCK_VERSION]))
-    expect(screen.getByTitle('新版本')).toBeInTheDocument()
-    expect(screen.getByTitle('打包导出当前版本训练集')).toBeInTheDocument()
-    // 切换 / 删除只在多版本时出现
-    expect(screen.queryByTitle('切换版本')).toBeNull()
-    expect(screen.queryByTitle('删除此版本（移到回收站）')).toBeNull()
+    const pill = screen.getByTitle('Switch version')
+    expect(pill).toBeInTheDocument()
+    fireEvent.click(pill)
+    expect(screen.getByRole('menuitem', { name: /New version/ })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'v2-exp' })).toBeNull()
   })
 
-  it('new + export invoke their handlers', () => {
+  it('"New version" menu item invokes onCreateVersion', () => {
     const ctx = makeCtx([MOCK_VERSION])
     renderLive('/projects/3', ctx)
-    fireEvent.click(screen.getByTitle('新版本'))
+    fireEvent.click(screen.getByTitle('Switch version'))
+    fireEvent.click(screen.getByRole('menuitem', { name: /New version/ }))
     expect(ctx.onCreateVersion).toHaveBeenCalled()
-    fireEvent.click(screen.getByTitle('打包导出当前版本训练集'))
-    expect(ctx.onExportTrain).toHaveBeenCalled()
   })
 
   it('multi version: switch opens popover and picks a version', () => {
     const ctx = makeCtx([MOCK_VERSION, V2])
     renderLive('/projects/3', ctx)
-    const sw = screen.getByTitle('切换版本')
+    const sw = screen.getByTitle('Switch version')
     expect(sw).toBeInTheDocument()
     fireEvent.click(sw)
-    // popover 列出两版本，点非当前的 v2-exp → onSelectVersion(8)
-    fireEvent.click(screen.getByRole('button', { name: 'v2-exp' }))
+    // popover lists both versions; clicking the non-active v2-exp -> onSelectVersion(8)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'v2-exp' }))
     expect(ctx.onSelectVersion).toHaveBeenCalledWith(8)
-  })
-
-  it('multi version: delete calls onDeleteVersion with active id', () => {
-    const ctx = makeCtx([MOCK_VERSION, V2])
-    renderLive('/projects/3', ctx)
-    fireEvent.click(screen.getByTitle('删除此版本（移到回收站）'))
-    expect(ctx.onDeleteVersion).toHaveBeenCalledWith(7)
   })
 })

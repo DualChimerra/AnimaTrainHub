@@ -1,16 +1,16 @@
-"""A4 — reg 集 dedup helper（PR-1）。
+"""A4 -- reg-set dedup helper (PR-1).
 
-把 `services/preprocess/duplicates.py` 的相似度分组算法套到 reg/ 上，
-返回每组里要删的相对路径；删除（含 .txt + .deleted_ids.json + meta 更新）
-由 `purge_paths` 完成。
+Applies the similarity-grouping algorithm from `services/preprocess/duplicates.py` to reg/,
+returning the relative paths to delete in each group; deletion (including .txt +
+`.deleted_ids.json` + meta update) is handled by `purge_paths`.
 
-两个调用方：
-- API endpoint `POST /reg/dedup-purge` —— 用户在 RegPreview 手动触发
-- worker reg_build_worker —— `auto_dedup=True` 时 build 后自动跑、配合
-  incremental 补足循环到达目标数
+Two callers:
+- API endpoint `POST /reg/dedup-purge` -- triggered manually by the user in RegPreview
+- worker reg_build_worker -- when `auto_dedup=True`, runs automatically after build and loops
+  with incremental top-up until the target count is reached
 
-不做路径越界校验：调用方负责保证 `relative_paths` 是合法 rdir 内相对路径
-（worker 自己生成的必合法；endpoint 路径走 `_safe_join_or_400`）。
+Does no path-traversal validation: callers are responsible for ensuring `relative_paths` are
+valid relative paths inside rdir (worker-generated ones are always valid; the endpoint path goes through `_safe_join_or_400`).
 """
 from __future__ import annotations
 
@@ -22,13 +22,13 @@ from . import builder as reg_builder
 
 
 def scan_for_dedup(reg_dir: Path) -> list[str]:
-    """对 reg/ 跑相似度分组，返回每组里**非保留项**的相对路径列表。
+    """Run similarity grouping on reg/, returning the **non-kept** relative paths in each group.
 
-    每组保留 `group[0]`（duplicate_finder 按文件大小 + 像素数排序，
-    第一项视作"推荐保留"），其余视作"推荐删除"。无重复组返回 []。
+    Each group keeps `group[0]` (duplicate_finder sorts by file size + pixel count, the first
+    item is treated as the "recommended keep"); the rest are treated as "recommended delete". No duplicate groups returns [].
 
-    用默认 `DuplicateOptions()` —— 用户决策（2026-05-30）：reg 集 quality
-    bar 比 train 低，不开放参数调整。
+    Uses the default `DuplicateOptions()` -- per the owner's decision (2026-05-30): the reg-set quality
+    bar is lower than train, so parameter tuning isn't exposed.
     """
     if not reg_dir.exists():
         return []
@@ -64,12 +64,12 @@ def scan_for_dedup(reg_dir: Path) -> list[str]:
 
 
 def purge_paths(reg_dir: Path, relative_paths: list[str]) -> dict[str, Any]:
-    """按相对路径删 reg/ 下的图 + 同名 .txt caption，更新 meta.actual_count，
-    booru ID（文件 stem）追加到 `reg/.deleted_ids.json`。
+    """Delete images under reg/ by relative path + same-named .txt caption, update meta.actual_count,
+    and append the booru ID (file stem) to `reg/.deleted_ids.json`.
 
-    路径不存在 / 非图：静默跳过。**不做** traversal 校验 —— 调用方负责。
+    Nonexistent path / non-image: silently skipped. **No** traversal validation is done -- callers are responsible.
 
-    返回 `{deleted: [rel...], count: int}`。
+    Returns `{deleted: [rel...], count: int}`.
     """
     deleted: list[str] = []
     deleted_booru_ids: list[str] = []

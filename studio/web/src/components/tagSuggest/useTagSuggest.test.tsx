@@ -7,25 +7,19 @@ import { __setStateForTest } from '../../tagDict/store'
 import { TagSuggestList } from './TagSuggestList'
 import { useTagSuggest } from './useTagSuggest'
 
-/** 注入一个小词典（绕过网络），让 findSuggestions 有东西可匹配。 */
+/** Seed a small tag list (no network) so findSuggestions has matches. */
 function seedDict() {
-  const entries = new Map<string, string[]>([
-    ['solo', ['单人']],
-    ['long hair', ['长发']],
-  ])
-  const tagKeys = Array.from(entries.keys())
+  const tagKeys = ['solo', 'long hair']
   __setStateForTest({
     status: 'ready',
-    entries,
     tagKeys,
     compactedKeys: tagKeys.map((t) => t.replace(/[\s_]/g, '')),
-    reverse: [],
     meta: null,
     error: null,
   })
 }
 
-/** 复刻真实 caller 的接线（PromptList / TagsInput 同构）。 */
+/** Mirrors the real caller's wiring (isomorphic to PromptList / TagsInput). */
 function Harness({ initial = '' }: { initial?: string }) {
   const [value, setValue] = useState(initial)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -60,20 +54,20 @@ function Harness({ initial = '' }: { initial?: string }) {
   )
 }
 
-describe('useTagSuggest 弹出规则', () => {
+describe('useTagSuggest popup rules', () => {
   beforeEach(() => {
     localStorage.clear()
     seedDict()
   })
 
-  it('鼠标点进已有内容的输入框不弹候选（只有输入变化才弹）', async () => {
+  it('clicking into an input that already has content does not pop suggestions (only a value change does)', async () => {
     const user = userEvent.setup()
     render(<Harness initial="sol" />)
     await user.click(screen.getByRole('textbox'))
     expect(screen.queryByRole('listbox')).toBeNull()
   })
 
-  it('输入变化后弹出候选', async () => {
+  it('pops suggestions after the value changes', async () => {
     const user = userEvent.setup()
     render(<Harness />)
     await user.type(screen.getByRole('textbox'), 'sol')
@@ -81,7 +75,7 @@ describe('useTagSuggest 弹出规则', () => {
     expect(screen.getByText('solo')).toBeInTheDocument()
   })
 
-  it('候选弹出后鼠标点击输入框（挪光标）→ 候选消失', async () => {
+  it('clicking the input to move the caret after suggestions are open closes them', async () => {
     const user = userEvent.setup()
     const input = () => screen.getByRole('textbox')
     render(<Harness />)
@@ -91,7 +85,7 @@ describe('useTagSuggest 弹出规则', () => {
     expect(screen.queryByRole('listbox')).toBeNull()
   })
 
-  it('全局开关关闭后，输入也不弹候选', async () => {
+  it('typing does not pop suggestions once the global switch is off', async () => {
     localStorage.setItem('studio.tag.autocomplete', '0')
     const user = userEvent.setup()
     render(<Harness />)
@@ -99,7 +93,7 @@ describe('useTagSuggest 弹出规则', () => {
     expect(screen.queryByRole('listbox')).toBeNull()
   })
 
-  it('鼠标点选候选仍然生效（onMouseDown pick 不被 click-close 挡掉）', async () => {
+  it('clicking a suggestion still works (onMouseDown pick is not blocked by click-close)', async () => {
     const user = userEvent.setup()
     render(<Harness />)
     await user.type(screen.getByRole('textbox'), 'sol')

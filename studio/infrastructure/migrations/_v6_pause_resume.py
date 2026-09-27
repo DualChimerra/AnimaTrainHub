@@ -1,17 +1,18 @@
-"""v5 → v6: ADR 0006 PR-2 — pause/resume backend 骨架。
+"""v5 -> v6: ADR 0006 PR-2 -- pause/resume backend skeleton.
 
-加列：
+New columns:
 
-- `paused_state_path`：暂停时 `.pt` 路径（pause_step_<N>.pt）
-- `paused_config_path`：暂停时 config snapshot 路径（pause_step_<N>.config.json）
-- `paused_step`：global_step 快照（picker / UI 提示用）
-- `paused_at`：UNIX 秒，"在 step N 暂停于 …"显示用
+- `paused_state_path`: `.pt` path at the time of pausing (pause_step_<N>.pt)
+- `paused_config_path`: config snapshot path at the time of pausing (pause_step_<N>.config.json)
+- `paused_step`: global_step snapshot (used by the picker / UI hints)
+- `paused_at`: UNIX seconds, used for the "paused at step N ..." display
 
-加表 `queue_settings`：kv 单行存储，跨重启保留。当前只有一个 key
-`queue.held` (true/false)，dispatcher 看它决定是否跳过本轮调度（ADR §3.2）。
+New table `queue_settings`: single-row kv storage, persists across restarts. Currently just one
+key `queue.held` (true/false); the dispatcher checks it to decide whether to skip this round of
+scheduling (ADR SS3.2).
 
-DDL 设计原则：所有 paused_* 列 NULLABLE（task 没暂停过时全 NULL），不需要
-backfill。queue_settings 表全新，老库升上来空表。
+DDL design principle: all paused_* columns are NULLABLE (all NULL when a task was never paused),
+no backfill needed. queue_settings is a brand-new table, empty when an old DB upgrades.
 """
 from __future__ import annotations
 

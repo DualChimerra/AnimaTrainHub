@@ -1,4 +1,4 @@
-"""runtime/training/snapshot.py — pause helpers 单测（ADR 0006 PR-2）。"""
+"""runtime/training/snapshot.py -- pause helper unit tests (ADR 0006 PR-2)."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ from runtime.training.snapshot import (  # type: ignore[import-not-found]
 )
 
 
-# ---- 路径 build --------------------------------------------------------------
+# ---- path building --------------------------------------------------------------
 
 
 def test_build_pause_state_path_uses_pause_prefix() -> None:
@@ -35,7 +35,7 @@ def test_build_pause_config_path_pairs_state() -> None:
 
 
 def test_state_and_config_path_share_stem_step() -> None:
-    """同 step 的 state 和 config 必须在同目录、文件名同前缀。"""
+    """The state and config for the same step must live in the same directory with the same filename prefix."""
     sd = Path("/x/state/task_7")
     state = build_pause_state_path(sd, 500)
     cfg = build_pause_config_path(sd, 500)
@@ -112,12 +112,12 @@ def test_write_config_snapshot_creates_parent_dir(tmp_path: Path) -> None:
 
 
 def test_write_config_snapshot_utf8_encoding(tmp_path: Path) -> None:
-    args = argparse.Namespace(name="中文_名字", prompt="anime, 1girl")
+    args = argparse.Namespace(name="unicode_ñäme", prompt="anime, 1girl")
     target = tmp_path / "snap.json"
-    write_config_snapshot(target, args, ["1girl，masterpiece"])
+    write_config_snapshot(target, args, ["1girl, café"])
     data = json.loads(target.read_text(encoding="utf-8"))
-    assert data["args"]["name"] == "中文_名字"
-    assert data["sample_prompts"] == ["1girl，masterpiece"]
+    assert data["args"]["name"] == "unicode_ñäme"
+    assert data["sample_prompts"] == ["1girl, café"]
 
 
 # ---- emit_event --------------------------------------------------------------
@@ -139,5 +139,5 @@ def test_emit_event_empty_payload(capsys: pytest.CaptureFixture) -> None:
 
 
 def test_event_marker_constant_matches_supervisor() -> None:
-    """跨进程 IPC 协议字面量；改 = breaking change。"""
+    """Cross-process IPC protocol literal; changing it = a breaking change."""
     assert EVENT_MARKER == "__EVENT__:"

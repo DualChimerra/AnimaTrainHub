@@ -1,6 +1,7 @@
-"""数据集目录扫描：识别 Kohya 风格 N_xxx 前缀、统计样本数和 caption 类型。
+"""Dataset directory scanning: recognizes the Kohya-style N_xxx prefix, counts samples and caption types.
 
-不做缓存：每次端点调用都重新扫一遍。dataset 目录通常 < 几千张图，扫描很快。
+No caching: every endpoint call rescans from scratch. Dataset directories are
+usually < a few thousand images, so scanning is fast.
 """
 from __future__ import annotations
 
@@ -8,15 +9,18 @@ import re
 from pathlib import Path
 from typing import Any
 
-# 全链路图片格式白名单 —— 上传 / 下载 / curation / tag / reg / 训练都引用这个集合。
-# 保持与 anima_train.py:EXTS 同步（trainer 是独立脚本，不 import studio）。
-# 删了 .jxl：PIL 12 没注册 .jxl，需要 pillow-jxl-plugin 才能解，booru 生态见不到。
+# The whole-pipeline image format whitelist — upload / download / curation /
+# tag / reg / training all reference this set.
+# Keep in sync with anima_train.py:EXTS (the trainer is a standalone script
+# that doesn't import studio).
+# Removed .jxl: PIL 12 doesn't register .jxl; it needs pillow-jxl-plugin to
+# decode, and it's not seen in the booru ecosystem anyway.
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 KOHYA_PREFIX = re.compile(r"^(\d+)_(.+)$")
 
 
 def parse_repeat(folder_name: str) -> tuple[int, str]:
-    """`5_concept` → (5, 'concept')；无前缀返回 (1, name)。"""
+    """`5_concept` -> (5, 'concept'); returns (1, name) if there's no prefix."""
     m = KOHYA_PREFIX.match(folder_name)
     if m:
         return int(m.group(1)), m.group(2)
@@ -24,7 +28,7 @@ def parse_repeat(folder_name: str) -> tuple[int, str]:
 
 
 def caption_kind(image_path: Path) -> str:
-    """同名 .json > .txt > 'none'。"""
+    """Same-name .json > .txt > 'none'."""
     if image_path.with_suffix(".json").exists():
         return "json"
     if image_path.with_suffix(".txt").exists():
@@ -33,7 +37,7 @@ def caption_kind(image_path: Path) -> str:
 
 
 def scan_folder(folder: Path, sample_limit: int = 4) -> dict[str, Any]:
-    """统计单个文件夹的样本与 caption 分布。"""
+    """Tally sample count and caption distribution for a single folder."""
     repeat, label = parse_repeat(folder.name)
     counts = {"json": 0, "txt": 0, "none": 0}
     samples: list[str] = []
@@ -60,20 +64,20 @@ def scan_folder(folder: Path, sample_limit: int = 4) -> dict[str, Any]:
 
 
 def scan_dataset_root(root: Path) -> dict[str, Any]:
-    """扫描 dataset 根目录，返回每个子目录的统计；根目录散图也算一个虚拟项。"""
+    """Scan the dataset root directory, returning stats for each subdirectory; loose images in the root also count as one virtual entry."""
     if not root.exists() or not root.is_dir():
         return {"root": str(root), "exists": False, "folders": []}
 
     folders: list[dict[str, Any]] = []
-    # 子目录
+    # subdirectories
     for entry in sorted(root.iterdir()):
         if entry.is_dir():
             folders.append(scan_folder(entry))
 
-    # 根目录直接放的图（无前缀子目录的图算 repeat=1）
+    # Images placed directly in the root (images with no prefix subdirectory count as repeat=1)
     root_loose = scan_folder(root, sample_limit=4)
     if root_loose["image_count"] > 0:
-        root_loose["name"] = "(根目录)"
+        root_loose["name"] = "(root directory)"
         root_loose["label"] = "(loose)"
         root_loose["repeat"] = 1
         folders.insert(0, root_loose)

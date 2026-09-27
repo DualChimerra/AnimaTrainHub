@@ -1,19 +1,23 @@
 import type { ReactNode } from 'react'
 
-/** Filmstrip 只依赖 name（选中键 + tooltip）；缩略图 URL 由调用方闭包提供。 */
+/** Filmstrip only depends on `name` (selection key + tooltip); the thumbnail URL is supplied by the caller's closure. */
 export interface FilmstripItemBase {
   name: string
 }
 
-/** 预处理子页共用的左栏纵向导航（裁剪页抽出，PR-A 涂抹页复用）。
+/** The left-column vertical nav shared by the preprocess sub-pages
+ *  (extracted from the crop page, reused by the inpaint page in PR-A).
  *
- *  3-col vertical grid with square cover thumbs. Squaring is intentional —
- *  数据集横竖 AR 混排时方形 cover-crop 保持网格整齐；完整 AR 在主画布可见。
- *  page 特有的角标（裁剪 rect overlay / 涂抹已改 dot）由 renderOverlay 注入，
- *  本组件不知道 crop / stroke 概念。
+ *  3-col vertical grid with square cover thumbs. Squaring is intentional --
+ *  when a dataset mixes portrait/landscape ARs, a square cover-crop keeps
+ *  the grid tidy; the full AR is visible on the main canvas. Page-specific
+ *  badges (the crop rect overlay / the inpaint "edited" dot) are injected
+ *  via renderOverlay -- this component has no notion of crop / stroke.
  *
- *  空态也渲染同一容器 —— 调用方把本组件放进多列 grid 时，条件卸载会塌掉
- *  列布局（详裁剪页 264 图数据集的教训）。
+ *  The empty state renders the same container too -- when the caller places
+ *  this component inside a multi-column grid, conditionally unmounting it
+ *  would collapse the column layout (learned the hard way on the crop
+ *  page's 264-image dataset).
  */
 export default function Filmstrip<T extends FilmstripItemBase>({
   items,

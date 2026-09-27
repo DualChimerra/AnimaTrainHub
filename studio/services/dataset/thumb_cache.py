@@ -1,14 +1,18 @@
-"""图片缩略图缓存（PP3 polish）。
+"""Image thumbnail cache (PP3 polish).
 
-为什么要单独做：之前 `/api/.../thumb` 直接 serve 原图，前端只是用 CSS 缩。
-当 download/ 有几百张几 MB 的 PNG 时，浏览器持续 decode 大图，滚动 / 悬停
-切预览都卡。这里把缩略图先生成到 `studio_data/thumb_cache/{sha1}.jpg`
-（hash = src 路径 + mtime + size），后续直接返回缓存。
+Why this exists as its own module: previously `/api/.../thumb` served the
+original image directly and the frontend just shrank it with CSS. When
+download/ has hundreds of multi-MB PNGs, the browser keeps decoding large
+images, and scrolling / hovering to switch previews gets janky. Here
+thumbnails are pre-generated into `studio_data/thumb_cache/{sha1}.jpg`
+(hash = src path + mtime + size), and subsequent requests just return the
+cached version.
 
-设计：
-- 缓存键含源文件 mtime，源被替换会自动 invalidate（hash 变）
-- 多线程安全：先写 .tmp 再 rename
-- size=0 表示「不缩」，直接返回源路径
+Design:
+- The cache key includes the source file's mtime, so replacing the source
+  auto-invalidates it (the hash changes)
+- Thread-safe: writes to .tmp first, then renames
+- size=0 means "don't resize" — returns the source path directly
 """
 from __future__ import annotations
 
@@ -25,11 +29,11 @@ from ...paths import THUMB_CACHE_DIR
 
 logger = logging.getLogger(__name__)
 
-# 进程内锁：避免两个并发请求同时生成同一缩略图（写半截）。
+# In-process lock: prevents two concurrent requests from generating the same thumbnail at once (half-written file).
 _LOCKS_LOCK = threading.Lock()
 _KEY_LOCKS: dict[str, threading.Lock] = {}
 
-# Pillow 9.1+ 把 LANCZOS 挪到 Image.Resampling 下；旧版本仍可用 Image.LANCZOS。
+# Pillow 9.1+ moved LANCZOS under Image.Resampling; older versions can still use Image.LANCZOS.
 _RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS  # type: ignore[attr-defined]
 
 
@@ -43,11 +47,14 @@ def _key_lock(key: str) -> threading.Lock:
 
 
 def _key_for(src: Path, size: int) -> Optional[str]:
-    """缓存键：sha1(abs_path|mtime_ns|size)。
+    """Cache key: sha1(abs_path|mtime_ns|size).
 
-    stat 失败时返回 None —— 不再退化用 mtime=0，否则 Windows 偶发 stat 失败
-    （杀软扫描 / 文件锁）会让所有受影响图片共享同一个 cache 键，串图。
-    上层拿 None 应该跳过缓存直接生成临时缩略图（或退回原图）。
+    Returns None when stat fails — no longer falls back to mtime=0, since
+    that would make Windows's occasional stat failures (antivirus scanning /
+    file locks) cause every affected image to share the same cache key,
+    mixing up thumbnails. Callers getting None should skip the cache and
+    generate a temporary thumbnail directly (or fall back to the original
+    image).
     """
     try:
         mtime = src.stat().st_mtime_ns
@@ -59,9 +66,10 @@ def _key_for(src: Path, size: int) -> Optional[str]:
 
 
 def get_or_make_thumb(src: Path, size: int) -> Path:
-    """返回可直接 FileResponse 的缩略图路径。
+    """Return a thumbnail path usable directly as a FileResponse.
 
-    size <= 0 → 原图直出（不缩）。生成失败 → 回退到原图。
+    size <= 0 -> serve the original image as-is (no resize). Generation
+    failure -> falls back to the original image.
     """
     if size <= 0:
         return src
@@ -70,8 +78,9 @@ def get_or_make_thumb(src: Path, size: int) -> Path:
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     key = _key_for(src, size)
     if key is None:
-        # stat 失败：不缓存，不串图；直接返回原图（Cache-Control: no-cache 让浏览器
-        # 下次会重试，stat 恢复后能拿到正常缩略图）
+        # stat failed: don't cache, don't mix up thumbnails; return the
+        # original image directly (Cache-Control: no-cache lets the browser
+        # retry next time, and once stat recovers it'll get a proper thumbnail)
         return src
     out = THUMB_CACHE_DIR / f"{key}.jpg"
     if out.exists():
@@ -83,11 +92,14 @@ def get_or_make_thumb(src: Path, size: int) -> Path:
             return out
         tmp = out.with_suffix(out.suffix + ".tmp")
         try:
-            # 必须在文件 still-open 期间完成所有像素操作：
-            # ImageOps.exif_transpose 对没有 orientation 的图直接返回原 lazy
-            # image，而 Image.open 是 lazy 的；一旦 with 块退出文件句柄被关，
-            # 后续 thumbnail/save 触发 lazy load 会失败，进而被 except 吞掉
-            # 返回源图（几 MB），让前端依旧加载大图、滚动卡顿。
+            # All pixel operations must complete while the file is still open:
+            # ImageOps.exif_transpose returns the original lazy image directly
+            # for images with no orientation, and Image.open is lazy; once the
+            # with block exits and the file handle closes, a later
+            # thumbnail/save triggering the lazy load would fail, getting
+            # swallowed by except and falling back to the source image
+            # (several MB), leaving the frontend still loading the large
+            # image with janky scrolling.
             with Image.open(src) as raw:
                 img = ImageOps.exif_transpose(raw) or raw
                 if img.mode != "RGB":
@@ -110,14 +122,16 @@ def get_or_make_thumb(src: Path, size: int) -> Path:
 def prewarm_from_image(
     src: Path, image: Image.Image, sizes: list[int]
 ) -> list[Path]:
-    """用已在内存的 PIL Image 直接写多档缩略图到缓存，省掉首次浏览时的解码。
+    """Write multiple thumbnail sizes directly to the cache from a PIL Image already in memory, saving decode work on first view.
 
-    主要给 upscaler 用：放大后的 PIL Image 还在内存里，与其等用户首次访问时
-    再读 PNG + decode + resize（一张几 MB 的 4× PNG 在 CPU 上 1-3s），不如
-    在 worker 阶段一次性把 256 / 768 都生成好。
+    Mainly used by the upscaler: the upscaled PIL Image is already in memory,
+    so rather than waiting for the user's first visit to re-read the PNG +
+    decode + resize (a multi-MB 4x PNG takes 1-3s on CPU), it's better to
+    generate both 256 / 768 up front during the worker stage.
 
-    `src` 决定缓存键 —— 必须是放大产物文件的真实路径（同 get_or_make_thumb
-    的 hash 计算）。`image` 应该是 RGB；其它模式会自动转换。
+    `src` determines the cache key — it must be the real path of the
+    upscaled output file (same hash calculation as get_or_make_thumb).
+    `image` should be RGB; other modes are auto-converted.
     """
     THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -158,7 +172,7 @@ def prewarm_from_image(
 
 
 def clear_cache() -> int:
-    """删除缓存目录下所有 .jpg；返回删除数量。"""
+    """Delete all .jpg files under the cache directory; return the number deleted."""
     if not THUMB_CACHE_DIR.exists():
         return 0
     n = 0

@@ -1,24 +1,25 @@
 """
-Optimizer Utils Module - 优化器创建
-===================================
-支持多种优化器：
-1. 标准 AdamW - PyTorch 内置
-2. 8-bit AdamW (bitsandbytes) - 内存高效
-3. Prodigy (prodigyopt) - 无需调 lr 的自适应优化器
-4. ProdigyPlusScheduleFree (prodigy-plus-schedule-free) - Schedule-Free + Prodigy，
-   解决 Prodigy 在扩散 LoRA 训练中的 mutation ep / 风格突变问题。
+Optimizer Utils Module - Optimizer creation
+============================================
+Supports multiple optimizers:
+1. Standard AdamW - PyTorch built-in
+2. 8-bit AdamW (bitsandbytes) - Memory-efficient
+3. Prodigy (prodigyopt) - Adaptive optimizer that needs no lr tuning
+4. ProdigyPlusScheduleFree (prodigy-plus-schedule-free) - Schedule-Free + Prodigy,
+   addressing the mutation-episode / style-shift problem Prodigy has in diffusion LoRA training.
 5. Lion - EvoLved Sign Momentum (Chen et al., 2023, arxiv 2302.06675)
 6. Automagic - Per-parameter adaptive lr via sign-agreement tracking
-   原作者: Ostris (https://github.com/ostris/ai-toolkit, MIT license, Copyright (c)
-   2024 Ostris, LLC). bf16 Kahan summation path 借鉴自 tdrussell/diffusion-pipe.
+   Original author: Ostris (https://github.com/ostris/ai-toolkit, MIT license, Copyright (c)
+   2024 Ostris, LLC). The bf16 Kahan summation path is borrowed from tdrussell/diffusion-pipe.
 7. SOAP - Adam in the Shampoo eigenbasis (Vyas et al., 2024, arxiv 2409.11321)
-8. SOAP-SF - Schedule-Free SOAP，SOAP 预条件 + Schedule-Free trajectory
-   (Defazio et al., 2024, "The Road Less Scheduled", arxiv 2405.15682)。SOAP 类
-   实现在 utils/soap_optimizer.py（MIT，Copyright (c) 2024 Nikhil Vyas）。
+8. SOAP-SF - Schedule-Free SOAP, SOAP preconditioning + Schedule-Free trajectory
+   (Defazio et al., 2024, "The Road Less Scheduled", arxiv 2405.15682). The SOAP class
+   is implemented in utils/soap_optimizer.py (MIT, Copyright (c) 2024 Nikhil Vyas).
 9. CAME - Confidence-guided Adaptive Memory Efficient optimizer
-   (Luo et al., 2023, ACL 2023, arxiv 2307.02047)。Adafactor 式分解二阶矩省显存
-   + 置信度引导（instability EMA）压制分解近似带来的更新噪声。
-   派生自官方实现 yangluo7/CAME（MIT，Copyright (c) 2023 Yang Luo）。
+   (Luo et al., 2023, ACL 2023, arxiv 2307.02047). Adafactor-style factored second-moment
+   to save memory + confidence guidance (instability EMA) to suppress the update noise
+   introduced by the factorization approximation.
+   Derived from the official implementation yangluo7/CAME (MIT, Copyright (c) 2023 Yang Luo).
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from torch.optim import Optimizer, AdamW
 
 logger = logging.getLogger(__name__)
 
-# 尝试导入 bitsandbytes
+# Try importing bitsandbytes
 try:
     import bitsandbytes as bnb
     BITSANDBYTES_AVAILABLE = True
@@ -68,9 +69,10 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-# 用户通过 schema (ppsf_* 字段) 显式配置的 kwarg。如果上游版本不接受这些，
-# silent drop 会让用户的勾选/数值悄悄失效，可能 8 小时后才发现训练效果不对——
-# 所以这些必须 fail loud，而不是只 log warning。
+# kwargs the user explicitly configures via the schema (ppsf_* fields). If the upstream
+# version doesn't accept these, a silent drop would make the user's toggles/values silently
+# stop working, possibly not noticed until 8 hours later when training results look off --
+# so these must fail loud rather than just log a warning.
 _USER_EXPOSED_PPSF_KWARGS = frozenset({
     "d_coef", "prodigy_steps",
     "split_groups", "split_groups_mean",
@@ -102,10 +104,10 @@ def _filter_kwargs_by_signature(cls_or_fn, kwargs: Dict[str, Any]) -> Dict[str, 
         if exposed_dropped:
             cls_name = getattr(cls_or_fn, "__name__", str(cls_or_fn))
             raise RuntimeError(
-                f"[optimizer] {cls_name} 不支持以下用户配置的 kwarg："
-                f"{exposed_dropped}。可能是 prodigy-plus-schedule-free 库版本不匹配 "
-                f"（pip show prodigy-plus-schedule-free 检查版本）。"
-                f"升级/降级依赖，或在 yaml 关掉对应字段。"
+                f"[optimizer] {cls_name} does not support the following user-configured kwargs: "
+                f"{exposed_dropped}. This is likely a prodigy-plus-schedule-free library version "
+                f"mismatch (check the version with pip show prodigy-plus-schedule-free). "
+                f"Upgrade/downgrade the dependency, or disable the corresponding field in the yaml."
             )
         logger.warning(
             f"[optimizer] Dropped unsupported kwargs for "
@@ -124,26 +126,26 @@ def create_optimizer(
     **kwargs
 ) -> Optimizer:
     """
-    创建优化器
+    Create an optimizer
 
-    根据配置创建不同类型的优化器。这是工厂模式的应用，
-    将优化器创建逻辑集中管理，便于维护和扩展。
+    Creates different optimizer types based on config. This is a factory-pattern
+    application that centralizes optimizer creation logic for easier maintenance and extension.
 
     Args:
-        optimizer_type: 优化器类型 ("adamw", "adamw8bit", "prodigy")
-        params: 模型参数迭代器
-        learning_rate: 学习率
-        betas: Adam beta 参数 (beta1, beta2)
-        weight_decay: 权重衰减系数
-        eps: 数值稳定性 epsilon
-        **kwargs: 其他优化器特定参数
+        optimizer_type: optimizer type ("adamw", "adamw8bit", "prodigy")
+        params: iterator of model parameters
+        learning_rate: learning rate
+        betas: Adam beta parameters (beta1, beta2)
+        weight_decay: weight decay coefficient
+        eps: numerical stability epsilon
+        **kwargs: other optimizer-specific parameters
 
     Returns:
-        Optimizer: 创建的优化器实例
+        Optimizer: the created optimizer instance
 
     Raises:
-        ValueError: 如果优化器类型不支持
-        ImportError: 如果需要的库未安装
+        ValueError: if the optimizer type is not supported
+        ImportError: if a required library is not installed
     """
     optimizer_type = optimizer_type.lower()
 
@@ -251,13 +253,14 @@ def create_optimizer(
 
 
 def iter_optimizer_params(params) -> Iterator[nn.Parameter]:
-    """展平「参数列表」或「param group 列表」为逐个参数。
+    """Flatten a "parameter list" or a "param group list" into individual parameters.
 
-    trainer 走的是 param group 形态（`injector.get_param_groups()` 返回
-    `[{"params": [...], "weight_decay": ...}, ...]`，LoKr 还会把 w1 单独分组），
-    而裸参数列表也是合法输入。torch.optim 两种都收，所以**构造优化器时不要
-    展平**；只有统计参数量这类旁路逻辑需要展平——直接 `p.numel()` 会在 group
-    形态下撞 `'dict' object has no attribute 'numel'`。
+    The trainer works with the param group shape (`injector.get_param_groups()` returns
+    `[{"params": [...], "weight_decay": ...}, ...]`, and LoKr also groups w1 separately),
+    while a plain parameter list is also valid input. torch.optim accepts both, so **don't
+    flatten when constructing the optimizer**; flattening is only needed for side logic
+    like counting parameters -- calling `p.numel()` directly would hit
+    `'dict' object has no attribute 'numel'` on the group shape.
     """
     for item in params:
         if isinstance(item, dict):
@@ -276,34 +279,34 @@ def create_8bit_adamw(
     **kwargs
 ) -> Optimizer:
     """
-    创建 8-bit AdamW 优化器
-    
-    8-bit AdamW 是 bitsandbytes 库提供的内存高效优化器。
-    它将优化器状态（动量、二阶矩）量化为 8-bit，可以
-    减少约 50% 的优化器显存占用。
-    
-    原理：
-    - 大多数深度学习参数不需要完整的 32-bit 精度来存储优化器状态
-    - 通过分块量化和动态范围调整，8-bit 可以保持良好的优化性能
-    
-    适用场景：
-    - 显存受限的训练（如单卡 RTX 3090 训练大模型）
-    - LoRA 训练（虽然 LoRA 参数少，但 8-bit 可以进一步节省内存）
-    
-    参数说明：
-    - min_8bit_size: 小于此大小的张量将保持 32-bit
-      这是因为小张量的 8-bit 量化收益不大，反而可能损失精度
-    
+    Create an 8-bit AdamW optimizer
+
+    8-bit AdamW is a memory-efficient optimizer provided by the bitsandbytes library.
+    It quantizes the optimizer state (momentum, second moment) to 8-bit, which can
+    reduce optimizer VRAM usage by roughly 50%.
+
+    Principle:
+    - Most deep learning parameters don't need full 32-bit precision to store optimizer state
+    - Through block-wise quantization and dynamic range adjustment, 8-bit can maintain good optimization performance
+
+    Use cases:
+    - VRAM-constrained training (e.g. training a large model on a single RTX 3090)
+    - LoRA training (although LoRA has few parameters, 8-bit can save memory further)
+
+    Parameter notes:
+    - min_8bit_size: tensors smaller than this size stay 32-bit
+      This is because small tensors gain little from 8-bit quantization, and may actually lose precision
+
     Args:
-        params: 模型参数
-        lr: 学习率
-        betas: Adam beta 参数
-        weight_decay: 权重衰减
+        params: model parameters
+        lr: learning rate
+        betas: Adam beta parameters
+        weight_decay: weight decay
         eps: epsilon
-        min_8bit_size: 8-bit 量化的最小张量大小
-        
+        min_8bit_size: minimum tensor size for 8-bit quantization
+
     Returns:
-        bnb.optim.AdamW8bit: 8-bit AdamW 优化器
+        bnb.optim.AdamW8bit: 8-bit AdamW optimizer
     """
     if not BITSANDBYTES_AVAILABLE:
         raise ImportError(
@@ -313,11 +316,11 @@ def create_8bit_adamw(
     
     print(f"Creating 8-bit AdamW optimizer (lr={lr}, weight_decay={weight_decay})")
     print(f"  min_8bit_size: {min_8bit_size}")
-    
-    # 将参数转换为列表（bitsandbytes 需要可索引的参数）
+
+    # Convert parameters to a list (bitsandbytes needs indexable parameters)
     param_list = list(params)
 
-    # 创建优化器（param group 形态原样传入，torch.optim 协议本来就接受）
+    # Create the optimizer (the param group shape is passed through as-is; the torch.optim protocol already accepts it)
     optimizer = bnb.optim.AdamW8bit(
         param_list,
         lr=lr,
@@ -328,11 +331,11 @@ def create_8bit_adamw(
         **kwargs
     )
     
-    # 计算内存节省
+    # Calculate memory savings
     total_params = sum(p.numel() for p in iter_optimizer_params(param_list))
-    # 8-bit 优化器状态：约 2 bytes per parameter (vs 8 bytes for 32-bit)
-    # 节省约 75% 的优化器状态内存
-    estimated_savings_gb = (total_params * 6) / (1024 ** 3)  # 节省 6 bytes per param
+    # 8-bit optimizer state: roughly 2 bytes per parameter (vs 8 bytes for 32-bit)
+    # Saves roughly 75% of optimizer state memory
+    estimated_savings_gb = (total_params * 6) / (1024 ** 3)  # saves 6 bytes per param
     print(f"  [OK] 8-bit AdamW created (estimated memory savings: {estimated_savings_gb:.2f} GB)")
     
     return optimizer
@@ -347,29 +350,29 @@ def create_standard_adamw(
     **kwargs
 ) -> Optimizer:
     """
-    创建标准 AdamW 优化器
-    
-    标准的 PyTorch AdamW 实现。作为后备选项，当其他
-    优化器不可用时使用。
-    
-    AdamW 特点：
-    - 将权重衰减与梯度更新解耦（decoupled weight decay）
-    - 比 Adam + L2 正则化效果更好
-    - 现代深度学习的事实标准优化器
-    
+    Create a standard AdamW optimizer
+
+    The standard PyTorch AdamW implementation. Used as a fallback option when other
+    optimizers are unavailable.
+
+    AdamW characteristics:
+    - Decouples weight decay from the gradient update (decoupled weight decay)
+    - Performs better than Adam + L2 regularization
+    - The de facto standard optimizer in modern deep learning
+
     Args:
-        params: 模型参数
-        lr: 学习率
-        betas: Adam beta 参数
-        weight_decay: 权重衰减
+        params: model parameters
+        lr: learning rate
+        betas: Adam beta parameters
+        weight_decay: weight decay
         eps: epsilon
-        
+
     Returns:
-        AdamW: 标准 AdamW 优化器
+        AdamW: standard AdamW optimizer
     """
     print(f"Creating standard AdamW optimizer (lr={lr}, weight_decay={weight_decay})")
-    
-    # 将参数转换为列表
+
+    # Convert parameters to a list
     param_list = list(params)
     
     optimizer = AdamW(
@@ -702,8 +705,9 @@ class Automagic(Optimizer):
                 converted_state["lr_mask"] = Auto8bitTensor(converted_state["lr_mask"])
             converted["state"][param_id] = converted_state
         result = super().load_state_dict(converted)
-        # PyTorch 只把 float state 搬到 param 的 dtype/device；bool tensor 与
-        # Auto8bitTensor 内部的 int8 不参与，resume 后留在 CPU。统一搬回。
+        # PyTorch only moves float state to the param's dtype/device; bool
+        # tensors and the int8 inside Auto8bitTensor are not covered, and are
+        # left on CPU after resume. Move them all back explicitly.
         for group in self.param_groups:
             for p in group["params"]:
                 st = self.state.get(p)
@@ -729,13 +733,16 @@ def create_automagic(
     weight_decay: float = 0.0,
     **kwargs,
 ) -> Optimizer:
-    # Automagic 上游推荐 init lr=1e-6（每参数自适应起点）；> 1e-5 量级是 AdamW
-    # 风格 lr 误用，sign-agreement 调度需要很多 step 才能从过高起点收敛回工作区间。
-    # UI 切换 optimizer_type 时会自动改写 lr=1e-6；这里兜底 saved config / CLI 路径。
+    # Automagic's upstream recommends init lr=1e-6 (a per-param adaptive
+    # starting point); anything in the >1e-5 range is an AdamW-style lr used
+    # by mistake, and the sign-agreement schedule takes many steps to
+    # converge back to the working range from too high a start. The UI
+    # rewrites lr=1e-6 automatically when switching optimizer_type; this is a
+    # fallback for the saved-config / CLI path.
     if lr > 1e-5:
         logger.warning(
-            "Automagic 初始 lr=%.2e 远高于推荐 1e-6；sign-agreement 自适应从过高起点"
-            "收敛慢，建议设为 1e-6（per-param lr 由 [min_lr, max_lr] 自动调）",
+            "Automagic initial lr=%.2e is far above the recommended 1e-6; sign-agreement adaptation "
+            "converges slowly from too high a start, recommend setting it to 1e-6 (per-param lr is auto-tuned within [min_lr, max_lr])",
             lr,
         )
     param_list = params if _is_param_groups(params) else list(params)
@@ -769,7 +776,7 @@ class Automagic2(Optimizer):
 
     Incompatible with GradScaler, clip_grad_norm_ and gradient accumulation
     (params update during backward) — see the design note above class Automagic.
-    Experimental: UI 默认隐藏（SystemConfig.enable_automagic_v2）。
+    Experimental: hidden by default in the UI (SystemConfig.enable_automagic_v2).
     """
 
     def __init__(
@@ -822,8 +829,10 @@ class Automagic2(Optimizer):
         state["step"] = 0
         state["lr"] = torch.full((), float(group["lr"]), dtype=torch.float32, device=p.device)
         state["last_polarity"] = torch.zeros(p.shape, dtype=torch.bool, device=p.device)
-        # 二阶矩固定 fp32：bf16 存储下 (1-beta2)=1e-3 的每步相对增量小于 bf16
-        # 相对分辨率 (~3.9e-3)，EMA 会在写回时被 round 吞掉而停滞。
+        # Second moment is fixed at fp32: under bf16 storage, the per-step
+        # relative increment of (1-beta2)=1e-3 is smaller than bf16's
+        # relative resolution (~3.9e-3), so the EMA would get swallowed by
+        # rounding on write-back and stall.
         if p.dim() >= 2:
             state["exp_avg_sq_row"] = torch.zeros(p.shape[:-1], dtype=torch.float32, device=p.device)
             state["exp_avg_sq_col"] = torch.zeros(p.shape[:-2] + p.shape[-1:], dtype=torch.float32, device=p.device)
@@ -849,11 +858,13 @@ class Automagic2(Optimizer):
         if grad.dtype != torch.float32:
             grad = grad.to(torch.float32)
 
-        # fused 路径绕过了训练循环的 step 边界 NaN 梯度检查（hook 跑完 p.grad
-        # 已是 None），必须在这里自卫 —— 否则一个坏 micro-batch 直接毒化权重。
+        # The fused path bypasses the training loop's step-boundary NaN
+        # gradient check (by the time the hook finishes, p.grad is already
+        # None), so this has to defend itself here -- otherwise one bad
+        # micro-batch poisons the weights directly.
         if not torch.isfinite(grad).all():
             logger.warning(
-                "Automagic2: param %s 梯度含 NaN/Inf，跳过本次 fused update",
+                "Automagic2: param %s gradient contains NaN/Inf, skipping this fused update",
                 tuple(p.shape),
             )
             p.grad = None
@@ -956,8 +967,9 @@ class Automagic2(Optimizer):
                 st = self.state.get(p)
                 if st is None:
                     continue
-                # PyTorch load 会把 float state cast 到 param dtype（bf16 训练时
-                # fp32 标量/二阶矩会被降级），这里统一恢复 fp32。
+                # PyTorch load casts float state to the param dtype (with bf16
+                # training this would downgrade the fp32 scalar/second moment);
+                # restore them to fp32 uniformly here.
                 for key in ("lr", "exp_avg_sq_row", "exp_avg_sq_col", "exp_avg_sq"):
                     v = st.get(key)
                     if isinstance(v, torch.Tensor) and v.dtype != torch.float32:
@@ -979,8 +991,8 @@ def create_automagic_v2(
 ) -> Optimizer:
     if lr > 1e-5:
         logger.warning(
-            "Automagic2 初始 lr=%.2e 远高于推荐 1e-6；sign-agreement 自适应从过高起点"
-            "收敛慢，建议设为 1e-6", lr,
+            "Automagic2 initial lr=%.2e is far above the recommended 1e-6; sign-agreement adaptation "
+            "converges slowly from too high a start, recommend setting it to 1e-6", lr,
         )
     param_list = params if _is_param_groups(params) else list(params)
     optimizer = Automagic2(
@@ -1067,13 +1079,14 @@ def create_lion(
     weight_decay: float = 0.0,
     **kwargs,
 ) -> Optimizer:
-    # Lion 论文（Chen et al. 2023, arxiv 2302.06675 §4.3）经验：lr ≈ AdamW lr / 3，
-    # weight_decay 3-10× AdamW。从 AdamW 默认 lr=1e-4 直切 Lion 容易发散；这里在
-    # lr 落在 AdamW 量级（1e-4 及以上）时提示一下。详细见 docs/user-guide/optimizers.md。
+    # Lion's paper (Chen et al. 2023, arxiv 2302.06675 SS4.3) rule of thumb:
+    # lr ~= AdamW lr / 3, weight_decay 3-10x AdamW. Switching directly from
+    # AdamW's default lr=1e-4 to Lion easily diverges; this warns when lr is
+    # in AdamW's range (1e-4 and above). See docs/user-guide/optimizers.md for details.
     if lr >= 1e-4:
         logger.warning(
-            "Lion lr=%.2e 接近/高于 AdamW 量级；论文推荐 lr ≈ AdamW lr / 3 "
-            "（如 AdamW 1e-4 → Lion ~3e-5）。继续训练但可能发散，详见 "
+            "Lion lr=%.2e is near/above AdamW's range; the paper recommends lr ~= AdamW lr / 3 "
+            "(e.g. AdamW 1e-4 -> Lion ~3e-5). Training will continue but may diverge, see "
             "docs/user-guide/optimizers.md",
             lr,
         )
@@ -1090,24 +1103,31 @@ class CAME(Optimizer):
     Paper: "CAME: Confidence-guided Adaptive Memory Efficient Optimization"
         https://arxiv.org/abs/2307.02047  (ACL 2023 Outstanding Paper)
 
-    Adafactor 式行/列分解二阶矩省显存 + 置信度引导：用 update 与其动量 exp_avg
-    的残差平方 EMA（instability）近似逐元素置信度，对动量更新做逆方差加权，
-    压制分解近似带来的更新噪声。
+    Adafactor-style row/column-factored second moment to save VRAM +
+    confidence guidance: uses the EMA of the squared residual
+    (instability) between the update and its momentum exp_avg as an
+    approximate per-element confidence, and applies inverse-variance
+    weighting to the momentum update to suppress the update noise
+    introduced by the factorization approximation.
 
-    派生自官方实现 yangluo7/CAME（MIT License, Copyright (c) 2023 Yang Luo），
-    做了本仓库统一的工程调整（算法公式与官方 step 逐行对齐，未改动）：
-    - optimizer state 固定 fp32（bf16 LoRA/LoKr 训练数值稳定，同 SOAP）
-    - bf16 参数写回走 stochastic rounding（_copy_stochastic 的 bit-trick 仅
-      适用 bf16；fp16 写回为普通 cast，但计算与 state 仍全程 fp32）
-    - load_state_dict 后恢复 fp32 state（PyTorch load 会 cast 到 param dtype）
+    Derived from the official implementation yangluo7/CAME (MIT License,
+    Copyright (c) 2023 Yang Luo), with engineering adjustments unified
+    across this repo (the algorithm formulas line up with the official
+    step, unchanged):
+    - optimizer state is fixed at fp32 (numerically stable for bf16
+      LoRA/LoKr training, same as SOAP)
+    - bf16 parameter write-back uses stochastic rounding (the
+      _copy_stochastic bit-trick only applies to bf16; fp16 write-back is
+      a plain cast, but compute and state stay fp32 throughout)
+    - fp32 state is restored after load_state_dict (PyTorch load casts to the param dtype)
 
     Args:
-        params: 参数或 param group 列表
-        lr: 学习率（真实 lr，AdamW 量级；不像 Prodigy 填 1.0）
-        eps: (eps1, eps2) — 分别用于二阶矩正则与 instability 正则
-        clip_threshold: update RMS 裁剪阈值
-        betas: (β1, β2, β3) — 动量 / 二阶矩 / instability EMA 衰减
-        weight_decay: 解耦权重衰减（L2）
+        params: parameters or a list of param groups
+        lr: learning rate (a real lr, AdamW-scale; not filled with 1.0 like Prodigy)
+        eps: (eps1, eps2) -- for the second-moment regularizer and the instability regularizer, respectively
+        clip_threshold: RMS clipping threshold for the update
+        betas: (beta1, beta2, beta3) -- decay for momentum / second moment / instability EMA
+        weight_decay: decoupled weight decay (L2)
     """
 
     def __init__(
@@ -1121,11 +1141,13 @@ class CAME(Optimizer):
     ) -> None:
         if lr <= 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        # β=1.0 会让对应 EMA 永远停在初始零值，_approx_sq_grad 算出 0/0=NaN
-        # 首步即毒化参数，故与 Lion 同样取开区间上界
+        # beta=1.0 would leave the corresponding EMA stuck at its initial
+        # zero forever, and _approx_sq_grad computing 0/0=NaN poisons the
+        # params on the very first step, so, same as Lion, this uses an open upper bound
         if len(betas) != 3 or not all(0.0 <= beta < 1.0 for beta in betas):
             raise ValueError(f"Invalid betas: {betas} (CAME needs 0 <= β1, β2, β3 < 1)")
-        # eps=0 在整张梯度为零（如 LoRA 零初始化首步）时同样产生 0/0=NaN
+        # eps=0 would likewise produce 0/0=NaN whenever the whole gradient is
+        # zero (e.g. the first step of a zero-initialized LoRA)
         if len(eps) != 2 or not all(e > 0.0 for e in eps):
             raise ValueError(f"Invalid eps: {eps} (CAME needs positive (eps1, eps2))")
         if clip_threshold <= 0.0:
@@ -1158,10 +1180,12 @@ class CAME(Optimizer):
 
     def load_state_dict(self, state_dict):
         result = super().load_state_dict(state_dict)
-        # PyTorch load 会把 float state cast 到 param dtype；CAME state 固定
-        # fp32（bf16 下 (1-β2)=1e-3 的 EMA 增量会被 bf16 round 吞掉），统一恢复。
-        # 不列 key 白名单：CAME 创建的张量 state 全是 fp32（"step" 是 int），
-        # 恢复所有浮点张量即可，未来新增 state key 也不会漏。
+        # PyTorch load casts float state to the param dtype; CAME state is
+        # fixed at fp32 (under bf16, the EMA increment of (1-beta2)=1e-3 would
+        # get swallowed by bf16 rounding), restored uniformly here.
+        # No key whitelist needed: every tensor state CAME creates is fp32
+        # ("step" is an int), so restoring every floating-point tensor is
+        # enough, and a future new state key won't be missed.
         for state in self.state.values():
             for key, value in state.items():
                 if isinstance(value, torch.Tensor) and value.is_floating_point() \
@@ -1225,8 +1249,9 @@ class CAME(Optimizer):
                 exp_avg = state["exp_avg"]
                 exp_avg.mul_(beta1).add_(update, alpha=1.0 - beta1)
 
-                # Confidence-guided strategy: instability = (update - exp_avg)^2 的
-                # EMA，行/列分解后取 rsqrt 作为逆方差权重乘到动量上
+                # Confidence-guided strategy: instability is the EMA of
+                # (update - exp_avg)^2; after row/column factorization, its
+                # rsqrt is used as an inverse-variance weight multiplied into the momentum
                 if factored:
                     res = (update - exp_avg) ** 2 + eps2
                     exp_avg_res_row = state["exp_avg_res_row"]
@@ -1238,7 +1263,7 @@ class CAME(Optimizer):
                 else:
                     update = exp_avg.clone()
 
-                # .float() 对非 fp32 张量本身就返回新拷贝，无需先 clone
+                # .float() already returns a new copy for a non-fp32 tensor, no need to clone first
                 p_data_fp32 = p if p.dtype == torch.float32 else p.detach().float()
 
                 if weight_decay != 0.0:
@@ -1262,28 +1287,34 @@ def create_came(
     clip_threshold: float = 1.0,
     **kwargs,
 ) -> Optimizer:
-    """创建 CAME 优化器（Luo et al. 2023, arxiv 2307.02047）。
+    """Create the CAME optimizer (Luo et al. 2023, arxiv 2307.02047).
 
-    lr 用 AdamW 量级真实值（LoRA 常用 1e-4 量级），不像 Prodigy 填 1.0。
-    可配常规 lr_scheduler。
+    lr uses a real AdamW-scale value (LoRA commonly uses ~1e-4), not filled
+    with 1.0 like Prodigy. A regular lr_scheduler can be configured.
 
     Args:
-        betas: (β1, β2, β3) — 动量 / 分解二阶矩 / instability EMA 衰减。
-            上层 create_optimizer 传其 Adam 默认 (0.9, 0.999) 时补论文默认 β3；
-            其余 2 元组视为配置错误，交给 CAME.__init__ 报 Invalid betas。
-        eps: (eps1, eps2) — 二阶矩正则 / instability 正则。上层 create_optimizer
-            传其 Adam 默认标量 1e-8 时回退论文默认 (1e-30, 1e-16)；显式传其他
-            标量则报错（标量 eps 对 CAME 无意义，静默替换会吞掉用户配置）。
-        clip_threshold: update RMS 裁剪阈值（同 Adafactor d 参数）。
+        betas: (beta1, beta2, beta3) -- decay for momentum / factored second
+            moment / instability EMA. When the upper create_optimizer passes
+            its Adam default (0.9, 0.999), the paper's default beta3 is
+            appended; any other 2-tuple is treated as a config error and left
+            for CAME.__init__ to raise Invalid betas.
+        eps: (eps1, eps2) -- second-moment regularizer / instability
+            regularizer. When the upper create_optimizer passes its Adam
+            default scalar 1e-8, it falls back to the paper's default
+            (1e-30, 1e-16); an explicit other scalar raises an error (a
+            scalar eps is meaningless for CAME, and silently substituting it
+            would swallow the user's config).
+        clip_threshold: RMS clipping threshold for the update (same as Adafactor's d parameter).
     """
     betas = tuple(betas)
     if betas == (0.9, 0.999):
-        # create_optimizer 的通用 Adam 默认；CAME 需要 (β1, β2, β3)，同 PPSF
-        # 的默认哨兵检测，只映射默认值，显式 2 元组由 CAME.__init__ 拒绝
+        # create_optimizer's generic Adam default; CAME needs (beta1, beta2,
+        # beta3). Same default-sentinel detection as PPSF: only the default
+        # value is mapped, an explicit 2-tuple is rejected by CAME.__init__
         betas = (0.9, 0.999, 0.9999)
     if isinstance(eps, (int, float)):
         if eps == 1e-8:
-            # create_optimizer 的通用 Adam 默认标量；回退论文默认
+            # create_optimizer's generic Adam default scalar; fall back to the paper's default
             eps = (1e-30, 1e-16)
         else:
             raise ValueError(
@@ -1319,26 +1350,27 @@ def create_prodigy(
     **kwargs,
 ) -> Optimizer:
     """
-    创建 Prodigy 优化器 (https://github.com/konstmish/prodigy)
+    Create the Prodigy optimizer (https://github.com/konstmish/prodigy)
 
-    Prodigy 自适应估计学习率，lr 应设为 1.0（这里的 lr 是 d 的放大系数）。
-    如果传入的 lr != 1.0，会强制覆盖为 1.0 并打印警告。
+    Prodigy adaptively estimates the learning rate; lr should be set to 1.0
+    (the lr here is a scaling coefficient on d). If the passed lr != 1.0, it
+    is forcibly overridden to 1.0 with a printed warning.
 
-    推荐默认：safeguard_warmup=True, use_bias_correction=True, d_coef=1.0。
-    使用 constant 或 cosine scheduler 即可，不建议叠 restart。
+    Recommended defaults: safeguard_warmup=True, use_bias_correction=True, d_coef=1.0.
+    A constant or cosine scheduler is enough; stacking restarts is not recommended.
 
     Args:
-        params: 模型参数
-        lr: 学习率（Prodigy 要求 1.0）
-        betas: Adam beta 参数
-        weight_decay: 权重衰减
+        params: model parameters
+        lr: learning rate (Prodigy requires 1.0)
+        betas: Adam beta parameters
+        weight_decay: weight decay
         eps: epsilon
-        d_coef: d 的初始缩放系数
-        safeguard_warmup: warmup 期间保护 d 不过快增长
-        use_bias_correction: 是否使用偏差修正
+        d_coef: initial scaling coefficient for d
+        safeguard_warmup: protects d from growing too fast during warmup
+        use_bias_correction: whether to use bias correction
 
     Returns:
-        Prodigy: Prodigy 优化器
+        Prodigy: the Prodigy optimizer
     """
     try:
         from prodigyopt import Prodigy
@@ -1395,44 +1427,50 @@ def create_prodigy_plus_schedulefree(
     **kwargs,
 ) -> Optimizer:
     """
-    创建 ProdigyPlusScheduleFree 优化器
+    Create the ProdigyPlusScheduleFree optimizer
     (https://github.com/LoganBooker/prodigy-plus-schedule-free)
 
-    Prodigy + Schedule-Free 的合体。相对普通 Prodigy 解决的核心问题：
-    - **Schedule-Free 的 averaged weights**: 维护训练权重 y 和 averaged 权重 x，
-      sample/save 用 x 出图 → 风格突变 ep 现象基本消失。
-      *使用要求*: sample/eval/save 前必须调 optimizer.eval()，事后 optimizer.train()。
-      用 optimizer_eval_mode(optimizer) context manager 包装最稳。
-    - **prodigy_steps 冻结 d**: 到某 step 后不再更新 d，避免后期跳档。
-    - **split_groups 细粒度估计**: 按 param group 分别估 d。
+    A combination of Prodigy + Schedule-Free. Core problems it solves
+    relative to plain Prodigy:
+    - **Schedule-Free's averaged weights**: maintains a training weight y
+      and an averaged weight x; sample/save use x to generate -> the style
+      mutation-episode phenomenon largely disappears.
+      *Usage requirement*: optimizer.eval() must be called before
+      sample/eval/save, and optimizer.train() afterward. Wrapping it with
+      the optimizer_eval_mode(optimizer) context manager is safest.
+    - **prodigy_steps freezes d**: stops updating d after a certain step, avoiding late-run jumps.
+    - **split_groups fine-grained estimation**: estimates d separately per param group.
 
-    *学习率*: 必须固定为 1.0（如同普通 Prodigy）。Schedule-Free 不需要 scheduler，
-    调用方应强制 lr_scheduler=none 并在启动期校验。
+    *Learning rate*: must be fixed at 1.0 (same as plain Prodigy).
+    Schedule-Free needs no scheduler; the caller should force
+    lr_scheduler=none and validate it at startup.
 
-    *betas 默认*: PPSF 上游默认 (0.9, 0.99) 而非 PyTorch AdamW 的 (0.9, 0.999)。
-    本工厂检测到传入是 PyTorch 默认时自动覆盖到 PPSF 推荐值；如调用方显式传入则尊重。
+    *betas default*: PPSF's upstream default is (0.9, 0.99), not PyTorch
+    AdamW's (0.9, 0.999). This factory auto-overrides to the PPSF-recommended
+    value when the passed betas is the PyTorch default; an explicit value from the caller is respected.
 
     Args:
-        params: 模型参数
-        lr: 学习率（PPSF 要求 1.0）
-        betas: Adam beta 参数（PPSF 推荐 (0.9, 0.99)）
-        weight_decay: 权重衰减
+        params: model parameters
+        lr: learning rate (PPSF requires 1.0)
+        betas: Adam beta parameters (PPSF recommends (0.9, 0.99))
+        weight_decay: weight decay
         eps: epsilon
-        d_coef: d 的初始缩放系数（小数据集建议 0.5）
-        prodigy_steps: 在第 N 步后冻结 d（0 = 不冻结，整个训练继续更新）
-        split_groups: 按 param group 分别估 d
-        split_groups_mean: split_groups=True 时是否取各组 d 的均值
-            (PPSF 默认 False；SimpleTuner 改成 True 但理由是给 transformer-only 训练，
-             我们走 LoRA + LoKr 多 param group 不适合，保持 False)
-        use_speed: 启用加速模式（实验性）
-        fused_back_pass: 与 PyTorch fused-backward 路径集成（显存吃紧时开）
-        use_stableadamw: 用 stable AdamW 归一化策略
+        d_coef: initial scaling coefficient for d (0.5 recommended for small datasets)
+        prodigy_steps: freeze d after step N (0 = never freeze, keeps updating throughout training)
+        split_groups: estimate d separately per param group
+        split_groups_mean: whether to average d across groups when split_groups=True
+            (PPSF default is False; SimpleTuner changed it to True, but for a
+             reason specific to transformer-only training -- doesn't fit our
+             LoRA + LoKr multi-param-group setup, kept False here)
+        use_speed: enable speed mode (experimental)
+        fused_back_pass: integrate with PyTorch's fused-backward path (enable when VRAM is tight)
+        use_stableadamw: use the stable AdamW normalization strategy
 
     Returns:
-        ProdigyPlusScheduleFree: 优化器实例
+        ProdigyPlusScheduleFree: the optimizer instance
     """
     try:
-        # pip 包名 `prodigy-plus-schedule-free`，import 名 `prodigyplus`
+        # pip package name `prodigy-plus-schedule-free`, import name `prodigyplus`
         from prodigyplus import ProdigyPlusScheduleFree
     except ImportError as e:
         raise ImportError(
@@ -1451,8 +1489,9 @@ def create_prodigy_plus_schedulefree(
         logger.warning(f"[ProdigyPlus] eps={eps} non-positive, falling back to None (Adam-atan2).")
         eps = None
 
-    # 上层 create_optimizer 默认 betas=(0.9, 0.999)（适合 AdamW），但 PPSF 推荐
-    # (0.9, 0.99)。如果调用方没改默认，覆盖到 PPSF 推荐值。
+    # The upper create_optimizer defaults to betas=(0.9, 0.999) (suited to
+    # AdamW), but PPSF recommends (0.9, 0.99). If the caller didn't change
+    # the default, override to PPSF's recommended value.
     if tuple(betas) == (0.9, 0.999):
         betas = (0.9, 0.99)
 
@@ -1500,22 +1539,28 @@ def create_soap(
     precond_in_state: bool = True,
     **kwargs,
 ) -> Optimizer:
-    """创建 SOAP 优化器（Vyas et al. 2024, arxiv 2409.11321）。
+    """Create the SOAP optimizer (Vyas et al. 2024, arxiv 2409.11321).
 
-    SOAP = Adam 跑在 Shampoo 的 eigenbasis 里：用梯度协方差的特征基旋转梯度，
-    在该基里做标准 Adam，再旋转回来。相比纯 Adam，对矩阵型参数（LoRA/LoKr 的
-    低秩因子）拟合更快；相比 Shampoo，预条件刷新更省（precondition_frequency）。
+    SOAP = Adam running in Shampoo's eigenbasis: rotates the gradient into
+    the eigenbasis of the gradient covariance, runs standard Adam there, then
+    rotates back. Compared to plain Adam, fits matrix-shaped parameters
+    (LoRA/LoKr's low-rank factors) faster; compared to Shampoo, the
+    preconditioner refresh is cheaper (precondition_frequency).
 
-    实现见 utils/soap_optimizer.py（MIT, Copyright (c) 2024 Nikhil Vyas）。
+    See the implementation in utils/soap_optimizer.py (MIT, Copyright (c) 2024 Nikhil Vyas).
 
     Args:
-        betas: (Adam β1, β2)，SOAP 论文默认 (0.95, 0.95)。
-        shampoo_beta: Shampoo 协方差 EMA 衰减；< 0 时复用 β2。
-        precondition_frequency: 每 N 步刷新一次特征基（越大越省算力、越旧）。
-        max_precond_dim: 逐维阈值——某轴维度 ≤ 此值才建满秩预条件，> 此值该轴退化
-            为 Adam。设大（如 10000）让大特征维也做二阶 = 提速来源；设小 = SOAP-lite。
-        precond_in_state: False 时把可重算的 Shampoo 矩阵（GG/Q）剔出 state_dict，
-            ckpt 更小，resume 时冷重建（从零训练不 resume 时零代价）。
+        betas: (Adam beta1, beta2), the SOAP paper's default is (0.95, 0.95).
+        shampoo_beta: Shampoo covariance EMA decay; reuses beta2 when < 0.
+        precondition_frequency: refreshes the eigenbasis every N steps (larger = cheaper compute, staler).
+        max_precond_dim: a per-axis threshold -- an axis builds a full-rank
+            preconditioner only if its dimension is <= this value; above it,
+            that axis degrades to Adam. Setting it large (e.g. 10000) lets
+            large feature dims also get second-order treatment = the source
+            of the speedup; setting it small = SOAP-lite.
+        precond_in_state: when False, strips the recomputable Shampoo
+            matrices (GG/Q) out of state_dict, making the ckpt smaller and
+            requiring a cold rebuild on resume (zero cost when training from scratch without resume).
     """
     from utils.soap_optimizer import SOAP
 
@@ -1554,25 +1599,32 @@ def create_soap_sf(
     warmup_steps: int = 0,
     **kwargs,
 ) -> Optimizer:
-    """创建 Schedule-Free SOAP（SOAP 预条件 + Schedule-Free 轨迹）。
+    """Create Schedule-Free SOAP (SOAP preconditioning + Schedule-Free trajectory).
 
-    在 SOAP 的 Adam-in-Shampoo-eigenbasis update 外面套 Schedule-Free 机制
-    （Defazio et al. 2024, "The Road Less Scheduled", arxiv 2405.15682）：丢掉
-    一阶动量 buffer，用 base 序列 z 与 Polyak-Ruppert 平均 x 的插值取代 LR 调度。
-    因此**不需要 lr_scheduler**（调用方应强制 lr_scheduler=none 并启动期校验），
-    并像其他 schedule-free 优化器一样暴露 train()/eval()：sample/save 前 eval()
-    切到平均权重 x，事后 train() 切回 y（trainer 的 optimizer_eval_mode 已统一处理）。
+    Wraps SOAP's Adam-in-Shampoo-eigenbasis update with the Schedule-Free
+    mechanism (Defazio et al. 2024, "The Road Less Scheduled", arxiv
+    2405.15682): drops the first-moment momentum buffer, replacing the LR
+    schedule with an interpolation between a base sequence z and the
+    Polyak-Ruppert average x. This means it **needs no lr_scheduler** (the
+    caller should force lr_scheduler=none and validate at startup), and, like
+    other schedule-free optimizers, exposes train()/eval(): eval() switches
+    to the averaged weight x before sample/save, and train() switches back
+    to y afterward (the trainer's optimizer_eval_mode already handles this uniformly).
 
-    实现见 utils/soap_optimizer.py `SOAPScheduleFree`。
+    See the implementation in utils/soap_optimizer.py, `SOAPScheduleFree`.
 
     Args:
-        betas: (SF 插值权重 β1, 二阶矩衰减 β2)。SF 下 β1 不是动量而是 z↔x 插值系数。
-        weight_lr_power / r / warmup_steps: Schedule-Free 专属——Polyak 权重里 lr
-            的幂 / step index 的幂（0=均匀平均）/ 线性 lr warmup 步数。
-        其余同 create_soap。
+        betas: (SF interpolation weight beta1, second-moment decay beta2).
+            Under SF, beta1 is not momentum but the z<->x interpolation coefficient.
+        weight_lr_power / r / warmup_steps: Schedule-Free-specific -- the
+            power of lr / the power of the step index (0=uniform averaging) /
+            the number of linear lr warmup steps within the Polyak weight.
+        Everything else is the same as create_soap.
 
-    注意：SF 的 Polyak 平均在极短训练（≤ ~100 步）严重滞后（x ≈ 轨迹质心 = 欠拟合），
-    那种 regime 用纯 ``soap`` 而非 ``soap_sf``；千步级训练 SF 正常。
+    Note: SF's Polyak averaging lags badly on very short training runs
+    (<= ~100 steps) (x ~= the trajectory centroid = underfit); use plain
+    ``soap`` rather than ``soap_sf`` for that regime; SF is fine for
+    thousand-step-scale training.
     """
     from utils.soap_optimizer import SOAPScheduleFree
 
@@ -1602,21 +1654,25 @@ def create_soap_sf(
 
 @contextmanager
 def optimizer_eval_mode(optimizer: Optimizer):
-    """切换 Schedule-Free 系优化器（PPSF 等）到 eval 模式的 context manager。
+    """Context manager that switches a Schedule-Free-family optimizer (PPSF
+    etc.) to eval mode.
 
-    Schedule-Free 优化器在内部维护两套权重：训练权重 y 和 averaged 权重 x。
-    sample / validation / save 应该用 x（averaged），训练 step 用 y。
-    PPSF 的 optimizer.eval() / optimizer.train() 通过 p.lerp_() in-place 切换参数张量
-    指向哪一套；忘记切回 train() 会让训练继续用 averaged 权重，结果错乱。
+    Schedule-Free optimizers internally keep two sets of weights: the
+    training weight y and the averaged weight x. sample / validation / save
+    should use x (averaged), while training steps use y. PPSF's
+    optimizer.eval() / optimizer.train() switch which set the parameter
+    tensors point to via an in-place p.lerp_(); forgetting to switch back
+    with train() leaves training continuing on the averaged weights, corrupting results.
 
-    用法:
+    Usage:
         with optimizer_eval_mode(optimizer):
             model.eval()
             img = sample_image(...)
             model.train()
 
-    对非 Schedule-Free 优化器（AdamW / Prodigy 等）无 .train/.eval 方法 — 此 context
-    manager 静默 no-op，所以调用方不需要分支判断 optimizer_type。
+    Non-Schedule-Free optimizers (AdamW / Prodigy etc.) have no .train/.eval
+    method -- this context manager is a silent no-op for them, so the caller
+    doesn't need to branch on optimizer_type.
     """
     has_eval = hasattr(optimizer, "eval") and callable(getattr(optimizer, "eval"))
     has_train = hasattr(optimizer, "train") and callable(getattr(optimizer, "train"))
@@ -1636,28 +1692,29 @@ def create_optimizer_grouped_parameters(
     no_decay_modules: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
-    创建分组的优化器参数
-    
-    某些参数（如偏置和 LayerNorm 的权重）通常不应该应用
-    权重衰减。这个函数将参数分为两组：
-    1. 需要权重衰减的参数（权重矩阵）
-    2. 不需要权重衰减的参数（偏置、LayerNorm）
-    
-    这是 Transformer 训练的最佳实践。
-    
+    Create grouped optimizer parameters
+
+    Certain parameters (such as biases and LayerNorm weights) usually
+    shouldn't have weight decay applied. This function splits parameters
+    into two groups:
+    1. Parameters that need weight decay (weight matrices)
+    2. Parameters that don't need weight decay (biases, LayerNorm)
+
+    This is standard best practice for Transformer training.
+
     Args:
-        model: 模型
-        weight_decay: 权重衰减系数
-        no_decay_modules: 不应用权重衰减的模块名称列表
-        
+        model: the model
+        weight_decay: weight decay coefficient
+        no_decay_modules: list of module names to exclude from weight decay
+
     Returns:
-        List[Dict]: 分组后的参数列表
+        List[Dict]: the grouped parameter list
     """
     if no_decay_modules is None:
-        # 默认：偏置和 LayerNorm 参数不应用权重衰减
+        # Default: biases and LayerNorm parameters don't get weight decay
         no_decay_modules = ["bias", "LayerNorm.weight", "layernorm.weight", "norm.weight"]
     
-    # 分组参数
+    # Group parameters
     decay_params = []
     no_decay_params = []
     
@@ -1665,7 +1722,7 @@ def create_optimizer_grouped_parameters(
         if not param.requires_grad:
             continue
             
-        # 检查是否需要权重衰减
+        # Check whether weight decay is needed
         needs_decay = True
         for no_decay_pattern in no_decay_modules:
             if no_decay_pattern in name:
@@ -1677,7 +1734,7 @@ def create_optimizer_grouped_parameters(
         else:
             no_decay_params.append(param)
     
-    # 构建参数组
+    # Build the parameter groups
     optimizer_grouped_parameters = [
         {
             "params": decay_params,
@@ -1689,7 +1746,7 @@ def create_optimizer_grouped_parameters(
         },
     ]
     
-    # 打印统计信息
+    # Print stats
     num_decay_params = sum(p.numel() for p in decay_params)
     num_no_decay_params = sum(p.numel() for p in no_decay_params)
     print(f"Parameter groups:")
@@ -1701,15 +1758,15 @@ def create_optimizer_grouped_parameters(
 
 def get_optimizer_info(optimizer: Optimizer) -> Dict[str, Any]:
     """
-    获取优化器信息
-    
-    用于日志记录和调试
-    
+    Get optimizer info
+
+    Used for logging and debugging
+
     Args:
-        optimizer: 优化器实例
-        
+        optimizer: the optimizer instance
+
     Returns:
-        Dict: 优化器信息字典
+        Dict: a dict of optimizer info
     """
     info = {
         "type": type(optimizer).__name__,
@@ -1717,7 +1774,7 @@ def get_optimizer_info(optimizer: Optimizer) -> Dict[str, Any]:
         "num_param_groups": len(optimizer.param_groups),
     }
     
-    # 获取总参数数
+    # Get the total parameter count
     total_params = 0
     for group in optimizer.param_groups:
         for p in group["params"]:
@@ -1725,7 +1782,7 @@ def get_optimizer_info(optimizer: Optimizer) -> Dict[str, Any]:
     
     info["total_trainable_params"] = total_params
 
-    # 添加优化器特定信息（duck typing：AdamW / Prodigy / PPSF / bnb AdamW8bit 都有这些字段）
+    # Add optimizer-specific info (duck typing: AdamW / Prodigy / PPSF / bnb AdamW8bit all have these fields)
     pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
     if "betas" in pg0:
         info["betas"] = pg0["betas"]
@@ -1733,7 +1790,7 @@ def get_optimizer_info(optimizer: Optimizer) -> Dict[str, Any]:
         info["weight_decay"] = pg0["weight_decay"]
     if "eps" in pg0:
         info["eps"] = pg0["eps"]
-    # PPSF 内部 d 估计 — 调试时有用
+    # PPSF's internal d estimate -- useful for debugging
     if "d" in pg0:
         info["d"] = pg0["d"]
     if hasattr(optimizer, "get_avg_learning_rate") and callable(getattr(optimizer, "get_avg_learning_rate")):

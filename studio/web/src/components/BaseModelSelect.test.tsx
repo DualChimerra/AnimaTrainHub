@@ -34,7 +34,7 @@ function optionValues() {
   ).map((o) => o.value)
 }
 
-describe('BaseModelSelect per family（多模型 P4-4）', () => {
+describe('BaseModelSelect per family (multi-model P4-4)', () => {
   it('default family lists anima variants + custom, hiding missing files', async () => {
     vi.mocked(api.getModelsCatalog).mockResolvedValue(catalog)
     render(<BaseModelSelect value={null} onChange={() => {}} />)
@@ -47,9 +47,9 @@ describe('BaseModelSelect per family（多模型 P4-4）', () => {
     render(<BaseModelSelect value={null} onChange={() => {}} family="krea2" />)
     await screen.findByRole('option', { name: /raw/ })
     expect(optionValues()).toEqual(['raw', 'turbo'])
-    // purpose 徽标（raw=训练 / turbo=推理）出现在 label 里
-    expect(screen.getByRole('option', { name: /turbo · 推理/ })).toBeInTheDocument()
-    // defaultValue 跟随该族 selected
+    // purpose badge (raw=training / turbo=inference) appears in the label
+    expect(screen.getByRole('option', { name: /turbo · inference/ })).toBeInTheDocument()
+    // defaultValue follows that family's selected
     expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('raw')
   })
 })

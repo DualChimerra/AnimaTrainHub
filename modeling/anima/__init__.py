@@ -1,4 +1,4 @@
-"""Anima 族结构定义：Anima(MiniTrainDIT) + LLMAdapter + attention backend 状态机。"""
+"""Anima family architecture definition: Anima(MiniTrainDIT) + LLMAdapter + attention backend state machine."""
 
 from modeling.anima.anima_modeling import (  # noqa: F401
     Anima,

@@ -1,15 +1,15 @@
 /**
- * useUploadProgress 单元测试 —— 状态机 + formatter。
+ * useUploadProgress unit tests -- state machine + formatters.
  *
- * 进度状态机：
- *   - start(n) → phase='uploading', total=n, loaded=0
- *   - onProgress(half) → phase='uploading', speed/eta 推断合理
- *   - onProgress(full) → phase='processing'（loaded === total）
- *   - finish() → phase='done', speed=0, eta=null
- *   - fail(e) → phase='error', error message
- *   - reset() → INITIAL
+ * Progress state machine:
+ *   - start(n) -> phase='uploading', total=n, loaded=0
+ *   - onProgress(half) -> phase='uploading', speed/eta inferred reasonably
+ *   - onProgress(full) -> phase='processing' (loaded === total)
+ *   - finish() -> phase='done', speed=0, eta=null
+ *   - fail(e) -> phase='error', error message
+ *   - reset() -> INITIAL
  *
- * lengthComputable=false 时 total 归 0、ETA 返回 null。
+ * When lengthComputable=false, total falls back to 0 and ETA returns null.
  */
 import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -56,7 +56,7 @@ describe('useUploadProgress state machine', () => {
       })
       expect(result.current.state.phase).toBe('uploading')
       expect(result.current.state.speedBps).toBeGreaterThan(0)
-      // 速度 ≈ 250 bytes / 0.5s = 500 B/s；剩余 750 → ETA ≈ 1.5s
+      // speed ≈ 250 bytes / 0.5s = 500 B/s; remaining 750 -> ETA ≈ 1.5s
       expect(result.current.state.etaSec).not.toBeNull()
       expect(result.current.state.etaSec!).toBeGreaterThan(0)
     } finally {

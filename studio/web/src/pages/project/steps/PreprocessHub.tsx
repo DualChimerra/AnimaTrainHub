@@ -12,7 +12,7 @@ import PreprocessOverviewPage from './PreprocessOverview'
  *    - `?tool=dedupe` → Duplicate / variant review
  *    - `?tool=upscale` → Upscale page
  *    - `?tool=crop` → Crop page
- *    - `?tool=inpaint` → Inpaint page (取色笔刷涂抹)
+ *    - `?tool=inpaint` → Inpaint page (color-pick brush painting)
  *
  *  Overview is default because it's the gallery that governs the dataset
  *  (peer to other navigable pages); upscale / crop / dedupe / inpaint are

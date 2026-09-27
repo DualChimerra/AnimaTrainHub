@@ -1,17 +1,23 @@
-"""block swap 的梯度保真度（真实尺寸 + 噪声底校准）。
+"""Gradient fidelity for block swap (real sizes + noise-floor calibration).
 
-**为什么单独一个文件、且必须用真实尺寸**：`test_block_swap.py` 里那条小张量的
-checkpoint 反向测试，在权重换入换出存在竞态时**照样全绿** —— 小 block 没有
-attention、计算快到竞态窗口不显形。真机 6144-dim × 28 层才暴露：梯度偏差达噪声
-底的 300 倍，PPSF 的 `d` 估计直接炸掉（用户真机报告）。
+**Why a separate file, and why it must use real sizes**: the small-tensor
+checkpoint backward test in `test_block_swap.py` **passes cleanly even when
+there's a race condition** in weight swap-in/swap-out -- a small block has
+no attention, and the compute finishes too fast for the race window to show
+up. Only a real machine's 6144-dim x 28 layers exposes it: the gradient
+deviation reaches 300x the noise floor, and PPSF's `d` estimate blows up
+outright (reported from a user's real machine).
 
-**为什么不能用 assert_close 逐位比**：SDPA 反向在 CUDA/bf16 上非确定 —— 同一份
-权重跑两遍梯度就差约 5e-3。所以判据是「与**对照组自身的重复性**同量级」：
-先测两次无 swap 的差（噪声底），再要求 swap 的差不超过它的若干倍。
+**Why not compare element-wise with assert_close**: SDPA's backward pass is
+nondeterministic on CUDA/bf16 -- running the same weights twice already
+differs by about 5e-3. So the criterion is "the same order of magnitude as
+the **control group's own repeatability**": first measure the difference
+between two no-swap runs (the noise floor), then require the swap
+difference to not exceed some multiple of it.
 
-历史读数（RTX 5090，8 层 × features 6144）：
-    修复前 checkpoint  噪声底 4.4e-3  swap 差 1.31    → 298× ❌
-    修复后 checkpoint  噪声底 4.4e-3  swap 差 4.7e-3  →   1× ✅
+Historical readings (RTX 5090, 8 layers x features 6144):
+    before the fix  noise floor 4.4e-3  swap diff 1.31    -> 298x fail
+    after the fix   noise floor 4.4e-3  swap diff 4.7e-3  ->   1x pass
 """
 
 from __future__ import annotations
@@ -30,19 +36,20 @@ for _p in (_ROOT, _ROOT / "runtime"):
         sys.path.insert(0, str(_p))
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="block swap 是 CUDA-only 机制"
+    not torch.cuda.is_available(), reason="block swap is a CUDA-only mechanism"
 )
 
 _LAYERS = 6
 _SWAP = 4
 _SEQ = 512 + 128
-#: swap 的梯度偏差相对噪声底的容忍倍数。真实 bug 是 300× 量级，噪声本身在
-#: 1–2× 抖动，10× 给足余量又能牢牢抓住回归。
+#: Tolerance multiplier for swap's gradient deviation relative to the noise
+#: floor. The real bug is on the order of 300x, and noise itself jitters
+#: 1-2x, so 10x gives enough margin while still firmly catching a regression.
 _TOLERANCE = 10.0
 
 
 def _make_model(device, dtype):
-    """真实尺寸的 krea2 block（含 attention —— 竞态要靠它才显形）+ 模拟 LoRA。"""
+    """A real-size krea2 block (with attention -- needed for the race to show up) + a mock LoRA."""
     from modeling.krea2 import KREA2_CONFIG
     from modeling.krea2.krea2_modeling import SingleStreamBlock
 
@@ -54,9 +61,9 @@ def _make_model(device, dtype):
         )
         for _ in range(_LAYERS)
     ]).to(device, dtype)
-    blocks.requires_grad_(False)          # 底模 frozen
+    blocks.requires_grad_(False)          # base model frozen
     torch.manual_seed(1)
-    for b in blocks:                      # LoRA 式可训练参数（常驻，不参与 swap）
+    for b in blocks:                      # LoRA-style trainable params (always resident, never swapped)
         b.lora = nn.Parameter(torch.ones(cfg.features, device=device, dtype=dtype) * 0.01)
     return blocks, cfg
 
@@ -96,10 +103,13 @@ def _max_rel(a_list, b_list) -> float:
 
 @pytest.mark.parametrize("use_checkpoint", [True, False])
 def test_swap_gradients_stay_within_nondeterminism_noise(use_checkpoint):
-    """swap 的梯度偏差必须与「无 swap 跑两遍」同量级。
+    """Swap's gradient deviation must be the same order of magnitude as "running no-swap twice".
 
-    回归的是：前向结束就放开槽位、而反向仍要读那批权重 → 下一次换入把正在被
-    读的权重覆盖掉 → 梯度静默错乱（不报错、不 NaN，只是数值不对）。
+    What this regression-tests: the slot gets released as soon as the
+    forward pass ends, while the backward pass still needs to read those
+    weights -> the next swap-in overwrites the weights currently being read
+    -> the gradient is silently corrupted (no error, no NaN, just wrong
+    numbers).
     """
     from training.block_swap import PinnedBlockSwap
 
@@ -112,7 +122,7 @@ def test_swap_gradients_stay_within_nondeterminism_noise(use_checkpoint):
 
     blocks_b, _ = _make_model(device, dtype)
     grads_b = _grads(blocks_b, inputs, use_checkpoint=use_checkpoint)
-    noise = _max_rel(grads_a, grads_b)      # 同一份权重跑两遍的固有抖动
+    noise = _max_rel(grads_a, grads_b)      # inherent jitter from running the same weights twice
 
     blocks_swap, _ = _make_model(device, dtype)
     swap = PinnedBlockSwap(blocks_swap, num_swap=_SWAP, device=device)
@@ -121,6 +131,7 @@ def test_swap_gradients_stay_within_nondeterminism_noise(use_checkpoint):
     observed = _max_rel(grads_swap, grads_a)
 
     assert observed <= max(noise, 1e-4) * _TOLERANCE, (
-        f"block swap 的梯度偏差 {observed:.2e} 超过噪声底 {noise:.2e} 的 "
-        f"{_TOLERANCE}× —— 权重在反向期间被换入覆盖了"
+        f"block swap's gradient deviation {observed:.2e} exceeds {_TOLERANCE}x "
+        f"the noise floor {noise:.2e} -- weights were overwritten by a "
+        f"swap-in during the backward pass"
     )

@@ -1,118 +1,151 @@
-# 0006 — Queue 任务暂停 / 恢复 + 队列挂起 / 恢复调度
+# 0006 — Queue task pause / resume + queue hold / release scheduling
 
-**状态**：Accepted（PR-1 #97 / PR-2 #98 / PR-3 #99 / PR-4 #100 全部合入 dev；PR-5 删 feature flag 默认开启）+ Addendum 1 2026-05-19（dev 训练栈 audit + 暂停语义翻盘，见末尾「增量更新」）
-**日期**：2026-05-18（初版） / 2026-05-19（Addendum 1）
-**决策者**：@WalkingMeatAxolotl
+**Status**: Accepted (PR-1 #97 / PR-2 #98 / PR-3 #99 / PR-4 #100 all merged into dev; PR-5 removes the feature flag, enabled by default) + Addendum 1 2026-05-19 (dev training-stack audit + pause-semantics reversal, see "Incremental updates" at the end)
+**Date**: 2026-05-18 (initial) / 2026-05-19 (Addendum 1)
+**Decision makers**: @WalkingMeatAxolotl
 
-> **维护约定**：本 ADR 跨多轮讨论演进。已 Accept 的初版决策（候选方案 / 决策 /
-> 理由 / 后果 / 不在范围 / 参考）**不修改、不删除**；后续 audit 发现 / 翻盘 /
-> 补丁 → 在文件末尾「## 增量更新」段追加新 `### YYYY-MM-DD — Addendum N: 标题`
-> 子段，标明影响原文哪一节。
+> **Maintenance convention**: this ADR evolves across multiple rounds of
+> discussion. The already-accepted initial decisions (candidate solutions /
+> decision / rationale / consequences / out of scope / references) are
+> **never modified or deleted**; when a later audit finds something, reverses
+> a decision, or patches it, a new `### YYYY-MM-DD — Addendum N: Title`
+> subsection is appended to the "## Incremental updates" section at the end
+> of the file, stating which section of the original it affects.
 
-## 背景
+## Background
 
-Queue 系统目前唯一能停训练的方式是「取消」——supervisor 发硬终止信号
-（Windows `CTRL_BREAK_EVENT` / POSIX `SIGTERM`），子进程退出，state 不保存，
-重新跑必须从 step 0 开始。
+Today the only way for the queue system to stop training is "cancel" — the
+supervisor sends a hard termination signal (Windows `CTRL_BREAK_EVENT` /
+POSIX `SIGTERM`), the child process exits, state isn't saved, and re-running
+must start from step 0.
 
-CLI 侧其实已经有完整的 save/resume 链路：
+The CLI side actually already has a full save/resume chain:
 
-- `runtime/training/context.py:109` `handle_interrupt` 保存 state + LoRA +
-  finish wandb；
-- `runtime/training/phases/resume.py:82` `signal.signal(SIGINT,
-  ctx.handle_interrupt)` 把它绑在 SIGINT 上；
-- `runtime/training/phases/resume.py:60-79` 实现 `--resume-state` 加载 state +
-  恢复 monitor 历史。
+- `runtime/training/context.py:109` `handle_interrupt` saves the state +
+  LoRA + finishes wandb;
+- `runtime/training/phases/resume.py:82` binds it to SIGINT via
+  `signal.signal(SIGINT, ctx.handle_interrupt)`;
+- `runtime/training/phases/resume.py:60-79` implements `--resume-state`,
+  loading state + restoring monitor history.
 
-但这条链路**只能从控制台手按 Ctrl+C 触发**——supervisor cancel 发的
-`CTRL_BREAK_EVENT` / `SIGTERM` 都不命中 SIGINT handler，绕过了 handle_interrupt。
+But this chain **can only be triggered by manually pressing Ctrl+C in the
+console** — the `CTRL_BREAK_EVENT` / `SIGTERM` that the supervisor's cancel
+sends never hits the SIGINT handler, bypassing handle_interrupt entirely.
 
-`ResumeFieldPicker` 让用户能在**新建 task** 时手动选一个 `.pt` 续训，但这是另起
-一个 task：新 task_id、新 log、loss / 监控历史断开。
+`ResumeFieldPicker` lets the user manually pick a `.pt` to resume from when
+**creating a new task**, but that's a separate task: a new task_id, a new
+log, and loss / monitoring history disconnected.
 
-`save_state_every` / `save_state_every_epochs` 周期写 `.pt`，但路径不带 task_id
-（`<output_dir>/training_state_step{N}.pt`），同 version 下多 task 跑会互相覆盖。
-这是个 latent bug，pause/resume 落地会把它放大成数据丢失。
+`save_state_every` / `save_state_every_epochs` periodically write a `.pt`,
+but the path doesn't include the task_id
+(`<output_dir>/training_state_step{N}.pt`), so multiple tasks running under
+the same version will overwrite each other. This is a latent bug, and
+implementing pause/resume would amplify it into actual data loss.
 
-**用户痛点（按频次）**：
+**User pain points (by frequency)**:
 
-- 训练中途想腾 GPU 跑别的（generate / 别的 LoRA） → 现在只能丢进度取消；
-- 关机 / 临时离线 → 同上；
-- 跑到一半 loss 不对，想停下来分析再决定 → 同上。
+- Wanting to free up the GPU mid-training for something else (generate /
+  another LoRA) → currently the only option is to cancel and lose progress;
+- Shutting down / going temporarily offline → same as above;
+- Loss looks wrong partway through and the user wants to pause to analyze
+  before deciding what to do → same as above.
 
-详细的状态机、user case、文件存放、UI 流程已在
-`docs/design/queue-pause-resume-design.md` 里讨论过三轮（PM / 终端用户 / Designer
-三方 review），本 ADR 承袭该文档的逻辑模型，重点固化决策和代码层面方向。
+The detailed state machine, user cases, file storage, and UI flow were
+discussed across three rounds in
+`docs/design/queue-pause-resume-design.md` (PM / end-user / designer
+three-way review); this ADR inherits that document's logic model, focusing
+on locking in decisions and code-level direction.
 
-## 候选方案
+## Candidate solutions
 
-### A：SIGINT 信号通道，复用 handle_interrupt 链路（采纳）
+### A: signal channel, reusing the handle_interrupt chain (adopted)
 
-supervisor 给子进程发信号触发已有的 handle_interrupt。POSIX 走 SIGINT，Windows
-走 `CTRL_BREAK_EVENT` + 子进程额外注册 SIGBREAK handler。
+The supervisor sends a signal to the child process, triggering the existing
+handle_interrupt. POSIX uses SIGINT; Windows uses `CTRL_BREAK_EVENT` + the
+child registers an extra SIGBREAK handler.
 
-- 优点：复用现成保存链路；信号是标准跨进程通知机制；改动面积小。
-- 缺点：Windows 上 `CREATE_NEW_PROCESS_GROUP` 收不到 `CTRL_C_EVENT`，只能收
-  `CTRL_BREAK_EVENT`；Python 把它映射成 SIGBREAK 而不是 SIGINT，需要子进程额外
-  注册一次。需要 spike 验证整条链路。
+- Pros: reuses an existing save chain; signals are a standard cross-process
+  notification mechanism; small change footprint.
+- Cons: on Windows, a `CREATE_NEW_PROCESS_GROUP` child can't receive
+  `CTRL_C_EVENT`, only `CTRL_BREAK_EVENT`; Python maps it to SIGBREAK rather
+  than SIGINT, requiring the child to register it separately. Needs a spike
+  to validate the whole chain.
 
-### B：Sentinel 文件 / 命名管道 IPC
+### B: sentinel file / named-pipe IPC
 
-supervisor 写一个 sentinel 文件，子进程开 watcher 线程定期 poll，看到就主动
-调 handle_interrupt。
+The supervisor writes a sentinel file; the child opens a watcher thread that
+polls periodically, and calls handle_interrupt on its own once it sees the
+file.
 
-- 优点：跨平台行为完全一致，不依赖信号语义。
-- 缺点：新增 IPC 通道；watcher 线程多一份 CPU 占用 + 触发延迟（poll 间隔）；
-  sentinel 清理 / 残留是新问题；如果方案 A 通了就没必要。
+- Pros: fully consistent cross-platform behavior, independent of signal
+  semantics.
+- Cons: adds a new IPC channel; the watcher thread adds CPU overhead + a
+  trigger delay (the poll interval); sentinel cleanup / leftovers become a
+  new problem; unnecessary if candidate A works.
 
-作为方案 A spike 失败的兜底。
+Kept as a fallback if candidate A's spike fails.
 
-### C：完全重新搭 RPC（gRPC / WebSocket）
+### C: build a full RPC layer from scratch (gRPC / WebSocket)
 
-最重，过度工程。否决。
+Too heavyweight, over-engineered. Rejected.
 
-### D：Fake pause — cancel 后自动从最近 save_state_every checkpoint 续训
+### D: fake pause — after cancel, automatically resume from the most recent save_state_every checkpoint
 
-- 优点：零代码成本。
-- 缺点：强依赖 `save_state_every`（默认 0，多数用户没开）；恢复点不精确（最近
-  周期 save 可能差几百 step）；UI 撒谎说"暂停成功"实际是 cancel，长期欠债。
+- Pros: zero code cost.
+- Cons: strongly depends on `save_state_every` (default 0, most users don't
+  enable it); the resume point is imprecise (the most recent periodic save
+  could be hundreds of steps behind); the UI would falsely claim "paused
+  successfully" when it's actually a cancel — long-term debt.
 
-否决。
+Rejected.
 
-## 决策
+## Decision
 
-采纳**方案 A**：信号通道 + 复用 handle_interrupt。具体决策汇总如下，详细论证
-见设计文档相应章节（标 §N 处引用 design doc）。
+**Candidate A is adopted**: a signal channel + reusing handle_interrupt. The
+specific decisions are summarized below; detailed reasoning is in the
+corresponding sections of the design document (references marked §N point to
+the design doc).
 
-1. **新增 task 状态 `paused`**（non-terminal, non-live）。不引入
-   `pausing` / `resuming` 中间态。（design §1-2）
-2. **新增队列挂起开关**：db kv 单 bool，跨 server 重启保留。不进 task 状态机。
-   （design §3.2）
-3. **术语**：任务**暂停 / 恢复**（pause / resume），队列**挂起 / 恢复调度**
-   （hold / release）。中英文都故意用不同动词避免歧义。（design §3）
-4. **State 文件路径**：`<output_dir>/state/task_<TID>/`，pause 文件加 `pause_`
-   前缀，跟周期 save 区分。同步顺手修今天的 latent bug。（design §5.1, §5.3）
-5. **Config snapshot**：pause 时落盘 `pause_step_<N>.config.json`，把当前训练
-   实际在用的全部 args / dataset / sample 参数序列化。resume 严格用 snapshot，
-   不读 task 表 / version 配置 / 外部 yaml。（design §5.7, §8.5）
-6. **Pause 文件对生命周期**：跟随 paused 状态自动管理；resume 成功 / 彻底取消 /
-   删除 task 三种情况一并删除。任何时刻一个 task 最多 1 对 pause 文件。
-   （design §5.5）
-7. **UI 暂停过程 modal**：点暂停立即锁屏 modal 全程引导（保存中→成功/超时/失败），
-   30s 超时不默默降级 cancel，给用户三选一。（design §4.3）
-8. **挂起 confirmation modal**：检测 running task 多问一句"是否同时暂停"，
-   radio + 主按钮文案联动；不做"暂停全部"复合按钮。（design §4.4）
-9. **挂起状态显示用 banner，不用 task chip**——banner 是 UI 元素，不是 task
-   状态机一部分。（design §4.1）
-10. **过早暂停防护**：UI 端 `is_pausable` 信号控制按钮可见性；API 端
-    defense-in-depth 拒绝。（design §8.1）
-11. **不做** server crash 自动保 state，引导用户开 `save_state_every`。（design §9）
+1. **Add a new task status, `paused`** (non-terminal, non-live). No
+   intermediate `pausing` / `resuming` states are introduced. (design §1-2)
+2. **Add a queue-hold switch**: a single bool in the db kv store, preserved
+   across server restarts. It is not part of the task state machine.
+   (design §3.2)
+3. **Terminology**: tasks are **paused / resumed** (pause / resume); the
+   queue is **held / released** (hold / release). Deliberately different
+   verbs are used to avoid ambiguity. (design §3)
+4. **State file path**: `<output_dir>/state/task_<TID>/`, with pause files
+   given a `pause_` prefix to distinguish them from periodic saves. This also
+   fixes today's latent bug in passing. (design §5.1, §5.3)
+5. **Config snapshot**: on pause, write `pause_step_<N>.config.json` to disk,
+   serializing all args / dataset / sample parameters currently in actual use
+   by training. Resume strictly uses the snapshot, never reading the task
+   table / version config / an external yaml. (design §5.7, §8.5)
+6. **Pause-file lifecycle**: managed automatically along with the paused
+   status; deleted together in three cases — successful resume, full cancel,
+   or task deletion. At any moment, a task has at most 1 pause-file pair.
+   (design §5.5)
+7. **UI pause-progress modal**: clicking pause immediately locks the screen
+   with a modal that guides the user through the whole process
+   (saving → success/timeout/failure); a 30s timeout doesn't silently
+   downgrade to cancel — the user gets a three-way choice instead. (design §4.3)
+8. **Hold confirmation modal**: if a running task is detected, ask an
+   additional question — "also pause it?" — with a radio button linked to
+   the primary button's label; there's no combined "pause everything"
+   button. (design §4.4)
+9. **Hold status is shown as a banner, not a task chip** — the banner is a UI
+   element, not part of the task state machine. (design §4.1)
+10. **Premature-pause guard**: the UI's `is_pausable` signal controls the
+    button's visibility; the API rejects it too, as defense in depth.
+    (design §8.1)
+11. **No automatic state-save on server crash** — instead, guide users to
+    enable `save_state_every`. (design §9)
 
-### 后端代码方向
+### Backend code direction
 
 #### `runtime/training/context.py`
 
-`TrainingContext.handle_interrupt` 改动：
+Changes to `TrainingContext.handle_interrupt`:
 
 ```python
 def handle_interrupt(self, sig, frame) -> None:
@@ -124,7 +157,7 @@ def handle_interrupt(self, sig, frame) -> None:
     config_path = state_path.with_suffix(".config.json")
 
     _write_config_snapshot(config_path, self.args, self.sample_prompts)
-    save_training_state(state_path, ...)  # 现有调用
+    save_training_state(state_path, ...)  # existing call
     self.injector.save(...)
     self.wandb_monitor.finish()
 
@@ -136,55 +169,60 @@ def handle_interrupt(self, sig, frame) -> None:
     sys.exit(0)
 ```
 
-新增字段 `TrainingContext.task_id: Optional[int]`，启动时从 env `LORA_TASK_ID`
-读入（supervisor spawn 时注入）。
+A new field, `TrainingContext.task_id: Optional[int]`, is read from the
+`LORA_TASK_ID` env var at startup (injected by the supervisor when spawning).
 
-`_build_pause_state_path` / `_write_config_snapshot` / `_emit_event` 作为模块级
-helper 函数，落到 `runtime/training/state.py` 或新文件 `runtime/training/snapshot.py`。
+`_build_pause_state_path` / `_write_config_snapshot` / `_emit_event` become
+module-level helper functions, landing in `runtime/training/state.py` or a
+new file `runtime/training/snapshot.py`.
 
-config snapshot 内容（候选清单，最终以实现时序列化结果为准）：
+Config snapshot contents (a candidate list; the final result is whatever
+gets serialized at implementation time):
 
-- 全部 `args.*`：lr, optimizer, optimizer_args, scheduler, batch_size,
+- All `args.*`: lr, optimizer, optimizer_args, scheduler, batch_size,
   grad_accum, max_train_steps, num_epochs, noise schedule, loss weighting,
   network_dim, network_alpha, dropout, rank, ...
 - dataset_config / resolution / caption_extension / shuffle / repeat
 - output_dir / output_name / sample_prompts / sample_every / save_every_n_steps
-- 关键模型路径（base, vae, text encoder） — 存路径不存 hash
+- Key model paths (base, vae, text encoder) — stores the path, not a hash
 - random seed
-- **不存**：wandb run id（已 finish），monitor live state（已 dump 在 .pt 内）
+- **Not stored**: wandb run id (already finished), monitor live state
+  (already dumped inside the .pt)
 
 #### `runtime/training/loop.py`
 
-周期 save 的写盘路径同步改成 per-task 子目录，命名保持 `step_<N>.pt`（无 pause
-前缀，靠命名跟 pause 文件区分）。这是顺手修 latent bug，独立 PR 先 ship 更干净
-（见"PR 拆分建议"）。
+The periodic save's write path is likewise changed to a per-task
+subdirectory, keeping the `step_<N>.pt` naming (no pause prefix — it's
+distinguished from pause files by the naming convention alone). This is
+fixing the latent bug in passing, shipped cleanly as its own PR first (see
+"Suggested PR split").
 
 #### `runtime/training/phases/resume.py`
 
 ```python
 def run(ctx: TrainingContext) -> None:
-    # ... 现有逻辑 ...
+    # ... existing logic ...
     signal.signal(signal.SIGINT, ctx.handle_interrupt)
     if os.name == "nt":
-        signal.signal(signal.SIGBREAK, ctx.handle_interrupt)  # 新增
+        signal.signal(signal.SIGBREAK, ctx.handle_interrupt)  # new
 
-    # 在进入 train_loop 前 emit:
+    # emit before entering train_loop:
     ctx._emit_event("train_loop_started", {})
 
-    # load_training_state 成功后 emit（已存在的 load_training_state 调用之后）:
+    # emit after load_training_state succeeds (after the existing load_training_state call):
     if args.resume_state:
-        # ... 现有 load ...
+        # ... existing load ...
         ctx._emit_event("resume_state_loaded", {"path": args.resume_state})
 ```
 
 #### `studio/supervisor.py`
 
-`_Slot` dataclass 加字段：
+New fields on the `_Slot` dataclass:
 
 ```python
 @dataclass
 class _Slot:
-    # ... 现有字段 ...
+    # ... existing fields ...
     pause_pending: bool = False
     pause_state_path: Optional[Path] = None
     pause_config_path: Optional[Path] = None
@@ -192,14 +230,16 @@ class _Slot:
     train_loop_started: bool = False
 ```
 
-新增方法：
+New methods:
 
-- `pause(task_id) -> bool`：跟 `cancel(task_id)` 平级
-- `_signal_pause_async(slot)`：跟 `_signal_terminate_async` 同形，发 pause 信号，
-  **超时不强杀**（让 modal 决定下一步）
-- `_send_pause_signal(proc)`：Windows `CTRL_BREAK_EVENT`，POSIX `os.kill(pid, SIGINT)`
+- `pause(task_id) -> bool`: at the same level as `cancel(task_id)`
+- `_signal_pause_async(slot)`: shaped like `_signal_terminate_async`, sends
+  the pause signal, **does not force-kill on timeout** (the modal decides
+  what happens next)
+- `_send_pause_signal(proc)`: `CTRL_BREAK_EVENT` on Windows,
+  `os.kill(pid, SIGINT)` on POSIX
 
-`_finish_slot` 三元分流（替换 `supervisor.py:972-977`）：
+`_finish_slot`'s three-way branch (replacing `supervisor.py:972-977`):
 
 ```python
 if slot.pause_pending and slot.pause_state_path:
@@ -212,31 +252,38 @@ else:
     status = "failed"
 ```
 
-paused 分支写 db 时多 set `paused_state_path` / `paused_config_path` /
-`paused_step` / `paused_at`。
+The `paused` branch additionally sets `paused_state_path` /
+`paused_config_path` / `paused_step` / `paused_at` when writing to the db.
 
-`_on_line` 识别新事件 `pause_state` / `train_loop_started` / `resume_state_loaded`，
-更新 slot 字段：
+`_on_line` recognizes the new events `pause_state` / `train_loop_started` /
+`resume_state_loaded`, updating slot fields:
 
-- `pause_state` → 设 `pause_state_path` + `pause_config_path` + `pause_step`
-- `train_loop_started` → 设 `train_loop_started=True`
-- `resume_state_loaded` → 标记可以删旧 pause 文件对（在 _on_finish 或独立线程清）
+- `pause_state` → sets `pause_state_path` + `pause_config_path` + `pause_step`
+- `train_loop_started` → sets `train_loop_started=True`
+- `resume_state_loaded` → marks the old pause-file pair for cleanup (cleaned
+  up in `_on_finish` or a separate thread)
 
-启动 reload 时 `status='running'` 标 failed 的现有逻辑要显式跳过 `paused`。
+The existing logic that marks `status='running'` tasks as failed on startup
+reload must explicitly skip `paused`.
 
-#### Cancel 在 Windows 的信号撞车
+#### Cancel and pause colliding on Windows signals
 
-今天 cancel 在 Windows 发 `CTRL_BREAK_EVENT`，pause 也要发它 → 子进程无法区分意图。
+Today, cancel sends `CTRL_BREAK_EVENT` on Windows, and pause needs to send
+the same signal → the child process can't distinguish intent.
 
-**决策**：cancel 在 Windows **不再发软信号**，直接走 `taskkill /T /F` 强杀进程树。
-理由：cancel 语义本来就是硬中断，"先优雅再强杀"在 Windows 上没意义（30s grace
-几乎都触发强杀）。`CTRL_BREAK_EVENT` 专门留给 pause。
+**Decision**: on Windows, cancel **no longer sends a soft signal** — it goes
+straight to `taskkill /T /F` to hard-kill the process tree. Reasoning:
+cancel's semantics are inherently a hard interrupt, and "graceful first, then
+force-kill" is meaningless on Windows (the 30s grace period almost always
+ends in a force-kill anyway). `CTRL_BREAK_EVENT` is reserved exclusively for
+pause.
 
-POSIX cancel 继续发 SIGTERM（grace 后强杀），pause 发 SIGINT，互不撞。
+POSIX cancel keeps sending SIGTERM (force-kill after grace), while pause
+sends SIGINT — no collision.
 
 #### `studio/db.py`
 
-migration 加列：
+Migration adds columns:
 
 - `paused_state_path TEXT NULL`
 - `paused_config_path TEXT NULL`
@@ -245,63 +292,68 @@ migration 加列：
 
 ```python
 VALID_STATUSES = {"pending", "running", "done", "failed", "canceled", "paused"}
-TERMINAL_STATUSES = {"done", "failed", "canceled"}  # 不加 paused
+TERMINAL_STATUSES = {"done", "failed", "canceled"}  # paused not added
 ```
 
-`next_pending` 不动（自然跳过 paused）。
+`next_pending` is unchanged (it naturally skips paused).
 
-挂起开关用 kv 存储：
+The hold switch is stored using kv storage:
 
 ```python
 def get_queue_held(conn) -> bool: ...
 def set_queue_held(conn, held: bool) -> None: ...
 ```
 
-放新表 `app_settings(key TEXT PRIMARY KEY, value TEXT)` 或现成的 kv 表，二选一。
+Choose either a new `app_settings(key TEXT PRIMARY KEY, value TEXT)` table
+or an existing kv table.
 
-#### `studio/server.py` 新 endpoint
+#### New `studio/server.py` endpoints
 
 ```
 POST /api/queue/{task_id}/pause   → supervisor.pause(task_id)
-POST /api/queue/{task_id}/resume  → 见下
+POST /api/queue/{task_id}/resume  → see below
 POST /api/queue/hold              → db.set_queue_held(True)
 POST /api/queue/release           → db.set_queue_held(False)
 GET  /api/queue/hold              → {"held": bool, "pending_waiting": N}
 ```
 
-`/api/queue/{id}/pause` 检查 `is_pausable`（看 supervisor slot 的
-`train_loop_started`），未就绪返 409。
+`/api/queue/{id}/pause` checks `is_pausable` (looking at the supervisor
+slot's `train_loop_started`); returns 409 if not ready.
 
-`/api/queue/{id}/resume` 流程：
+`/api/queue/{id}/resume` flow:
 
-1. 读 task 的 `paused_state_path` + `paused_config_path`。
-2. 校验文件存在（不存在返 409，引导用户走 ResumeFieldPicker 起新 task）。
-3. 把 task 的 status 从 paused 改回 pending。
-4. cmd_builder 在下一轮调度时识别到 `paused_state_path` / `paused_config_path`：
-   - 用 `paused_config_path` 的 snapshot 拼 args；
-   - 唯一覆盖：`--resume-state <paused_state_path>`；
-   - env 注入 `LORA_TASK_ID=<task_id>`（保持 state 子目录一致）。
+1. Read the task's `paused_state_path` + `paused_config_path`.
+2. Verify the files exist (returns 409 if not, guiding the user toward
+   starting a new task via ResumeFieldPicker).
+3. Change the task's status from paused back to pending.
+4. On the next dispatch round, cmd_builder detects `paused_state_path` /
+   `paused_config_path`:
+   - Builds args from the `paused_config_path` snapshot;
+   - The only override: `--resume-state <paused_state_path>`;
+   - Injects env `LORA_TASK_ID=<task_id>` (to keep the state subdirectory
+     consistent).
 
-`cancel_task` 增强：允许 paused → canceled 直接改 db + 清 pause 文件对（进程
-已退出，不需要发信号）。
+`cancel_task` is enhanced: allows paused → canceled directly by updating the
+db + clearing the pause-file pair (the process has already exited, no signal
+needs to be sent).
 
-supervisor 主循环 dispatch 时检查：
+The supervisor's main dispatch loop checks:
 
 ```python
 if db.get_queue_held(conn):
-    continue  # 跳过本轮调度，已 running 的不动
+    continue  # skip this dispatch round; already-running tasks are unaffected
 ```
 
-### 前端代码方向
+### Frontend code direction
 
 #### `studio/web/src/types.ts` + API client
 
 ```ts
 type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled' | 'paused'
-const TERMINAL: TaskStatus[] = ['done', 'failed', 'canceled']  // 不加 paused
+const TERMINAL: TaskStatus[] = ['done', 'failed', 'canceled']  // paused not added
 ```
 
-`studio/web/src/api/client.ts` 加：
+Additions to `studio/web/src/api/client.ts`:
 
 ```ts
 pauseTask: (id: number) => req(`/api/queue/${id}/pause`, { method: 'POST' }),
@@ -311,259 +363,370 @@ releaseQueue: () => req(`/api/queue/release`, { method: 'POST' }),
 getQueueHold: () => req<QueueHoldState>(`/api/queue/hold`),
 ```
 
-monitor SSE 协议增加 `is_pausable: boolean` 字段，由 supervisor 从
-`slot.train_loop_started` 派生。
+The monitor SSE protocol gains an `is_pausable: boolean` field, derived by
+the supervisor from `slot.train_loop_started`.
 
 #### `studio/web/src/pages/Queue.tsx` / `QueueDetail.tsx`
 
-- 顶部 banner（仅 `held=true` 时显示，sticky）；
-- 顶部 actions：暂停 / 取消 / 挂起队列 / 恢复调度；
-- 暂停按钮：`!isPausable` 时隐藏（不是 disabled）；
-- paused 行内：恢复 / 彻底取消按钮；
-- paused 行附信息：在 step N 暂停于 …；
-- pending 行在 held=true 时附"等待恢复调度"提示。
+- Top banner (shown only when `held=true`, sticky);
+- Top actions: pause / cancel / hold queue / release queue;
+- Pause button: hidden (not disabled) when `!isPausable`;
+- Inline on a paused row: resume / cancel-permanently buttons;
+- Info attached to a paused row: "paused at step N …";
+- Pending rows show a "waiting for the queue to resume" note when `held=true`.
 
-#### 新增组件
+#### New components
 
-- `PauseProgressModal.tsx`：暂停过程 modal（保存中 / 超时 / 成功 / 失败四态），
-  订阅 task 的 SSE 事件流。
-- `HoldQueueModal.tsx`：挂起 confirmation modal（情形 A 无 running + 情形 B
-  有 running 的 radio 联动）。
+- `PauseProgressModal.tsx`: the pause-progress modal (saving / timeout /
+  success / failure states), subscribing to the task's SSE event stream.
+- `HoldQueueModal.tsx`: the hold confirmation modal (case A: no running task
+  + case B: has a running task, with a linked radio button).
 
 #### i18n
 
-新增 key（中英双语，英文术语用 hold / release）：
+New keys (English terms use hold / release):
 
 - `queue.pause` / `queue.resume` / `queue.holdQueue` / `queue.releaseQueue`
-- `queue.pauseProgress.*`（modal 状态文案）
-- `queue.holdModal.*`（情形 A / B 文案）
+- `queue.pauseProgress.*` (modal state copy)
+- `queue.holdModal.*` (case A / B copy)
 - `status.paused`
-- 等
+- etc.
 
-### Spike 必做（合并 ADR 后第一件事）
+### Required spike (the first thing after merging this ADR)
 
-Windows 端验证：
+Windows-side validation:
 
-1. supervisor `proc.send_signal(signal.CTRL_BREAK_EVENT)` 能否送达
-   `CREATE_NEW_PROCESS_GROUP` 子进程组；
-2. 子进程 Python `signal.signal(signal.SIGBREAK, handler)` 能否捕获；
-3. handler 能否完整跑完 save_training_state + write snapshot 后 `sys.exit(0)`；
-4. supervisor 能否正确读到子进程 stdout 上的 `__EVENT__:pause_state` 行后才走
-   `_finish_slot` 标 paused。
+1. Whether the supervisor's `proc.send_signal(signal.CTRL_BREAK_EVENT)`
+   reaches a `CREATE_NEW_PROCESS_GROUP` child process group;
+2. Whether the child process's Python
+   `signal.signal(signal.SIGBREAK, handler)` catches it;
+3. Whether the handler can fully complete save_training_state + writing the
+   snapshot before `sys.exit(0)`;
+4. Whether the supervisor correctly reads the `__EVENT__:pause_state` line
+   from the child's stdout before marking it paused via `_finish_slot`.
 
-spike 失败 → 回退方案 B（sentinel 文件 IPC），本 ADR 第二阶段决策修订。
+If the spike fails → fall back to candidate B (sentinel-file IPC); this ADR
+is revised in a second decision phase.
 
-### PR 拆分建议
+### Suggested PR split
 
-1. **PR-0 spike**：仅 spike 脚本 + 报告，不动主线。
-2. **PR-1 latent bug 前置修**：`runtime/training/loop.py` 周期 save 路径加
-   per-task 子目录。独立 ship，干净地基。
-3. **PR-2 后端骨架**：context / supervisor / db migration，新 API endpoint，
-   全部带单测。feature flag `enable_pause_resume` 默认 off。
-4. **PR-3 resume 路径 + cmd_builder**：端到端集成测（pause N step → resume →
-   验证 global_step 从 N+1 接上 + loss 连续）。
-5. **PR-4 前端 UI**：banner / 按钮 / 两个 modal / i18n。
-6. **PR-5 文档 + changelog + 灰度开启 feature flag**。
+1. **PR-0 spike**: spike script + report only, doesn't touch the main line.
+2. **PR-1 latent-bug prefix fix**: `runtime/training/loop.py`'s periodic save
+   path gets a per-task subdirectory. Shipped independently, a clean base.
+3. **PR-2 backend skeleton**: context / supervisor / db migration, new API
+   endpoints, all with unit tests. Feature flag `enable_pause_resume`
+   defaults off.
+4. **PR-3 resume path + cmd_builder**: end-to-end integration test (pause at
+   step N → resume → verify global_step picks up from N+1 + loss is
+   continuous).
+5. **PR-4 frontend UI**: banner / buttons / two modals / i18n.
+6. **PR-5 docs + changelog + gradual rollout of the feature flag**.
 
-每个 PR 独立可 revert，回滚粒度细。
+Each PR is independently revertible, for fine-grained rollback.
 
-## 理由
+## Rationale
 
-**为什么否决方案 B**：信号机制更标准，spike 通了就没必要再加 IPC 通道。B 保留
-作 spike 失败兜底。
+**Why candidate B was rejected**: the signal mechanism is more standard, and
+once the spike works there's no need to add an IPC channel. B is kept as a
+fallback in case the spike fails.
 
-**为什么否决方案 D**：强依赖 `save_state_every`（默认 0），多数用户没开；恢复
-点不精确；UI 撒谎欠债。
+**Why candidate D was rejected**: it strongly depends on `save_state_every`
+(default 0), which most users don't enable; the resume point is imprecise;
+and the UI would falsely report success — accruing debt.
 
-**为什么 state 文件路径要加 per-task 子目录**：今天 `save_state_every` 在同
-version 多 task 场景已经互覆盖。这不是 pause/resume 引入的问题，是 latent
-bug，本 feature 顺手修。把它拆 PR-1 独立先 ship 让回归风险隔离。
+**Why the state file path needs a per-task subdirectory**: today,
+`save_state_every` already overwrites across multiple tasks under the same
+version. This isn't a problem introduced by pause/resume — it's a latent
+bug that this feature fixes in passing. Splitting it out as an independent
+PR-1 isolates the regression risk.
 
-**为什么 config snapshot 而不复用 task config 字段**：task config 字段创建时
-frozen，但有些参数来自 version / preset / 外部 yaml，存的是引用路径不是
-inline value。用户改 version 配置后，按路径再次解析会拿到新值。snapshot 落盘
-= 把所有引用 inline 展开成具体值，从根上跟"用户当前 config"解耦。
+**Why a config snapshot instead of reusing the task config fields**: task
+config fields are frozen at creation time, but some parameters come from a
+version / preset / an external yaml, and what's stored is a reference path,
+not an inline value. If the user edits the version config afterward,
+resolving by path again would fetch the new value. Writing a snapshot to
+disk means expanding all references into concrete inline values, decoupling
+it at the root from "the user's current config."
 
-**为什么挂起状态不进 task 状态机**：队列挂起是 dispatcher 级别属性，跟单 task
-状态无关。task 跨挂起边界状态不变（running 继续跑、paused 继续 paused）。进
-状态机意味着 5 个状态变 6 个 + 全套迁移规则，没必要。
+**Why the hold status isn't part of the task state machine**: queue hold is
+a dispatcher-level property, unrelated to any individual task's status. A
+task's state doesn't change across a hold boundary (a running task keeps
+running, a paused task stays paused). Making it part of the state machine
+would mean turning 5 states into 6, plus a full set of transition rules —
+unnecessary.
 
-**为什么暂停过程用全程 modal 而不是按钮 + toast**：pause 期间用户没机会"反悔
-不想 pause"（信号已发），强制锁屏避免误操作把进度丢了。30s 超时给用户选 [再等
-30s] / [强制取消保存进度] / [终止任务] 而不是默默降级 cancel——用户点暂停的
-意图就是要保进度，默默 cancel = 用户惊吓。
+**Why the pause-in-progress uses a full-screen modal rather than a button +
+toast**: during a pause, the user has no opportunity to "change their mind
+about pausing" (the signal has already been sent), so a forced screen lock
+prevents a stray click from losing progress. The 30s timeout gives the user
+a choice of [wait 30 more seconds] / [force-cancel and keep progress
+saved-so-far] / [terminate the task], rather than silently downgrading to
+cancel — the intent behind clicking pause is to preserve progress, so a
+silent cancel would startle the user.
 
-**为什么 cancel 在 Windows 改成 taskkill /T /F 直接走**：cancel 语义本来就是
-硬中断，30s grace 几乎都触发强杀。`CTRL_BREAK_EVENT` 专门留给 pause 让信号意图
-明确。POSIX 没这个问题（SIGINT vs SIGTERM 天然分流）。
+**Why cancel on Windows switches directly to taskkill /T /F**: cancel's
+semantics are inherently a hard interrupt, and the 30s grace period almost
+always ends in a force-kill anyway. `CTRL_BREAK_EVENT` is reserved for pause
+to keep signal intent unambiguous. POSIX doesn't have this problem (SIGINT
+vs. SIGTERM naturally separate the two).
 
-## 后果
+## Consequences
 
-### 正面
+### Positive
 
-- 现有 cancel 语义不变，用户旧习惯不受影响。
-- 用户能恢复中断进度，不再"取消 = 全部白跑"。
-- 跨 server 重启的 paused task 自动保留，"关机再开"工作流可用。
-- 顺手修了 `save_state_every` per-task 子目录的 latent bug。
-- config snapshot 设计让 paused task 跟用户后续改 config 完全解耦。
-- 队列挂起独立开关让"夜间不跑"" 维护窗口"工作流可用。
+- Existing cancel semantics are unchanged, so users' existing habits are
+  unaffected.
+- Users can resume interrupted progress — "cancel" no longer means "all
+  progress lost."
+- Paused tasks automatically survive a server restart, enabling a
+  "shut down, then start back up" workflow.
+- Fixes the `save_state_every` per-task-subdirectory latent bug in passing.
+- The config-snapshot design fully decouples a paused task from any config
+  edits the user makes afterward.
+- The independent queue-hold switch enables workflows like "don't run
+  overnight" or "maintenance window."
 
-### 负面 / 待评估
+### Negative / to be evaluated
 
-- Windows 信号链路通不通取决于 spike，有方案 B 兜底但需要重新走一轮设计。
-- pause 文件对（.pt + .config.json）多一份磁盘占用，但跟随 task 生命周期自动清。
-- supervisor `_finish_slot` 分支从二元变三元，回归风险靠单测覆盖。
-- cancel 在 Windows 改成 taskkill /T /F 直接走，跳过软信号 grace 阶段；现有
-  cancel 行为对用户基本无差异，但日志 / telemetry 如果有依赖 grace 阶段需迁移。
-- snapshot 序列化清单的完备性需要在 PR-3 集成测里覆盖——少存一个字段就可能
-  resume 行为漂移。
+- Whether the Windows signal chain works depends on the spike; candidate B
+  is a fallback but requires another design round.
+- The pause-file pair (.pt + .config.json) adds some disk usage, but it's
+  cleaned up automatically along with the task's lifecycle.
+- Supervisor's `_finish_slot` branch goes from binary to three-way; the
+  regression risk relies on unit-test coverage.
+- Cancel on Windows switching to `taskkill /T /F` skips the soft-signal grace
+  phase; existing cancel behavior is essentially unchanged for the user, but
+  logging / telemetry that depends on the grace phase would need migrating.
+- The completeness of the snapshot's serialization list needs coverage in
+  the PR-3 integration tests — missing even one field could cause resume
+  behavior to drift.
 
-### 未来债（明确不在本 ADR scope）
+### Future debt (explicitly out of scope for this ADR)
 
-- Wandb run id 续接（resume 起新 run，不复用 run_id）
-- 批量 pause / resume
-- 挂起定时自动恢复
-- paused 超 X 天提醒
-- 首次跑训练 UI 推荐开 `save_state_every`
-- 成功指标 / 灰度遥测
-- 暂停后编辑 config 再 resume（永远不支持，强制 fork）
+- Continuing the same wandb run id on resume (resume currently starts a new
+  run, not reusing run_id)
+- Bulk pause / resume
+- Scheduled automatic resume of a held queue
+- Reminders for a task paused more than X days
+- Recommending `save_state_every` be enabled on the first training run in the UI
+- Success metrics / gradual-rollout telemetry
+- Editing config after pausing, then resuming (never supported — a fork is
+  required instead)
 
-## 不在范围
+## Out of scope
 
-- 服务器主动 stop / crash / 断电时自动保 state（覆盖面不可控，引导用户开
-  `save_state_every` 周期 checkpoint）
-- "暂停全部"复合按钮（挂起 modal 多问一句已覆盖）
-- 强 kill 后保留 paused 状态（强 kill 时 state 不可信，必标 canceled）
-- 自动清理周期 save 文件（用户主动开的灾后恢复点，由用户管）
-- pause generate / download / tag task（跑得快无意义）
+- Automatically saving state when the server actively stops / crashes /
+  loses power (the coverage is uncontrollable; instead guide users to enable
+  `save_state_every` periodic checkpoints)
+- A combined "pause all" button (covered already by the extra question in
+  the hold modal)
+- Keeping the paused status after a hard kill (state isn't trustworthy after
+  a hard kill, so it must be marked canceled)
+- Automatically cleaning up periodic save files (these are disaster-recovery
+  points the user opted into; the user manages them)
+- Pausing generate / download / tag tasks (they run fast enough that this
+  would be pointless)
 
-## 参考
+## References
 
-- 设计文档（三轮 review）：`docs/design/queue-pause-resume-design.md`
-- 现有代码触点：
+- Design document (three review rounds): `docs/design/queue-pause-resume-design.md`
+- Existing code touch points:
   - `runtime/training/context.py:109` `handle_interrupt`
-  - `runtime/training/phases/resume.py:82` SIGINT 注册
-  - `runtime/training/loop.py:271` `save_state_every` 写盘（latent bug 现场）
-  - `studio/supervisor.py:952` `_finish_slot` 状态分流
+  - `runtime/training/phases/resume.py:82` SIGINT registration
+  - `runtime/training/loop.py:271` `save_state_every` writes to disk (where the latent bug lives)
+  - `studio/supervisor.py:952` `_finish_slot` status branching
   - `studio/supervisor.py:1081` `_send_terminate_signal`
   - `studio/db.py:36` `VALID_STATUSES`
-  - `studio/server.py:2893` `cancel_task` endpoint（现有）
-  - `studio/web/src/pages/Queue.tsx:159` 现有 cancel-only 注释
-- memory：`memory/queue_pause_resume_via_sigint.md`（早期决策痕迹）
+  - `studio/server.py:2893` the existing `cancel_task` endpoint
+  - `studio/web/src/pages/Queue.tsx:159` the existing cancel-only comment
+- memory: `memory/queue_pause_resume_via_sigint.md` (a record of earlier decisions)
 
 ---
 
-## 增量更新
+## Incremental updates
 
-### 2026-05-19 — Addendum 1: dev 训练栈深度 audit + 暂停语义翻盘（Pause-as-Cancel + Epoch Auto-Backup）
+### 2026-05-19 — Addendum 1: deep audit of dev's training stack + pause-semantics reversal (Pause-as-Cancel + Epoch Auto-Backup)
 
-**影响范围**：影响初版 ADR「决策第 4/5/6 条」「后端代码方向 / `handle_interrupt` 伪代码」「不在范围 / 服务器主动 stop 自动保 state」段。本 Addendum 落地后初版 ADR 的 **mid-epoch save 路径完全废弃**，pause 信号不再触发任何 save 写盘。
+**Scope of impact**: affects the initial ADR's "decision items 4/5/6",
+"backend code direction / `handle_interrupt` pseudocode", and "out of scope
+/ automatically saving state on server-initiated stop" sections. Once this
+Addendum lands, the initial ADR's **mid-epoch save path is entirely
+retired**, and the pause signal no longer triggers any save to disk.
 
-**起因**：PR-1 ~ PR-5 已合 dev，用户准备开始使用前提出疑问——「加了这么多特殊参数（InfoNoise / Prodigy / PPSF / Cosine LR / loss_weighting / pyramid noise / ...），点暂停保存的 state 在恢复后能完美 resume 吗？」深度 audit dev 训练栈、并行 3 个算法专家 sub-agent 对抗评审，发现初版 ADR 的隐含假设——「CLI 侧已有完整 save/resume 链路，supervisor 信号触发就 OK」——在 dev 当前代码上有 **7 条具体风险**，其中 2 条是 dev 独家发现（worktree 内本地草稿未覆盖）。
+**Trigger**: PR-1 through PR-5 had already merged into dev, and just before
+the user was about to start using it, they raised a question — "with all
+these special parameters added (InfoNoise / Prodigy / PPSF / Cosine LR /
+loss_weighting / pyramid noise / ...), can the state saved by clicking pause
+actually resume perfectly?" A deep audit of the dev training stack, run in
+parallel with 3 algorithm-expert sub-agents doing adversarial review, found
+that the initial ADR's implicit assumption — "the CLI side already has a
+complete save/resume chain, so a supervisor signal trigger is fine" — has
+**7 concrete risks** against dev's current code, 2 of which are **dev-only
+discoveries** (not covered by the local draft in the worktree).
 
-#### Round 1: dev 训练栈组件清点
+#### Round 1: inventory of dev's training-stack components
 
-`runtime/training/` 下当前活跃组件审完，标识每个组件是否带内部 state：
+Every currently active component under `runtime/training/` was reviewed,
+tagging whether each one carries internal state:
 
-| 组件 | 文件 | 内部 state |
+| Component | File | Internal state |
 |---|---|---|
-| baseline timestep sampler | `timestep_samplers/baseline.py` | 无（纯函数 wrapper） |
-| **InfoNoise** | `timestep_samplers/infonoise.py:29-80` | **9 个字段**：`_fifo` (K×B floats) / `_mse_ema` / `_n_count` / `_cdf_values` / `_internal_step` + 4 个 metadata counter |
-| make_noise / pyramid / noise_offset | `noise.py` | 无（每步重 sample，torch RNG） |
-| timestep_sampling (6 mode + Möbius shift) | `timestep_sampling.py` | 无（纯函数） |
-| loss_weighting (min_snr / detail_inv_t / cosmap) | `loss_weighting.py` | 无（纯函数） |
-| ER-SDE-3 inference sampler | `inference_samplers/er_sde.py` | 推理用，resume 无关 |
-| AdamW | `optimizers/adamw.py` | torch builtin，state_dict 完整 |
-| Prodigy | `optimizers/prodigy.py` | `d / d_max / d_numerator / s` 在 state_dict 内 |
-| **PPSF (ProdigyPlusScheduleFree)** | `optimizers/prodigy_plus_schedulefree.py` | 三组权重 x/y/z，**train/eval 切换是 in-place lerp p.data**（见 `utils/optimizer_utils.py:466-491`） |
-| CosineAnnealingLR | `schedulers/cosine.py` | `last_epoch / _last_lr` 在 state_dict 内 |
-| CosineAnnealingWarmRestarts | `schedulers/cosine_with_restart.py` | `T_cur / T_i` 在 state_dict 内 |
-| lycoris injector | `adapters/lycoris.py` | LoRA 权重在 `injector.state_dict()` 内 |
+| baseline timestep sampler | `timestep_samplers/baseline.py` | none (pure function wrapper) |
+| **InfoNoise** | `timestep_samplers/infonoise.py:29-80` | **9 fields**: `_fifo` (K×B floats) / `_mse_ema` / `_n_count` / `_cdf_values` / `_internal_step` + 4 metadata counters |
+| make_noise / pyramid / noise_offset | `noise.py` | none (resampled every step, torch RNG) |
+| timestep_sampling (6 modes + Möbius shift) | `timestep_sampling.py` | none (pure functions) |
+| loss_weighting (min_snr / detail_inv_t / cosmap) | `loss_weighting.py` | none (pure functions) |
+| ER-SDE-3 inference sampler | `inference_samplers/er_sde.py` | inference only, unrelated to resume |
+| AdamW | `optimizers/adamw.py` | torch builtin, state_dict complete |
+| Prodigy | `optimizers/prodigy.py` | `d / d_max / d_numerator / s` are in state_dict |
+| **PPSF (ProdigyPlusScheduleFree)** | `optimizers/prodigy_plus_schedulefree.py` | three sets of weights x/y/z; **switching train/eval does an in-place lerp on p.data** (see `utils/optimizer_utils.py:466-491`) |
+| CosineAnnealingLR | `schedulers/cosine.py` | `last_epoch / _last_lr` are in state_dict |
+| CosineAnnealingWarmRestarts | `schedulers/cosine_with_restart.py` | `T_cur / T_i` are in state_dict |
+| lycoris injector | `adapters/lycoris.py` | LoRA weights are in `injector.state_dict()` |
 
-**dev 当前 `save_training_state`**（`runtime/training/state.py:22-39`）序列化：LoRA injector + optimizer.state_dict + epoch + global_step + loss_history + rng_state（torch + cuda + random）+ monitor_state + scheduler.state_dict（如有）。**完全没序列化 numpy rng 或任何 timestep_sampler 内部状态**。
+**dev's current `save_training_state`** (`runtime/training/state.py:22-39`)
+serializes: the LoRA injector + optimizer.state_dict + epoch + global_step +
+loss_history + rng_state (torch + cuda + random) + monitor_state +
+scheduler.state_dict (if present). **It serializes neither the numpy rng nor
+any timestep_sampler internal state at all.**
 
-#### Round 2: 三方算法专家对抗评审
+#### Round 2: three-way adversarial algorithm review
 
-并行启动 3 个 sub-agent 从不同视角审 dev 当前 pause/resume 路径：
+Three sub-agents were run in parallel, each auditing dev's current
+pause/resume path from a different angle:
 
-| 视角 | 关键发现 | 推荐边界 |
+| Angle | Key finding | Recommended boundary |
 |---|---|---|
-| timestep / noise | InfoNoise 9 state 一个都没序列化（dev 现状）→ resume 后 `_internal_step=0` 重走整个 N_warm（默认 5000 步） | step 边界（前提 InfoNoise 加 state_dict） |
-| optimizer | PPSF resume `.train()` 缺失 + grad_accum 边界未守 + Prodigy d 在 mid-epoch 漂移 | accum 边界（延迟 handler 到下个 global_step） |
-| scheduler / loss / data | BucketBatchSampler 5% double-train + cosine restart T_cur 漂移 + `current_epoch` 二义性 | **epoch 边界**（其它方案要补 ≥8 字段才能真做对） |
+| timestep / noise | None of InfoNoise's 9 state fields are serialized (dev's current state) → after resume, `_internal_step=0` re-runs the entire N_warm (default 5000 steps) | step boundary (assuming InfoNoise adds a state_dict) |
+| optimizer | PPSF resume is missing `.train()` + the grad_accum boundary isn't guarded + Prodigy's d drifts mid-epoch | accum boundary (defer the handler to the next global_step) |
+| scheduler / loss / data | BucketBatchSampler causes 5% double-training + cosine restart's T_cur drifts + `current_epoch` is ambiguous | **epoch boundary** (other approaches would need ≥8 more fields to get right) |
 
-#### Round 3: 七条 bug 清单（含 2 条 dev 独家发现）
+#### Round 3: the seven-item bug list (including 2 dev-exclusive findings)
 
-| # | Bug | 严重 | dev 独家? |
+| # | Bug | Severity | dev-exclusive? |
 |---|---|---|---|
-| 1 | InfoNoise 9 个 state 没序列化 | 🔴 | 否（worktree 草稿已识别） |
-| 2 | **PPSF resume 后未显式 `.train()`**，`p.data` 停留 averaged x 但 PPSF 内部以为 = y → 第一 step 梯度方向偏 | 🔴 | **是** |
-| 3 | `handle_interrupt` 在 grad_accum 周期中间触发，partial backward grad 挂在 `p.grad` 不进 optimizer state | 🔴 | 否 |
-| 4 | BucketBatchSampler 进度不存，resume 从 epoch 头重训前半 epoch，对 LoRA 短训 5% double-train 配 Prodigy 偏 d 估计 | 🔴 | 否 |
-| 5 | **`current_epoch` 语义二义性**：mid-epoch 路径保 `epoch`（`context.py:175`），epoch-end 路径保 `epoch+1`（`loop.py:297,342`）；`loop.py:341-344` 周期 epoch save 同样 off-by-one | 🟡 | **是** |
-| 6 | CosineAnnealingWarmRestarts `T_cur` 每次 pause/resume 漂移 5% | 🟡 | 否 |
-| 7 | `epoch_loss_sum` / wandb `train/loss_epoch` 累计错乱（mid-epoch resume 后） | 🟡 | 否 |
+| 1 | InfoNoise's 9 state fields aren't serialized | 🔴 | No (already identified in the worktree draft) |
+| 2 | **PPSF doesn't explicitly call `.train()` after resume**, so `p.data` stays at averaged x but PPSF internally thinks it's = y → the first step's gradient direction is off | 🔴 | **Yes** |
+| 3 | `handle_interrupt` fires mid-way through a grad_accum cycle, leaving partial backward gradients on `p.grad` that never enter the optimizer state | 🔴 | No |
+| 4 | BucketBatchSampler's progress isn't saved; resume restarts from the beginning of the epoch, retraining the first half of the epoch — for short LoRA runs, this 5% double-training skews Prodigy's d estimate | 🔴 | No |
+| 5 | **`current_epoch` semantics are ambiguous**: the mid-epoch path saves `epoch` (`context.py:175`), while the epoch-end path saves `epoch+1` (`loop.py:297,342`); `loop.py:341-344`'s periodic epoch save has the same off-by-one | 🟡 | **Yes** |
+| 6 | `CosineAnnealingWarmRestarts`'s `T_cur` drifts by 5% on every pause/resume | 🟡 | No |
+| 7 | `epoch_loss_sum` / wandb `train/loss_epoch` accumulation gets confused (after a mid-epoch resume) | 🟡 | No |
 
-#### Round 4: 用户提出「暂停 = 取消 + epoch 自动备份」新设计
+#### Round 4: the user proposes a new design — "pause = cancel + automatic epoch backup"
 
-> "保存逻辑更改，不再是点击暂停保存当前 step state；而是每次 ep 都自动备份一次，新的 ep 覆盖老的 ep；暂停时直接暂停任务，不产出新的 state；resume 从之前保存的 ep state 开始，舍弃当前 ep 的进度。"
+> "Change the save logic — instead of clicking pause saving the current step's
+> state, automatically back up once per epoch, with each new epoch
+> overwriting the old one. Pausing directly pauses the task without producing
+> new state; resuming starts from the previously saved epoch state,
+> discarding the current epoch's progress."
 
-此设计把 pause 路径与 save 路径**彻底解耦**。pause 退化为「带 wandb finish 收尾的 cancel」；save 责任全部落到训练循环自身的 epoch 边界周期备份。bug #3 / #4 / #6 / #7 **自然消除**，#1 / #2 / #5 仍需显式修。
+This design **fully decouples** the pause path from the save path. Pause
+degrades to "a cancel with a wandb-finish tidy-up"; save responsibility
+falls entirely to a periodic backup at the training loop's own epoch
+boundary. Bugs #3 / #4 / #6 / #7 **disappear naturally**; #1 / #2 / #5 still
+need explicit fixes.
 
-新设计同时符合「暂停 = 立即释放 GPU」产品语义——用户按暂停的本质是腾显卡跑别的，不是等当前 step 保存完。
+This new design also matches the product semantics of "pause = release the
+GPU immediately" — the whole point of clicking pause is to free up the GPU
+for something else, not to wait for the current step to finish saving.
 
-#### 最终决策（方案 Δ）
+#### Final decision (approach Δ)
 
-**采用 Pause-as-Cancel + Epoch Auto-Backup**。具体决策：
+**Pause-as-Cancel + Epoch Auto-Backup is adopted**. Specific decisions:
 
-1. **新增 `auto_epoch_state.pt` 自动备份**：每 epoch 末尾覆盖式写 `<state_dir>/auto_epoch_state.pt` + 配套 `auto_epoch_state.config.json`。**无 args gate**（系统级保障，不是用户开关）。**不顺手保 LoRA `.safetensors`**——纯 resume 用，跟 pause 无关联，用户想要每 epoch LoRA 让他开 `save_every=1` 自己来。
-2. **`handle_interrupt` 大幅简化**：删 `save_training_state` / `injector.save(interrupted_*)` / `write_config_snapshot` 三处调用；保留 `wandb_monitor.finish()` + `emit pause_state(state_path=最近的 auto_epoch_state.pt)` + `sys.exit(0)`。重复 SIGINT 仍 `sys.exit(1)` 强退。
-3. **第一 epoch 内暂停 → cancel**：`handle_interrupt` 看 ctx 的 `last_auto_epoch_state_path` 字段；为 None（首 epoch 未结束）则 emit `pause_state(state_path=None)`，supervisor 据此走 cancel 分支。UI 端 `is_pausable=false` 完全隐藏按钮（保持初版 ADR §8.1 现行规则；用户看不到按钮 = 不会按，不需要任何告知文案）。
-4. **`save_state_every` (step) 和 `save_state_every_epochs` (用户主动 epoch) 行为完全不动**。它们是用户主动开的灾后恢复点，跟 auto backup 并行存在，三份文件共存于 `<state_dir>/task_<TID>/`：
-   - `auto_epoch_state.pt`（系统强制，单文件覆盖）
-   - `training_state_epoch{N}.pt`（用户 epoch 周期备份，多份历史归档）
-   - `training_state_step{N}.pt`（用户 step 周期备份，多份历史归档）
-5. **PauseProgressModal 加 confirm 子 modal**：点暂停按钮先弹 confirm，**统一文案不带任何动态字段**：
+1. **Add a new automatic backup, `auto_epoch_state.pt`**: at the end of
+   every epoch, overwrite-write `<state_dir>/auto_epoch_state.pt` plus a
+   matching `auto_epoch_state.config.json`. **No args gate** (this is a
+   system-level guarantee, not a user toggle). **Does not also save the
+   LoRA `.safetensors`** — it's purely for resume, unrelated to pause; a
+   user who wants a LoRA every epoch should turn on `save_every=1`
+   themselves.
+2. **`handle_interrupt` is drastically simplified**: the calls to
+   `save_training_state` / `injector.save(interrupted_*)` /
+   `write_config_snapshot` are removed; it keeps
+   `wandb_monitor.finish()` + `emit pause_state(state_path=<the most recent auto_epoch_state.pt>)` +
+   `sys.exit(0)`. A repeated SIGINT still forces exit via `sys.exit(1)`.
+3. **Pausing within the first epoch → cancel**: `handle_interrupt` checks
+   ctx's `last_auto_epoch_state_path` field; if it's None (the first epoch
+   hasn't finished), it emits `pause_state(state_path=None)`, and the
+   supervisor routes this to the cancel branch. On the UI side,
+   `is_pausable=false` hides the button entirely (keeping the initial ADR's
+   §8.1 rule in effect; if the user can't see the button, they can't click
+   it, and no explanatory copy is needed).
+4. **`save_state_every` (step) and `save_state_every_epochs` (user-initiated
+   epoch) behavior is completely unchanged**. They remain user-opted-in
+   disaster-recovery points, coexisting alongside the auto backup — three
+   files coexist under `<state_dir>/task_<TID>/`:
+   - `auto_epoch_state.pt` (system-enforced, single overwritten file)
+   - `training_state_epoch{N}.pt` (the user's per-epoch backups, multiple archived copies)
+   - `training_state_step{N}.pt` (the user's per-step backups, multiple archived copies)
+5. **PauseProgressModal gains a confirm sub-modal**: clicking the pause
+   button first pops a confirm dialog, with **uniform copy containing no
+   dynamic fields**:
    ```
-   标题：暂停训练？
+   Title: Pause training?
 
-   部分实验性参数（如 InfoNoise 自适应采样器、Prodigy 类
-   自适应优化器、cosine 学习率调度）在暂停 / 恢复后可能
-   出现质量波动。
+   Some experimental parameters (e.g. the InfoNoise adaptive
+   sampler, Prodigy-family adaptive optimizers, cosine LR
+   scheduling) may cause quality fluctuations after a
+   pause/resume cycle.
 
-   恢复时将从上一轮 epoch 结束位置继续，当前轮进度将
-   被丢弃。
+   Resuming will continue from the end of the previous
+   epoch; progress in the current epoch will be discarded.
 
-   [取消]  [确认暂停]
+   [Cancel]  [Confirm pause]
    ```
-   确认后进入原 PauseProgressModal 保存中 / 成功 / 失败状态机（初版 ADR §4.3 设计）。
-6. **InfoNoise 序列化必做（PR-A）**：`runtime/training/timestep_samplers/{protocol,baseline,infonoise}.py` 加 optional `state_dict()` / `load_state_dict()` hook；`state.py` `save_training_state` / `load_training_state` 加 `timestep_sampler=` keyword；空 dict 不写 key；K/B mismatch warning 不阻塞。
-7. **PPSF resume `.train()` 修复 (PR-C2)**：需先 spike 验证（1-2 小时）确定方案：
-   - **方案 X**：拆 save 协议，`state.pt` 内的 `lora_state_dict` 存 y（不在 `optimizer_eval_mode` 内 save）；`.safetensors` 文件继续存 averaged x（用户下载使用）。loop.py / context.py 现有「同一 `with optimizer_eval_mode` 包两次 save」要拆。
-   - **方案 Y**：load 后用 Schedule-Free lerp 公式 `y = (x - β·z) / (1-β)` 反推 y 重写 `p.data`，β 从 PPSF 源码读取。
-   - Spike 完决定 X 或 Y 再 ship。
-8. **`loop.py:341-344` off-by-one 顺手修 (PR-C1)**：`save_training_state(..., epoch, ...)` 改 `... ctx.current_epoch ...`（已经是 `epoch+1`）。这是 worktree 草稿独立识别的 latent bug，本 Addendum 一并修。
+   After confirming, it proceeds into the original PauseProgressModal's
+   saving / success / failure state machine (as designed in the initial ADR
+   §4.3).
+6. **InfoNoise serialization is mandatory (PR-A)**: add optional
+   `state_dict()` / `load_state_dict()` hooks to
+   `runtime/training/timestep_samplers/{protocol,baseline,infonoise}.py`;
+   add a `timestep_sampler=` keyword to `state.py`'s `save_training_state` /
+   `load_training_state`; an empty dict writes no key; a K/B mismatch only
+   warns, never blocks.
+7. **PPSF resume `.train()` fix (PR-C2)**: needs a spike first (1-2 hours) to
+   decide between approaches:
+   - **Approach X**: split the save protocol — the `lora_state_dict` inside
+     `state.pt` stores y (not saved within `optimizer_eval_mode`); the
+     `.safetensors` file continues to store the averaged x (for the user to
+     download and use). The current "same `with optimizer_eval_mode` block
+     wrapping two saves" in loop.py / context.py needs to be split apart.
+   - **Approach Y**: after loading, use the Schedule-Free lerp formula
+     `y = (x - β·z) / (1-β)` to back out y and rewrite `p.data`, reading β
+     from the PPSF source.
+   - Decide between X and Y once the spike is done, then ship.
+8. **`loop.py:341-344` off-by-one fixed in passing (PR-C1)**: change
+   `save_training_state(..., epoch, ...)` to `... ctx.current_epoch ...`
+   (which is already `epoch+1`). This is a latent bug independently
+   identified in the worktree draft, fixed together with this Addendum.
 
-#### 三方 audit 七条 bug 处置矩阵
+#### Disposition matrix for the three-way audit's seven bugs
 
-| # | 处置 |
+| # | Disposition |
 |---|---|
-| 1 InfoNoise 9 state | 🔴 PR-A 显式修 |
-| 2 PPSF .train() | 🔴 PR-C2 修，依赖 Spike-PPSF 结论 |
-| 3 grad_accum 周期 | ✅ 自然消除（epoch 末必然是 accum 完成 + step 边界） |
-| 4 dataloader double-train | ✅ 自然消除（epoch 边界 set_epoch 重 shuffle 是预期行为） |
-| 5 current_epoch 二义性 + off-by-one | 🟡 PR-C1 修（一行 keyword 改） |
-| 6 CosineWarmRestarts T_cur | ✅ 自然消除 |
-| 7 epoch_loss_sum 错乱 | ✅ 自然消除 |
+| 1 InfoNoise 9 state fields | 🔴 explicitly fixed in PR-A |
+| 2 PPSF .train() | 🔴 fixed in PR-C2, pending the Spike-PPSF conclusion |
+| 3 grad_accum boundary | ✅ disappears naturally (end-of-epoch always coincides with a completed accum cycle + a step boundary) |
+| 4 dataloader double-training | ✅ disappears naturally (re-shuffling via set_epoch at an epoch boundary is expected behavior) |
+| 5 current_epoch ambiguity + off-by-one | 🟡 fixed in PR-C1 (a one-line keyword change) |
+| 6 CosineWarmRestarts T_cur | ✅ disappears naturally |
+| 7 epoch_loss_sum confusion | ✅ disappears naturally |
 
-#### 代码层面方向
+#### Code-level direction
 
-**Loop** (`runtime/training/loop.py`)：
-- L296-348 epoch 末尾插入「强制 auto epoch backup」段（无 args gate）+ 给 ctx 的 `last_auto_epoch_state_path` / `last_auto_epoch_config_path` 赋值 + emit `auto_epoch_backup_written` event（供 supervisor 升级 `is_pausable`）
-- 用 `with optimizer_eval_mode(...):` 包住（PPSF averaged x）；如 Spike-PPSF 选方案 X，此处需调整
-- L341-344 现有 `save_state_every_epochs` 调用顺手修 off-by-one（`epoch` → `ctx.current_epoch`）
+**Loop** (`runtime/training/loop.py`):
+- Insert a "forced auto epoch backup" block at the end of the epoch
+  (L296-348, no args gate) + set ctx's `last_auto_epoch_state_path` /
+  `last_auto_epoch_config_path` + emit an `auto_epoch_backup_written` event
+  (so the supervisor can upgrade `is_pausable`)
+- Wrap it in `with optimizer_eval_mode(...):` (for PPSF's averaged x); if
+  Spike-PPSF selects approach X, this needs adjusting
+- Fix the off-by-one in the existing `save_state_every_epochs` call at
+  L341-344 in passing (`epoch` → `ctx.current_epoch`)
 
-**Context** (`runtime/training/context.py:126-188`)：
+**Context** (`runtime/training/context.py:126-188`):
 ```python
 def handle_interrupt(self, sig, frame) -> None:
     if self.interrupted:
@@ -579,64 +742,106 @@ def handle_interrupt(self, sig, frame) -> None:
     })
     sys.exit(0)
 ```
-新增字段 `last_auto_epoch_state_path: Optional[Path] = None` / `last_auto_epoch_config_path: Optional[Path] = None`。
+New fields: `last_auto_epoch_state_path: Optional[Path] = None` /
+`last_auto_epoch_config_path: Optional[Path] = None`.
 
-**State** (`runtime/training/state.py`)：
-- `save_training_state` 加 `timestep_sampler=` keyword，调 `state_dict()` 序列化；空 dict 不写 key
-- `load_training_state` 调 `load_state_dict()`，K/B mismatch warning 不抛
-- `load_training_state` 末尾按 Spike-PPSF 结论做 PPSF 守护
+**State** (`runtime/training/state.py`):
+- `save_training_state` gains a `timestep_sampler=` keyword, calling
+  `state_dict()` to serialize it; an empty dict writes no key
+- `load_training_state` calls `load_state_dict()`; a K/B mismatch only warns,
+  never raises
+- The end of `load_training_state` adds PPSF handling per the Spike-PPSF
+  conclusion
 
-**Supervisor** (`studio/supervisor.py`)：
-- `_on_line` 识别新 event `auto_epoch_backup_written` → 设 `slot.last_auto_epoch_state_path`
-- `_on_line` 收 `pause_state(state_path=None)` → 走 cancel 分支
-- `is_pausable` SSE 字段升级：`train_loop_started AND last_auto_epoch_state_path is not None`
+**Supervisor** (`studio/supervisor.py`):
+- `_on_line` recognizes the new event `auto_epoch_backup_written` → sets
+  `slot.last_auto_epoch_state_path`
+- `_on_line` receiving `pause_state(state_path=None)` → routes to the cancel
+  branch
+- `is_pausable` SSE field upgraded to:
+  `train_loop_started AND last_auto_epoch_state_path is not None`
 
-**UI** (`studio/web/src/pages/Queue.tsx` / 新组件 `PauseConfirmModal.tsx`)：
-- 暂停按钮在 `is_pausable=false` 时完全隐藏（保持现状）
-- 点暂停 → PauseConfirmModal（统一文案，无 epoch N 等动态字段） → 确认 → 调 pause API → 原 PauseProgressModal
+**UI** (`studio/web/src/pages/Queue.tsx` / new component `PauseConfirmModal.tsx`):
+- The pause button stays fully hidden when `is_pausable=false` (unchanged)
+- Clicking pause → PauseConfirmModal (uniform copy, no dynamic fields like
+  epoch N) → confirm → call the pause API → the original PauseProgressModal
 
-#### PR 拆分
+#### PR split
 
-| PR | 内容 | 依赖 |
+| PR | Contents | Dependency |
 |---|---|---|
-| PR-A | InfoNoise + sampler protocol `state_dict` / `load_state_dict` + `state.py` 加 `timestep_sampler=` 参数 + 14 单测 | 无 |
-| PR-B | `loop.py` 加 auto_epoch_backup + off-by-one fix + ctx 字段 + emit event | 无 |
-| PR-C1 | `current_epoch` 语义统一 + `loop.py:341-344` off-by-one fix（如未在 PR-B 一起做） | 无 |
-| **Spike-PPSF** | 1-2 小时跑短训 + resume + 对照 loss 曲线，确认方案 X vs Y | 不阻塞主线 |
+| PR-A | InfoNoise + the sampler protocol's `state_dict` / `load_state_dict` + `state.py` gaining the `timestep_sampler=` argument + 14 unit tests | none |
+| PR-B | `loop.py` gains auto_epoch_backup + the off-by-one fix + ctx fields + event emission | none |
+| PR-C1 | Unify `current_epoch` semantics + `loop.py:341-344` off-by-one fix (if not already bundled into PR-B) | none |
+| **Spike-PPSF** | 1-2 hours running a short training + resume + comparing loss curves, to confirm approach X vs. Y | doesn't block the main line |
 | PR-C2 | PPSF resume fix | Spike-PPSF |
-| PR-D | supervisor `_on_line` 新事件 + `is_pausable` 升级 + cancel 分流 | PR-B |
-| PR-E | UI：PauseConfirmModal + 文案 + i18n | PR-D |
+| PR-D | supervisor's new `_on_line` events + `is_pausable` upgrade + cancel routing | PR-B |
+| PR-E | UI: PauseConfirmModal + copy + i18n | PR-D |
 
-PR-A / PR-B 之间无强依赖可并行；PR-C1 可合进 PR-B；PR-C2 单独 ship；PR-D 在 PR-B 之后；PR-E 在 PR-D 之后。
+PR-A / PR-B have no hard dependency on each other and can run in parallel;
+PR-C1 can be merged into PR-B; PR-C2 ships separately; PR-D comes after PR-B;
+PR-E comes after PR-D.
 
-#### 落地测试计划
+#### Test plan for the rollout
 
-- `test_auto_epoch_backup_overwrites_in_place` — 3 epoch 后只剩一份 auto_epoch_state.pt
-- `test_handle_interrupt_no_save_only_emit` — SIGINT 触发后不调 save_training_state
-- `test_pause_before_first_epoch_marks_canceled` — 半 epoch SIGINT，supervisor 标 canceled
-- `test_resume_from_auto_epoch_no_double_training` — 3 epoch + 半 epoch + SIGINT + resume → optimizer step 数 == 3 × steps_per_epoch + 重做 epoch 4
-- `test_ppsf_train_mode_after_load` — PPSF load 后状态对得上（具体 assertion 按 Spike 结论定）
-- `test_current_epoch_off_by_one_fixed` — auto_epoch_state.pt 内 `epoch` 字段 == `ctx.current_epoch`
-- 14 单测从 worktree 草稿 cherry-pick：timestep sampler resume bit-exact / RNG / K/B mismatch warning / deque maxlen / 损坏 sampler_state warning 不阻塞 / roundtrip 集成
+- `test_auto_epoch_backup_overwrites_in_place` — only one
+  auto_epoch_state.pt remains after 3 epochs
+- `test_handle_interrupt_no_save_only_emit` — save_training_state isn't
+  called after SIGINT fires
+- `test_pause_before_first_epoch_marks_canceled` — SIGINT mid-way through the
+  first epoch, supervisor marks it canceled
+- `test_resume_from_auto_epoch_no_double_training` — 3 epochs + half an
+  epoch + SIGINT + resume → the optimizer step count ==
+  3 × steps_per_epoch, and epoch 4 is redone
+- `test_ppsf_train_mode_after_load` — PPSF's state matches after loading
+  (the exact assertion depends on the spike's conclusion)
+- `test_current_epoch_off_by_one_fixed` — the `epoch` field inside
+  auto_epoch_state.pt == `ctx.current_epoch`
+- 14 unit tests cherry-picked from the worktree draft: timestep sampler
+  resume bit-exactness / RNG / K/B mismatch warning / deque maxlen /
+  corrupted sampler_state warning doesn't block / a roundtrip integration
+  test
 
-#### 拒绝方案的理由
+#### Reasons for rejecting other approaches
 
-- **方案 A (mid-epoch dataloader skip)**：worktree 草稿三方对抗已 audit；Prodigy `d` 单调非减 + `safeguard_warmup` 反向限制 + cosine LR 不联动，三个偏差同向叠加；5% double-train 是学术界惯例（N/S < 1%）的 5× 不安全区。
-- **方案 B (deferred interrupt，等当前 epoch end 才退出)**：违反「暂停 = 立即释放 GPU」产品语义——用户腾显卡跑别的不能等几分钟到几十分钟。
-- **方案 C (worktree 草稿原方案：epoch 边界 + 仍由 SIGINT 触发 save)**：dev 上还要解决 #2 #5 两条独家 bug；与方案 Δ 相比，方案 C 让 SIGINT handler 仍持有 save 责任，Δ 让 SIGINT 退化为纯信号通知，handler 极简，路径更易验证。
+- **Approach A (mid-epoch dataloader skip)**: already audited by the
+  three-way adversarial review in the worktree draft; Prodigy's `d` is
+  monotonically non-decreasing + `safeguard_warmup`'s reverse constraint +
+  cosine LR not being kept in sync — three biases stacking in the same
+  direction; 5% double-training is 5x beyond academia's usual safe zone
+  (N/S < 1%).
+- **Approach B (deferred interrupt, waiting until the current epoch ends
+  before exiting)**: violates the product semantics of "pause = release the
+  GPU immediately" — a user freeing up the GPU for something else can't wait
+  several minutes to tens of minutes.
+- **Approach C (the worktree draft's original approach: epoch boundary, but
+  save still triggered by SIGINT)**: dev would still need to fix the 2
+  dev-exclusive bugs #2 and #5; compared to approach Δ, approach C keeps the
+  SIGINT handler holding save responsibility, whereas Δ reduces SIGINT to a
+  pure signal notification, making the handler minimal and the path far
+  easier to verify.
 
-#### 遗留 follow-ups（明确不在本 Addendum scope）
+#### Remaining follow-ups (explicitly out of scope for this Addendum)
 
-- `ep_size % grad_accum != 0` 末尾残留 micro-batch（独立 latent bug，与 pause/resume 无关）
-- DataLoader skip-K mid-epoch resume（永远不做，方案 A 已否决）
-- numpy RNG 槽位（dev 训练路径无 numpy.random RNG 调用，保留作未来防御）
-- `speed_ema` / `sample_prompt_idx` 序列化（监控 metric / sample 轮换，丢失无 algo 影响）
-- Wandb run id 续接（永远不做，resume 起新 run）
+- The leftover micro-batch at the end when `ep_size % grad_accum != 0`
+  (an independent latent bug, unrelated to pause/resume)
+- DataLoader skip-K mid-epoch resume (never doing this — approach A was
+  already rejected)
+- The numpy RNG slot (dev's training path makes no numpy.random RNG calls;
+  kept as a future defensive measure)
+- Serializing `speed_ema` / `sample_prompt_idx` (monitoring metrics / sample
+  rotation; losing them has no algorithmic impact)
+- Continuing the same wandb run id (never doing this — resume always starts
+  a new run)
 
-#### 新增参考
+#### New references
 
-- 三方对抗 sub-agent 报告（一次性对话产物，不归档）
-- `utils/optimizer_utils.py:466-491` `optimizer_eval_mode` context manager 实质语义
-- `runtime/training/timestep_samplers/infonoise.py:29-80` InfoNoiseScheduler 9 个内部 state 字段
-- `runtime/training/optimizers/prodigy_plus_schedulefree.py` PPSF 工厂
-- worktree-090validation 内本地草稿（内容已部分过时，按用户决定不合并）
+- The three-way adversarial sub-agent reports (a one-time conversation
+  artifact, not archived)
+- `utils/optimizer_utils.py:466-491` — the actual semantics of the
+  `optimizer_eval_mode` context manager
+- `runtime/training/timestep_samplers/infonoise.py:29-80` — InfoNoiseScheduler's
+  9 internal state fields
+- `runtime/training/optimizers/prodigy_plus_schedulefree.py` — the PPSF factory
+- The local draft in worktree-090validation (partially stale content; per
+  the user's decision, it is not being merged)

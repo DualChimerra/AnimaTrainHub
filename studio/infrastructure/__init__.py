@@ -1,13 +1,13 @@
-"""底层基础设施 — PR-7 起从 studio/ 顶层抽出。
+"""Low-level infrastructure -- extracted from the studio/ top level starting in PR-7.
 
-子模块：
-    paths.py           路径常量 + safe_join / validate_path_component
-    event_bus.py       进程内 SSE 总线
-    log_tail.py        per-task 日志增量读 + monitor state 轮询
-    argparse_bridge.py pydantic 模型 → argparse 参数派生
-    llm_presets.py     studio/llm_presets/*.json 出厂预设加载
+Submodules:
+    paths.py           path constants + safe_join / validate_path_component
+    event_bus.py        in-process SSE bus
+    log_tail.py         per-task incremental log reads + monitor state polling
+    argparse_bridge.py  pydantic model -> argparse argument derivation
+    llm_presets.py      loads factory presets from studio/llm_presets/*.json
 
-后续 PR：
-    secrets/  PR-7 commit 2  secrets.py 763 → models/store/migrations 3 文件
-    db/       PR-7 commit 3  db.py 188 + studio/migrations/ → infrastructure/db/
+Upcoming PRs:
+    secrets/  PR-7 commit 2  secrets.py 763 lines -> models/store/migrations, 3 files
+    db/       PR-7 commit 3  db.py 188 lines + studio/migrations/ -> infrastructure/db/
 """

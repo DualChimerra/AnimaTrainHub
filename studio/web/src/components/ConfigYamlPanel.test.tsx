@@ -5,9 +5,10 @@ import { api } from '../api/client'
 import ConfigYamlPanel from './ConfigYamlPanel'
 import { ToastProvider } from './Toast'
 
-// R4(D3):组件不再本地裁剪渲染(pruneInactiveConfig/configToYaml 已删),
-// 而是 300ms debounce 后调 POST /api/schema/preview-yaml —— 与落盘同一条
-// 序列化路径。测试 mock 该端点,锁「请求带当前 config + 展示返回文本」。
+// R4(D3): the component no longer prunes/renders config locally (pruneInactiveConfig/
+// configToYaml were removed); instead it calls POST /api/schema/preview-yaml after a
+// 300ms debounce, the same serialization path used on disk. The test mocks that
+// endpoint and pins down "the request carries the current config + shows the returned text".
 
 function renderPanel(config: ConfigData, hint?: string) {
   return render(
@@ -36,14 +37,14 @@ describe('ConfigYamlPanel', () => {
     )
     expect(spy).toHaveBeenCalledWith({ optimizer_type: 'adamw', lora_rank: 64 })
     expect(screen.getByText('config.yaml')).toBeInTheDocument()
-    // schema.fieldCount → 顶级键 2 项(顶格行计数)
-    expect(screen.getByText('2 项')).toBeInTheDocument()
+    // schema.fieldCount -> 2 top-level keys (top-level line count)
+    expect(screen.getByText('2 items')).toBeInTheDocument()
   })
 
   it('shows the hint when provided', async () => {
     vi.spyOn(api, 'previewConfigYaml').mockResolvedValue({ yaml: 'lora_rank: 64\n' })
-    renderPanel({ lora_rank: 64 }, '包含未保存的修改')
-    expect(screen.getByText('包含未保存的修改')).toBeInTheDocument()
+    renderPanel({ lora_rank: 64 }, 'Has unsaved changes')
+    expect(screen.getByText('Has unsaved changes')).toBeInTheDocument()
     await waitFor(
       () => expect(document.querySelector('pre')?.textContent).toContain('lora_rank'),
       { timeout: 2000 },

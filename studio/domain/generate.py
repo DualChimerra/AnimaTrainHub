@@ -1,10 +1,12 @@
-"""测试出图 schema —— 对应 runtime/anima_generate.py 的 JSON 配置。
+"""Test-generation schema — corresponds to the JSON config for runtime/anima_generate.py.
 
-LoRA 加载走 inference_core.apply_loras —— 每份 LoRA 独立 inject，
-rank/alpha 从 ss_network_args 读，正确合并多 LoRA。
+LoRA loading goes through inference_core.apply_loras — each LoRA is injected
+independently, with rank/alpha read from ss_network_args, correctly merging
+multiple LoRAs.
 
-注意：不使用 `from __future__ import annotations`——Pydantic v2 + Python 3.12+
-在延迟求值模式下会将 typing._SpecialForm 当成 schema key，触发 AttributeError。
+Note: does NOT use `from __future__ import annotations` — under Pydantic v2 +
+Python 3.12+'s deferred evaluation, that would turn typing._SpecialForm into a
+schema key and raise AttributeError.
 """
 from typing import Any, Literal, Optional
 
@@ -18,15 +20,17 @@ from .xy_matrix import XYMatrixSpec, _check_axis_values
 def validate_sampling_for_family(
     family: str, sampler_name: str, scheduler: str,
 ) -> None:
-    """generate / reg_ai 的 sampler 按族严格校验（多模型 P4-4）。
+    """Strict, per-family validation of the sampler for generate / reg_ai (multi-model P4-4).
 
-    与训练 config 不同，这两份 config 是每任务临时 JSON——没有 legacy 语料，
-    不需要 grandfather：越族值直接报错 + 可操作文案（两族 sample_image 都在
-    入口对白名单外的值 raise，这里提前到 422）。
+    Unlike the training config, these two configs are per-task, throwaway
+    JSON — there's no legacy corpus, so no grandfathering is needed: an
+    out-of-family value is rejected immediately with actionable messaging
+    (both families' sample_image raise on out-of-whitelist values at the
+    entry point anyway; this just moves that check earlier, to a 422).
     """
     allowed = FAMILY_SAMPLING.get(family)
     if allowed is None:
-        return  # 未知族由 model_family 的 Literal 校验报错
+        return  # An unknown family is already rejected by model_family's Literal validation
     for label, value, kind in (
         ("sampler_name", sampler_name, "samplers"),
         ("scheduler", scheduler, "schedulers"),
@@ -39,30 +43,31 @@ def validate_sampling_for_family(
 
 
 class GenerateConfig(BaseModel):
-    """测试出图任务参数。对应 runtime/anima_generate.py 的 JSON 配置。
+    """Parameters for a test-generation task. Corresponds to the JSON config for runtime/anima_generate.py.
 
-    LoRA 加载走 inference_core.apply_loras —— 每份 LoRA 独立 inject，
-    rank/alpha 从 ss_network_args 读，正确合并多 LoRA。
+    LoRA loading goes through inference_core.apply_loras — each LoRA is
+    injected independently, with rank/alpha read from ss_network_args,
+    correctly merging multiple LoRAs.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # 模型族（服务端从请求填充；daemon 按此派发加载与采样栈）
+    # Model family (filled server-side from the request; the daemon dispatches loading and the sampling stack based on this)
     model_family: Literal["anima", "krea2"] = Field("anima")
-    # 蒸馏推理底模（Krea2 Turbo：8 步 / guidance 0 / mu 固定 1.15）。
-    # 服务端按 catalog variant purpose 检测官方 Turbo 路径后注入
+    # Distilled inference base model (Krea2 Turbo: 8 steps / guidance 0 / mu fixed at 1.15).
+    # Injected server-side after detecting the official Turbo path via the catalog variant purpose
     distilled: bool = Field(False)
 
-    # 模型路径（服务端从 secrets 填充）
+    # Model paths (filled server-side from secrets)
     transformer_path: str = Field("models/diffusion_models/anima-base-v1.0.safetensors")
     vae_path: str = Field("models/vae/qwen_image_vae.safetensors")
     text_encoder_path: str = Field("models/text_encoders")
     t5_tokenizer_path: str = Field("models/t5_tokenizer")
 
-    # 生成参数
+    # Generation parameters
     prompts: list[str] = Field(
         default_factory=lambda: ["newest, safe, 1girl, masterpiece, best quality"],
-        description="正向提示词列表（每条 prompt 生成 count 张）",
+        description="List of positive prompts (each prompt generates `count` images)",
     )
     negative_prompt: str = Field("")
     width: int = Field(1024, ge=256, le=4096)
@@ -71,50 +76,53 @@ class GenerateConfig(BaseModel):
     cfg_scale: float = Field(4.0, ge=0.0, le=20.0)
     sampler_name: Literal["er_sde", "dpmpp_3m_sde", "euler"] = Field("er_sde")
     scheduler: Literal["simple", "sgm_uniform"] = Field("simple")
-    count: int = Field(1, ge=1, le=32, description="每个 prompt 生成张数")
-    seed: int = Field(0, description="随机种子（0=随机）")
+    count: int = Field(1, ge=1, le=32, description="Number of images to generate per prompt")
+    seed: int = Field(0, description="Random seed (0 = random)")
 
-    # LoRA（多 LoRA 独立 inject + multiplier=scale 控贡献权重）
+    # LoRA (multiple LoRAs are injected independently; multiplier=scale controls each one's contribution weight)
     lora_configs: list[LoraEntry] = Field(
         default_factory=list,
-        description="LoRA 列表（每份独立 inject，multiplier=scale）",
+        description="List of LoRAs (each injected independently, multiplier=scale)",
     )
 
-    # XY 矩阵（None=普通单图模式；设了就 anima_generate.py 走 XY 循环分支）
+    # XY matrix (None = plain single-image mode; when set, anima_generate.py takes the XY loop branch)
     xy_matrix: Optional[XYMatrixSpec] = Field(
         None,
-        description="XY 矩阵参数；设值时 prompts 限单条、count=1（避免排列爆炸）",
+        description="XY matrix parameters; when set, prompts is limited to a single entry and count=1 (to avoid a combinatorial explosion)",
     )
 
-    # 运行时
-    output_dir: str = Field("", description="输出目录（服务端填 tempdir，task 结束清）")
+    # Runtime
+    output_dir: str = Field("", description="Output directory (server fills in a tempdir, cleaned up when the task ends)")
     mixed_precision: str = Field("bf16")
     vae_precision: Literal["bf16", "fp32"] = Field(
         "bf16",
-        description="VAE decode 精度：bf16 对齐 ComfyUI 现代 GPU 默认；fp32 全精度（decode 前会 offload 腾显存）",
+        description="VAE decode precision: bf16 matches ComfyUI's default on modern GPUs; fp32 is full precision (triggers an offload to free VRAM before decoding)",
     )
     vae_tiling: Literal["auto", "on", "off"] = Field(
         "auto",
-        description="VAE 分块 decode：auto=可用显存紧张时自动分块（推荐）；on=始终分块（省显存、慢约 30%）；"
-                    "off=整图，仅真正 OOM 时回退。fp32 / 高分辨率在大显存卡上整图 decode 会逼近占满显存、"
-                    "触发系统内存回退导致单次 decode 卡上百秒，auto 可避免",
+        description="VAE tiled decode: auto = tile automatically when VRAM is tight (recommended); on = always tile "
+                    "(saves VRAM, about 30% slower); "
+                    "off = decode the whole image, only falls back to tiling on an actual OOM. On high-VRAM cards, "
+                    "full-image decode at fp32 / high resolution can nearly fill VRAM and "
+                    "trigger a system-memory fallback that makes a single decode take over a hundred seconds; auto avoids this",
     )
     attention_backend: AttentionBackend = Field(
         "flash_attn",
-        description="Attention backend：none（SDPA）/ xformers / flash_attn",
+        description="Attention backend: none (SDPA) / xformers / flash_attn",
     )
     vram_policy: Literal["auto", "save_vram", "performance"] = Field(
         "auto",
-        description="显存策略（krea2 生效）：auto=按空闲显存决定文本编码器与 DiT 是否让位（推荐）；"
-                    "save_vram=强制顺序化，峰值最低（16GB 卡可跑 fp8）、每图多几秒 CPU↔GPU 搬运；"
-                    "performance=全部常驻显存，峰值最高、零搬运",
+        description="VRAM policy (applies to krea2): auto = decide whether the text encoder and DiT yield to each other based on free VRAM (recommended); "
+                    "save_vram = force sequential execution, lowest peak usage (a 16GB card can run fp8), a few extra seconds of CPU↔GPU transfer per image; "
+                    "performance = keep everything resident in VRAM, highest peak usage, zero transfers",
     )
     ram_guard: bool = Field(
         False,
-        description="内存/显存水位保护：加载大模型前按权重文件实际大小预算系统内存与 GPU 空闲显存，"
-                    "任一不足时中止并报错（含其他进程占用显存的情形）；"
-                    "默认关（按文件大小的估算偏保守，在配置足够的机器上误拒率高），"
-                    "关闭时资源不足加载会继续，可能触发整机换页卡顿",
+        description="RAM/VRAM headroom guard: before loading a large model, estimate the required system RAM and free GPU VRAM "
+                    "from the actual weight file size, and abort with an error if either is insufficient "
+                    "(including cases where other processes are using the VRAM); "
+                    "off by default (the file-size-based estimate is conservative and has a high false-reject rate on well-equipped machines); "
+                    "when off, loading proceeds even under insufficient resources, which may trigger system-wide paging stalls",
     )
 
     @model_validator(mode="after")
@@ -125,7 +133,7 @@ class GenerateConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_xy(self) -> "GenerateConfig":
-        """XY 与 prompts/count 互斥；axis lora_index 必须指向已存在的 lora_configs。"""
+        """XY is mutually exclusive with prompts/count; axis lora_index must point to an existing lora_configs entry."""
         if self.xy_matrix is None:
             return self
         if len(self.prompts) > 1:

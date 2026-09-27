@@ -1,13 +1,18 @@
-"""系统内存工具（Windows 为主）：working set trim + 可用内存查询。
+"""System memory utilities (mainly Windows): working set trim + available memory queries.
 
-背景（真机卡死案例）：safetensors 用 mmap 流式读权重文件，读过的文件页
-会驻留进程 working set——13GB DiT + 5GB TE 加载完后有 ~18GB「可回收但
-赖着不走」的文件缓存页。物理内存紧张的机器上，这些页与其他应用争内存
-触发换页风暴，表现为整机卡死（显存全程健康）。
+Background (a real machine hang): safetensors uses mmap to stream-read
+weight files, and pages that have been read stay resident in the process
+working set -- after loading a 13GB DiT + 5GB TE, there's ~18GB of file
+cache pages that are "reclaimable but won't leave on their own". On a
+machine tight on physical RAM, these pages compete with other applications
+and trigger a paging storm, showing up as the whole machine hanging (VRAM
+stays healthy the whole time).
 
-- ``trim_working_set``：把 working set 页挤到 standby list（系统需要时
-  秒级回收、无换页 IO）；被挤出的热页由 soft fault 拉回，代价微秒级。
-- ``available_ram_bytes``：ctypes 直读 GlobalMemoryStatusEx，零依赖。
+- ``trim_working_set``: pushes working-set pages into the standby list (the
+  system can reclaim them in milliseconds when needed, with no paging I/O);
+  hot pages that got pushed out are pulled back by a soft fault, at
+  microsecond cost.
+- ``available_ram_bytes``: reads GlobalMemoryStatusEx directly via ctypes, zero dependencies.
 """
 
 from __future__ import annotations
@@ -20,9 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 def trim_working_set() -> bool:
-    """把进程 working set 里的可回收页（mmap 文件缓存等）挤回系统。
+    """Push reclaimable pages in the process working set (mmap file cache
+    etc.) back to the system.
 
-    大权重加载完成后调用；非 Windows / 失败时 no-op 返回 False。
+    Called after loading large weights; no-op returning False on non-Windows
+    or on failure.
     """
     if sys.platform != "win32":
         return False
@@ -32,14 +39,14 @@ def trim_working_set() -> bool:
         handle = ctypes.windll.kernel32.GetCurrentProcess()
         ok = bool(ctypes.windll.psapi.EmptyWorkingSet(handle))
         if ok:
-            logger.info("working set 已 trim（mmap 文件缓存页归还系统）")
+            logger.info("working set trimmed (mmap file cache pages returned to the system)")
         return ok
     except Exception:
         return False
 
 
 def available_ram_bytes() -> int | None:
-    """当前系统可用物理内存（字节）；查询失败返回 None。"""
+    """Current available physical RAM in bytes; returns None if the query fails."""
     if sys.platform == "win32":
         try:
             import ctypes
@@ -72,14 +79,15 @@ def available_ram_bytes() -> int | None:
         return None
 
 
-#: RAM 预算基底：进程/torch 运行余量（真机实测进程基底 ~4GB + 换页安全边际）
+#: RAM budget base: headroom for the process/torch itself (real-machine
+#: measurement of process base is ~4GB + a paging safety margin)
 _RAM_BASE_BYTES = 4 * 1024**3
-#: VRAM 预算基底：CUDA context + 激活余量
+#: VRAM budget base: CUDA context + activation headroom
 _VRAM_BASE_BYTES = 3 * 1024**3
 
 
 def _file_bytes(paths) -> int:
-    """将读取的权重文件总大小（预算依据）；不存在的路径忽略。"""
+    """Total size of the weight files to be read (the budget basis); nonexistent paths are ignored."""
     import os
 
     total = 0
@@ -98,10 +106,11 @@ def _file_bytes(paths) -> int:
 
 
 def guard_enabled_from_env() -> bool:
-    """训练侧水位保护开关（Settings → 训练 → 训练参数）。
+    """Training-side memory watermark protection toggle (Settings -> Training -> Training parameters).
 
-    supervisor 在 spawn 训练 / 正则 AI 子进程时按全局设置注入
-    ``LORA_RAM_GUARD=0`` 表示关闭；缺省 = 开（CLI 直跑同样默认受保护）。
+    The supervisor injects ``LORA_RAM_GUARD=0`` per the global setting when
+    spawning the training / regularization AI subprocess, meaning disabled;
+    default = enabled (a plain CLI run is likewise protected by default).
     """
     import os
 
@@ -112,28 +121,41 @@ def guard_enabled_from_env() -> bool:
 
 def check_load_budget(
     enabled: bool, *, weight_paths, stage: str, vram_discount_ratio: float = 0.0,
-    settings_hint: str = "设置 → 显存策略",
+    settings_hint: str = "Settings -> VRAM strategy",
 ) -> None:
-    """双预算水位护栏：按即将加载的文件实际大小预算 RAM 与 VRAM。
+    """Dual-budget watermark guardrail: budgets RAM and VRAM by the actual
+    size of the files about to be loaded.
 
-    静态阈值只回答「现在还好吗」；预算制回答「做完这件事之后还好吗」：
-    - RAM 需求 ≈ 文件总大小（mmap 读文件的瞬时峰值，真机实测 ≈1:1）+ 基底
-    - VRAM 需求 ≈ 文件总大小（权重上卡）+ 基底。GPU free 检查天然拦住
-      多进程叠加（另一个 daemon 驻留模型时第二个加载入口 fail-fast）
-    ``vram_discount_ratio``：**不会进显存**的那部分权重占全模型参数的**比例**。
-    block swap 把末尾 N 层留在内存，这些权重永远不上卡 —— 不扣的话，16GB 卡开满
-    swap 会被本护栏按「完整模型装不下」误拒，而实际是装得下的。只扣显存侧：RAM
-    侧照算（换出层仍占内存，且是**锁定**的，另有 check_pinned_budget 把关）。
+    A static threshold only answers "is it fine right now"; a budget answers
+    "will it still be fine after doing this":
+    - RAM need ~= total file size (the instantaneous peak of an mmap file
+      read, ~1:1 in real-machine measurements) + base
+    - VRAM need ~= total file size (weights loaded onto the card) + base.
+      The GPU free check naturally catches multi-process stacking (a second
+      load fails fast if another daemon already has a model resident)
+    ``vram_discount_ratio``: the **proportion** of the full model's
+    parameters that belong to the part that will **not** go into VRAM.
+    Block swap keeps the last N layers in RAM, and those weights never go
+    onto the card -- without discounting this, a 16GB card with swap maxed
+    out would be falsely rejected by this guardrail as "the full model
+    doesn't fit", when it actually does. Only the VRAM side is discounted;
+    the RAM side is computed in full (swapped-out layers still occupy RAM,
+    and are **pinned**, which check_pinned_budget separately guards).
 
-    为什么是比例而不是字节数：``need`` 来自权重文件的**实际**大小，fp8 checkpoint
-    只有 bf16 的一半。若折扣按计算 dtype 的字节数算，fp8 场景会折扣过头（need
-    13GB 减掉按 bf16 估的 11.3GB → 以为只要 1.7GB，实际常驻 7.2GB），护栏形同
-    虚设。按比例乘文件实际大小，两种精度都正确。
+    Why a ratio and not a byte count: ``need`` comes from the weight file's
+    **actual** size, and an fp8 checkpoint is only half the size of bf16. If
+    the discount were computed from the compute dtype's byte count, the fp8
+    case would over-discount (need 13GB, subtract a bf16-based estimate of
+    11.3GB -> think only 1.7GB is needed, when 7.2GB is actually resident),
+    making the guardrail useless. Multiplying the ratio by the actual file
+    size is correct for both precisions.
 
-    ``enabled`` 来自用户配置（推理侧 = 设置 → 显存策略；训练侧 = 设置 →
-    训练 → 训练参数，经 ``guard_enabled_from_env`` 读取）；查询失败静默放行。
-    ``settings_hint``：报错里「去哪关这个保护」的指引，两侧开关位置不同，
-    由调用方按自己那侧传入。
+    ``enabled`` comes from user config (inference side = Settings -> VRAM
+    strategy; training side = Settings -> Training -> Training parameters,
+    read via ``guard_enabled_from_env``); a failed query silently lets it
+    through. ``settings_hint``: the "where to turn this protection off"
+    pointer in the error message; the two sides have different toggle
+    locations, so the caller passes in its own.
     """
     if not enabled:
         return
@@ -146,44 +168,51 @@ def check_load_budget(
     avail = available_ram_bytes()
     if avail is not None and avail < need + _RAM_BASE_BYTES:
         raise RuntimeError(
-            f"系统可用内存不足（{avail / 1024**3:.1f}GB，本次{stage}约需 "
-            f"{(need + _RAM_BASE_BYTES) / 1024**3:.1f}GB：权重文件 "
-            f"{need / 1024**3:.1f}GB + 运行余量），已中止以避免整机换页"
-            f"卡死。请关闭其他占用内存的应用后重试；如需强制继续，可在 "
-            f"{settings_hint} 关闭内存水位保护。"
+            f"Not enough available system RAM ({avail / 1024**3:.1f}GB; this {stage} needs approx "
+            f"{(need + _RAM_BASE_BYTES) / 1024**3:.1f}GB: weight file(s) "
+            f"{need / 1024**3:.1f}GB + runtime headroom). Aborted to avoid a "
+            f"whole-machine paging freeze. Please close other memory-hungry "
+            f"applications and retry; to force it anyway, you can disable "
+            f"the memory watermark protection at {settings_hint}."
         )
 
     free = gpu_free_bytes_global()
     if free is not None and free < vram_need + _VRAM_BASE_BYTES:
         raise RuntimeError(
-            f"GPU 空闲显存不足（{free / 1024**3:.1f}GB，本次{stage}"
-            f"约需 {(vram_need + _VRAM_BASE_BYTES) / 1024**3:.1f}GB）。"
-            f"可能有其他进程占用显存（另一个出图/训练任务？）——"
-            f"请先释放后重试；如需强制继续，可在 {settings_hint} "
-            f"关闭内存水位保护。"
+            f"Not enough free GPU VRAM ({free / 1024**3:.1f}GB; this {stage} "
+            f"needs approx {(vram_need + _VRAM_BASE_BYTES) / 1024**3:.1f}GB). "
+            f"Another process may be using VRAM (another generation/training "
+            f"job?) -- please free it up and retry; to force it anyway, you "
+            f"can disable the memory watermark protection at {settings_hint}."
         )
 
 
-#: pinned（页锁定）内存的安全上限占**可用**物理内存的比例。
-#: 页锁定内存**不可换页、trim_working_set 对它无效**，占满会拖垮整机（与
-#: mmap working set 卡死同源但更硬）。
-#: 分母是 available 而非 total —— 其他应用占的已不在分母里，所以这里是
-#: 「训练进程能吃掉当前空闲的几成」，留出的部分只为吸收波动（用户口径：
-#: 训练期间不应同时做其他重内存工作）。
+#: The safety cap for pinned memory, as a fraction of **available** physical RAM.
+#: Pinned memory **cannot be paged out, and trim_working_set has no effect
+#: on it**; filling it up can bring down the whole machine (same root cause
+#: as the mmap working-set freeze, but harder).
+#: The denominator is available, not total -- what other applications are
+#: using is already excluded, so this is "what fraction of the currently
+#: free memory the training process is allowed to eat", leaving the rest to
+#: absorb fluctuations (by convention: no other heavy memory work should run
+#: at the same time as training).
 _PINNED_SAFE_FRACTION = 0.8
 
 
 def pinned_safe_limit(avail_bytes: int) -> int:
-    """可用内存里允许被 pin 的上限字节数。
+    """The maximum bytes allowed to be pinned, out of available memory.
 
-    比例 + 绝对下限取更严者。纯比例在小内存机器上会失效：可用 10GB 时 80%
-    允许 pin 8GB，只剩 2GB 给训练进程自身的非 pinned 部分（Python/torch 基底、
-    dataset、latent，``_RAM_BASE_BYTES`` 已标定 ≈4GB）→ 直接换页。而小内存
-    机器恰恰是 block swap 要服务的人群，不能在这里破功。
+    Takes the stricter of a ratio and an absolute floor. A pure ratio breaks
+    down on low-memory machines: with 10GB available, 80% would allow
+    pinning 8GB, leaving only 2GB for the training process's own non-pinned
+    parts (Python/torch base, dataset, latents -- ``_RAM_BASE_BYTES`` is
+    calibrated at ~4GB) -> straight into paging. And low-memory machines are
+    exactly who block swap is meant to serve, so this can't be allowed to break there.
 
-    抽成独立函数是为了让 ``check_pinned_budget``（拒绝）与 block swap 预检
-    （推荐 blocks_to_swap）用**同一条水位线** —— 两处各写一份迟早会漂移成
-    「预检说能跑、护栏当场拒绝」。
+    Pulled out into its own function so ``check_pinned_budget`` (the reject
+    path) and the block swap preflight (the recommend-blocks_to_swap path)
+    use **the same watermark** -- keeping two separate copies would sooner
+    or later drift into "preflight says it'll run, the guardrail rejects it on the spot".
     """
     avail = max(int(avail_bytes), 0)
     return min(
@@ -193,14 +222,16 @@ def pinned_safe_limit(avail_bytes: int) -> int:
 
 
 def check_pinned_budget(need_bytes: int, *, blocks: int) -> None:
-    """block swap 的 pinned 内存预算护栏（docs/design/block-swap.md §3.2 ①）。
+    """Pinned-memory budget guardrail for block swap (docs/design/block-swap.md SS3.2 (1)).
 
-    **不能复用 check_load_budget**：那套按「文件大小 ≈ mmap 瞬时峰值」预算，
-    假设内存可回收；pinned 是**永久锁定**、``trim_working_set`` 对它无效，
-    同样字节数的危害等级不同。
+    **Cannot reuse check_load_budget**: that one budgets by "file size ~=
+    mmap instantaneous peak", assuming the memory is reclaimable; pinned
+    memory is **permanently locked**, ``trim_working_set`` has no effect on
+    it, so the same byte count carries a different severity.
 
-    只在训练启动期调用一次（B6：失败即报错、不静默降级；分配失败只可能发生
-    在启动那一刻，见 §8.1）。查询失败静默放行，与既有护栏口径一致。
+    Called only once, at training startup (B6: fail loudly on failure, no
+    silent degradation; an allocation can only fail at that one moment, see
+    SS8.1). A failed query silently lets it through, matching the other guardrails.
     """
     if need_bytes <= 0:
         return
@@ -210,18 +241,21 @@ def check_pinned_budget(need_bytes: int, *, blocks: int) -> None:
     safe = pinned_safe_limit(avail)
     if need_bytes > safe:
         raise RuntimeError(
-            f"内存不足以换出 {blocks} 层：需锁定 {need_bytes / 1024**3:.1f}GB，"
-            f"当前可用 {avail / 1024**3:.1f}GB（安全上限 {safe / 1024**3:.1f}GB）。"
-            f"换出的层权重会**锁定**在内存里不可换页，占满会拖慢整机。"
-            f"请调小 blocks_to_swap，或关闭其他占用内存的应用后重试。"
+            f"Not enough memory to swap out {blocks} layers: need to pin {need_bytes / 1024**3:.1f}GB, "
+            f"currently available {avail / 1024**3:.1f}GB (safe cap {safe / 1024**3:.1f}GB). "
+            f"Swapped-out layer weights are **pinned** in memory and can't be paged out; filling it up will slow down the whole machine. "
+            f"Please lower blocks_to_swap, or close other memory-hungry applications and retry."
         )
 
 
 def log_vram(stage: str, device=None) -> None:
-    """在关键节点打一行显存/内存快照，方便判断 block swap 等旋钮的实际效果。
+    """Log one VRAM/RAM snapshot line at key points, to help judge the actual
+    effect of knobs like block swap.
 
-    刻意同时打 torch 已分配量与**全卡**已用量：WDDM 下两者可能差很多（驱动
-    侧开销 + 其他进程），只看 torch 的数会低估真实占用。查询失败静默跳过。
+    Deliberately logs both torch's allocated amount and the **whole card's**
+    used amount: under WDDM these can differ a lot (driver-side overhead +
+    other processes), and looking only at torch's number would underestimate
+    real usage. Fails silently on a query error.
     """
     try:
         import torch
@@ -238,19 +272,21 @@ def log_vram(stage: str, device=None) -> None:
     except Exception:  # noqa: BLE001
         return
     ram = available_ram_bytes()
-    ram_note = f"，可用内存 {ram / 1024**3:.1f}GB" if ram else ""
+    ram_note = f", available RAM {ram / 1024**3:.1f}GB" if ram else ""
     logger.info(
-        "[显存] %s：torch 已分配 %.2fGB / 保留 %.2fGB，全卡已用 %.2fGB / %.1fGB%s",
+        "[VRAM] %s: torch allocated %.2fGB / reserved %.2fGB, whole card used %.2fGB / %.1fGB%s",
         stage, allocated, reserved, used, total / 1024**3, ram_note,
     )
 
 
 def gpu_free_bytes_global() -> int | None:
-    """全卡真实空闲显存；查询失败返回 None。
+    """Actual free VRAM for the whole card; returns None if the query fails.
 
-    必须走 NVML：WDDM 下 ``cudaMemGetInfo`` 是**每进程虚拟化视角**，
-    看不到其他进程的占用（真机实测：他进程持有 20GB 时它仍报全量
-    free）——用它做跨进程护栏形同虚设。NVML 是全卡视角。
+    Must go through NVML: under WDDM, ``cudaMemGetInfo`` is a **per-process
+    virtualized view** and can't see other processes' usage (real-machine
+    test: with another process holding 20GB, it still reports the full
+    amount free) -- using it for a cross-process guardrail would be useless.
+    NVML gives the whole-card view.
     """
     try:
         import pynvml

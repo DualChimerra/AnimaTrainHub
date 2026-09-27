@@ -1,14 +1,16 @@
 name: build-launcher
 
-# 一键启动器（tools/launcher.py → AnimaLoraStudio.exe）的构建。
+# Build for the one-click launcher (tools/launcher.py -> AnimaLoraStudio.exe).
 #
-# PyInstaller 产出的是**宿主平台**的可执行文件，没法交叉编译 —— Windows 的 exe
-# 只能在 windows runner 上出。Linux 的那份顺带一起出，方便本机 Linux 用户。
+# PyInstaller produces an executable for the **host platform** — it can't cross-compile,
+# so the Windows exe can only be built on a windows runner. The Linux one is built
+# alongside it for the convenience of local Linux users.
 #
-# 触发：
-#   - 改到启动器源码的 PR / push → 只构建，作为「exe 还能编出来」的守门
-#   - 打 tag（v*）→ 构建并把 exe 传成 release 附件
-#   - 手动 workflow_dispatch
+# Triggers:
+#   - PR / push touching the launcher source -> build only, as a gate that "the exe
+#     still builds"
+#   - tag push (v*) -> build and attach the exe as a release asset
+#   - manual workflow_dispatch
 on:
   pull_request:
     paths:
@@ -42,8 +44,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          # 启动器只用标准库，但**它自己**得能在用户机器上跑。用 3.10 构建
-          # 让产物的 glibc / API 需求落在我们声明支持的最低版本上。
+          # The launcher itself only uses the standard library, but **it** still has to
+          # run on the user's machine. Building with 3.10 keeps the produced binary's
+          # glibc/API requirements at the minimum version we claim to support.
           python-version: "3.10"
 
       - name: Install PyInstaller
@@ -52,8 +55,9 @@ jobs:
       - name: Build
         run: python tools/build_launcher.py
 
-      # 冒烟：产物必须能跑起来并认出自己在仓库里（--check 不装任何东西）。
-      # 这一步能挡住"打包成功但一运行就缺模块"这类只有跑一次才暴露的问题。
+      # Smoke test: the built binary must actually run and recognize itself inside the
+      # repo (--check installs nothing). This step catches "packaged fine but missing a
+      # module at runtime" issues that only surface when you actually run it once.
       - name: Smoke test
         run: ${{ matrix.binary }} --check
 

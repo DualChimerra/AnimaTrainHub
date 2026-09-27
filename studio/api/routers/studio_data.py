@@ -1,13 +1,15 @@
-"""studio_data 存储位置 —— 查询 / 迁移到自定义目录。
+"""studio_data storage location — query / migrate to a custom directory.
 
-3 routes：
-    GET  /api/studio-data/info            当前/默认位置 + 全量扫描（文件数/字节）
-    POST /api/studio-data/migrate         校验 + 起后台复制线程（进度走 SSE）
-    GET  /api/studio-data/migrate_status  迁移状态快照（modal 重开 / SSE 漏事件兜底）
+3 routes:
+    GET  /api/studio-data/info            current/default location + full scan (file count/bytes)
+    POST /api/studio-data/migrate         validate + start a background copy thread (progress via SSE)
+    GET  /api/studio-data/migrate_status  migration status snapshot (fallback for modal reopen / missed SSE events)
 
-迁移协议：复制完成后写仓库根 `studio_data_location.json` 指针，**重启 server
-生效**（paths.STUDIO_DATA 是 import 时求值；cli.py 重启循环拉新进程重新解析）。
-旧位置数据保留不删。进度事件：`studio_data_migrate_progress` / `_done`。
+Migration protocol: once the copy finishes, writes the `studio_data_location.json`
+pointer at the repo root — **takes effect after a server restart** (paths.STUDIO_DATA
+is resolved at import time; cli.py's restart loop spawns a fresh process that
+re-resolves it). Data at the old location is kept, not deleted. Progress events:
+`studio_data_migrate_progress` / `_done`.
 """
 from __future__ import annotations
 
@@ -27,8 +29,10 @@ router = APIRouter()
 
 @router.get("/api/studio-data/info")
 def studio_data_info(scan: bool = True) -> dict[str, Any]:
-    """当前 / 默认位置；scan=true 时附全量扫描（大目录可能要数秒，前端确认
-    modal 加载态等它；Settings 页仅显示路径用 scan=false 免扫盘）。"""
+    """Current / default location; when scan=true, includes a full scan (large
+    directories can take a few seconds — the frontend confirmation modal shows
+    a loading state while it waits; the Settings page only shows the path and
+    uses scan=false to avoid the disk scan)."""
     return {
         "current": str(STUDIO_DATA),
         "default": str(DEFAULT_STUDIO_DATA),
@@ -39,7 +43,7 @@ def studio_data_info(scan: bool = True) -> dict[str, Any]:
 
 @router.post("/api/studio-data/migrate")
 def studio_data_migrate(body: StudioDataMigrateRequest) -> dict[str, Any]:
-    """起迁移。约束：无 running task（复制期间训练继续写文件会拷出半截数据）。"""
+    """Start a migration. Constraint: no running task (if training keeps writing files during the copy, you'd end up copying half-written data)."""
     _check_no_running_tasks()
     try:
         svc.start_migration(Path(body.target))

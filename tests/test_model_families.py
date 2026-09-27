@@ -1,4 +1,3 @@
-"""ModelFamily registry / 派发 / 防回归（多模型 PR-2b）。"""
 
 from __future__ import annotations
 
@@ -30,7 +29,6 @@ def test_get_family_unknown_lists_registered():
 
 
 def test_resolve_family_defaults_and_carriers():
-    # Namespace 缺字段 / dict 缺键 / dict 显式指定 三种载体（D7 零迁移）
     assert resolve_family(SimpleNamespace()).spec.family_id == "anima"
     assert resolve_family({}).spec.family_id == "anima"
     assert resolve_family({"model_family": "anima"}).spec.family_id == "anima"
@@ -44,9 +42,9 @@ def test_family_lora_contract():
         "preset": ANIMA_SPEC.lora.preset_name,
     }
     sd = {"k": torch.zeros(1)}
-    assert fam.convert_lora_state_dict(sd) is sd  # 恒等（04 §7.1）
+    assert fam.convert_lora_state_dict(sd) is sd
     assert fam.lora_preset()["lora_prefix"] == ANIMA_SPEC.lora.prefix
-    assert fam.prepare_text_cache([], []) is None  # online 族 no-op
+    assert fam.prepare_text_cache([], []) is None
 
     krea2 = get_family("krea2")
     assert krea2 is get_family("krea2")
@@ -60,8 +58,6 @@ def test_family_lora_contract():
 
 
 def test_krea2_and_anima_share_latent_space_identity():
-    # 同一性而非相等性：两族引用 latent_spaces.WAN21_F8C16 同一实例，
-    # D6 的缓存跨族共享是结构事实，不靠副本 + 相等断言维持。
     assert KREA2_SPEC.latent is ANIMA_SPEC.latent
 
 
@@ -92,7 +88,6 @@ def test_krea2_forward_train_passes_varlen_mask_and_checkpoint():
 
 
 def test_forward_train_shapes_and_padding_mask():
-    """pad_mask 构造与 t 形状按摩收进族内（03-③）。"""
 
     class _FakeDiT(nn.Module):
         def __init__(self):
@@ -109,26 +104,22 @@ def test_forward_train_shapes_and_padding_mask():
     noisy = torch.zeros(2, 16, 1, 8, 6)
     t = torch.rand(2)
     out = fam.forward_train(dit, noisy, t, cond=None, use_checkpoint=False)
-    assert out.shape == noisy.shape  # v_pred 同形（不变量 #3）
+    assert out.shape == noisy.shape
     assert dit.seen["t_shape"] == (2, 1)
     assert dit.seen["pad_shape"] == (2, 1, 8, 6)
 
 
 def test_no_direct_loader_literals_in_dispatch_sites():
-    """防回归（01 §9）：派发点不得再出现绕过 family 的直调字面量。"""
     phases_models = (REPO_ROOT / "runtime/training/phases/models.py").read_text(encoding="utf-8")
     assert "load_anima_model(" not in phases_models
     assert "load_text_encoders(" not in phases_models
 
     loop = (REPO_ROOT / "runtime/training/loop.py").read_text(encoding="utf-8")
-    assert "preprocess_text_embeds" not in loop  # 文本块已下沉 family
-    assert "forward_with_optional_checkpoint(" not in loop  # 前向经 family
+    assert "preprocess_text_embeds" not in loop
+    assert "forward_with_optional_checkpoint(" not in loop
 
 
 def test_krea2_load_text_generate_fixes_te_fp16_storage_fp32_compute(monkeypatch):
-    """generate 场景 TE 固定 fp16 存储 + fp32 compute（ComfyUI sd.py:258
-    口径，忽略调用方 dtype、无旋钮）；训练路径维持调用方 dtype，不设
-    compute_dtype。"""
     import training.families.krea2 as krea2_module
 
     calls: list[dict] = []
@@ -151,8 +142,6 @@ def test_krea2_load_text_generate_fixes_te_fp16_storage_fp32_compute(monkeypatch
 
 
 def test_anima_load_text_purpose_never_overrides_backend_choice(monkeypatch):
-    """purpose 对 Anima 接受并忽略（load_dit 同款）：generate 调用面传
-    purpose 不得把用户显式选择的 hf backend 静默切成 comfy_qwen。"""
     import training.families.anima.loader as anima_loader
 
     calls: list[dict] = []

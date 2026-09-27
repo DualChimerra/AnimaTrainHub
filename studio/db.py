@@ -1,10 +1,13 @@
-"""Re-export shim — PR-7 真实模块 studio.infrastructure.db。
+"""Re-export shim -- the real module is studio.infrastructure.db (PR-7).
 
-188 行单文件未做 connection/tasks/settings 3-way 拆（planning 原方案）—
-理由同 secrets.py：现状不影响读 / 修改，3-way split 收益有限，独立 PR 更稳。
+The 188-line file was kept as a single module instead of the planned 3-way
+split into connection/tasks/settings -- same rationale as secrets.py: the
+current shape doesn't hurt readability or edits, the split buys little, and
+it's safer as its own PR.
 
-migrations/ 子包也搬到 studio/infrastructure/migrations/，`db.init_db()` 内
-的 `from .migrations import apply_all` 相对引用透明 work。
+The migrations/ subpackage also moved to studio/infrastructure/migrations/;
+the `from .migrations import apply_all` relative import inside
+`db.init_db()` keeps working transparently.
 """
 import sys as _sys
 

@@ -1,17 +1,19 @@
-"""把 pydantic v2 模型反向编译成 `argparse.ArgumentParser`。
+"""Reverse-compiles a pydantic v2 model into an `argparse.ArgumentParser`.
 
-设计目标：
-    - 让 schema.py 的 TrainingConfig 成为 CLI / YAML / Web 表单的唯一权威源
-    - 现有 anima_train.py 的 CLI 习惯：少量字段使用别名（如 --lr ↔ learning_rate）
-      —— 通过 json_schema_extra={"cli_alias": "--lr"} 显式声明
-    - 不试图替换 argparse 的语义，只是自动把字段类型/约束/默认值翻译成参数声明
+Design goals:
+    - make schema.py's TrainingConfig the single source of truth for CLI / YAML / web form
+    - preserve the existing anima_train.py CLI convention: a few fields use an alias (e.g.
+      --lr <-> learning_rate) -- declared explicitly via json_schema_extra={"cli_alias": "--lr"}
+    - doesn't try to replace argparse's semantics, just auto-translates field types/constraints/
+      defaults into argument declarations
 
-支持的字段类型：
-    bool                  → BooleanOptionalAction，--foo / --no-foo
-    Literal["a", "b"]     → choices=["a","b"]
-    int / float / str     → type=...
-    list[T]               → nargs="*", type=T
-    Optional[T]           → 同 T，但默认 None；空字符串 / None 都能落到默认值
+Supported field types:
+    bool                  -> BooleanOptionalAction, --foo / --no-foo
+    Literal["a", "b"]     -> choices=["a","b"]
+    int / float / str     -> type=...
+    list[T]               -> nargs="*", type=T
+    Optional[T]           -> same as T, but defaults to None; both empty string / None fall
+                             back to the default
 """
 from __future__ import annotations
 
@@ -24,12 +26,12 @@ from pydantic.fields import FieldInfo
 
 
 # ---------------------------------------------------------------------------
-# 类型分析
+# Type analysis
 # ---------------------------------------------------------------------------
 
 
 def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
-    """Optional[X] / X | None → (X, True)。否则 (annotation, False)。"""
+    """Optional[X] / X | None -> (X, True). Otherwise (annotation, False)."""
     origin = get_origin(annotation)
     if origin in (Union, types.UnionType):
         non_none = [a for a in get_args(annotation) if a is not type(None)]
@@ -52,12 +54,12 @@ def _is_literal(annotation: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 字段 → argparse
+# Field -> argparse
 # ---------------------------------------------------------------------------
 
 
 def _default_value(field: FieldInfo) -> Any:
-    """提取 Field default / default_factory（pydantic v2 用 PydanticUndefined 表示无默认）。"""
+    """Extracts the Field default / default_factory (pydantic v2 uses PydanticUndefined for "no default")."""
     from pydantic_core import PydanticUndefined
 
     if field.default is not PydanticUndefined and field.default is not None:
@@ -83,37 +85,39 @@ def add_argument_for(
     *,
     suppress_default: bool = False,
 ) -> None:
-    """把单个字段加到 parser。dest 始终等于字段名（即下划线形式）。
+    """Adds a single field to the parser. dest is always the field name (underscore form).
 
-    suppress_default=True 时所有参数 default=argparse.SUPPRESS —— parse 产物
-    Namespace 只含用户显式传入的键（sparse），CLI 显式性由键的存在性精确判定，
-    供 namespace_from_config 做 CLI > YAML 合并。
+    When suppress_default=True, every argument gets default=argparse.SUPPRESS -- the resulting
+    parse Namespace only contains keys the user explicitly passed (sparse), so CLI explicitness
+    can be determined precisely from key presence, for namespace_from_config's CLI > YAML merge.
     """
     flag = _flag_for(name, field)
     annotation, is_optional = _unwrap_optional(field.annotation)
     default = _default_value(field)
-    # argparse format_help 把 description 当 printf 模板做 `% params` 展开，
-    # description 里裸 `%`（如 "占 90%"）会让 --help 直接 ValueError。
-    # 项目里 schema description 同时给 Web UI / i18n 用，不应被 argparse 语义污染，
-    # 因此在 bridge 一层把所有裸 `%` 转义 —— 全项目无人使用 %(default)s 这类
-    # argparse named substitution，escape 不会破坏既有用法。
+    # argparse's format_help treats description as a printf template and expands `% params`;
+    # a bare `%` in the description (e.g. "takes up 90%") makes --help raise ValueError outright.
+    # Schema descriptions in this project are also used by the web UI / i18n and shouldn't be
+    # polluted by argparse semantics, so every bare `%` gets escaped here at the bridge layer --
+    # nobody in this project uses argparse named substitutions like %(default)s, so the escape
+    # doesn't break any existing usage.
     help_text = (field.description or "").strip().replace("%", "%%")
 
     # bool ----------------------------------------------------------------
     if annotation is bool:
-        # Optional[bool] 的默认值保留 None —— 表示「未指定」；
-        # 非 Optional 的 bool 则 fallback 到 False。
+        # An Optional[bool] field's default stays None -- meaning "not specified";
+        # a non-Optional bool falls back to False.
         if is_optional:
             actual_default = default  # keep None
         else:
             actual_default = bool(default) if default is not None else False
         if suppress_default:
             actual_default = argparse.SUPPRESS
-        # Python 3.13+ 的 argparse 拒绝把 --no-X 形式的 flag 传给
-        # BooleanOptionalAction（会自动衍生 --no-no-X 与字段重名）。
-        # 字段名以 no_ 开头时退化为一对互斥 store_true/store_false：
-        #   --no-X    → store_true  (no_X = True)
-        #   --X       → store_false (no_X = False)
+        # Python 3.13+'s argparse rejects passing a --no-X style flag to BooleanOptionalAction
+        # (it would auto-derive --no-no-X, colliding with the field name).
+        # For field names starting with no_, fall back to a pair of mutually exclusive
+        # store_true/store_false actions instead:
+        #   --no-X    -> store_true  (no_X = True)
+        #   --X       -> store_false (no_X = False)
         if name.startswith("no_") and len(name) > 3:
             positive = "--" + name[3:].replace("_", "-")
             parser.add_argument(
@@ -123,9 +127,9 @@ def add_argument_for(
                 default=actual_default,
                 help=help_text or None,
             )
-            # 第二个同 dest action 的 default 必须与第一个一致：argparse 在
-            # parse 开始时按注册顺序 setattr default，非 SUPPRESS 的 None 会
-            # 把 sparse namespace 撑出一个假显式键。
+            # The default of the second action sharing this dest must match the first: argparse
+            # setattrs the default in registration order at the start of parsing, and a non-
+            # SUPPRESS None would inflate the sparse namespace with a fake "explicit" key.
             parser.add_argument(
                 positive, dest=name, action="store_false",
                 default=actual_default, help=None,
@@ -143,7 +147,7 @@ def add_argument_for(
     # Literal -------------------------------------------------------------
     if _is_literal(annotation):
         choices = list(get_args(annotation))
-        # Literal 元素类型一致；若全是 str，type=str
+        # Literal elements share a type; if all str, type=str
         item_t = type(choices[0]) if choices else str
         parser.add_argument(
             flag,
@@ -185,7 +189,7 @@ def add_argument_for(
         )
         return
 
-    # 默认按字符串处理（包括 str、Optional[str]、未知类型）
+    # Default to treating it as a string (covers str, Optional[str], and unknown types)
     parser.add_argument(
         flag,
         dest=name,
@@ -204,23 +208,24 @@ def build_parser(
     add_config_arg: bool = True,
     suppress_defaults: bool = False,
 ) -> argparse.ArgumentParser:
-    """从 pydantic 模型生成完整 parser。
+    """Generates a complete parser from a pydantic model.
 
-    add_config_arg=True 时自动加上 `--config PATH`（指向 YAML 配置；不参与
-    suppress —— 调用方在合并前就要读它）。
-    suppress_defaults=True 时 schema 字段全部 default=argparse.SUPPRESS，
-    parse 产物只含用户显式传入的键，配合 namespace_from_config 使用。
+    When add_config_arg=True, automatically adds `--config PATH` (pointing at the YAML config;
+    not subject to suppress -- the caller needs to read it before merging).
+    When suppress_defaults=True, every schema field gets default=argparse.SUPPRESS, so the
+    parse result only contains keys the user explicitly passed; used together with
+    namespace_from_config.
     """
     parser = argparse.ArgumentParser(prog=prog, description=description)
     if add_config_arg:
-        parser.add_argument("--config", default="", help="YAML 配置文件路径")
+        parser.add_argument("--config", default="", help="Path to the YAML config file")
     for name, field in model_cls.model_fields.items():
         add_argument_for(parser, name, field, suppress_default=suppress_defaults)
     return parser
 
 
 # ---------------------------------------------------------------------------
-# YAML + CLI 显式值 → pydantic 校验 → 完整 Namespace
+# YAML + explicit CLI values -> pydantic validation -> full Namespace
 # ---------------------------------------------------------------------------
 
 
@@ -229,23 +234,29 @@ def namespace_from_config(
     yaml_data: dict[str, Any],
     model_cls: type[BaseModel],
 ) -> argparse.Namespace:
-    """合并 YAML 与 CLI 显式值，经 model_cls 完整构造后展开成 Namespace。
+    """Merges YAML and explicit CLI values, then expands into a Namespace after a full
+    model_cls construction.
 
-    取代旧 merge_yaml_into_namespace（「值==默认值」近似 CLI 显式性且绕过全部
-    validator——字段迁移 / FAMILY_CONFIG_DEFAULTS 族默认 overlay / 互斥与能力
-    校验在 trainer 路径全部失效，如 krea2 缺键 shuffle_caption 落回 anima 语义
-    默认 True 而拒训）。调用方的 parser 必须以 suppress_defaults=True 构建，
-    `args` 只含显式键，CLI > YAML 的优先级是精确判定。
+    Replaces the old merge_yaml_into_namespace (which approximated CLI explicitness by
+    "value == default" and bypassed every validator -- field migration / the
+    FAMILY_CONFIG_DEFAULTS per-family default overlay / mutual-exclusion and capability
+    validation all silently stopped working on the trainer path; e.g. krea2 missing the
+    shuffle_caption key would fall back to anima's semantic default of True and reject
+    training). The caller's parser must be built with suppress_defaults=True so `args` only
+    contains explicit keys, letting CLI > YAML precedence be determined precisely.
 
-    合并语义：
-    - yaml_data 原样交给 pydantic —— 旧键由 before-validator 迁移，未知键按
-      模型的 extra 策略处理（TrainingConfig 为 ignore）
-    - args 中属于 schema 的键覆盖 YAML（CLI 显式优先）；合并结果整体过一次
-      模型构造，任何来源组合出的非法配置都在此 fail-fast
-    - args 中不属于 schema 的键（--interactive 等 CLI-only 开关）原样带回
+    Merge semantics:
+    - yaml_data is handed to pydantic as-is -- old keys get migrated by a before-validator,
+      unknown keys follow the model's extra policy (ignore, for TrainingConfig)
+    - keys in args that belong to the schema override YAML (CLI explicit wins); the merged
+      result goes through a single model construction, so any illegal config produced by
+      combining sources fails fast right here
+    - keys in args that don't belong to the schema (CLI-only switches like --interactive) are
+      carried through unchanged
 
     Raises:
-        pydantic.ValidationError: 合并结果非法（互斥冲突 / 族能力越界等）。
+        pydantic.ValidationError: the merged result is invalid (mutual-exclusion conflict /
+        family capability out of bounds / etc).
     """
     fields = model_cls.model_fields
     explicit = vars(args)

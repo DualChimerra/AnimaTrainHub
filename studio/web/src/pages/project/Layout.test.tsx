@@ -1,8 +1,10 @@
 /**
- * ProjectLayout 版本切换回归测试（issue #386）。
+ * ProjectLayout version-switch regression test (issue #386).
  *
- * 场景：切换版本后 activate 请求还在途时立即点「开始训练」，Train 页读到的
- * activeVersion 必须已经是新版本（乐观更新），否则会把旧版本入队。
+ * Scenario: switching versions then immediately clicking "Start training"
+ * while the activate request is still in flight -- the activeVersion the
+ * Train page reads must already be the new version (optimistic update),
+ * otherwise it would enqueue the old version.
  */
 import { useEffect } from 'react'
 import { act, render, screen, waitFor } from '@testing-library/react'
@@ -49,7 +51,7 @@ const V3 = makeVersion(3, 'v3')
 
 function makeProject(activeVid: number, versions: Version[]): ProjectDetail {
   return {
-    id: 3, slug: 'ganyu', title: '甘雨', active_version_id: activeVid,
+    id: 3, slug: 'ganyu', title: 'Ganyu', active_version_id: activeVid,
     active_version_label: 'v2', active_version_status: 'preparing',
     active_version_phase: 'curating', created_at: 0, updated_at: 0,
     archived_at: null, note: null, versions,
@@ -65,7 +67,8 @@ type OutletCtx = {
 let lastOutletCtx: OutletCtx | null = null
 let probeMounts = 0
 
-/** 模拟 Train 等步骤页：从 Outlet context 读 activeVersion（Train.tsx 入队用的就是它）。 */
+/** Simulates the Train and other step pages: reads activeVersion from the Outlet
+ * context (this is exactly what Train.tsx uses to enqueue). */
 function Probe() {
   const octx = useOutletContext<OutletCtx>()
   lastOutletCtx = octx
@@ -104,15 +107,18 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-/** 等 Layout 首载完成：Probe 已渲染**且** setCtx effect 已 flush。慢环境（CI）下
- * getProject 可能在 findByTestId 首次同步检查前就 resolve，元素直接命中、没走
- * act 包裹的轮询路径 → passive effect 未跑、lastCtx 还是 null，必须显式再等。 */
+/** Waits for the Layout's first load to finish: Probe has rendered **and** the
+ * setCtx effect has flushed. On slow environments (CI), getProject can resolve
+ * before findByTestId's first synchronous check, so the element matches
+ * immediately without going through the act-wrapped polling path -> the
+ * passive effect hasn't run yet and lastCtx is still null, so we must
+ * explicitly wait some more. */
 async function ready() {
   await screen.findByTestId('active-vid')
   await waitFor(() => expect(lastCtx).not.toBeNull())
 }
 
-describe('ProjectLayout 版本切换（#386）', () => {
+describe('ProjectLayout version switching (#386)', () => {
   beforeEach(() => {
     lastCtx = null
     lastOutletCtx = null
@@ -123,7 +129,7 @@ describe('ProjectLayout 版本切换（#386）', () => {
     getProjectMock.mockResolvedValue(makeProject(2, [V1, V2]))
   })
 
-  it('activate 在途时 activeVersion 已乐观切到新版本', async () => {
+  it('activeVersion optimistically switches to the new version while activate is in flight', async () => {
     const d = deferred<{ active_version_id: number }>()
     activateVersionMock.mockReturnValue(d.promise)
     renderLayout()
@@ -131,14 +137,15 @@ describe('ProjectLayout 版本切换（#386）', () => {
     expect(screen.getByTestId('active-vid')).toHaveTextContent('2')
 
     act(() => { lastCtx!.onSelectVersion(1) })
-    // 后端未返回，本地已经是 v1 —— 此刻点「开始训练」入队的就是 v1。
+    // The backend hasn't responded yet, but locally it's already v1 -- clicking
+    // "Start training" right now would enqueue v1.
     expect(screen.getByTestId('active-vid')).toHaveTextContent('1')
 
     await act(async () => { d.resolve({ active_version_id: 1 }) })
     expect(screen.getByTestId('active-vid')).toHaveTextContent('1')
   })
 
-  it('activate 失败回滚到原版本并 toast', async () => {
+  it('rolls back to the original version and toasts on activate failure', async () => {
     const d = deferred<{ active_version_id: number }>()
     activateVersionMock.mockReturnValue(d.promise)
     renderLayout()
@@ -152,7 +159,7 @@ describe('ProjectLayout 版本切换（#386）', () => {
     expect(toastMock).toHaveBeenCalled()
   })
 
-  it('快速连切两次，第一次失败不覆盖第二次的选择', async () => {
+  it('switching twice in quick succession: the first failure does not overwrite the second choice', async () => {
     getProjectMock.mockResolvedValue(makeProject(2, [V1, V2, V3]))
     const d1 = deferred<{ active_version_id: number }>()
     const d2 = deferred<{ active_version_id: number }>()
@@ -165,7 +172,8 @@ describe('ProjectLayout 版本切换（#386）', () => {
     act(() => { lastCtx!.onSelectVersion(3) })
     expect(screen.getByTestId('active-vid')).toHaveTextContent('3')
 
-    // 第一次切换的失败先落地：序号已过期，既不回滚也不 toast。
+    // The first switch's failure lands first: its sequence number is already
+    // stale, so it neither rolls back nor toasts.
     await act(async () => { d1.reject(new Error('stale boom')) })
     expect(screen.getByTestId('active-vid')).toHaveTextContent('3')
     expect(toastMock).not.toHaveBeenCalled()
@@ -174,7 +182,7 @@ describe('ProjectLayout 版本切换（#386）', () => {
     expect(screen.getByTestId('active-vid')).toHaveTextContent('3')
   })
 
-  it('版本作用域路由：切版本重挂载步骤页', async () => {
+  it('version-scoped routes: switching versions remounts the step page', async () => {
     activateVersionMock.mockResolvedValue({ active_version_id: 1 })
     renderLayout('/projects/3/v/2/train')
     await ready()
@@ -182,11 +190,12 @@ describe('ProjectLayout 版本切换（#386）', () => {
 
     await act(async () => { lastCtx!.onSelectVersion(1) })
     expect(screen.getByTestId('active-vid')).toHaveTextContent('1')
-    // 旧步骤页实例卸载、新实例重挂载 —— 本地缓存 / 选中态全部换代。
+    // The old step page instance unmounts and a new one remounts -- local
+    // cache / selection state is fully replaced.
     expect(probeMounts).toBe(2)
   })
 
-  it('project 作用域路由（总览）：切版本不重挂载', async () => {
+  it('project-scoped routes (overview): switching versions does not remount', async () => {
     activateVersionMock.mockResolvedValue({ active_version_id: 1 })
     renderLayout()
     await ready()
@@ -196,7 +205,7 @@ describe('ProjectLayout 版本切换（#386）', () => {
     expect(probeMounts).toBe(1)
   })
 
-  it('切换守卫返回 false 时取消切换', async () => {
+  it('cancels the switch when the switch guard returns false', async () => {
     renderLayout('/projects/3/v/2/train')
     await ready()
     act(() => { lastOutletCtx!.setVersionSwitchGuard(() => Promise.resolve(false)) })

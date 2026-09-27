@@ -52,7 +52,7 @@ interface AutoParams {
   kMax: number
 }
 
-/** Reset / clear is "未裁" (pending), having any rect is "已裁" (cropped). Status quo:
+/** Reset / clear is "uncropped" (pending), having any rect is "cropped". Status quo:
  *  the page bypasses upscale-vs-pending distinction — every workspace image is a
  *  candidate; whether it has crops drawn is the only filter dimension. */
 function genRectId(): string {
@@ -93,7 +93,7 @@ export default function PreprocessCropPage() {
     maxCropFraction: 0.10, kMin: 3, kMax: 6,
   })
   const [lastClusterK, setLastClusterK] = useState<number | null>(null)
-  // 自动聚类参数改由 header 按钮弹出的 modal 承载（不再占裁剪参数区）。
+  // Auto-cluster parameters now live in the modal popped up by the header button (no longer taking up space in the crop-params area).
   const [clusterModalOpen, setClusterModalOpen] = useState(false)
 
   // ────── Editor state ──────
@@ -120,8 +120,8 @@ export default function PreprocessCropPage() {
   const jobIdRef = useRef<number | null>(null)
   jobIdRef.current = job?.id ?? null
 
-  // 回放（issue #251）：crop 与放大共用 kind=preprocess，走同一 status 端点
-  // 恢复最近一次 preprocess job + log_tail；同一 job 本地已有 SSE 积累时不覆盖。
+  // Replay (issue #251): crop and upscale share kind=preprocess and go through the same status
+  // endpoint, restoring the most recent preprocess job + log_tail; not overwritten when it's the same job and local SSE accumulation already exists.
   const refreshJobStatus = useCallback(async () => {
     if (!vid) return
     try {
@@ -339,7 +339,7 @@ export default function PreprocessCropPage() {
   }, [cropsByImage, activeName, project.id, vid, toast, t])
 
   // ────── Render ──────
-  // ADR 0010: hooks 之后再做 vid guard
+  // ADR 0010: do the vid guard after the hooks
   if (!activeVersion) {
     return (
       <div className="p-6 text-fg-secondary">
@@ -370,191 +370,164 @@ export default function PreprocessCropPage() {
       ]}
     >
       <PreprocessCard current="crop" projectId={project.id} versionId={vid}>
-        <div className="ds-pp-toolbar">
-            <>
-              {/* 次操作 = ghost（对齐正则/打标页 header 范式）；主操作「裁剪当前图」= primary + icon，放最右 */}
+        <div className="ds-pp-toolbar" style={{ justifyContent: 'flex-start' }}>
+          <div className="ds-pills" role="group">
+            {(['all', 'pending', 'cropped'] as const).map((k) => (
               <button
+                key={k}
                 type="button"
-                onClick={() => setClusterModalOpen(true)}
-                disabled={busy || images.length === 0}
-                className="ds-ctl ds-ghost"
+                onClick={() => setFilter(k)}
+                className={`ds-pill${filter === k ? ' ds-is-active' : ''}`}
+                aria-pressed={filter === k}
               >
-                {t('preprocessCrop.autoCluster')}
+                {t(`preprocessCrop.filter.${k}`)} <span className="ds-count">{counts[k]}</span>
               </button>
-              <button
-                type="button"
-                onClick={() => void submitCrop(false)}
-                disabled={busy || totalRects === 0}
-                className="ds-ctl ds-ghost"
-              >
-                {t('preprocessCrop.cropAll', { n: totalRects })}
-              </button>
-              <button
-                type="button"
-                onClick={() => void submitCrop(true)}
-                disabled={busy || activeCrops.length === 0}
-                className="ds-btn-primary"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-                <span>{t('preprocessCrop.cropActive')}</span>
-              </button>
-            </>
+            ))}
+          </div>
+          {activeImage && (
+            <span className="ds-crop-imginfo" title={activeImage.name}>
+              <b>{activeImage.name}</b> · {activeImage.w}×{activeImage.h} · {arLabel(activeImage.w, activeImage.h)}
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={clearActive}
+            disabled={!activeName || (cropsByImage[activeName] ?? []).length === 0}
+            className="ds-ctl"
+          >{t('preprocessCrop.clearActive')}</button>
+          <button
+            type="button"
+            onClick={() => setClusterModalOpen(true)}
+            disabled={busy || images.length === 0}
+            className="ds-ctl"
+          >
+            {t('preprocessCrop.autoCluster')}
+          </button>
+          <button
+            type="button"
+            onClick={() => void submitCrop(false)}
+            disabled={busy || totalRects === 0}
+            className="ds-ctl"
+          >
+            {t('preprocessCrop.cropAll', { n: totalRects })}
+          </button>
+          <button
+            type="button"
+            onClick={() => void submitCrop(true)}
+            disabled={busy || activeCrops.length === 0}
+            className="ds-btn-primary"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
+            <span>{t('preprocessCrop.cropActive')}</span>
+          </button>
         </div>
-        <div className="ds-pp-body">
-          <div className="flex flex-col h-full gap-3 min-h-0 m-h-auto">
-            <div className="grid gap-3 flex-1 min-h-0 m-grid-1" style={{ gridTemplateColumns: '1fr 260px' }}>
-              {/* 左栏 —— 裁剪参数区已删，工作区占满高度；长宽比锁定移到工作区底部固定栏 */}
-              <div className="flex flex-col gap-2 min-h-0 min-w-0">
-                <section className="flex flex-col flex-1 min-h-0 rounded-md border border-subtle bg-surface overflow-hidden m-h-auto">
-                  <header className="flex items-center gap-2 shrink-0 px-2.5 py-1.5 border-b border-subtle text-sm flex-wrap">
-                    <div className="flex items-center gap-1">
-                      {(['all', 'pending', 'cropped'] as const).map((k) => (
-                        <button
-                          key={k}
-                          onClick={() => setFilter(k)}
-                          className={
-                            'px-2 py-0.5 rounded-full text-xs transition-colors ' +
-                            (filter === k
-                              ? 'bg-accent-soft text-accent font-semibold'
-                              : 'bg-overlay text-fg-secondary font-medium hover:text-fg-primary')
-                          }
-                        >
-                          {t(`preprocessCrop.filter.${k}`)} {counts[k]}
-                        </button>
-                      ))}
-                    </div>
-                    {activeImage && (
-                      <span className="text-fg-tertiary text-xs font-mono ml-2">
-                        {activeImage.name} · {activeImage.w}×{activeImage.h} · {arLabel(activeImage.w, activeImage.h)}
-                      </span>
-                    )}
-                    <span className="flex-1" />
-                    <button
-                      onClick={clearActive}
-                      disabled={!activeName || (cropsByImage[activeName] ?? []).length === 0}
-                      className="btn btn-ghost btn-sm"
-                    >{t('preprocessCrop.clearActive')}</button>
-                  </header>
 
-                  <div className="flex-1 min-h-0 overflow-hidden p-3 m-h-auto m-p-sm">
-                    {loading && (
-                      <p className="text-fg-tertiary text-sm">{t('preprocessCrop.loading')}</p>
-                    )}
-                    {!loading && images.length === 0 && (
-                      <p className="text-fg-tertiary text-sm">
-                        {t('preprocessCrop.emptyWorkspace')}{' '}
-                        <Link to={`/projects/${project.id}/v/${vid}/preprocess?tool=upscale`} className="text-accent hover:underline">
-                          {t('preprocessCrop.goToUpscale')}
-                        </Link>
-                      </p>
-                    )}
+        {loading && (
+          <div className="ds-pp-body"><p className="ds-muted" style={{ fontSize: 12.5, margin: 0 }}>{t('preprocessCrop.loading')}</p></div>
+        )}
+        {!loading && images.length === 0 && (
+          <div className="ds-pp-body">
+            <div className="ds-empty">
+              {t('preprocessCrop.emptyWorkspace')}
+              <Link to={`/projects/${project.id}/v/${vid}/preprocess?tool=upscale`} style={{ color: 'var(--green-text)', fontWeight: 500 }}>
+                {t('preprocessCrop.goToUpscale')}
+              </Link>
+            </div>
+          </div>
+        )}
 
-                    {activeImage && (
-                      /* 3-column layout — filmstrip (left) / canvas (center) / rect list (right).
-                         With 264+ image datasets, a bottom horizontal filmstrip gets squeezed to
-                         a hairline. Vertical 3-col grid scrolls cleanly and gives the canvas
-                         the full WorkArea height to render in. */
+        {activeImage && (
+          /* filmstrip / canvas / frames + summary. With 264+ image datasets a
+             bottom filmstrip gets squeezed to a hairline; a vertical column
+             scrolls cleanly and leaves the canvas the full height. */
+          <div className="ds-crop-grid pp-editor-grid">
+            {/* Always render the filmstrip column — an empty filter keeps the
+                grid in place; the empty state lives inside Filmstrip. */}
+            <Filmstrip
+              items={filteredImages}
+              activeName={activeName}
+              onSelect={(name) => {
+                setActiveName(name)
+                setSelectedRectId(null)
+              }}
+              thumbUrl={(im) => {
+                const i = im.name.lastIndexOf('/')
+                const folder = i >= 0 ? im.name.slice(0, i) : ''
+                const filename = i >= 0 ? im.name.slice(i + 1) : im.name
+                return api.versionThumbUrl(
+                  project.id, vid, 'train', filename, folder, 256,
+                ) + `&_=${im.mtime}`
+              }}
+              emptyHint={t(`preprocessCrop.filmstripEmpty.${filter}`)}
+              renderOverlay={(im) => {
+                const crops = cropsByImage[im.name] ?? []
+                if (crops.length === 0) return null
+                return (
+                  <>
+                    {crops.map((c, i) => (
                       <div
-                        className="grid gap-3 h-full min-h-0 pp-editor-grid"
-                        style={{ gridTemplateColumns: '220px minmax(0, 1fr) 260px' }}
-                      >
-                        {/* Always render the filmstrip column — when the active filter
-                            produces 0 matches (e.g. 「已裁剪 0」), conditionally hiding
-                            the whole component would collapse the 3-col grid and push
-                            canvas + rect list one column left. The empty state lives
-                            inside Filmstrip itself so layout stays put. */}
-                        <Filmstrip
-                          items={filteredImages}
-                          activeName={activeName}
-                          onSelect={(name) => {
-                            setActiveName(name)
-                            setSelectedRectId(null)
-                          }}
-                          thumbUrl={(im) => {
-                            const i = im.name.lastIndexOf('/')
-                            const folder = i >= 0 ? im.name.slice(0, i) : ''
-                            const filename = i >= 0 ? im.name.slice(i + 1) : im.name
-                            return api.versionThumbUrl(
-                              project.id, vid, 'train', filename, folder, 256,
-                            ) + `&_=${im.mtime}`
-                          }}
-                          emptyHint={t(`preprocessCrop.filmstripEmpty.${filter}`)}
-                          renderOverlay={(im) => {
-                            const crops = cropsByImage[im.name] ?? []
-                            if (crops.length === 0) return null
-                            return (
-                              <>
-                                {crops.map((c, i) => (
-                                  <div
-                                    key={c.id}
-                                    className={'fs-overlay ' + (crops.length > 1 ? 'is-multi' : '')}
-                                    style={{
-                                      left: `${c.x * 100}%`,
-                                      top: `${c.y * 100}%`,
-                                      width: `${c.w * 100}%`,
-                                      height: `${c.h * 100}%`,
-                                    }}
-                                    aria-label={`crop ${i + 1}`}
-                                  />
-                                ))}
-                                {crops.length > 1 && <span className="fs-badge">×{crops.length}</span>}
-                              </>
-                            )
-                          }}
-                        />
+                        key={c.id}
+                        className={'fs-overlay ' + (crops.length > 1 ? 'is-multi' : '')}
+                        style={{
+                          left: `${c.x * 100}%`,
+                          top: `${c.y * 100}%`,
+                          width: `${c.w * 100}%`,
+                          height: `${c.h * 100}%`,
+                        }}
+                        aria-label={`crop ${i + 1}`}
+                      />
+                    ))}
+                    {crops.length > 1 && <span className="fs-badge">×{crops.length}</span>}
+                  </>
+                )
+              }}
+            />
 
-                        <div className="min-w-0 min-h-0 overflow-hidden">
-                          <FreeCropEditor
-                            image={{
-                              id: activeImage.name,
-                              name: activeImage.name,
-                              w: activeImage.w,
-                              h: activeImage.h,
-                              thumbUrl: (() => {
-                                const i = activeImage.name.lastIndexOf('/')
-                                const folder = i >= 0 ? activeImage.name.slice(0, i) : ''
-                                const filename = i >= 0 ? activeImage.name.slice(i + 1) : activeImage.name
-                                return api.versionThumbUrl(
-                                  project.id, vid, 'train', filename, folder, 1024,
-                                ) + `&_=${activeImage.mtime}`
-                              })(),
-                            }}
-                            crops={activeCrops}
-                            selectedId={selectedRectId}
-                            arLock={arLock}
-                            onSelect={setSelectedRectId}
-                            onChange={updateRect}
-                            onCreate={createRect}
-                          />
-                        </div>
+            <div className="ds-crop-canvas">
+              <FreeCropEditor
+                image={{
+                  id: activeImage.name,
+                  name: activeImage.name,
+                  w: activeImage.w,
+                  h: activeImage.h,
+                  thumbUrl: (() => {
+                    const i = activeImage.name.lastIndexOf('/')
+                    const folder = i >= 0 ? activeImage.name.slice(0, i) : ''
+                    const filename = i >= 0 ? activeImage.name.slice(i + 1) : activeImage.name
+                    return api.versionThumbUrl(
+                      project.id, vid, 'train', filename, folder, 1024,
+                    ) + `&_=${activeImage.mtime}`
+                  })(),
+                }}
+                crops={activeCrops}
+                selectedId={selectedRectId}
+                arLock={arLock}
+                onSelect={setSelectedRectId}
+                onChange={updateRect}
+                onCreate={createRect}
+              />
+            </div>
 
-                        <RectListPanel
-                          activeImage={activeImage}
-                          crops={activeCrops}
-                          selectedId={selectedRectId}
-                          arLock={arLock}
-                          arSel={arSel}
-                          setArSel={setArSel}
-                          customAR={customAR}
-                          setCustomAR={setCustomAR}
-                          busy={busy}
-                          onSelect={setSelectedRectId}
-                          onLabelChange={(id, label) => {
-                            const r = activeCrops.find((c) => c.id === id)
-                            if (r) updateRect(id, { ...r, label })
-                          }}
-                          onDelete={deleteRect}
-                          onDuplicate={duplicateRect}
-                        />
-                      </div>
-                    )}
-                  </div>
-                </section>
-              </div>
-
-              {/* 右栏统计 */}
+            <div className="ds-crop-side">
+              <RectListPanel
+                activeImage={activeImage}
+                crops={activeCrops}
+                selectedId={selectedRectId}
+                arLock={arLock}
+                arSel={arSel}
+                setArSel={setArSel}
+                customAR={customAR}
+                setCustomAR={setCustomAR}
+                busy={busy}
+                onSelect={setSelectedRectId}
+                onLabelChange={(id, label) => {
+                  const r = activeCrops.find((c) => c.id === id)
+                  if (r) updateRect(id, { ...r, label })
+                }}
+                onDelete={deleteRect}
+                onDuplicate={duplicateRect}
+              />
               <RightRail
                 totalRects={totalRects}
                 configuredImages={configuredImages}
@@ -564,28 +537,28 @@ export default function PreprocessCropPage() {
                 images={images}
               />
             </div>
-
-            {clusterModalOpen && (
-              <ClusterModal
-                autoParams={autoParams}
-                setAutoParams={setAutoParams}
-                lastClusterK={lastClusterK}
-                busy={busy}
-                totalImages={images.length}
-                onRun={runClustering}
-                onClose={() => setClusterModalOpen(false)}
-              />
-            )}
           </div>
-        </div>
+        )}
+
+        {clusterModalOpen && (
+          <ClusterModal
+            autoParams={autoParams}
+            setAutoParams={setAutoParams}
+            lastClusterK={lastClusterK}
+            busy={busy}
+            totalImages={images.length}
+            onRun={runClustering}
+            onClose={() => setClusterModalOpen(false)}
+          />
+        )}
       </PreprocessCard>
     </StepShell>
   )
 }
 
 // ---------------------------------------------------------------------------
-// 自动聚类 modal —— header 按钮弹出。按长宽比给所有图预填裁剪框（之后可手动微调）。
-// 参数用数字 input 框（原来是左右拉 slider）。
+// Auto-cluster modal -- popped up by the header button. Pre-fills crop boxes for all images by aspect ratio (can be fine-tuned manually afterward).
+// Parameters use numeric input boxes (previously a drag slider).
 // ---------------------------------------------------------------------------
 
 function ClusterModal({
@@ -719,100 +692,63 @@ function RectListPanel({
 }) {
   const { t } = useTranslation()
   return (
-    <div className="bg-sunken border border-subtle rounded-md flex flex-col h-full min-h-0 overflow-hidden">
-      <div className="flex flex-col gap-2 p-2.5 flex-1 min-h-0 overflow-y-auto">
-      <header className="flex items-center gap-2 flex-wrap">
-        <h3 className="caption">{t('preprocessCrop.rectListTitle')} · {crops.length}</h3>
-        <span className="text-fg-tertiary text-[11px]">
+    <section className="ds-crop-panel">
+      <header className="ds-crop-panel-head">
+        <span className="ds-crop-panel-title">{t('preprocessCrop.rectListTitle')}<span className="ds-samples-count">{crops.length}</span></span>
+        <span className="ds-kpi-meta" style={{ marginLeft: 'auto' }}>
           {arLock ? t('preprocessCrop.arLockedTo', { ar: `${arLock.w}:${arLock.h}` }) : t('preprocessCrop.arUnlocked')}
         </span>
-        {/* Selected-rect actions — show only when a rect is selected; act as a
-            second affordance for the per-row ⎘/✕ buttons so the user has a
-            top-of-panel control even when scrolled in a long crop list. */}
-        {selectedId && (
-          <>
-            <span className="flex-1" />
-            <button
-              className="bg-transparent border-none text-fg-tertiary cursor-pointer px-1.5 py-0.5 text-xs hover:bg-overlay hover:text-fg-primary rounded"
-              onClick={() => onDuplicate(selectedId)}
-              title={t('preprocessCrop.duplicate')}
-            >⎘</button>
-            <button
-              className="bg-transparent border-none text-fg-tertiary cursor-pointer px-1.5 py-0.5 text-xs hover:bg-err-soft hover:text-err rounded"
-              onClick={() => onDelete(selectedId)}
-              title={t('preprocessCrop.delete')}
-            >✕</button>
-          </>
-        )}
       </header>
-      {crops.length === 0 && (
-        <div className="flex flex-col items-center py-6 px-3 gap-1.5 text-center">
-          <div className="text-fg-disabled text-2xl">⬚</div>
-          <p className="text-fg-secondary text-xs">{t('preprocessCrop.emptyHintLine1')}</p>
-          <p className="text-fg-tertiary text-[11px]">{t('preprocessCrop.emptyHintLine2')}</p>
-        </div>
-      )}
-      {crops.map((c, i) => {
-        const outW = Math.round(c.w * activeImage.w)
-        const outH = Math.round(c.h * activeImage.h)
-        const isSel = c.id === selectedId
-        return (
-          <div
-            key={c.id}
-            className={
-              'grid items-center gap-2 p-1.5 rounded border cursor-pointer transition-colors ' +
-              (isSel
-                ? 'border-accent bg-accent-soft/40'
-                : 'border-subtle bg-surface hover:border-dim')
-            }
-            style={{ gridTemplateColumns: '50px 1fr auto' }}
-            onClick={() => onSelect(c.id)}
-          >
-            <div
-              className="border border-dashed border-dim rounded bg-sunken flex items-center justify-center text-fg-tertiary text-[10px]"
-              style={{ aspectRatio: `${outW}/${outH}`, minHeight: 24 }}
-            >
-              <span className="font-mono">{arLabel(outW, outH)}</span>
-            </div>
-            <div className="min-w-0 flex flex-col gap-0.5">
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-fg-tertiary font-mono">#{i + 1}</span>
-                <input
-                  value={c.label}
-                  onChange={(e) => onLabelChange(c.id, e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="bg-transparent border-none text-fg-primary text-[12.5px] outline-none w-full min-w-0"
-                />
-              </div>
-              <div className="text-[11px] text-fg-tertiary font-mono">{outW}×{outH} px</div>
-            </div>
-            <div className="flex gap-0.5">
-              <button
-                onClick={(e) => { e.stopPropagation(); onDuplicate(c.id) }}
-                className="bg-transparent border-none text-fg-tertiary cursor-pointer px-1.5 py-0.5 text-xs hover:bg-overlay hover:text-fg-primary rounded"
-                title={t('preprocessCrop.duplicate')}
-              >⎘</button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onDelete(c.id) }}
-                className="bg-transparent border-none text-fg-tertiary cursor-pointer px-1.5 py-0.5 text-xs hover:bg-err-soft hover:text-err rounded"
-                title={t('preprocessCrop.delete')}
-              >✕</button>
-            </div>
+      <div className="ds-crop-rects">
+        {crops.length === 0 && (
+          <div className="ds-empty" style={{ padding: '18px 12px' }}>
+            <span style={{ color: 'var(--ink-2)', fontWeight: 500 }}>{t('preprocessCrop.emptyHintLine1')}</span>
+            <span style={{ fontSize: 11.5 }}>{t('preprocessCrop.emptyHintLine2')}</span>
           </div>
-        )
-      })}
+        )}
+        {crops.map((c, i) => {
+          const outW = Math.round(c.w * activeImage.w)
+          const outH = Math.round(c.h * activeImage.h)
+          const isSel = c.id === selectedId
+          return (
+            <div
+              key={c.id}
+              className={`ds-crop-rect${isSel ? ' ds-is-on' : ''}`}
+              onClick={() => onSelect(c.id)}
+            >
+              <span className="ds-crop-rect-ar" style={{ aspectRatio: `${outW}/${outH}` }}>{arLabel(outW, outH)}</span>
+              <span style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span className="ds-kpi-meta">#{i + 1}</span>
+                  <input
+                    value={c.label}
+                    onChange={(e) => onLabelChange(c.id, e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="ds-crop-rect-label"
+                  />
+                </span>
+                <span className="ds-kpi-meta">{outW}×{outH} px</span>
+              </span>
+              <button type="button" className="ds-kebab" onClick={(e) => { e.stopPropagation(); onDuplicate(c.id) }} title={t('preprocessCrop.duplicate')} aria-label={t('preprocessCrop.duplicate')}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="8" width="12" height="12" rx="2.5" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+              </button>
+              <button type="button" className="ds-kebab ds-danger" onClick={(e) => { e.stopPropagation(); onDelete(c.id) }} title={t('preprocessCrop.delete')} aria-label={t('preprocessCrop.delete')}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              </button>
+            </div>
+          )
+        })}
       </div>
 
-      {/* 长宽比锁定固定栏：贴「本图裁剪」面板底部，画框时锁定裁剪框比例 */}
-      <div className="shrink-0 border-t border-subtle px-2.5 py-2 flex flex-col gap-1.5">
-        <label className="flex items-center gap-1.5 text-xs">
-          <span className="text-fg-tertiary shrink-0">{t('preprocessCrop.aspectRatio')}</span>
+      {/* Aspect lock: applies to frames drawn on the canvas. */}
+      <footer className="ds-crop-panel-foot">
+        <label className="ds-crop-ar">
+          <span>{t('preprocessCrop.aspectRatio')}</span>
           <select
             value={arSel}
             onChange={(e) => setArSel(e.target.value)}
             disabled={busy}
-            className="input text-sm flex-1 min-w-0"
-            style={{ padding: '2px 6px' }}
+            className="ds-inp"
           >
             {AR_OPTIONS.map((o) => (
               <option key={o.id} value={o.id}>{o.label}</option>
@@ -820,27 +756,29 @@ function RectListPanel({
           </select>
         </label>
         {arSel === 'custom' && (
-          <label className="flex items-center gap-1.5 text-xs">
-            <span className="text-fg-tertiary shrink-0">W : H</span>
-            <input
-              type="number" min={1} max={64}
-              value={customAR.w}
-              onChange={(e) => setCustomAR({ ...customAR, w: Number(e.target.value) || 1 })}
-              className="input input-mono text-sm"
-              style={{ width: 56, padding: '2px 6px' }}
-            />
-            <span className="text-fg-tertiary">:</span>
-            <input
-              type="number" min={1} max={64}
-              value={customAR.h}
-              onChange={(e) => setCustomAR({ ...customAR, h: Number(e.target.value) || 1 })}
-              className="input input-mono text-sm"
-              style={{ width: 56, padding: '2px 6px' }}
-            />
+          <label className="ds-crop-ar">
+            <span>W : H</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="number" min={1} max={64}
+                value={customAR.w}
+                onChange={(e) => setCustomAR({ ...customAR, w: Number(e.target.value) || 1 })}
+                className="ds-inp"
+                style={{ width: 64 }}
+              />
+              <span className="ds-muted">:</span>
+              <input
+                type="number" min={1} max={64}
+                value={customAR.h}
+                onChange={(e) => setCustomAR({ ...customAR, h: Number(e.target.value) || 1 })}
+                className="ds-inp"
+                style={{ width: 64 }}
+              />
+            </span>
           </label>
         )}
-      </div>
-    </div>
+      </footer>
+    </section>
   )
 }
 
@@ -901,47 +839,32 @@ function RightRail({
   }, [cropsByImage, images])
 
   return (
-    <div className="flex flex-col gap-3 min-w-0">
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent" />
-          {t('preprocessCrop.rrProgress')}
-        </h3>
-        <StatRow label={t('preprocessCrop.rrWorkspace')} value={`${totalImages} imgs`} />
-        <StatRow label={t('preprocessCrop.rrConfigured')} value={`${configuredImages} imgs`} accent={configuredImages > 0 ? 'ok' : undefined} />
-        <StatRow label={t('preprocessCrop.rrPending')} value={`${totalImages - configuredImages} imgs`} accent={totalImages - configuredImages > 0 ? 'warn' : undefined} />
-        <div className="mt-2 h-1.5 rounded bg-sunken overflow-hidden">
-          <div className="h-full bg-accent rounded transition-[width] duration-300 ease-out" style={{ width: `${pct}%` }} />
-        </div>
-        <p className="text-xs text-fg-tertiary mt-1 text-right">{pct}%</p>
-      </div>
-
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-ok" />
-          {t('preprocessCrop.rrOutputs')}
-        </h3>
-        <StatRow label={t('preprocessCrop.rrOutputFiles')} value={`${totalRects} imgs`} />
-        <StatRow label={t('preprocessCrop.rrConfiguredImages')} value={`${configuredImages} / ${totalImages}`} />
+    <section className="ds-crop-panel">
+      <header className="ds-crop-panel-head">
+        <span className="ds-crop-panel-title">{t('preprocessCrop.rrProgress')}</span>
+        <span className="ds-kpi-meta" style={{ marginLeft: 'auto' }}>{pct}%</span>
+      </header>
+      <div style={{ padding: '0 14px 12px' }}>
+        <span className="ds-meter ds-thin" style={{ margin: '2px 0 8px' }}><i style={{ width: `${pct}%` }} /></span>
+        <StatRow label={t('preprocessCrop.rrWorkspace')} value={totalImages} />
+        <StatRow label={t('preprocessCrop.rrConfigured')} value={configuredImages} accent={configuredImages > 0 ? 'ok' : undefined} />
+        <StatRow label={t('preprocessCrop.rrPending')} value={totalImages - configuredImages} accent={totalImages - configuredImages > 0 ? 'warn' : undefined} />
+        <StatRow label={t('preprocessCrop.rrOutputFiles')} value={totalRects} />
         {lastClusterK !== null && (
           <StatRow label={t('preprocessCrop.rrSource')} value={`Cluster k=${lastClusterK}`} accent="ok" />
         )}
-        <p className="text-[11px] text-fg-tertiary mt-1.5 leading-snug">
-          {t('preprocessCrop.rrNote')}
-        </p>
+        <p className="ds-kpi-meta" style={{ margin: '8px 0 0' }}>{t('preprocessCrop.rrNote')}</p>
       </div>
-
-      <div className="rounded-md border border-subtle bg-surface px-3 py-2.5">
-        <h3 className="caption flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent opacity-60" />
-          {t('preprocessCrop.rrArDist')}
-        </h3>
-        <div className="text-[10px] text-fg-tertiary mt-1 mb-1 font-mono">
-          {arHist.fromSource ? `· ${t('preprocessCrop.rrFromSource')}` : `· ${t('preprocessCrop.rrFromCrops')}`}
-        </div>
+      <header className="ds-crop-panel-head" style={{ borderTop: '1px solid var(--line)' }}>
+        <span className="ds-crop-panel-title">{t('preprocessCrop.rrArDist')}</span>
+        <span className="ds-kpi-meta" style={{ marginLeft: 'auto' }}>
+          {arHist.fromSource ? t('preprocessCrop.rrFromSource') : t('preprocessCrop.rrFromCrops')}
+        </span>
+      </header>
+      <div style={{ padding: '0 14px 12px' }}>
         <BarHistogram bins={arHist.bins} />
       </div>
-    </div>
+    </section>
   )
 }
 
@@ -952,9 +875,9 @@ function StatRow({ label, value, accent }: { label: string; value: string | numb
     accent === 'err' ? 'text-err' :
     'text-fg-primary'
   return (
-    <div className="flex justify-between items-baseline mt-1.5 text-xs">
-      <span className="text-fg-tertiary">{label}</span>
-      <span className={`font-mono font-medium ${cls}`}>{value}</span>
+    <div className="ds-kv">
+      <span className="ds-k">{label}</span>
+      <span className={`ds-v ${cls}`}>{value}</span>
     </div>
   )
 }

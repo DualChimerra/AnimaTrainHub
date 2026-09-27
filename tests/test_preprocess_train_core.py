@@ -1,12 +1,3 @@
-"""ADR 0010 — train-scope core API（PR-2 step B）。
-
-覆盖 `list_train_images / summary_train / resolve_targets_train / start_job_train
-/ start_crop_job_train / list_crop_workspace_train /
-list_duplicate_removed_workspace_train / restore_products_train`。
-
-train/ 是 LoRA repeat folder 结构（`train/{N_label}/{image}`）；manifest entry
-key 和这些函数的 `name` 参数都用 POSIX 相对路径（`"1_data/X.png"`）。
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -30,7 +21,6 @@ def _rel(name: str, folder: str = DEFAULT_FOLDER) -> str:
 
 @pytest.fixture
 def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """isolated 项目 + 自动创建 v1 version + `versions/v1/train/1_data/` sub-folder。"""
     dbfile = tmp_path / "studio.db"
     db.init_db(dbfile)
     monkeypatch.setattr(db, "STUDIO_DB", dbfile)
@@ -60,7 +50,6 @@ def _download_dir(p: dict) -> Path:
 
 
 def test_list_train_images_empty_when_no_train(isolated) -> None:
-    # 删 fixture 预建的 sub-folder
     import shutil
     shutil.rmtree(isolated["sub"])
     items = preprocess.list_train_images(isolated["project"], "v1")
@@ -118,14 +107,13 @@ def test_list_train_images_marks_duplicate_removed(isolated) -> None:
 
 
 def test_list_train_images_includes_duplicate_removed_tombstone(isolated) -> None:
-    """train_mark_duplicate_removed 物理删图 + 留 manifest tombstone → list 仍报告该 entry。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "S.png")
     preprocess_manifest.train_mark_duplicate_removed(
         preprocess.project_root(p), "v1", [_rel("S.png")]
     )
-    assert not (sub / "S.png").exists()  # mark 已删
+    assert not (sub / "S.png").exists()
 
     items = preprocess.list_train_images(p, "v1")
     assert len(items) == 1
@@ -135,7 +123,6 @@ def test_list_train_images_includes_duplicate_removed_tombstone(isolated) -> Non
 
 
 def test_list_train_images_returns_processed_flag(isolated) -> None:
-    """list_train_images 返 `processed` 字段（ADR 0010 fixup：读 manifest 字段）。"""
     p = isolated["project"]
     sub = isolated["sub"]
 
@@ -166,7 +153,6 @@ def test_summary_train_counts_physical_plus_tombstone(isolated) -> None:
     sub = isolated["sub"]
     _write_png(sub / "A.png")
     _write_png(sub / "B.png")
-    # duplicate_removed → 物理删 + tombstone 留
     _write_png(sub / "C.png")
     preprocess_manifest.train_mark_duplicate_removed(
         preprocess.project_root(p), "v1", [_rel("C.png")]
@@ -218,7 +204,6 @@ def test_resolve_targets_unknown_mode_raises(isolated) -> None:
 
 
 def test_resolve_targets_name_with_traversal_rejected(isolated) -> None:
-    """`..` 在 name 里被 _validate_name 拒。folder/file POSIX 形式 OK。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "X.png")
@@ -304,19 +289,14 @@ def test_list_crop_workspace_excludes_duplicate_removed(isolated) -> None:
 
 
 def test_list_crop_workspace_processed_flag(isolated) -> None:
-    """ADR 0010 fixup（2026-06-04）：`_is_processed` 直接读 manifest entry
-    的 `processed` 字段（worker 写 True，curate 复制不写）。
-    """
     p = isolated["project"]
     sub = isolated["sub"]
 
-    # worker upscale 后写的 entry（processed=True）
     _write_png(sub / "up.png")
     preprocess_manifest.train_add_processed(
         preprocess.project_root(p), "v1", _rel("up.png"),
         {"origin": "up.png", "processed": True},
     )
-    # curate 复制原图（无 processed 字段）
     _write_png(sub / "raw.png")
     preprocess_manifest.train_add_processed(
         preprocess.project_root(p), "v1", _rel("raw.png"),
@@ -343,10 +323,9 @@ def _png_bytes(size: tuple[int, int] = (10, 10), color: str = "blue") -> bytes:
 
 
 def test_inpaint_save_overwrites_png_source(isolated) -> None:
-    """png 源同名覆盖：像素被替换、manifest 标 processed、返回新 size/mtime。"""
     p = isolated["project"]
     sub = isolated["sub"]
-    _write_png(sub / "X.png", (10, 10))  # 红色源
+    _write_png(sub / "X.png", (10, 10))
 
     res = preprocess.inpaint_save_train(
         p, "v1", name=_rel("X.png"), data=_png_bytes((10, 10), "blue"),
@@ -366,7 +345,6 @@ def test_inpaint_save_overwrites_png_source(isolated) -> None:
 
 
 def test_inpaint_save_converts_non_png_source(isolated) -> None:
-    """jpg 源 → 产物统一 .png、旧源删除、caption sidecar 保留、manifest key 迁移。"""
     p = isolated["project"]
     sub = isolated["sub"]
     Image.new("RGB", (20, 10), color="red").save(sub / "Y.jpg", "JPEG")
@@ -382,7 +360,7 @@ def test_inpaint_save_converts_non_png_source(isolated) -> None:
     assert res["origin"] == "Y.jpg"
     assert (sub / "Y.png").is_file()
     assert not (sub / "Y.jpg").exists()
-    assert (sub / "Y.txt").is_file()  # caption 跟 stem 走，不动
+    assert (sub / "Y.txt").is_file()
 
     m = preprocess_manifest.train_load(preprocess.project_root(p), "v1")
     assert _rel("Y.jpg") not in m["images"]
@@ -392,7 +370,6 @@ def test_inpaint_save_converts_non_png_source(isolated) -> None:
 
 
 def test_inpaint_save_size_mismatch_rejected(isolated) -> None:
-    """尺寸不符 → ValidationError，源图字节不动。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "Z.png", (10, 10))
@@ -439,11 +416,9 @@ def test_inpaint_save_invalid_name_rejected(isolated) -> None:
 
 
 def test_list_duplicate_removed_workspace_returns_marked(isolated) -> None:
-    """mark 物理删 train/{name}；list 从 download/{origin} 现读 w/h。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "Q.png", (40, 30))
-    # download/Q.png 用作 origin 来源
     download = _download_dir(p)
     download.mkdir(parents=True, exist_ok=True)
     _write_png(download / "Q.png", (40, 30))
@@ -461,7 +436,6 @@ def test_list_duplicate_removed_workspace_returns_marked(isolated) -> None:
 
 
 def test_list_duplicate_removed_workspace_no_origin(isolated) -> None:
-    """download/{origin} 缺失 → 仍报告 entry，w/h=None。"""
     p = isolated["project"]
     sub = isolated["sub"]
     _write_png(sub / "R.png")
@@ -480,7 +454,6 @@ def test_list_duplicate_removed_workspace_no_origin(isolated) -> None:
 
 
 def test_restore_products_train_copies_download_to_train(isolated) -> None:
-    """restore X.png (entry origin=X.jpg) → train/1_data/X.jpg + 删原 entry。"""
     p = isolated["project"]
     sub = isolated["sub"]
     download = _download_dir(p)
@@ -493,9 +466,7 @@ def test_restore_products_train_copies_download_to_train(isolated) -> None:
 
     result = preprocess.restore_products_train(p, "v1", [_rel("X.png")])
     assert result == {"restored": [_rel("X.png")], "missing": [], "no_origin": []}
-    # 新文件落在 {folder}/{origin}
     assert (sub / "X.jpg").read_bytes() == b"original" * 5
-    # 老 entry / 文件清掉
     assert not (sub / "X.png").exists()
     assert preprocess_manifest.train_get_entry(
         preprocess.project_root(p), "v1", _rel("X.png")

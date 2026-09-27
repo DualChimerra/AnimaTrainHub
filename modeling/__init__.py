@@ -1,1 +1,1 @@
-"""模型结构定义层（层 1）：每族一个子目录，只依赖 torch/einops。"""
+"""Model architecture definition layer (layer 1): one subdirectory per family, depends only on torch/einops."""

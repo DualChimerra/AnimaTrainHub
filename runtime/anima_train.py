@@ -1,15 +1,16 @@
 #!/usr/bin/env python
-"""Anima LoRA Trainer v2 — main() 编排入口。
+"""Anima LoRA Trainer v2 -- main() orchestration entry point.
 
-本模块的实现层已按 ADR 0003 PR-A 拆到 runtime/training/ 子包：
+This module's implementation layer was split into the runtime/training/
+subpackage per ADR 0003 PR-A:
   bootstrap / cli / observability / model_loading / models / text_encoding /
   state / dataset / sampling / timestep_sampling / noise / loss_weighting
 
-顶部的 re-export 段保留 anima_train.X 访问路径，给 sister script
-（anima_daemon / anima_generate / anima_reg_ai）和 tests/ 不变。新代码请
-直接 `from training.X import Y`。
+The re-export block at the top keeps the anima_train.X access path unchanged
+for sister scripts (anima_daemon / anima_generate / anima_reg_ai) and tests/.
+New code should `from training.X import Y` directly.
 
-LoRA / LoKr 实现：见 utils.lycoris_adapter.AnimaLycorisAdapter（ADR 0001）。
+LoRA / LoKr implementation: see utils.lycoris_adapter.AnimaLycorisAdapter (ADR 0001).
 """
 
 import logging
@@ -17,30 +18,32 @@ import os
 import sys
 from pathlib import Path
 
-# 小显存优化：减少 CUDA 显存碎片，缓解 8GB 卡 LoKr full-matrix OOM。
-# - 必须在 torch 链式 import 之前设置：torch 在 import 阶段就读 PYTORCH_CUDA_ALLOC_CONF
-#   并缓存，之后再改无效。
-# - expandable_segments 的 CUDA backend 实现需要 PYTORCH_C10_DRIVER_API_SUPPORTED 宏，
-#   PyTorch 的 c10/cuda/CMakeLists.txt 把该宏 gate 在 `if(NOT WIN32)`，因此 Windows wheel
-#   不包含该 backend，运行时会 emit `TORCH_WARN_ONCE("expandable_segments not supported
-#   on this platform")` 并强制 disable。为避免 Windows 用户看无用 warning，只在 Linux 设。
-# - setdefault 不覆盖用户已显式设置的值。
+# Small-VRAM optimization: reduces CUDA memory fragmentation, mitigating LoKr
+# full-matrix OOM on 8GB cards.
+# - Must be set before the torch import chain: torch reads and caches
+#   PYTORCH_CUDA_ALLOC_CONF during its own import, and changing it afterward has no effect.
+# - expandable_segments' CUDA backend implementation needs the
+#   PYTORCH_C10_DRIVER_API_SUPPORTED macro, which PyTorch's c10/cuda/CMakeLists.txt
+#   gates behind `if(NOT WIN32)`, so Windows wheels don't include that backend and
+#   emit `TORCH_WARN_ONCE("expandable_segments not supported on this platform")`
+#   at runtime before force-disabling it. To spare Windows users a useless warning, only set this on Linux.
+# - setdefault doesn't override a value the user has already set explicitly.
 if sys.platform.startswith("linux"):
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# 脚本在 runtime/ 下按裸脚本启动（`python runtime/anima_train.py`）。
-# 把仓库根 + runtime/ 注入 sys.path，让 `import utils.*` / `import train_monitor` /
-# `import training.*` 等不需要改成包导入。
+# The script is launched as a bare script from runtime/ (`python runtime/anima_train.py`).
+# Inject the repo root + runtime/ into sys.path so `import utils.*` / `import train_monitor` /
+# `import training.*` etc. don't need to be converted to package imports.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 for _p in (_REPO_ROOT, _REPO_ROOT / "runtime"):
     _ps = str(_p)
     if _ps not in sys.path:
         sys.path.insert(0, _ps)
 
-# Windows 控制台默认 cp936，logging / print 写中文会 UnicodeEncodeError，
-# 默认 handler 的 errors='backslashreplace' 会把中文转成 \uXXXX 形式 ——
-# 这就是 task log 里看到的「检查 VAE」之类乱码的来源。
-# 强制 stdout/stderr UTF-8 + replace 让中文 / emoji 永远直出。
+# The Windows console defaults to cp936; logging / print writing non-ASCII text
+# raises UnicodeEncodeError, and the default handler's errors='backslashreplace'
+# turns it into \uXXXX escapes -- that's the source of the garbled text seen in task logs.
+# Force stdout/stderr to UTF-8 + replace so non-ASCII text / emoji always print directly.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -51,10 +54,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-# ─── Re-exports for sister script / tests (ADR 0003 PR-A) ────────────────────
-# 这些名字被 anima_daemon / anima_generate / anima_reg_ai (`import anima_train as _T`
-# 然后 _T.X) 以及 tests/test_anima_train_migration.py 等直接读取。新代码请
-# 直接 import 子模块，不要再依赖 anima_train 顶层。
+# --- Re-exports for sister script / tests (ADR 0003 PR-A) --------------------
+# These names are read directly by anima_daemon / anima_generate / anima_reg_ai
+# (`import anima_train as _T` then _T.X) and by tests/test_anima_train_migration.py
+# etc. New code should import the submodule directly instead of relying on the anima_train top level.
 from training.bootstrap import (  # noqa: E402
     apply_yaml_config,
     ensure_dependencies,
@@ -86,7 +89,7 @@ from training.families.anima.text_encoding import (  # noqa: E402
 from training.state import load_training_state, save_training_state  # noqa: E402
 from training.model_loading import ensure_models_namespace  # noqa: E402
 from training.vae import load_vae  # noqa: E402
-from training.families import get_family, resolve_family  # noqa: E402  # 派发咽喉（D8'）
+from training.families import get_family, resolve_family  # noqa: E402  # dispatch choke point (D8')
 from training.families.anima.loader import (  # noqa: E402
     load_anima_model,
     load_text_encoders,
@@ -112,14 +115,14 @@ from training.loss_weighting import compute_loss_weight  # noqa: E402
 
 
 # ============================================================================
-# 主函数
+# Main function
 # ============================================================================
 
 def main():
-    """ADR 0003 PR-B：main() 现在只编排 phase。
+    """ADR 0003 PR-B: main() now only orchestrates phases.
 
-    每个 phase 是个 `run(ctx)` 函数，按顺序 in-place mutate TrainingContext。
-    具体实现在 runtime/training/phases/。
+    Each phase is a `run(ctx)` function that mutates TrainingContext in place, in order.
+    The actual implementation lives in runtime/training/phases/.
     """
     from training import phases
     from training.context import TrainingContext

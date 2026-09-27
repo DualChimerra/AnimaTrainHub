@@ -1,19 +1,23 @@
-"""Curation 操作（PP3）：download / train 双面板的后端逻辑。
+"""Curation operations (PP3): backend logic for the download / train dual panel.
 
-- `download/` 永远是项目级全量备份，不删
-- 左侧候选 = download/ 列表（**每张图通过 `preprocess_manifest.resolve()` 拿
-  实际字节路径**，可能是 download/{name} 也可能是 preprocess/{name}.png——
-  对前端透明，见 ADR 0004）
-- 复制 / 移除只动 `versions/{label}/train/{folder}/` 的副本
-- 文件名做差集：left = download − all-train，right = train 按 folder 分组
-- 子文件夹遵 Kohya 风格 N_xxx（PP4 / PP6 训练时仍按 dataset.parse_repeat 解析）
-- 每张图返回 `{name, mtime}`（mtime 为 unix 秒），排序由前端按用户偏好决定；
-  后端只保证按 name 字典序的稳定输出
+- `download/` is always the full project-level backup and is never deleted
+- The left-side candidates = the `download/` listing (**each image resolves its
+  actual byte path via `preprocess_manifest.resolve()`**, which may be
+  download/{name} or preprocess/{name}.png -- transparent to the frontend, see
+  ADR 0004)
+- Copy / remove only touch the copies under `versions/{label}/train/{folder}/`
+- Filenames are diffed as sets: left = download minus all-train, right = train
+  grouped by folder
+- Subfolders follow the Kohya-style N_xxx convention (still parsed via
+  dataset.parse_repeat during PP4 / PP6 training)
+- Each image is returned as `{name, mtime}` (mtime in unix seconds); sort order
+  is left to the frontend based on user preference -- the backend only
+  guarantees a stable output ordered by name
 
-约束：
-- 不允许 path traversal（folder / 文件名都校验）
-- 复制时把同名 .txt / .json metadata 一起带走（如果存在）
-- 移除时连带清掉同名 metadata；download/ 一律不动
+Constraints:
+- Path traversal is not allowed (both folder and filename are validated)
+- When copying, any same-stem .txt / .json metadata is carried along (if present)
+- When removing, the same-stem metadata is deleted too; download/ is never touched
 """
 from __future__ import annotations
 
@@ -27,9 +31,9 @@ from .scan import IMAGE_EXTS
 from ..preprocess import manifest as preprocess_manifest
 from ..preprocess import masks as train_masks
 
-# Kohya: 可选 `N_` 前缀 + 字母（不允许纯数字 / `5_` 这种空 label）
+# Kohya: optional `N_` prefix + letters (no bare digits / empty labels like `5_`)
 _FOLDER_PATTERN = re.compile(r"^([0-9]+_)?[A-Za-z][A-Za-z0-9_-]*$")
-# 文件名安全：仅允许文件名（含扩展名），不允许任何路径分隔
+# Filename safety: only a bare filename (with extension) is allowed, no path separators
 _FILE_PATTERN = re.compile(r"^[^\\/]+$")
 
 
@@ -37,9 +41,10 @@ from studio.domain.errors import DomainError
 
 
 class CurationError(DomainError):
-    """Curation 业务错误（路径非法 / 不存在 / 冲突）。
+    """Curation business errors (invalid path / not found / conflict).
 
-    PR-2 C3 加 DomainError base — handler 自动翻 dual-write envelope。
+    PR-2 C3 adds the DomainError base -- the handler automatically converts it
+    into the dual-write envelope.
     """
     default_code = "curation.error"
 
@@ -78,7 +83,8 @@ def _project_dir(conn, project_id: int) -> tuple[dict[str, Any], Path]:
 def _resolve_version_dir(conn, project_id: int, version_id: int) -> tuple[
     dict[str, Any], dict[str, Any], Path
 ]:
-    """(project, version, version 根目录)；project/version 不存在抛 404。"""
+    """Returns (project, version, version root dir); raises 404 if project/version
+    doesn't exist."""
     p = projects.get_project(conn, project_id)
     if not p:
         raise CurationError(
@@ -109,10 +115,10 @@ def _version_validation_dir(conn, project_id: int, version_id: int) -> tuple[
 
 
 def _list_image_entries(d: Path) -> list[dict[str, Any]]:
-    """目录下的图像列表 → `[{name, mtime}, ...]`，按 name 字典序稳定输出。
+    """List images in a directory -> `[{name, mtime}, ...]`, stably ordered by name.
 
-    mtime 取自磁盘 stat，单位为 unix 秒（float）；前端拿到后可按 id / name /
-    mtime 自由重排。
+    mtime comes from the disk stat, in unix seconds (float); once the frontend has
+    it, it can freely re-sort by id / name / mtime.
     """
     if not d.exists():
         return []
@@ -135,19 +141,26 @@ def _list_image_entries(d: Path) -> list[dict[str, Any]]:
 
 
 def list_download(conn, project_id: int) -> list[dict[str, Any]]:
-    """筛选页左侧候选列表 = `download/` 物理图，每张一行。
+    """Left-side candidate list on the curation page = physical images in
+    `download/`, one row each.
 
-    ADR 0010 fixup（2026-06-04）：Curation 跟预处理派生解耦。原 ADR 0004 设计
-    会按 manifest 展开 multi-crop 派生（X.jpg → 显示 X_c0.png + X_c1.png），但
-    新模型下 list_train 按 origin 去重（fan-out 折叠成一行 X.jpg），left/right
-    名字空间不一致会让 `used` 排除失败 → 已加入 train 的图重新出现在 left →
-    用户重选 → `copy_to_train` 看到 dst 物理已存在 → skip 报错。
+    ADR 0010 fixup (2026-06-04): curation is decoupled from preprocessing
+    derivatives. The original ADR 0004 design expanded multi-crop derivatives via
+    the manifest (X.jpg -> shown as X_c0.png + X_c1.png), but under the new model,
+    list_train dedupes by origin (fan-out collapses into one row X.jpg); a mismatch
+    between the left/right name spaces broke the `used` exclusion -> images already
+    added to train would reappear on the left -> the user re-selects them ->
+    `copy_to_train` sees the destination already physically exists -> skip with an
+    error.
 
-    新行为：list_download 只列 download/ 物理图（不感知 manifest 派生）；
-    name 跟 list_train 返回的 origin 在同一命名空间（download 文件名），
-    used 排除走得通。预处理派生只在 Preprocess Overview 暴露给用户。
+    New behavior: list_download only lists physical images in download/ (unaware
+    of manifest derivatives); `name` shares the same namespace as the `origin`
+    returned by list_train (the download filename), so the `used` exclusion works
+    correctly. Preprocessing derivatives are only exposed to the user on the
+    Preprocess Overview page.
 
-    `duplicate_removed` 也不过滤（PR-4 上一 fixup 决议，去重已下沉 train scope）。
+    `duplicate_removed` isn't filtered here either (per the PR-4 fixup decision --
+    dedup has moved down into train scope).
     """
     _, pdir = _project_dir(conn, project_id)
     download_dir = pdir / "download"
@@ -168,20 +181,25 @@ def list_download(conn, project_id: int) -> list[dict[str, Any]]:
 def list_train(
     conn, project_id: int, version_id: int
 ) -> dict[str, list[dict[str, Any]]]:
-    """train 子文件夹 → `[{name, mtime, origin}, ...]`（按 origin 去重）。
+    """Train subfolders -> `[{name, mtime, origin}, ...]` (deduped by origin).
 
-    ADR 0010 fixup：Curation 右侧 train 区显示"用户筛选时选了哪些 download 原图"，
-    跟预处理后状态解耦：
+    ADR 0010 fixup: the curation page's right-side train area shows "which
+    download originals the user selected while curating", decoupled from
+    post-preprocessing state:
 
-    - 按 manifest entry.origin **去重**：multi-crop fan-out 派生（X_c0.png +
-      X_c1.png 同 origin=X.jpg）只显示一条
-    - 物理 iterdir 决定显示集合：duplicate_removed 物理已删 → 自然不出现
-      在 Curation；要查看 / 恢复走总览页"已删除"tab
-    - 返回 `name` 用 **origin**（download 文件名），跟 `copy_download_to_train` /
-      `remove_from_train` 的 name 语义对齐到 download scope
+    - **Deduped** by manifest entry.origin: multi-crop fan-out derivatives
+      (X_c0.png + X_c1.png sharing origin=X.jpg) are shown as a single entry
+    - The displayed set is determined by a physical iterdir: once
+      duplicate_removed images are physically deleted, they naturally no longer
+      appear in curation; to view / restore them, use the "Deleted" tab on the
+      overview page instead
+    - The returned `name` uses **origin** (the download filename), so it aligns
+      with `copy_download_to_train` / `remove_from_train`'s name semantics, which
+      are scoped to download
 
-    `mtime` 用物理文件 mtime；前端按时间排序仍稳定。老项目 fallback：
-    ensure_train_manifest 重建后走同一路径。
+    `mtime` uses the physical file's mtime; sorting by time on the frontend stays
+    stable. Legacy project fallback: after ensure_train_manifest rebuilds it, the
+    same path is used.
     """
     p, v, train = _version_train_dir(conn, project_id, version_id)
     if not train.exists():
@@ -195,9 +213,11 @@ def list_train(
     for sub in sorted(train.iterdir()):
         if not sub.is_dir():
             continue
-        # 物理目录决定显示集合（duplicate_removed 物理已删→不出现）+
-        # 兼容老路径（copy_to_train 不写 manifest，但物理图能扫到）。manifest
-        # 仅用于反查 origin → 按 origin 去重（multi-crop fan-out 折叠成一行）。
+        # The physical directory determines the displayed set (physically-deleted
+        # duplicate_removed images don't appear), plus compatibility with the old
+        # path (copy_to_train doesn't write to the manifest, but physical images
+        # are still picked up by the scan). The manifest is only used to look up
+        # origin -> dedup by origin (collapsing multi-crop fan-out into one row).
         items_by_origin: dict[str, dict[str, Any]] = {}
         for raw in _list_image_entries(sub):
             rel = f"{sub.name}/{raw['name']}"
@@ -217,13 +237,16 @@ def list_train(
 def list_validation(
     conn, project_id: int, version_id: int
 ) -> list[dict[str, Any]]:
-    """validation/ 下所有子文件夹的图拍平成一条 flat list（手动加的 +
-    auto-split 移进来的都列），每条 `{name, mtime, folder}`。
+    """Flattens images from every subfolder under validation/ into a single flat
+    list (both manually added images and ones moved in by auto-split), each entry
+    `{name, mtime, folder}`.
 
-    validation 无 manifest（held-out 集只读，靠目录位置区分身份，见
-    eval_validation 模块），所以这里不查 origin / 不去重，`name` 就是物理文件名。
-    `folder` 给前端用来定位缩略图（version thumb 的 validation bucket 需要它）
-    与精确删除（多选可能跨 auto-split 的不同 repeat 文件夹）。
+    validation has no manifest (the held-out set is read-only, and identity is
+    distinguished by directory location -- see the eval_validation module), so
+    this doesn't look up origin or dedupe; `name` is just the physical filename.
+    `folder` lets the frontend locate thumbnails (needed by the version thumb's
+    validation bucket) and perform precise deletion (a multi-select may span
+    different auto-split repeat folders).
     """
     _, _, val = _version_validation_dir(conn, project_id, version_id)
     if not val.exists():
@@ -237,10 +260,12 @@ def list_validation(
 
 def _used_names(train: dict[str, list[dict[str, Any]]],
                 val: list[dict[str, Any]]) -> set[str]:
-    """已分配到 train（按 origin）或 validation 的 download 名集合。
+    """The set of download names already assigned to train (by origin) or validation.
 
-    held-out 要求一张图不能同时在 train 和 validation，否则 eval 测的是记忆
-    不是泛化。左栏候选从 download 里减掉这个集合，两个 bucket 共用同一池。
+    Held-out requires that an image can't be in both train and validation at once,
+    or eval would be measuring memorization rather than generalization. The
+    left-column candidates subtract this set from download; both buckets draw from
+    the same pool.
     """
     used = {e["name"] for files in train.values() for e in files}
     used |= {e["name"] for e in val}
@@ -248,16 +273,21 @@ def _used_names(train: dict[str, list[dict[str, Any]]],
 
 
 def curation_view(conn, project_id: int, version_id: int) -> dict[str, Any]:
-    """前端用：left = download − train − validation，right = train 按 folder 分组。
+    """Used by the frontend: left = download minus train minus validation, right =
+    train grouped by folder.
 
-    每个文件返回 `{name, mtime}`；前端用 mtime 提供「按时间」排序。
-    左侧的实际字节路径由 resolver 决定（已处理走 preprocess/ 副本，未处理走原图），
-    前端通过项目缩略图端点拿，不感知差异。
+    Each file is returned as `{name, mtime}`; the frontend uses mtime to offer
+    "sort by time". The actual byte path on the left is decided by the resolver
+    (processed images use the preprocess/ copy, unprocessed ones use the
+    original); the frontend fetches it through the project thumbnail endpoint and
+    is unaware of the difference.
 
-    left 同时减掉 validation：训练后 auto-split 把图移进 validation/ 后，这些图
-    在 download/ 里仍在，旧逻辑会让它们重新冒回 train 左栏候选 → 可被重新加进
-    train → 与 validation 重叠泄漏。减掉 validation 既修这个，也让 train /
-    validation 两个 curation 视图共用同一候选池。
+    left also subtracts validation: after training, auto-split moves images into
+    validation/, but those images still remain in download/ -- the old logic would
+    let them resurface as train left-column candidates -> they could get re-added
+    to train -> overlapping with validation and leaking held-out data. Subtracting
+    validation both fixes this and lets the train / validation curation views
+    share the same candidate pool.
     """
     left = list_download(conn, project_id)
     train = list_train(conn, project_id, version_id)
@@ -266,7 +296,8 @@ def curation_view(conn, project_id: int, version_id: int) -> dict[str, Any]:
     return {
         "left": [e for e in left if e["name"] not in used],
         "right": train,
-        # download_total 保留语义：左侧候选总数（与历史 API 兼容）
+        # download_total keeps its historical meaning: total left-side candidate
+        # count (kept for API compatibility)
         "download_total": len(left),
         "train_total": sum(len(v) for v in train.values()),
         "folders": list(train.keys()),
@@ -276,11 +307,12 @@ def curation_view(conn, project_id: int, version_id: int) -> dict[str, Any]:
 def curation_validation_view(
     conn, project_id: int, version_id: int
 ) -> dict[str, Any]:
-    """验证集筛选视图：left = download − train − validation（与训练集同池），
-    right = validation 扁平列表。
+    """Curation view for the validation set: left = download minus train minus
+    validation (same pool as the training set), right = the flat validation list.
 
-    与 `curation_view` 对称，区别只在 right 是 flat（无文件夹概念，见
-    `list_validation`）。前端验证集模式渲染右栏用它。
+    Symmetric with `curation_view`; the only difference is that right is flat (no
+    folder concept, see `list_validation`). Used by the frontend to render the
+    right column in validation-set mode.
     """
     left = list_download(conn, project_id)
     train = list_train(conn, project_id, version_id)
@@ -309,21 +341,24 @@ def copy_download_to_train(
     files: list[str],
     dest_folder: str,
 ) -> dict[str, list[str]]:
-    """ADR 0010 train scope（PR-2 step C）：纯 download → train 复制 + 写
-    train manifest entry。简化版替代 `copy_to_train`，PR-3 删老的。
+    """ADR 0010 train scope (PR-2 step C): plain download -> train copy + writes a
+    train manifest entry. A simplified replacement for `copy_to_train`; the old one
+    is removed in PR-3.
 
-    跟老 `copy_to_train` 的差异：
+    Differences from the old `copy_to_train`:
 
-    - **取消 preprocess 派生分支** — bytes 始终从 `download/{name}` 拿
-    - 写 train manifest entry，key = `f"{dest_folder}/{name}"`，
-      origin = name（curate 阶段图是原图未处理；后续 preprocess 在 train/
-      原地处理时再 update entry）
-    - caption (.txt/.json) 仍从 `download/{stem}.{ext}` 复制到
+    - **The preprocess-derivative branch is removed** -- bytes always come from
+      `download/{name}`
+    - Writes a train manifest entry with key = `f"{dest_folder}/{name}"`,
+      origin = name (at the curate stage the image is still the unprocessed
+      original; a later in-place preprocess pass in train/ updates the entry)
+    - Caption files (.txt/.json) are still copied from `download/{stem}.{ext}` to
       `train/{dest_folder}/{stem}.{ext}`
-    - 不消费 / 不感知 preprocess 派生（multi-crop fan-out 在新模型下发生在
-      curate 之后的 preprocess phase）
+    - Does not consume or know about preprocess derivatives (under the new model,
+      multi-crop fan-out happens during the preprocess phase, after curation)
 
-    `files` 是 download 池里的图名（平铺），不带 folder 前缀。
+    `files` is a flat list of image names from the download pool, without a folder
+    prefix.
     """
     _validate_folder(dest_folder)
     p, v, train = _version_train_dir(conn, project_id, version_id)
@@ -347,7 +382,7 @@ def copy_download_to_train(
             skipped.append(name)
             continue
         shutil.copy2(src, dst)
-        # caption metadata 跟随
+        # carry along caption metadata
         stem = Path(name).stem
         for ext in _META_EXTS:
             sm = download_dir / f"{stem}{ext}"
@@ -356,7 +391,7 @@ def copy_download_to_train(
                     shutil.copy2(sm, dst_dir / f"{stem}{ext}")
                 except OSError:
                     pass
-        # 写 train manifest entry，key = "{folder}/{name}"
+        # write the train manifest entry, key = "{folder}/{name}"
         rel = f"{dest_folder}/{name}"
         meta: dict[str, Any] = {"origin": name}
         try:
@@ -377,14 +412,15 @@ def remove_from_train(
     folder: str,
     files: list[str],
 ) -> dict[str, list[str]]:
-    """从 train/{folder}/ 删除 download 原图的所有 train 派生 + 同 stem
-    metadata；download 不动。
+    """Delete every train derivative of a download original from train/{folder}/,
+    plus any same-stem metadata; download is left untouched.
 
-    ADR 0010 fixup（2026-06-04）：`files` 是 **origin 名**（download 文件
-    名），跟 list_train 返回的 `name` 字段一致。本函数查 train manifest
-    找所有 origin 匹配的 entry，删它们的 train 物理文件 + manifest entry
-    + 同 stem caption (.txt/.json)。这样删一行 = 删该原图在 train 里的
-    全部派生（multi-crop fan-out 一并清掉）。
+    ADR 0010 fixup (2026-06-04): `files` is a list of **origin names** (download
+    filenames), matching the `name` field returned by list_train. This function
+    looks up the train manifest for every entry whose origin matches, and deletes
+    their physical train files + manifest entries + same-stem caption
+    (.txt/.json). This way, deleting one row deletes every derivative of that
+    original within train (multi-crop fan-out is cleaned up together).
     """
     _validate_folder(folder)
     p, v, train = _version_train_dir(conn, project_id, version_id)
@@ -394,7 +430,7 @@ def remove_from_train(
     tm = preprocess_manifest.train_load(pdir, v["label"])
     entries = tm.get("images", {})
 
-    # origin → [rel paths in this folder]
+    # origin -> [rel paths in this folder]
     by_origin: dict[str, list[str]] = {}
     for rel, entry in entries.items():
         if "/" not in rel:
@@ -412,7 +448,8 @@ def remove_from_train(
         _validate_filename(origin_name)
         rels = by_origin.get(origin_name, [])
         if not rels:
-            # manifest 没记 → 兜底直接删 fdir / origin_name（老项目同名场景）
+            # not recorded in the manifest -> fall back to deleting fdir / origin_name
+            # directly (a same-name scenario from legacy projects)
             pp = fdir / origin_name
             if pp.exists():
                 pp.unlink()
@@ -428,7 +465,8 @@ def remove_from_train(
             else:
                 missing.append(origin_name)
             continue
-        # 删所有派生物理文件 + 各派生 stem 的 metadata + mask sidecar
+        # delete every derivative's physical file + each derivative stem's metadata
+        # + mask sidecar
         for rel in rels:
             _, filename = rel.split("/", 1)
             pp = fdir / filename
@@ -456,12 +494,14 @@ def remove_from_train(
 
 
 # ---------------------------------------------------------------------------
-# validation copy / remove（held-out 验证集手动维护）
+# validation copy / remove (manual maintenance of the held-out validation set)
 #
-# 与 train 的 copy/remove 对称，但 validation 无 manifest（held-out 集靠目录位置
-# 区分身份），所以更简单：纯物理复制 / 删除，不写 manifest、不做 origin 去重。
-# 手动加入的图统一落到固定 `validation/1_data/`（复用 DEFAULT_TRAIN_FOLDER，
-# 与常见 auto-split 落点一致）；UI 不暴露文件夹概念。
+# Symmetric with train's copy/remove, but validation has no manifest (identity
+# in the held-out set is distinguished by directory location), so it's simpler:
+# plain physical copy / delete, with no manifest writes and no origin dedup.
+# Manually added images always land in the fixed `validation/1_data/` folder
+# (reusing DEFAULT_TRAIN_FOLDER, matching the common auto-split destination); the
+# UI doesn't expose the folder concept.
 # ---------------------------------------------------------------------------
 
 
@@ -471,12 +511,14 @@ def copy_download_to_validation(
     version_id: int,
     files: list[str],
 ) -> dict[str, list[str]]:
-    """download → `validation/1_data/` 复制（连同 caption .txt/.json）。
+    """Copy from download -> `validation/1_data/` (along with caption .txt/.json).
 
-    `files` 是 download 池里的图名（平铺，不带 folder 前缀）。已在 train（按
-    origin）或 validation 里的名字一律 skip —— 防 held-out 泄漏，与
-    `curation_view` 左栏候选的排除集一致。验证集的 caption 会被 eval 当生成
-    prompt 用（见 eval_samples），所以 sidecar 必须跟着复制。
+    `files` is a flat list of image names from the download pool (no folder
+    prefix). Any name already present in train (by origin) or validation is
+    always skipped -- to prevent held-out leakage, matching the same exclusion
+    set used for `curation_view`'s left column. Validation captions are used as
+    generation prompts by eval (see eval_samples), so the sidecar files must be
+    copied along with them.
     """
     p, v, val = _version_validation_dir(conn, project_id, version_id)
     pdir = projects.project_dir(p["id"], p["slug"])
@@ -484,7 +526,8 @@ def copy_download_to_validation(
     dst_dir = val / versions.DEFAULT_TRAIN_FOLDER
     dst_dir.mkdir(parents=True, exist_ok=True)
 
-    # 已分配集合（train origins ∪ validation 名）——同 curation_view 的排除口径。
+    # Already-assigned set (train origins union validation names) -- same
+    # exclusion rule as curation_view.
     train = list_train(conn, project_id, version_id)
     existing_val = list_validation(conn, project_id, version_id)
     used = _used_names(train, existing_val)
@@ -525,10 +568,12 @@ def remove_from_validation(
     version_id: int,
     items: list[dict[str, str]],
 ) -> dict[str, list[str]]:
-    """从 validation/ 删除指定图（连同同 stem caption）；download 不动。
+    """Delete the given images from validation/ (along with same-stem captions);
+    download is left untouched.
 
-    `items` 是 `[{"folder": ..., "name": ...}]`：多选可能跨 auto-split 的不同
-    repeat 文件夹，所以按 (folder, name) 精确定位，而不是按名跨文件夹删。
+    `items` is `[{"folder": ..., "name": ...}]`: a multi-select may span
+    different auto-split repeat folders, so deletion is located precisely by
+    (folder, name) rather than by name across all folders.
     """
     _, _, val = _version_validation_dir(conn, project_id, version_id)
     removed: list[str] = []
@@ -617,10 +662,12 @@ def _version_reg_dir(conn, project_id: int, version_id: int) -> tuple[
 def rename_reg_folder(
     conn, project_id: int, version_id: int, name: str, new_name: str
 ) -> Path:
-    """重命名 reg/ 下的子文件夹（如改 Kohya repeat 前缀 2_data → 1_data）。
+    """Rename a subfolder under reg/ (e.g. changing a Kohya repeat prefix from
+    2_data to 1_data).
 
-    跟 rename_folder（train/）同构，只是作用在 reg/。UI 在「已生成 reg 图」
-    那步用它，对齐 Step 1 train 文件夹改名体验。
+    Structurally the same as rename_folder (train/), just operating on reg/
+    instead. The UI uses it at the "reg images generated" step, to match the
+    renaming experience from Step 1's train folders.
     """
     _validate_folder(name)
     _validate_folder(new_name)
@@ -638,7 +685,8 @@ def rename_reg_folder(
 
 
 def delete_folder(conn, project_id: int, version_id: int, name: str) -> None:
-    """整个子文件夹连同里面的 train 副本一起删；download 不动。"""
+    """Delete the entire subfolder along with its train copies inside; download is
+    left untouched."""
     _validate_folder(name)
     _, _, train = _version_train_dir(conn, project_id, version_id)
     target = train / name
@@ -659,7 +707,7 @@ def delete_folder(conn, project_id: int, version_id: int, name: str) -> None:
 def has_train_images(
     conn, project_id: int, version_id: int
 ) -> bool:
-    """该 version 的 train/ 下是否已经有图片（任意子文件夹）。"""
+    """Whether this version's train/ already has any images (in any subfolder)."""
     _, _, train = _version_train_dir(conn, project_id, version_id)
     if not train.exists():
         return False

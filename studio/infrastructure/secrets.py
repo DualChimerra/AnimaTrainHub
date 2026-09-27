@@ -1,8 +1,8 @@
-"""全局服务凭证 + 配置 —— 集中存到 studio_data/secrets.json。
+"""Global service credentials + config — centrally stored in studio_data/secrets.json.
 
-`studio_data/` 已被 .gitignore，本文件即可放真实 token / api key。
-对外通过 `to_masked_dict()` 把敏感字段以 "***" 返回；前端 PUT
-时若回传 "***" 表示「保持不变」，由 `update()` 的 deep-merge 处理。
+`studio_data/` is already in .gitignore, so this file can hold real tokens / api keys.
+Sensitive fields are returned externally as "***" via `to_masked_dict()`; when the
+frontend PUTs back "***" it means "keep unchanged", handled by `update()`'s deep-merge.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .paths import STUDIO_DATA
 
 SECRETS_FILE = STUDIO_DATA / "secrets.json"
 MASK = "***"
-# 点路径 + `*` 通配支持：`llm_tagger.presets.*.api_key` 会遍历 list 内每个 dict。
+# Dotted-path + `*` wildcard support: `llm_tagger.presets.*.api_key` walks every dict in the list.
 SENSITIVE_FIELDS: tuple[str, ...] = (
     "gelbooru.api_key",
     "danbooru.api_key",
@@ -35,38 +35,40 @@ class GelbooruConfig(BaseModel):
 
 
 class DanbooruConfig(BaseModel):
-    """Danbooru HTTP Basic auth：username + api_key。
+    """Danbooru HTTP Basic auth: username + api_key.
 
-    PR #38 起强制绑定（不再允许匿名）：
-    - Danbooru 挂了 Cloudflare 后，匿名 UA 已不可靠（CF 可能随时收紧）
-    - 强制账户让我们 UA 带 (by username)，CF 拦匿名时不会一锅端
-    - danbooru 端按账户配速率上限（标准 2 req/s，高于匿名）
+    Mandatory binding as of PR #38 (anonymous no longer allowed):
+    - After Danbooru put up Cloudflare, an anonymous UA is no longer reliable (CF can tighten at any time)
+    - Requiring an account lets our UA carry (by username), so CF blocking anonymous traffic won't take us down with it
+    - Danbooru rate-limits by account tier (standard 2 req/s, higher than anonymous)
     """
     username: str = ""
     api_key: str = ""
-    # 账户类型决定多 tag 搜索上限（free=2 / gold=6 / platinum=12）
+    # Account type determines the multi-tag search cap (free=2 / gold=6 / platinum=12)
     account_type: str = "free"
 
 
 class HuggingFaceConfig(BaseModel):
     token: str = ""
-    # PR-S3: HF 模型下载端点。`""` 走 huggingface_hub 默认（直连 huggingface.co）。
-    # 0.8.2 hotfix：默认从 `hf-mirror.com` 切回 `""`（HF 官方）。hf-mirror 当前
-    # 在所有 huggingface_hub 版本下均触发 `FileMetadataError`（commit_hash None），
-    # 国内用户走 ModelScope 或自建反代；hf-mirror preset 暂从 UI 隐藏，但 endpoint
-    # 字段仍接受任意 URL（用户可手动粘贴）。复查清单见 docs/todo/hf-mirror-recheck.md。
-    # 自定义 URL 也支持（tencent / sjtug / 自建反代等）。
-    # huggingface_hub>=0.20 起 hf_hub_download / snapshot_download 都支持 `endpoint=` kwarg，
-    # 我们 per-call 传，不依赖 HF_ENDPOINT env var（env var 只在模块 import 时读，
-    # runtime 改设置无效）。
+    # PR-S3: HF model download endpoint. `""` uses the huggingface_hub default (direct to huggingface.co).
+    # 0.8.2 hotfix: switched the default back from `hf-mirror.com` to `""` (official HF). hf-mirror
+    # currently triggers `FileMetadataError` (commit_hash None) on every huggingface_hub version;
+    # users in mainland China should use ModelScope or their own reverse proxy; the hf-mirror preset
+    # is hidden from the UI for now, but the endpoint field still accepts any URL (users can paste
+    # one manually). See the recheck list at docs/todo/hf-mirror-recheck.md.
+    # Custom URLs are also supported (tencent / sjtug / self-hosted reverse proxy, etc).
+    # Since huggingface_hub>=0.20, both hf_hub_download / snapshot_download accept an `endpoint=`
+    # kwarg, which we pass per-call rather than relying on the HF_ENDPOINT env var (the env var is
+    # only read at module import time, so changing it at runtime has no effect).
     endpoint: str = ""
 
 
 class WandBPresetConfig(BaseModel):
-    """一套 WandB 账号 + 上传策略预设（对齐 LLMPresetConfig 的预设模式）。
+    """A WandB account + upload-policy preset (mirrors LLMPresetConfig's preset pattern).
 
-    0.18 起 WandB 配置预设化：顶层 WandBConfig 只留 enabled + 预设切换，
-    账号（api_key/entity/base_url）和上传策略全部下沉到 preset，可整套切换。
+    As of 0.18, WandB config is preset-based: the top-level WandBConfig only keeps
+    enabled + the current preset pointer; the account (api_key/entity/base_url) and
+    upload policy all live in the preset, so the whole set can be swapped at once.
     """
     id: str = "default"
     label: str = "Default"
@@ -75,16 +77,20 @@ class WandBPresetConfig(BaseModel):
     entity: str = ""
     base_url: str = ""
     mode: str = "online"
-    # 默认开 — wandb 启用时一并上传采样图，省得用户每次额外勾一次。私有 IP / NSFW
-    # 数据集请在 Settings 里关掉这个开关；关了之后只上传指标，图片不出本机。
+    # On by default — when wandb is enabled, sample images upload along with it, saving users an
+    # extra toggle each time. Turn this off in Settings for private IP / NSFW datasets; with it
+    # off, only metrics upload, no images leave the machine.
     log_samples: bool = True
-    # 上传前缩到最长边像素；原图常 2K+，512 已足够 wandb 面板浏览，省流量。
+    # Downscaled to this max side in pixels before upload; source images are often 2K+, and 512 is
+    # plenty for browsing in the wandb panel, saving bandwidth.
     sample_max_side: int = 512
-    # step 节流：>0 时只在 `global_step % N == 0` 上传，避免长训练上 GB 级图。
-    # 0 = 不额外节流（按训练循环已有 sample 频率上传），baseline / epoch 边界始终上传。
+    # Step throttling: when >0, only uploads on `global_step % N == 0`, avoiding GB-scale image
+    # uploads over a long run. 0 = no extra throttling (uploads at whatever sample frequency the
+    # training loop already uses); baseline / epoch boundaries always upload.
     sample_every_n_steps: int = 0
-    # Artifact 上传：模型 / 训练状态上传到 wandb Artifacts，方便云端管理和版本追踪。
-    # policy = "all" 保留全部版本，"last" 只保留最新一份（上传新的后删除旧版本）。
+    # Artifact upload: model / training-state checkpoints uploaded to wandb Artifacts for cloud
+    # management and version tracking. policy = "all" keeps every version, "last" keeps only the
+    # newest (deletes the old version after uploading the new one).
     upload_model: bool = False
     upload_model_policy: str = "last"
     upload_state_manual: bool = False
@@ -114,11 +120,11 @@ class WandBPresetConfig(BaseModel):
 
 
 class WandBConfig(BaseModel):
-    """全局 WandB：顶层只留总开关 + 当前预设指针，字段全在 preset 里。
+    """Global WandB: the top level only keeps the overall switch + the current preset pointer; all other fields live in the preset.
 
-    老扁平 schema（enabled + 平铺字段）由 _migrate_legacy_schema 包成
-    id="default" 的单 preset。训练进程经 supervisor 注入 WANDB_* env 读
-    `active` 预设 —— secrets 不落任何 yaml。
+    The old flat schema (enabled + flat fields) is wrapped by _migrate_legacy_schema into
+    a single preset with id="default". The training process reads the `active` preset and
+    injects it as WANDB_* env vars via the supervisor — secrets are never written to any yaml.
     """
     enabled: bool = False
     current_preset: str = "default"
@@ -128,7 +134,7 @@ class WandBConfig(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_values(self) -> "WandBConfig":
-        # id 去重保序 + 保底至少一个 preset + current 指向存在的 id
+        # Dedupe ids while preserving order + guarantee at least one preset + make current point to an existing id
         merged: list[WandBPresetConfig] = []
         seen: set[str] = set()
         for preset in self.presets:
@@ -144,7 +150,7 @@ class WandBConfig(BaseModel):
 
     @property
     def active(self) -> WandBPresetConfig:
-        """当前选中的 preset；validator 保证至少有一个。"""
+        """The currently selected preset; the validator guarantees at least one exists."""
         for preset in self.presets:
             if preset.id == self.current_preset:
                 return preset
@@ -153,9 +159,10 @@ class WandBConfig(BaseModel):
 
 class ModelScopeConfig(BaseModel):
     token: str = ""
-    # 魔搭社区（modelscope.cn）下载 token。公开模型不填也能下，私有 / 限速时需要。
-    # 使用前需 pip install modelscope；下载时会优先找 MODELSCOPE_REPO_MAP 里的对应仓库，
-    # 没有映射的模型自动回退 HuggingFace。
+    # ModelScope (modelscope.cn) download token. Public models can download without it; needed for
+    # private models or when rate-limited.
+    # Requires `pip install modelscope` first; downloads prefer the matching repo from
+    # MODELSCOPE_REPO_MAP, falling back to HuggingFace for unmapped models.
 
 
 class EvalMetricModelsConfig(BaseModel):
@@ -168,39 +175,46 @@ class EvalMetricModelsConfig(BaseModel):
     clip_model_name: str = "openai/clip-vit-base-patch32"
     dino_model_name: str = "facebook/dinov2-small"
     ccip_model_name: str = "ccip-caformer-24-randaug-pruned"
-    # 启用哪些评估指标（Settings 复选框，见 eval_registry）。eval 只算勾选的；
-    # 默认保留现有三指标，anime 域新指标（ccip_i / tag_recall）默认关、需用户开。
+    # Which evaluation metrics are enabled (Settings checkboxes, see eval_registry). Only checked
+    # metrics are computed; the existing three metrics stay on by default, the anime-domain
+    # metrics (ccip_i / tag_recall) default off and need the user to enable them.
     enabled_metrics: list[str] = Field(
         default_factory=lambda: ["clip_t", "clip_i", "dino_i"]
     )
-    # baseline 对照：训练后评估额外出一组纯底模(lora_scale=0)同 prompt/seed 图，
-    # 各指标给出 Δ = checkpoint − baseline（解「绝对值难解读」）。每 task 一次。
-    # 评估统一在训练后跑（inline / checkpoint-trigger 已移除）；是否评估由每个
-    # version 训练配置的 eval_validation_enabled 决定。
+    # Baseline comparison: after training, evaluation additionally generates a set of
+    # pure-base-model (lora_scale=0) images with the same prompt/seed, and each metric reports
+    # Δ = checkpoint − baseline (solving the "absolute values are hard to interpret" problem).
+    # Runs once per task. Evaluation always runs after training (inline / checkpoint-trigger has
+    # been removed); whether it runs is decided by each version's eval_validation_enabled
+    # training-config field.
     eval_baseline_enabled: bool = True
 
 
 class DownloadConfig(BaseModel):
-    """全局下载偏好（跨渠道共享）。"""
-    # 全局排除 tag：搜索时自动追加 -tag1 -tag2（gelbooru / danbooru 语法一致）
+    """Global download preferences (shared across channels)."""
+    # Global exclude tags: automatically appends -tag1 -tag2 to searches (same syntax on gelbooru / danbooru)
     exclude_tags: list[str] = Field(default_factory=list)
-    # PP9 — Booru API 池子调速（downloader + reg_builder 共用）
+    # PP9 — Booru API pool rate limiting (shared by downloader + reg_builder)
     parallel_workers: int = 4
     api_rate_per_sec: float = 2.0
     cdn_rate_per_sec: float = 5.0
-    # 图片入库处理（曾挂在 gelbooru 下，实际被所有 booru 下载 / reg / 本地上传共用）：
+    # Downloaded-image ingestion processing (used to live under gelbooru, actually shared by all
+    # booru downloads / reg / local uploads):
     save_tags: bool = False
     convert_to_png: bool = True
-    # 新装默认 true：训练里 4-channel PNG 会让 VAE 把透明区域当噪声学进去，
-    # 多数情况下用户都需要去掉 alpha。已存在 secrets.json 里显式 false 不受影响。
+    # New installs default to true: in training, a 4-channel PNG lets the VAE learn the
+    # transparent region as noise; most users need alpha stripped. Existing secrets.json with this
+    # explicitly set to false is unaffected.
     remove_alpha_channel: bool = True
 
 
 class RegConfig(BaseModel):
-    """正则集生成偏好（全局默认）。"""
-    # 全局默认排除 tag：正则集生成页进入某个 build 且尚无本地选择时，用这份列表
-    # 做初始排除（种子）。仅作初值，用户进页面后仍可逐 tag 增删，不影响已有 build 的
-    # 本地记录。前端按本页约定归一到 booru 形态（下划线）后存进 excluded 集。
+    """Regularization-set generation preferences (global defaults)."""
+    # Global default exclude tags: when the regularization-set generation page opens a build with
+    # no local selection yet, this list seeds the initial exclusion. It's only a starting point —
+    # users can still add/remove tags per-build after entering the page, and it doesn't affect an
+    # existing build's local record. The frontend normalizes to booru form (underscores) per this
+    # page's convention before storing into the excluded set.
     default_excluded_tags: list[str] = Field(default_factory=list)
 
 
@@ -209,13 +223,13 @@ LLM_MESSAGE_TYPES: tuple[str, ...] = ("text", "image")
 
 
 class LLMMessage(BaseModel):
-    """LLM payload 里的一条消息。
+    """A single message inside an LLM payload.
 
-    type=text：普通文本消息，需指定 role (system/user/assistant)；content 为 prompt 文本
-    type=image：图片占位 item，打标时后端把当前图片塞进这里
-        - content 字段被忽略
-        - role 固定为 "user"（OpenAI / Anthropic 都把 image 放在 user 侧）
-        - 每个 preset 必须恰好有一个 type=image item（validator 兜底）
+    type=text: a plain text message, requires a role (system/user/assistant); content is the prompt text
+    type=image: an image placeholder item — the backend inserts the current image here during tagging
+        - the content field is ignored
+        - role is fixed to "user" (both OpenAI / Anthropic put images on the user side)
+        - each preset must have exactly one type=image item (enforced by the validator)
     """
     type: str = "text"
     role: str = "user"
@@ -235,7 +249,7 @@ class LLMMessage(BaseModel):
 
 
 def _default_messages_for(prompt: str) -> list["LLMMessage"]:
-    """老 prompt 字段一行迁移 → [{system, prompt}, {image}]。"""
+    """One-line migration of the old prompt field → [{system, prompt}, {image}]."""
     msgs: list[LLMMessage] = []
     if prompt:
         msgs.append(LLMMessage(type="text", role="system", content=prompt))
@@ -244,40 +258,41 @@ def _default_messages_for(prompt: str) -> list["LLMMessage"]:
 
 
 class LLMPresetConfig(BaseModel):
-    """完整 LLM tagger 预设：每条 preset 承载一整套 endpoint + messages + 生成参数。
+    """Full LLM tagger preset: each preset carries a complete endpoint + messages + generation-parameter set.
 
-    messages 是 OpenAI chat-completions 风格的消息序列，外加一个特殊 type=image item
-    标记图片应当插入的位置。打标时后端按 messages 顺序铺开成 API payload。
+    messages is an OpenAI chat-completions-style message sequence, plus a special type=image item
+    marking where the image should be inserted. During tagging, the backend expands messages in
+    order into the API payload.
 
-    builtin: bool 仅标识 id 是否来自 builtin 列表（用于 UI 显示「重置为默认」）
-    —— 不锁字段，用户改 builtin preset 的任何字段都会持久化。
+    builtin: bool only flags whether the id comes from the builtin list (used by the UI to show
+    "reset to default") — it doesn't lock the fields; editing any field of a builtin preset still persists.
     """
     id: str
     label: str = ""
     builtin: bool = False
-    # endpoint 身份
+    # Endpoint identity
     base_url: str = ""
     api_key: str = ""
     model: str = ""
     model_ids: list[str] = Field(default_factory=list)
     endpoint: str = "chat_completions"  # chat_completions | responses
-    # prompt 消息序列（含图片位置）
+    # Prompt message sequence (including the image position)
     messages: list[LLMMessage] = Field(default_factory=lambda: _default_messages_for(""))
     output_format: str = "json"  # json | text
     # Assist tagging: pre-tag images with a local ONNX tagger before LLM calls,
     # then inject tags into {{tags}} placeholders in text messages.
     assist_tagger: str = ""  # "" | wd14 | cltagger
-    # 生成参数
+    # Generation parameters
     temperature: float = 0.2
     max_tokens: int = 700
-    # 图片处理
+    # Image handling
     max_side: int = 1280
     jpeg_quality: int = 85
     max_image_mb: float = 5.0
-    # 重试 / 超时
+    # Retry / timeout
     timeout: int = 60
     max_retries: int = 3
-    # 请求池 / 节流
+    # Request pool / throttling
     concurrency: int = 1
     requests_per_second: float = 0.0
     max_requests_per_minute: int = 0
@@ -285,7 +300,7 @@ class LLMPresetConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _accept_legacy_prompt(cls, data: Any) -> Any:
-        """兼容旧 schema 的 prompt: str → messages list。"""
+        """Backward compat for the old schema's prompt: str → messages list."""
         if not isinstance(data, dict):
             return data
         if "messages" in data and data["messages"]:
@@ -324,7 +339,7 @@ class LLMPresetConfig(BaseModel):
         self.max_side = max(64, int(self.max_side or 1280))
         self.jpeg_quality = max(1, min(100, int(self.jpeg_quality or 85)))
         self.max_image_mb = max(0.1, float(self.max_image_mb or 5.0))
-        # 当前选中的 model 始终出现在候选列表头部（与 WD14Config 一致）
+        # The currently selected model always appears at the head of the candidate list (same as WD14Config)
         if self.model and self.model not in self.model_ids:
             self.model_ids = [self.model, *self.model_ids]
         seen: set[str] = set()
@@ -337,7 +352,7 @@ class LLMPresetConfig(BaseModel):
             seen.add(key)
             clean.append(text)
         self.model_ids = clean
-        # messages 兜底：必须恰好一个 type=image item；缺则补到末尾
+        # messages fallback: must have exactly one type=image item; append one if missing
         if not self.messages:
             self.messages = _default_messages_for("")
         else:
@@ -345,7 +360,7 @@ class LLMPresetConfig(BaseModel):
             if not has_image:
                 self.messages = [*self.messages, LLMMessage(type="image")]
             else:
-                # 多个 image → 只保留第一个
+                # multiple images → keep only the first
                 kept: list[LLMMessage] = []
                 seen_image = False
                 for m in self.messages:
@@ -365,9 +380,9 @@ def _default_llm_presets() -> list[LLMPresetConfig]:
 
 
 class LLMTaggerConfig(BaseModel):
-    """LLM tagger 顶层配置：只保留 \"当前选中 preset id\" + \"preset 列表\"。
+    """Top-level LLM tagger config: only keeps "the currently selected preset id" + "the preset list".
 
-    所有 endpoint / prompt / 生成参数都下沉到 LLMPresetConfig。
+    All endpoint / prompt / generation parameters live in LLMPresetConfig.
     """
     current_preset: str = "style_json"
     presets: list[LLMPresetConfig] = Field(default_factory=_default_llm_presets)
@@ -381,7 +396,7 @@ class LLMTaggerConfig(BaseModel):
 
         merged: list[LLMPresetConfig] = []
         seen_ids: set[str] = set()
-        # 1) 按 builtin 顺序排列：用户改过的覆盖 builtin default；缺失则补回 default
+        # 1) Order by builtin order: user-modified presets override the builtin default; missing ones are refilled from the default
         for bid in BUILTIN_PRESET_ORDER:
             if bid in user_by_id:
                 preset = user_by_id[bid]
@@ -393,7 +408,7 @@ class LLMTaggerConfig(BaseModel):
                 preset.builtin = True
                 merged.append(preset)
                 seen_ids.add(bid)
-        # 2) 追加用户自定义 preset（id 不在 builtin 列表）
+        # 2) Append user-defined presets (id not in the builtin list)
         for preset in self.presets:
             if preset.id and preset.id not in seen_ids:
                 preset.builtin = False
@@ -409,15 +424,16 @@ class LLMTaggerConfig(BaseModel):
 
     @property
     def active(self) -> LLMPresetConfig:
-        """当前选中的 preset；validator 保证至少有一个。"""
+        """The currently selected preset; the validator guarantees at least one exists."""
         for preset in self.presets:
             if preset.id == self.current_preset:
                 return preset
         return self.presets[0]
 
 
-# 默认 WD14 候选模型；用户可在「设置 → WD14 → 候选模型」里增删，
-# 当前选中的 `model_id` 永远会被规范化进 `model_ids`（见 WD14Config validator）。
+# Default WD14 candidate models; users can add/remove them under "Settings → WD14 → candidate
+# models". The currently selected `model_id` is always normalized into `model_ids` (see the
+# WD14Config validator).
 DEFAULT_WD14_MODELS: tuple[str, ...] = (
     "SmilingWolf/wd-eva02-large-tagger-v3",
     "SmilingWolf/wd-vit-tagger-v3",
@@ -434,18 +450,20 @@ class WD14Config(BaseModel):
     threshold_general: float = 0.35
     threshold_character: float = 0.85
     blacklist_tags: list[str] = Field(default_factory=list)
-    # PP8 — batch 推理大小；GPU EP 时按这个走，CPU 兜底自动降到 1
+    # PP8 — batch inference size; used when the GPU EP is active, falls back to 1 automatically on CPU
     batch_size: int = 8
 
     @model_validator(mode="after")
     def _ensure_model_ids_invariant(self) -> "WD14Config":
-        """保证 `model_id ∈ model_ids` 且候选列表不为空。
+        """Guarantees `model_id ∈ model_ids` and that the candidate list is never empty.
 
-        - 列表为空（含旧 secrets.json 没这个字段然后被显式置空）→ 回填默认 4 项。
-        - 当前选中的 model_id 不在列表里 → 加到列表头（用户既能跑临时模型，
-          dropdown 也始终能显示当前值）。
-        副作用：用户若想从候选中「删除当前选中」，需先在打标 / 设置页切到另一个
-        model_id 再删；前端会强制这种顺序。
+        - Empty list (including an old secrets.json missing this field that then got explicitly
+          cleared) → refilled with the default 4 entries.
+        - The currently selected model_id not in the list → prepended to the list (so users can
+          run a one-off model while the dropdown still always shows the current value).
+        Side effect: if a user wants to "remove the currently selected" model from the candidates,
+        they must switch to a different model_id on the tagging / settings page first, then delete;
+        the frontend enforces this order.
         """
         if not self.model_ids:
             self.model_ids = list(DEFAULT_WD14_MODELS)
@@ -460,10 +478,11 @@ class CLTaggerConfig(BaseModel):
     tag_mapping_path: str = "cl_tagger_1_02/tag_mapping.json"
     threshold_general: float = 0.35
     threshold_character: float = 0.6
-    # CLTagger 模型输出 8 个 category：General / Character 走阈值过滤，其余 6 个
-    # 按 bool 开关 gate。默认勾上 General / Character / Copyright 三类——LoRA
-    # 训练标准 caption 形态；Artist / Meta / Model / Rating / Quality 默认关，
-    # 避免污染 caption（画师名以及 "highres", "best quality", "explicit" 这类元信息）。
+    # The CLTagger model outputs 8 categories: General / Character go through threshold filtering,
+    # the other 6 are gated by bool switches. General / Character / Copyright are checked on by
+    # default — the standard caption shape for LoRA training; Artist / Meta / Model / Rating /
+    # Quality default off, to avoid polluting captions (artist names and meta info like "highres",
+    # "best quality", "explicit").
     add_copyright_tag: bool = True
     add_artist_tag: bool = False
     add_meta_tag: bool = False
@@ -471,86 +490,101 @@ class CLTaggerConfig(BaseModel):
     add_rating_tag: bool = False
     add_quality_tag: bool = False
     blacklist_tags: list[str] = Field(default_factory=list)
-    # 与 WD14 一致：只有 CUDA EP 时才真正 batch，CPU 自动降到 1。
+    # Same as WD14: real batching only kicks in with a CUDA EP, falls back to 1 automatically on CPU.
     batch_size: int = 8
 
 
 class QueueConfig(BaseModel):
-    """队列调度策略（R-1 资源档位模型，docs/design/queue-resource-model-0.17.md）。
+    """Queue scheduling policy (the R-1 resource-tier model, docs/design/queue-resource-model-0.17.md).
 
-    工作项分三档：exclusive（训练/正则 AI/出图/评估出图，底模级显存，全系统
-    同时只跑 1 个，永不并行）、light（打标/超分/正则构建/评估指标，数百 MB
-    小模型）、io（下载，恒放行）。
+    Work items fall into three tiers: exclusive (training / regularization AI / image generation /
+    evaluation generation — base-model-scale VRAM, only 1 runs system-wide at a time, never in
+    parallel), light (tagging / upscaling / regularization build / evaluation metrics — a few
+    hundred MB, small models), io (downloads, always allowed through).
 
-    - `light_tasks_during_train`：exclusive 任务运行时是否允许 light 档并行。
-      默认开启——轻量任务只加载小模型。独占档不受此开关影响（老开关
-      `allow_gpu_during_train` 会连评估出图一起放行，是 OOM 隐患，已废弃；
-      语义变化故不迁移旧值）。
+    - `light_tasks_during_train`: whether light-tier tasks are allowed to run in parallel while an
+      exclusive task is running. On by default — light tasks only load small models. The exclusive
+      tier is unaffected by this switch (the old `allow_gpu_during_train` switch let even
+      evaluation generation through, an OOM hazard, and has been retired; its semantics changed,
+      so the old value isn't migrated).
     """
     light_tasks_during_train: bool = True
 
 
 class TrainingSecretsConfig(BaseModel):
-    """训练侧全局行为开关（Settings → 训练）。
+    """Global training-side behavior switches (Settings → Training).
 
-    - `ram_guard`：训练 / AI 先验（正则生成）的内存/显存水位保护。语义同
-      `generate.ram_guard`：加载大模型前按权重文件实际大小预算系统内存与
-      GPU 空闲显存，任一不足时中止并报可操作错误。**默认关**（上游 v0.23.1
-      裁定：按文件大小的估算偏保守，在配置足够的机器上误拒率高，而误拒时
-      用户没有出路）；关闭时资源不足会继续加载，可能触发整机换页卡顿。
-      经环境变量 ``LORA_RAM_GUARD`` 注入训练子进程（supervisor `_popen`）。
-      block swap 的 pinned 内存护栏**不受此开关影响** —— 锁定内存不可换页、
-      占满会硬卡整机，且有独立出路（调小 blocks_to_swap）。
+    - `ram_guard`: memory/VRAM headroom protection for training / AI priors (regularization
+      generation). Same semantics as `generate.ram_guard`: before loading a large model, budgets
+      system RAM and free GPU VRAM against the weight file's actual size, aborting with an
+      actionable error if either is insufficient. **Off by default** (per upstream v0.23.1: the
+      file-size-based estimate is conservative, producing a high false-rejection rate on
+      well-provisioned machines, and a false rejection leaves the user with no way out); when off,
+      insufficient resources let loading proceed, which may trigger system-wide paging stutter.
+      Injected into the training subprocess via the ``LORA_RAM_GUARD`` environment variable
+      (supervisor `_popen`). Block swap's pinned-memory guardrail **is not affected by this
+      switch** — pinned memory can't be paged out, filling it hard-stalls the whole machine, and it
+      has its own way out (lower blocks_to_swap).
 
-    上游把这个模型叫 `TrainingConfig`，本 fork 改名 `TrainingSecretsConfig`：
-    `studio.domain.training.TrainingConfig`（643 行的训练参数 schema）是全仓
-    最常被 import 的名字之一，同名两个 pydantic 模型只会招来误 import。
-    secrets.json 里的键仍是 `training`，与上游同形。
+    Upstream calls this model `TrainingConfig`; this fork renames it `TrainingSecretsConfig`:
+    `studio.domain.training.TrainingConfig` (the 643-line training-parameter schema) is one of the
+    most commonly imported names in the whole repo, and two same-named pydantic models would
+    invite wrong imports.
+    The key in secrets.json is still `training`, matching upstream's shape.
     """
     ram_guard: bool = False
 
 
 class ModelsConfig(BaseModel):
-    """全局模型配置（PP7）。
+    """Global model configuration (PP7).
 
-    - `root`：模型存放根目录。`None/""` → 回退到 `REPO_ROOT/models/`（默认）。
-      云端 / 大容量数据盘可改成绝对路径，比如 `D:/anima-models` 或 `/data/anima`。
-      所有训练模型（Anima / VAE / Qwen3 / T5 tokenizer / WD14）共享这一根目录。
-    - `selected_anima`：当前默认主模型。可为官方 variant key（`1.0` 等）**或**
-      `custom_anima_paths` 里某个本地 `.safetensors` 绝对路径。Studio 创建新
-      version 时根据此字段把 `transformer_path` 写成绝对路径到 yaml；已存在
-      version 不动（保证训练重现性）。
-    - `custom`：按模型族保存用户通过 PathPicker 注册的本地主模型权重。
-      `custom_anima_paths` 保留为旧客户端兼容读写面。仅注册路径，不下载、
-      不复制；条目失效时解析自动回退到官方 variant。
-    - `selected_vae`：当前默认 VAE。空串 = 官方 `qwen_image_vae` 落点；否则是
-      用户注册的本地 `.safetensors` 绝对路径。VAE 是族无关共享资产（见
-      `models/paths.qwen_image_vae_target`），所以这里是单值而非 per-family。
-    - `selected_upscaler`：预处理默认放大器。可为预设 label（如 "4x-AnimeSharp"）
-      或自定义/上传的文件名（如 "my-anime-model.pth"）。空串/None → 用
-      DEFAULT_UPSCALER 兜底。
-    - `auto_sync_paths`：fork 预设到 version 时，是否自动用全局模型路径覆盖
-      预设里的 4 个模型字段（transformer / vae / text_encoder / t5_tokenizer）。
-      ON（默认）→ 多数用户：永不碰 4 字段，fork 始终用 Settings 全局值；
-      4 字段在项目页 / 预设页 UI 上 disabled。
-      OFF → 独立模型用户：fork 时尊重预设值，4 字段可编辑 + picker。
+    - `root`: the root directory where models are stored. `None/""` → falls back to
+      `REPO_ROOT/models/` (default). Cloud / large-capacity data disks can point this at an
+      absolute path, e.g. `D:/anima-models` or `/data/anima`. All training models (Anima / VAE /
+      Qwen3 / T5 tokenizer / WD14) share this one root directory.
+    - `selected_anima`: the current default main model. Can be an official variant key (`1.0`,
+      etc.) **or** an absolute path to a local `.safetensors` file registered in
+      `custom_anima_paths`. When Studio creates a new version, this field determines the absolute
+      path written into `transformer_path` in the yaml; existing versions are left untouched (to
+      preserve training reproducibility).
+    - `custom`: per-family storage of local main-model weights the user registered via the
+      PathPicker. `custom_anima_paths` is kept as a read/write compat surface for older clients.
+      Only registers the path — nothing is downloaded or copied; if an entry becomes invalid,
+      resolution automatically falls back to the official variant.
+    - `selected_vae`: the current default VAE. Empty string = the official `qwen_image_vae`
+      location; otherwise a user-registered absolute path to a local `.safetensors` file. VAE is a
+      family-agnostic shared asset (see `models/paths.qwen_image_vae_target`), so this is a single
+      value rather than per-family.
+    - `selected_upscaler`: the default preprocessing upscaler. Can be a preset label (e.g.
+      "4x-AnimeSharp") or a custom/uploaded filename (e.g. "my-anime-model.pth"). Empty
+      string/None → falls back to DEFAULT_UPSCALER.
+    - `auto_sync_paths`: when forking a preset into a version, whether to automatically overwrite
+      the preset's 4 model fields (transformer / vae / text_encoder / t5_tokenizer) with the global
+      model paths. ON (default) → for most users: the 4 fields are never touched, forking always
+      uses the Settings global values; the 4 fields are disabled in the project page / preset page
+      UI.
+      OFF → for independent-model users: forking respects the preset's own values, the 4 fields are
+      editable + have a picker.
     """
     root: Optional[str] = None
-    # per-family 选中主模型（多模型 PR-4）：family_id → variant key 或 custom 路径。
-    # 老键 selected_anima 由 before-validator 迁移（settings PUT 的 merged dict
-    # 会同时带两键——入站 selected_anima 优先，覆盖 merge 进来的旧 selected）。
+    # Per-family selected main model (multi-model PR-4): family_id → variant key or custom path.
+    # The old selected_anima key is migrated by the before-validator (a settings PUT's merged dict
+    # can carry both keys — the inbound selected_anima takes priority, overriding the old selected
+    # merged in).
     selected: dict[str, str] = Field(default_factory=lambda: {"anima": "1.0"})
-    # per-family 选中文本编码器：官方 variant key（krea2："bf16"|"fp8"，
-    # 缺失=bf16）**或**用户注册的本地文本编码器目录绝对路径（自定义 CLIP /
-    # Qwen 编码器）。决定训练新建 version 的 text_encoder_path 默认 + 测试
-    # 出图 TE 默认；已存在 version 的 config 不动（训练重现性，与 selected
-    # 同口径）。本地路径失效（被删 / 移走）时解析自动回退官方目录。
+    # Per-family selected text encoder: an official variant key (krea2: "bf16"|"fp8", missing=bf16)
+    # **or** an absolute path to a user-registered local text-encoder directory (custom CLIP /
+    # Qwen encoder). Determines the text_encoder_path default when a new training version is
+    # created + the test-generation TE default; existing versions' configs are untouched (training
+    # reproducibility, same convention as selected). A local path that becomes invalid (deleted /
+    # moved) automatically falls back to the official directory.
     selected_te: dict[str, str] = Field(default_factory=dict)
-    # 选中 VAE：空串 = 官方 qwen_image_vae 落点，否则本地 .safetensors 绝对
-    # 路径（domain "vae" 的候选之一）。失效时同样回退官方落点。
+    # Selected VAE: empty string = the official qwen_image_vae location, otherwise an absolute
+    # local .safetensors path (one of domain "vae"'s candidates). Also falls back to the official
+    # location when invalid.
     selected_vae: str = ""
-    # per-family 本地主模型路径。老键 custom_anima_paths 由 validator 迁移，
-    # computed_field 保留旧客户端读面。
+    # Per-family local main-model paths. The old custom_anima_paths key is migrated by the
+    # validator; the computed_field keeps a read surface for older clients.
     custom: dict[str, list[str]] = Field(default_factory=dict)
     selected_upscaler: str = "4x-AnimeSharp"
     auto_sync_paths: bool = True
@@ -558,7 +592,7 @@ class ModelsConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_model_fields(cls, data):
-        """迁移 Anima 老键，同时保留按 family 的新结构。"""
+        """Migrates the old Anima keys while preserving the new per-family structure."""
         if isinstance(data, dict) and (
             "selected_anima" in data or "custom_anima_paths" in data
         ):
@@ -579,45 +613,50 @@ class ModelsConfig(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def selected_anima(self) -> str:
-        """兼容读面（前端 settings 读 + dump 落盘回显）；写请走 selected。"""
+        """Read-compat surface (frontend settings reads + dump echoes to disk); writes should go through selected."""
         return self.selected.get("anima") or "1.0"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def custom_anima_paths(self) -> list[str]:
-        """兼容旧客户端的 Anima 本地模型列表；写请走 custom。"""
+        """Backward-compat Anima local-model list for old clients; writes should go through custom."""
         return list(self.custom.get("anima") or [])
 
 
 class GenerateConfig(BaseModel):
-    """测试出图 daemon 行为（PR Phase 2）。
+    """Test-generation daemon behavior (PR Phase 2).
 
-    - `preview_every_n_steps`：中间步预览节流。0=关；>0 → daemon 用 TAEFlux
-      decode 每 N 步推一张 256px JPEG 给前端。需要 TAEFlux 模型已下载
-      （settings 入口或 POST /api/generate/taeflux/install）。
-    - `attention_backend`：注意力后端选择。`'auto'`（默认）→ 装了什么用什么
-      （优先级 flash_attn > xformers > none/SDPA）；显式值（flash_attn/
-      xformers/none）则强制 —— 想 debug 或对比时手动指定。
-    - `idle_timeout_minutes`：daemon 闲置 N 分钟自动卸载模型释放 VRAM。
-      0 = 关闭，模型常驻直到用户手动清。计时只在 daemon idle + 模型已 load
-      时跑；进 busy / 已 unload 时取消。
-    - `vae_precision`：测试出图 VAE decode 精度。`'bf16'`（默认）对齐 ComfyUI
-      在现代 GPU 上的 auto VAE dtype；`'fp32'` 全精度 decode（显存高峰更大，
-      daemon 会在 decode 前临时 offload DiT/Qwen 腾显存）。
-    - `save_test_images`：开关测试出图自动落盘。默认关；开后每次出完图前端
-      会调 /api/generate/save 把成图存到 studio_data/test/<date>/{single,xy}/
-      image_N.png（N 按当前文件夹已有最大编号+1）。compare 模式不落盘。
-    - `vram_policy`：测试出图显存策略（krea2 生效）。`'auto'`（默认）按空闲
-      显存决定文本编码器与 DiT 是否让位；`'save_vram'` 强制顺序化（峰值最
-      低，每图多几秒搬运）；`'performance'` 全部常驻显存（峰值最高、零搬运）。
-    - `ram_guard`：内存/显存水位保护。加载大模型前按权重文件实际大小
-      预算系统内存与 GPU 空闲显存，任一不足时中止并报可操作错误
-      （开启时显存检查可拦多进程叠加）。**默认关**（上游 v0.23.1 裁定：
-      按文件大小的估算偏保守，误拒率高）；关闭时资源不足会继续加载，
-      可能触发整机换页卡顿。
-    - `task_timeout_minutes`：出图任务超时兜底。任务开始后超 N 分钟未
-      完成 → 强制终止 daemon 进程（卡死场景协议级取消无效，只能进程级
-      kill；下次任务自动重启）。0（默认）= 关闭。
+    - `preview_every_n_steps`: intermediate-step preview throttling. 0=off; >0 → the daemon
+      pushes a 256px JPEG preview to the frontend every N steps via TAEFlux decode. Requires the
+      TAEFlux model to already be downloaded (via the Settings entry point or
+      POST /api/generate/taeflux/install).
+    - `attention_backend`: attention backend selection. `'auto'` (default) → uses whatever is
+      installed (priority flash_attn > xformers > none/SDPA); an explicit value (flash_attn/
+      xformers/none) forces it — useful for debugging or comparisons.
+    - `idle_timeout_minutes`: the daemon auto-unloads the model to free VRAM after N minutes idle.
+      0 = off, the model stays resident until manually cleared. The timer only runs while the
+      daemon is idle + a model is loaded; it's cancelled on entering busy / after unload.
+    - `vae_precision`: test-generation VAE decode precision. `'bf16'` (default) matches ComfyUI's
+      auto VAE dtype on modern GPUs; `'fp32'` is full-precision decode (higher peak VRAM — the
+      daemon temporarily offloads DiT/Qwen before decode to free VRAM).
+    - `save_test_images`: toggles automatic disk-saving of test generations. Off by default; when
+      on, the frontend calls /api/generate/save after each generation to save the image to
+      studio_data/test/<date>/{single,xy}/image_N.png (N = the current folder's highest existing
+      number + 1). Compare mode never saves to disk.
+    - `vram_policy`: test-generation VRAM strategy (applies to krea2). `'auto'` (default) decides
+      whether the text encoder and DiT yield to each other based on free VRAM; `'save_vram'` forces
+      sequential loading (lowest peak, a few extra seconds moving things per image);
+      `'performance'` keeps everything resident in VRAM (highest peak, zero moving).
+    - `ram_guard`: memory/VRAM headroom protection. Before loading a large model, budgets system
+      RAM and free GPU VRAM against the weight file's actual size, aborting with an actionable
+      error if either is insufficient (when on, the VRAM check can catch multi-process VRAM
+      stacking). **Off by default** (per upstream v0.23.1: the file-size-based estimate is
+      conservative, producing a high false-rejection rate); when off, insufficient resources let
+      loading proceed, which may trigger system-wide paging stutter.
+    - `task_timeout_minutes`: a fallback timeout for generation tasks. If a task hasn't finished N
+      minutes after starting → the daemon process is force-killed (a hung task can't be cancelled
+      at the protocol level, only killed at the process level; the next task restarts it
+      automatically). 0 (default) = off.
     """
     preview_every_n_steps: int = 3
     attention_backend: str = "auto"
@@ -630,40 +669,46 @@ class GenerateConfig(BaseModel):
 
 
 class SystemConfig(BaseModel):
-    """系统级偏好（ADR 0002 / 0005）。
+    """System-level preferences (ADR 0002 / 0005).
 
-    - `update_channel`：用户订阅哪条更新轨道。"stable"（默认）= 只看稳定版
-      更新提示；"dev" = 看 dev 通道（最近 commit 时间线、可切到 dev HEAD）。
-      这是**用户视图偏好**，与 git 工作树状态解耦 —— 切 toggle 不触发任何
-      git 操作；真正"切到 dev HEAD" / "更新到 vX.Y.Z" 是单独按钮。
-    - `show_dev_channel`：deprecated，由 `_migrate_legacy_schema` 一次性迁移成
-      `update_channel`（true → "dev"，false → "stable"），保留字段以便旧
-      secrets.json 读取时 pydantic 不报错；新代码不要再用。
-    - `enable_automagic_v2`：实验性 feature flag。Automagic v2（fused backward）
-      未正式发布，UI 默认隐藏 automagic_variant 字段（/api/schema 动态打 hidden）。
-      Settings 页**故意不渲染**这个开关 —— 只能手改 secrets.json 启用；CLI/yaml
-      路径不受影响（validate 仍拦 grad_accum/fp16 等不兼容组合）。
+    - `update_channel`: which update track the user is subscribed to. "stable" (default) = only
+      see stable-release update prompts; "dev" = see the dev channel (recent commit timeline, can
+      switch to dev HEAD). This is a **user view preference**, decoupled from the git working
+      tree's state — toggling it triggers no git operations; actually "switching to dev HEAD" /
+      "updating to vX.Y.Z" are separate buttons.
+    - `show_dev_channel`: deprecated, one-time migrated to `update_channel` by
+      `_migrate_legacy_schema` (true → "dev", false → "stable"); kept so pydantic doesn't error
+      reading an old secrets.json; don't use it in new code.
+    - `enable_automagic_v2`: an experimental feature flag. Automagic v2 (fused backward) hasn't
+      been officially released, so the UI hides the automagic_variant field by default
+      (/api/schema dynamically marks it hidden). The Settings page **deliberately doesn't render**
+      this toggle — it can only be enabled by hand-editing secrets.json; the CLI/yaml path is
+      unaffected (validation still catches incompatible combinations like grad_accum/fp16).
     """
     update_channel: str = "stable"  # "stable" / "dev"
-    show_dev_channel: bool = False  # deprecated, 仅作迁移源
-    enable_automagic_v2: bool = False  # 实验性：文件级开关，UI 不暴露
-    # 「ram_guard 默认改关」一次性迁移哨兵（_migrate_legacy_schema 第 10 步）。
-    # 判据是**盘上键缺失**（只有本版之前写的旧盘没有此键）→ 丢弃盘上的
-    # generate/training ram_guard 旧值让新默认（关）生效；新代码落的盘总带
-    # 此键，显式开启的值不会被丢弃。默认 True：新装无旧值可迁，
-    # 「迁移已完成」天然成立。
+    show_dev_channel: bool = False  # deprecated, migration source only
+    enable_automagic_v2: bool = False  # experimental: file-level switch, not exposed in the UI
+    # One-time migration sentinel for "ram_guard default flipped to off" (_migrate_legacy_schema
+    # step 10). The test is **the key missing on disk** (only an old disk written before this
+    # version lacks this key) → discard the old on-disk generate/training ram_guard values so all
+    # users land on the new default (off); new code always writes this disk with the key present,
+    # so an explicitly-enabled value is never discarded. Default True: a fresh install has no old
+    # value to migrate, so "migration already done" holds trivially.
     ram_guard_default_off: bool = True
 
 
 class RuntimeConfig(BaseModel):
-    """运行模式（Colab / Local）—— 见 `infrastructure/runtime_mode.py`。
+    """Runtime mode (Colab / Local) — see `infrastructure/runtime_mode.py`.
 
-    - `mode`：`""`（还没选过，前端进应用时弹选择框）/ `"local"` / `"colab"`。
-      非法值由 validator 归零成 `""`，宁可多问一次也不要静默按错模式跑。
-    - `asked`：用户是否已经过一次选择流程。`mode` 有值时它必然为 True；单独
-      留字段是为了未来"跳过一次、下次再问"的可能，现在只作只读标记。
+    - `mode`: `""` (not chosen yet, the frontend pops the picker on app entry) / `"local"` /
+      `"colab"`. An invalid value is reset to `""` by the validator — better to ask again than to
+      silently run under the wrong mode.
+    - `asked`: whether the user has already been through the choice flow once. It's necessarily
+      True whenever `mode` has a value; it's kept as a separate field for a possible future "skip
+      once, ask again next time," and for now is just a read-only marker.
 
-    环境变量 `ALS_RUNTIME_MODE` 覆盖本字段且不落盘（Colab notebook 注入）。
+    The `ALS_RUNTIME_MODE` environment variable overrides this field and is never persisted
+    (injected by the Colab notebook).
     """
     mode: str = ""
     asked: bool = False
@@ -671,8 +716,9 @@ class RuntimeConfig(BaseModel):
     @model_validator(mode="after")
     def _normalize_values(self) -> "RuntimeConfig":
         text = str(self.mode or "").strip().lower()
-        # 这里刻意不 import runtime_mode：secrets 被 runtime_mode.stored() 反向
-        # import，函数内 import 能断环但模块级不行。取值集合就两个，直接内联。
+        # Deliberately not importing runtime_mode here: secrets is reverse-imported by
+        # runtime_mode.stored(); an in-function import can break the cycle but a module-level one can't.
+        # There are only two possible values, so inline them directly.
         self.mode = text if text in ("local", "colab") else ""
         if self.mode:
             self.asked = True
@@ -708,33 +754,34 @@ class RemoteAccessConfig(BaseModel):
 
 
 class ProxyConfig(BaseModel):
-    """全局 HTTP/HTTPS 代理配置。"""
+    """Global HTTP/HTTPS proxy configuration."""
     enabled: bool = False
-    http_proxy: str = ""  # 例如: http://127.0.0.1:7890
+    http_proxy: str = ""  # e.g.: http://127.0.0.1:7890
     https_proxy: str = ""
-    no_proxy: str = ""    # 例外地址，如 localhost,127.0.0.1
+    no_proxy: str = ""    # exceptions, e.g. localhost,127.0.0.1
 
 
-# 按类型分别选下载源的 key（双源类型）。固定 HF 的（cltagger / t5 / taeflux）
-# 不在此列，路由强制 HF。training = anima 主+VAE + qwen3 + t5 这一整组训练前置。
+# Per-type download-source selection key (dual-source types). Types fixed to HF (cltagger / t5 /
+# taeflux) aren't in this list — routing forces HF for them. training = the whole pre-training
+# group: Anima main + VAE + qwen3 + t5.
 DOWNLOAD_SOURCE_TYPES: tuple[str, ...] = ("training", "wd14", "upscaler")
 DOWNLOAD_SOURCE_VALUES: tuple[str, ...] = ("huggingface", "modelscope")
 
 
 # ---------------------------------------------------------------------------
-# 统一模型来源候选（docs/design/model-source-unification.md）
+# Unified model-source candidates (docs/design/model-source-unification.md)
 # ---------------------------------------------------------------------------
 
 
 class SourceCandidate(BaseModel):
-    """用户添加的模型来源候选。
+    """A model-source candidate the user added.
 
-    - kind="download"：`repo`（HF/MS repo id）+ 单文件资产另需 `filename`
-      （upscaler / 主模型）；目录型资产（wd14 / eval / cltagger）只有 repo。
-    - kind="local"：`path` 本地绝对路径（文件或目录）。永不被删除文件，
-      移除只是移出候选列表。
-    - `extra`：域特有键（cltagger：model_path / tag_mapping_path 相对 repo
-      根的双文件路径）。
+    - kind="download": `repo` (an HF/MS repo id) + single-file assets also need `filename`
+      (upscaler / main model); directory-type assets (wd14 / eval / cltagger) only have repo.
+    - kind="local": `path` an absolute local path (file or directory). Never deletes the file;
+      removing it only takes it off the candidate list.
+    - `extra`: domain-specific keys (cltagger: model_path / tag_mapping_path, the two file paths
+      relative to the repo root).
     """
     kind: Literal["download", "local"]
     repo: str = ""
@@ -743,48 +790,50 @@ class SourceCandidate(BaseModel):
     extra: dict[str, str] = Field(default_factory=dict)
 
     def identity(self) -> tuple[str, str, str]:
-        """去重身份键：download=(repo, filename)，local=(path,)。"""
+        """Dedup identity key: download=(repo, filename), local=(path,)."""
         if self.kind == "download":
             return ("download", self.repo, self.filename)
         return ("local", self.path, "")
 
 
-# repo 型 domain（选中值 = repo id 或本地绝对路径）。这些 domain 参与
-# 「选中值不在内置也不在候选 → 自动补候选」的统一不变量；upscaler
-# （文件名语义 + 扫盘兜底）与主模型族（families 注册表在 services 层，
-# 解析回退逻辑健全）不在此列，其候选完全由端点维护。
+# Repo-type domains (selected value = repo id or an absolute local path). These domains
+# participate in the shared invariant "selected value not in builtins and not in candidates →
+# auto-add a candidate"; upscaler (filename semantics + disk-scan fallback) and the main-model
+# families (the families registry lives at the services layer, whose fallback resolution is
+# already solid) aren't in this list — their candidates are maintained entirely by their own
+# endpoints.
 MODEL_SOURCE_REPO_DOMAINS: tuple[str, ...] = (
     "wd14", "cltagger", "eval_clip", "eval_dino", "eval_ccip",
 )
 
-#: 族无关 VAE 权重的候选 domain（选中值落 models.selected_vae）。
+#: Candidate domain for the family-agnostic VAE weights (selected value lands in models.selected_vae).
 VAE_DOMAIN = "vae"
-#: 按族文本编码器候选 domain 的后缀：`anima_te` / `krea2_te`（选中值落
-#: models.selected_te[family]，与官方 variant key 共用同一字段）。
+#: Suffix for per-family text-encoder candidate domains: `anima_te` / `krea2_te` (selected value
+#: lands in models.selected_te[family], sharing the same field as the official variant key).
 TE_DOMAIN_SUFFIX = "_te"
 
 
 def te_domain(family: str) -> str:
-    """族 id → 文本编码器候选 domain（`krea2` → `krea2_te`）。"""
+    """Family id → text-encoder candidate domain (`krea2` → `krea2_te`)."""
     return f"{family}{TE_DOMAIN_SUFFIX}"
 
 
 def te_domain_family(domain: str) -> str:
-    """`krea2_te` → `krea2`；非 TE domain 返回空串。"""
+    """`krea2_te` → `krea2`; returns an empty string for a non-TE domain."""
     if domain.endswith(TE_DOMAIN_SUFFIX) and len(domain) > len(TE_DOMAIN_SUFFIX):
         return domain[: -len(TE_DOMAIN_SUFFIX)]
     return ""
 
 
 def is_weight_asset_domain(domain: str) -> bool:
-    """VAE / 文本编码器 domain？——它们的本地候选不进 models.custom 兼容面
-    （那个字段只放「族本地主模型」，见 ModelsConfig.custom）。"""
+    """VAE / text-encoder domain? — their local candidates don't go into the models.custom compat
+    surface (that field only holds "per-family local main models", see ModelsConfig.custom)."""
     return domain == VAE_DOMAIN or bool(te_domain_family(domain))
 
 
 def is_abs_path(value: str) -> bool:
-    """跨平台绝对路径判断（win 盘符 / UNC / posix 根）；repo id 形如
-    `owner/name` 均为相对 → False。"""
+    """Cross-platform absolute-path check (Windows drive letter / UNC / posix root); a repo id
+    like `owner/name` is relative → False."""
     return (
         PureWindowsPath(value).is_absolute()
         or PurePosixPath(value).is_absolute()
@@ -802,16 +851,16 @@ class Secrets(BaseModel):
     eval_metrics: EvalMetricModelsConfig = Field(
         default_factory=EvalMetricModelsConfig
     )
-    # 旧的全局下载源（已退役为「迁移种子」）。不再有 UI 开关；新模型按类型在
-    # download_sources 里各自选源。保留此字段仅为兼容旧 secrets.json：load 时把它
-    # 的值种子填充到尚未设过的 download_sources 类型，避免老（尤其国内设了
-    # modelscope 的）用户静默回退 HF。
+    # The old global download source (retired to a "migration seed"). No UI toggle anymore; new
+    # models each pick a source per type in download_sources. Kept only for compat with old
+    # secrets.json: on load, its value seeds any download_sources type not yet set, so old users
+    # (especially those in mainland China who had set modelscope) don't silently fall back to HF.
     download_source: str = "huggingface"
-    # 按类型分别选下载源：{"training"|"wd14"|"upscaler": "huggingface"|"modelscope"}。
-    # 选中源缺某个 variant/文件时由 downloader 自动回退另一源。
+    # Per-type download-source selection: {"training"|"wd14"|"upscaler": "huggingface"|"modelscope"}.
+    # If the selected source is missing a variant/file, the downloader automatically falls back to the other source.
     download_sources: dict[str, str] = Field(default_factory=dict)
-    # JoyCaptionConfig 已并入 llm_tagger 的 joycaption builtin preset；
-    # secrets.json 里若残留 joycaption 字段，由 _migrate_legacy_schema 迁移后丢弃。
+    # JoyCaptionConfig has been folded into llm_tagger's joycaption builtin preset;
+    # any leftover joycaption field in secrets.json is migrated then dropped by _migrate_legacy_schema.
     llm_tagger: LLMTaggerConfig = Field(default_factory=LLMTaggerConfig)
     wd14: WD14Config = Field(default_factory=WD14Config)
     cltagger: CLTaggerConfig = Field(default_factory=CLTaggerConfig)
@@ -819,29 +868,32 @@ class Secrets(BaseModel):
     queue: QueueConfig = Field(default_factory=QueueConfig)
     generate: GenerateConfig = Field(default_factory=GenerateConfig)
     training: TrainingSecretsConfig = Field(default_factory=TrainingSecretsConfig)
-    # 本 fork：in-app updater 移除，但 SystemConfig 保留（enable_automagic_v2
-    # feature flag + 旧 secrets.json 的 update_channel 字段兼容）。
+    # This fork: the in-app updater was removed, but SystemConfig is kept (the enable_automagic_v2
+    # feature flag + compat for old secrets.json's update_channel field).
     system: SystemConfig = Field(default_factory=SystemConfig)
-    # 本 fork：Colab / Local 运行模式的持久化选择（infrastructure/runtime_mode.py）。
+    # This fork: persisted choice of Colab / Local runtime mode (infrastructure/runtime_mode.py).
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     remote_access: RemoteAccessConfig = Field(default_factory=RemoteAccessConfig)
-    # 统一模型来源候选：domain → 用户添加的候选列表。domain 白名单校验在
-    # API 层（families 注册表在 services 层）。内置 preset 不在此存储——
-    # 候选全集 = 代码内置 + 本字段。当前选中值仍写各 domain 原字段
-    # （wd14.model_id / eval_metrics.*_model_name / models.selected 等，两条
-    # 兼容纪律见 docs/design/model-source-unification.md §3）。
+    # Unified model-source candidates: domain → the candidate list the user added. Domain
+    # whitelist validation lives at the API layer (the families registry lives at the services
+    # layer). Builtin presets aren't stored here — the full candidate set = code-builtin + this
+    # field. The currently selected value is still written to each domain's own field
+    # (wd14.model_id / eval_metrics.*_model_name / models.selected, etc — see the two-surface
+    # compat contract in docs/design/model-source-unification.md §3).
     model_sources: dict[str, list[SourceCandidate]] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def _sync_legacy_source_fields(cls, data: Any) -> Any:
-        """旧候选字段（wd14.model_ids / models.custom）→ model_sources 全量同步。
+        """Full sync of the old candidate fields (wd14.model_ids / models.custom) → model_sources.
 
-        入站 dict **带这些键**时（旧盘文件 / 老客户端 PUT）以其为准重建对应
-        kind 的候选集——保留老客户端增删语义；`update()` 已把 merge base 里的
-        重建键剥掉，故新 UI 只写 model_sources 时不会被过期旧值覆盖。
-        另一半（model_sources → 旧字段重建写盘）见 after-validator。
+        When the inbound dict **carries these keys** (an old on-disk file / an old client's PUT),
+        they take precedence and rebuild the corresponding kind's candidate set — preserving the
+        old client's add/remove semantics; `update()` already strips these rebuild keys from the
+        merge base, so when the new UI only writes model_sources, it won't be overwritten by a
+        stale old value. The other half (model_sources → rebuilding the old fields for writing to
+        disk) is in the after-validator.
         """
         if not isinstance(data, dict):
             return data
@@ -891,14 +943,15 @@ class Secrets(BaseModel):
 
     @model_validator(mode="after")
     def _model_sources_invariants(self) -> "Secrets":
-        """统一不变量 + 兼容写盘面重建。
+        """The shared invariant + compat-surface rebuild for writing to disk.
 
-        1. repo 型 domain 的当前选中值若既非内置 preset 也不在候选里 → 自动
-           补一条候选（WD14 现有「model_id 永远可见」不变量的推广；用户先切
-           走再移除，前端强制该顺序）。
-        2. 重建兼容面：wd14.model_ids = 内置 + download 候选（回滚可读）；
-           models.custom = 各族 local 候选路径。二者在 `update()` 的 merge
-           base 中被剥掉，唯一真源是 model_sources。
+        1. If a repo-type domain's currently selected value is neither a builtin preset nor in the
+           candidates → automatically add a candidate (a generalization of WD14's existing
+           "model_id is always visible" invariant; the user must switch away before removing it,
+           the frontend enforces this order).
+        2. Rebuild the compat surfaces: wd14.model_ids = builtins + download candidates (readable
+           on rollback); models.custom = each family's local candidate paths. Both are stripped
+           from the merge base in `update()` — the single source of truth is model_sources.
         """
         cltagger_official = str(
             CLTaggerConfig.model_fields["model_id"].default
@@ -934,7 +987,7 @@ class Secrets(BaseModel):
             if is_abs_path(sel):
                 cands.append(SourceCandidate(kind="local", path=sel))
             elif domain == "cltagger":
-                # fork repo 迁移自带当前双文件相对路径（镜像覆盖退役，D4）
+                # fork repo migration carries over the current pair of relative file paths (mirror override retired, D4)
                 cands.append(SourceCandidate(
                     kind="download", repo=sel,
                     extra={
@@ -945,7 +998,8 @@ class Secrets(BaseModel):
             else:
                 cands.append(SourceCandidate(kind="download", repo=sel))
 
-        # 兼容面重建（写盘给旧版本读；运行时读的选中值字段不在此列）
+        # Rebuilding the compat surfaces (written to disk for older versions to read; the
+        # runtime-read selected-value fields aren't in this list)
         wd14_downloads = [
             c.repo for c in self.model_sources.get("wd14", [])
             if c.kind == "download" and c.repo
@@ -969,10 +1023,11 @@ class Secrets(BaseModel):
 
     @model_validator(mode="after")
     def _seed_and_normalize_download_sources(self) -> "Secrets":
-        """旧全局 download_source → 按类型 download_sources 的迁移种子 + 归一化。
+        """Migration seed + normalization: the old global download_source → per-type download_sources.
 
-        尚未设过的类型从旧全局值继承（老用户不丢源偏好）；非法值回落 huggingface。
-        每次 load 都 setdefault（幂等）：用户一旦在某类型上显式选过就不会被覆盖。
+        Types not yet set inherit from the old global value (so existing users don't lose their
+        source preference); invalid values fall back to huggingface. Every load does a setdefault
+        (idempotent): once a user has explicitly chosen a source for a type, it's never overwritten.
         """
         legacy = str(self.download_source or "").strip().lower()
         if legacy not in DOWNLOAD_SOURCE_VALUES:
@@ -993,7 +1048,7 @@ class Secrets(BaseModel):
 
 
 def load() -> Secrets:
-    """读 secrets.json；缺失或损坏时返回默认实例（不抛错）。"""
+    """Reads secrets.json; returns a default instance if missing or corrupted (never raises)."""
     if not SECRETS_FILE.exists():
         return Secrets()
     try:
@@ -1001,7 +1056,7 @@ def load() -> Secrets:
         raw = _migrate_legacy_schema(raw) if isinstance(raw, dict) else raw
         return Secrets.model_validate(raw)
     except Exception:
-        # 文件损坏不应阻断 Studio 启动；用默认值覆盖
+        # A corrupted file shouldn't block Studio from starting; fall back to defaults
         return Secrets()
 
 
@@ -1011,7 +1066,7 @@ def save(s: Secrets) -> None:
 
 
 def get(path: str) -> Any:
-    """点路径取值，例：`get('wd14.threshold_general')`。"""
+    """Get a value by dotted path, e.g. `get('wd14.threshold_general')`."""
     cur: Any = load()
     for seg in path.split("."):
         cur = getattr(cur, seg)
@@ -1019,24 +1074,25 @@ def get(path: str) -> Any:
 
 
 def update(partial: dict[str, Any]) -> Secrets:
-    """deep-merge `partial` 进当前持久化值；返回新 Secrets 并落盘。
+    """Deep-merges `partial` into the current persisted value; returns the new Secrets and saves it to disk.
 
-    - `partial` 里 leaf 值为 MASK ("***") 时，表示「保持原值不变」。
-    - llm_tagger.presets 是 list[dict]，按 preset.id 匹配做按 id deep-merge，
-      让前端 PUT 整个 list 时单个 preset 的 api_key=MASK 也能保持原值。
-    - 未提及的字段沿用旧值。
+    - A leaf value of MASK ("***") in `partial` means "keep the original value unchanged".
+    - llm_tagger.presets is list[dict], matched and deep-merged by preset.id, so when the frontend
+      PUTs the whole list, a single preset's api_key=MASK still keeps its original value.
+    - Fields not mentioned keep their old value.
     """
     current_dict = load().model_dump()
-    # 剥离 models 的 read-compat computed 键（selected_anima / custom_anima_paths）：
-    # 它们不是存储字段，留在 merge base 里会以「入站 legacy 键」的身份经
-    # _migrate_legacy_model_fields 覆盖 partial 新写入的 selected/custom。
-    # 真正入站的 legacy 键（老客户端）在 partial 里，照旧获胜。
+    # Strip the read-compat computed keys of models (selected_anima / custom_anima_paths): they
+    # aren't storage fields, and leaving them in the merge base would let them, as "inbound legacy
+    # keys", get overwritten via _migrate_legacy_model_fields by the newly-written selected/custom
+    # from partial. A genuinely inbound legacy key (from an old client) is in partial and wins as usual.
     models_base = current_dict.get("models")
     if isinstance(models_base, dict):
         models_base.pop("selected_anima", None)
         models_base.pop("custom_anima_paths", None)
-        # model_sources 兼容重建键（同上语义）：留在 merge base 会经
-        # _sync_legacy_source_fields 用过期值覆盖 partial 新写入的 model_sources。
+        # model_sources compat-rebuild key (same reasoning as above): leaving it in the merge base
+        # would let _sync_legacy_source_fields overwrite the newly-written model_sources from
+        # partial with a stale value.
         models_base.pop("custom", None)
     wd14_base = current_dict.get("wd14")
     if isinstance(wd14_base, dict):
@@ -1048,10 +1104,10 @@ def update(partial: dict[str, Any]) -> Secrets:
 
 
 def to_masked_dict(s: Secrets) -> dict[str, Any]:
-    """GET /api/secrets 返回此结构；敏感字段非空时替换为 MASK。
+    """Returned by GET /api/secrets; non-empty sensitive fields are replaced with MASK.
 
-    SENSITIVE_FIELDS 支持 `*` 通配（用于 llm_tagger.presets.*.api_key 这种
-    list-of-dict 场景）。
+    SENSITIVE_FIELDS supports a `*` wildcard (for list-of-dict cases like
+    llm_tagger.presets.*.api_key).
     """
     d = s.model_dump()
     for path in SENSITIVE_FIELDS:
@@ -1078,12 +1134,12 @@ def _apply_mask(node: Any, segs: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# WandB preset 导入导出（0.18 预设化）
+# WandB preset import/export (0.18 preset-ification)
 # ---------------------------------------------------------------------------
 
 
 def get_wandb_preset(preset_id: str) -> Optional["WandBPresetConfig"]:
-    """按 id 取 preset（**含真实 api_key**，绕过 mask）——只给显式导出端点用。"""
+    """Gets a preset by id (**including the real api_key**, bypassing the mask) — for the explicit export endpoint only."""
     for preset in load().wandb.presets:
         if preset.id == preset_id:
             return preset
@@ -1093,12 +1149,12 @@ def get_wandb_preset(preset_id: str) -> Optional["WandBPresetConfig"]:
 def import_wandb_preset(
     data: Any, fallback_label: str = ""
 ) -> tuple[Secrets, "WandBPresetConfig"]:
-    """导入一条 wandb preset：id 撞名自动加后缀，导入后设为当前选中。
+    """Imports a wandb preset: an id collision auto-appends a suffix, and the imported preset becomes the current selection.
 
-    - 兼容旧前端 JSON 导出格式 ``{kind, version, preset: {...}}``（自动解包）
-    - ``api_key == MASK`` 哨兵（旧客户端导出）按空处理；带真实 key 的备份文件
-      原样恢复
-    - 值非法时抛 pydantic ValidationError，由 caller 翻 400
+    - Compatible with the old frontend JSON export format ``{kind, version, preset: {...}}`` (auto-unwrapped)
+    - An ``api_key == MASK`` sentinel (from an old client's export) is treated as empty; a backup
+      file with a real key is restored as-is
+    - Raises a pydantic ValidationError on invalid values, which the caller turns into a 400
     """
     if not isinstance(data, dict):
         raise ValueError("preset data must be a mapping")
@@ -1124,7 +1180,7 @@ def import_wandb_preset(
     preset = WandBPresetConfig(**{**payload, "id": pid, "label": label})
     s.wandb.presets.append(preset)
     s.wandb.current_preset = preset.id
-    new = Secrets.model_validate(s.model_dump())  # 重跑 validator（去重/回退保底）
+    new = Secrets.model_validate(s.model_dump())  # re-run the validator (dedup / fallback safety net)
     save(new)
     return new, preset
 
@@ -1135,35 +1191,38 @@ def import_wandb_preset(
 
 
 def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
-    """老 schema → 新 schema 一次性迁移。
+    """One-time migration from the old schema → the new schema.
 
-    迁移目标 (PR #18 schema → preset-unified schema)：
-    1. 顶层 LLMTaggerConfig.base_url / api_key / model / endpoint / temperature /
+    Migration targets (PR #18 schema → preset-unified schema):
+    1. Top-level LLMTaggerConfig.base_url / api_key / model / endpoint / temperature /
        max_tokens / max_side / jpeg_quality / max_image_mb / timeout / max_retries
-       下沉到每个 preset
-    2. prompt_presets[{id,label,prompt,builtin,output_format}] 升级为完整 preset
-       （继承顶层 endpoint + 生成参数字段）
-    3. prompt_preset = "custom" + custom_prompt 非空 → 建一个 `user_custom` preset
-    4. JoyCaptionConfig.base_url / model / prompt_template → 写入 joycaption preset
-       （base_url/model 直接覆盖；prompt_template 非默认时建 `user_joycaption`）
-    5. 删 raw["joycaption"] 字段
-    6. system.show_dev_channel=true → system.update_channel="dev"（ADR 0005）
+       sink down into each preset
+    2. prompt_presets[{id,label,prompt,builtin,output_format}] are upgraded into full presets
+       (inheriting the top-level endpoint + generation-parameter fields)
+    3. prompt_preset = "custom" + a non-empty custom_prompt → creates a `user_custom` preset
+    4. JoyCaptionConfig.base_url / model / prompt_template → written into the joycaption preset
+       (base_url/model overwrite directly; a non-default prompt_template creates `user_joycaption`)
+    5. Deletes the raw["joycaption"] field
+    6. system.show_dev_channel=true → system.update_channel="dev" (ADR 0005)
 
-    幂等：新 schema（llm_tagger 含 current_preset / presets）直接返回。
+    Idempotent: a new-schema payload (llm_tagger containing current_preset / presets) is returned as-is.
     """
-    # 6. system 通道偏好一次性迁移（无论后面 llm_tagger path 怎么走都先做）
+    # 6. One-time migration of the system channel preference (done first regardless of which llm_tagger path runs below)
     sys_raw = raw.get("system")
     if isinstance(sys_raw, dict):
-        # 新字段已显式设过 → 不覆盖（幂等）
+        # New field already explicitly set → don't overwrite (idempotent)
         if "update_channel" not in sys_raw and sys_raw.get("show_dev_channel") is True:
             sys_raw["update_channel"] = "dev"
 
-    # 10. ram_guard 默认改关（上游 v0.23.1）：save() 全量落盘使「用户显式开启」
-    #     与「旧默认 true 被动落盘」不可分辨（同第 8 步先例），故对旧盘一次性
-    #     丢弃 ram_guard 值，让所有用户回到新默认（关）。判据是哨兵**键缺失**
-    #     —— 不能看值：本版之后代码落的盘总带此键，值即真源；用「值为假」判
-    #     会把新装用户首次显式开启的值也丢掉。哨兵在下次 save() 才落盘，
-    #     落盘前重复丢弃是幂等的（丢的仍是旧盘值）。
+    # 10. ram_guard default flipped to off (upstream v0.23.1): since save() always writes the whole
+    #     file, "the user explicitly enabled it" and "the old default true was passively written" are
+    #     indistinguishable (same precedent as step 8), so old disk files have their ram_guard value
+    #     discarded once, returning all users to the new default (off). The test is the sentinel
+    #     **key being absent** — not the value: any disk written by code after this version always
+    #     carries this key, and its value is then the source of truth; testing "value is false" would
+    #     also discard a newly-installed user's first explicit enable. The sentinel is only written to
+    #     disk on the next save(); discarding repeatedly before that save is idempotent (it's still
+    #     discarding the old disk value).
     sys_raw_rg = raw.setdefault("system", {})
     if isinstance(sys_raw_rg, dict) and "ram_guard_default_off" not in sys_raw_rg:
         for section in ("generate", "training"):
@@ -1172,18 +1231,19 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
                 sec_raw.pop("ram_guard", None)
         sys_raw_rg["ram_guard_default_off"] = True
 
-    # 8. R-1 资源档位（0.17）：queue.allow_gpu_during_train 废弃。语义变化
-    #    （老开关连 eval_samples 等底模级任务一起放行，是 OOM 隐患；新开关
-    #    light_tasks_during_train 只辖轻量档且默认开），且 save() 全量落盘使
-    #    「显式 false」与「默认 false」不可分辨 —— 故不迁移旧值，直接丢弃。
+    # 8. R-1 resource tiers (0.17): queue.allow_gpu_during_train is retired. Its semantics changed
+    #    (the old switch let even base-model-scale tasks like eval_samples through, an OOM hazard;
+    #    the new light_tasks_during_train switch only covers the light tier and defaults on), and
+    #    since save() always writes the whole file, "explicitly false" and "default false" are
+    #    indistinguishable — so the old value isn't migrated, just dropped.
     q_raw = raw.get("queue")
     if isinstance(q_raw, dict):
         q_raw.pop("allow_gpu_during_train", None)
 
-    # 9. WandB 预设化（0.18）：老扁平 wandb {enabled, api_key, project, ...} →
-    #    {enabled, current_preset, presets: [{id: "default", ...}]}。enabled 留
-    #    顶层（总开关不随预设切换），其余字段整体下沉成 id="default" 的 preset。
-    #    幂等：已有 presets 键直接跳过。
+    # 9. WandB preset-ification (0.18): the old flat wandb {enabled, api_key, project, ...} →
+    #    {enabled, current_preset, presets: [{id: "default", ...}]}. enabled stays at the top level
+    #    (the overall switch doesn't change with the preset), everything else sinks as a whole into
+    #    the id="default" preset. Idempotent: skips immediately if a presets key already exists.
     wb_raw = raw.get("wandb")
     if isinstance(wb_raw, dict) and "presets" not in wb_raw:
         enabled = bool(wb_raw.pop("enabled", False))
@@ -1194,8 +1254,9 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
             "presets": [preset],
         }
 
-    # 7. gelbooru 的图片入库设置搬到全局 download.*（这三个本被所有 booru 下载 /
-    #    reg / 本地上传共用，不该挂在 gelbooru 下）。download 侧未显式设过才搬，幂等。
+    # 7. gelbooru's image-ingestion settings moved to the global download.* (these three were
+    #    already shared by all booru downloads / reg / local uploads, and didn't belong under
+    #    gelbooru). Only moves fields the download side hasn't explicitly set — idempotent.
     gel_raw = raw.get("gelbooru")
     if isinstance(gel_raw, dict):
         dl_raw = raw.setdefault("download", {})
@@ -1207,16 +1268,16 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
 
     llm_old = raw.get("llm_tagger")
     if not isinstance(llm_old, dict):
-        # 不存在 llm_tagger 字段：可能是更老的 secrets.json；交给 pydantic 用默认值
+        # No llm_tagger field: probably an even older secrets.json; leave it to pydantic's defaults
         raw.pop("joycaption", None)
         return raw
 
-    # 已经是新 schema：仅清理可能残留的 joycaption 字段后直接返回
+    # Already the new schema: just clean up any leftover joycaption field and return
     if "presets" in llm_old or "current_preset" in llm_old:
         raw.pop("joycaption", None)
         return raw
 
-    # 老顶层字段（PR #18 schema）
+    # Old top-level fields (PR #18 schema)
     def _get(key: str, default: Any) -> Any:
         val = llm_old.get(key)
         return default if val is None else val
@@ -1240,7 +1301,7 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
     old_prompt_preset = _get("prompt_preset", "style_json")
     old_prompt_presets = list(_get("prompt_presets", []) or [])
 
-    from .llm_presets import builtin_llm_presets  # 局部 import 避免循环
+    from .llm_presets import builtin_llm_presets  # local import to avoid a cycle
 
     builtin_defaults = {item["id"]: item for item in builtin_llm_presets()}
 
@@ -1279,7 +1340,7 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
             "prompt": p.get("prompt") or base_default.get("prompt", ""),
             "output_format": p.get("output_format") or base_default.get("output_format", "json"),
         }
-        # joycaption builtin 用其自己的推荐 temperature/max_tokens（如果用户没改过老顶层）
+        # The joycaption builtin uses its own recommended temperature/max_tokens (if the user never touched the old top-level values)
         if pid in builtin_defaults and old_temperature == 0.2 and old_max_tokens == 700:
             merged["temperature"] = base_default.get("temperature", old_temperature)
             merged["max_tokens"] = base_default.get("max_tokens", old_max_tokens)
@@ -1290,14 +1351,14 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
         new_presets.append({
             **_endpoint_fields(),
             "id": "user_custom",
-            "label": "自定义",
+            "label": "Custom",
             "builtin": False,
             "prompt": old_custom_prompt,
             "output_format": "json",
         })
         current = "user_custom"
 
-    # JoyCaption 卡片合并 ----
+    # JoyCaption card merge ----
     joycap = raw.get("joycaption") if isinstance(raw.get("joycaption"), dict) else {}
     joy_base_url = str(joycap.get("base_url", "") or "").strip()
     joy_model = str(joycap.get("model", "") or "").strip()
@@ -1308,7 +1369,7 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
     joycap_default_prompt = "Descriptive Caption"
 
     if joy_base_url or joy_model:
-        # 写入 joycaption preset（如果 old prompt_presets 没含 joycaption，建一个）
+        # Write into the joycaption preset (create one if old prompt_presets didn't have joycaption)
         joy_preset = next((p for p in new_presets if p["id"] == "joycaption"), None)
         if joy_preset is None:
             joy_default = builtin_defaults.get("joycaption", {})
@@ -1321,7 +1382,7 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
             if joy_model not in joy_preset.get("model_ids", []):
                 joy_preset["model_ids"] = [joy_model, *joy_preset.get("model_ids", [])]
     if joy_prompt and joy_prompt != joycap_default_prompt:
-        # 用户改过 joycaption prompt_template → 建 user 自定义 preset，保留这份 prompt
+        # User edited the joycaption prompt_template → create a user custom preset, keeping this prompt
         new_presets.append({
             "base_url": joy_base_url or joycap_default_base,
             "api_key": "",
@@ -1339,7 +1400,7 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
             "requests_per_second": 0.0,
             "max_requests_per_minute": 0,
             "id": "user_joycaption",
-            "label": "JoyCaption（自定义 prompt）",
+            "label": "JoyCaption (custom prompt)",
             "builtin": False,
             "prompt": joy_prompt,
             "output_format": "text",
@@ -1354,10 +1415,11 @@ def _migrate_legacy_schema(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """把 patch 合并到 base：嵌套 dict 递归合并；leaf 值为 MASK 则丢弃。
+    """Merges patch into base: nested dicts are merged recursively; a leaf value of MASK is dropped.
 
-    list[dict] 含 id 字段时（如 llm_tagger.presets）按 id deep-merge：保留 base
-    里 patch 没动到的 preset；patch 中存在的 preset 与 base 同 id 项 deep-merge。
+    When a list[dict] has an id field (e.g. llm_tagger.presets), it's deep-merged by id: presets in
+    base that patch didn't touch are kept; presets present in patch are deep-merged with the
+    same-id entry in base.
     """
     out = dict(base)
     for key, val in patch.items():
@@ -1380,7 +1442,7 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         if isinstance(val, dict) and isinstance(out.get(key), dict):
             out[key] = _deep_merge(out[key], val)
         elif val == MASK:
-            # 保持旧值
+            # keep the old value
             continue
         else:
             out[key] = val
@@ -1388,21 +1450,21 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
 
 
 def has_danbooru_credentials() -> bool:
-    """前端 / 端点判断是否已经配好 Danbooru auth。"""
+    """Frontend / endpoint check for whether Danbooru auth is already configured."""
     d = load().danbooru
     return bool(d.username and d.api_key)
 
 
 def has_gelbooru_credentials() -> bool:
-    """便捷：用于前端 / 端点判断是否已经配好 Gelbooru。"""
+    """Convenience: frontend / endpoint check for whether Gelbooru is already configured."""
     g = load().gelbooru
     return bool(g.user_id and g.api_key)
 
 
 def has_credentials_for(api_source: str) -> bool:
-    """各下载渠道的「能不能跑」判定（两个 source 都强制绑定，no anon）：
-    - gelbooru: 必须有 user_id + api_key（API 强制要求）
-    - danbooru: 必须有 username + api_key（PR #38 起，CF 收紧后强制）
+    """Per-download-channel "can it run" check (both sources require binding, no anon):
+    - gelbooru: requires user_id + api_key (the API mandates it)
+    - danbooru: requires username + api_key (mandatory as of PR #38, after CF tightened up)
     """
     if api_source == "gelbooru":
         return has_gelbooru_credentials()

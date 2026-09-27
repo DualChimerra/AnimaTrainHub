@@ -19,13 +19,14 @@ function MeterItem({ label, value, pct, tooltip }: { label: string; value: strin
 export default function SystemStats() {
   const [stats, setStats] = useState<SystemStatsData | null>(null)
 
-  // mount 时拉一次冷启动 (避免空白等 2.5s 首个 SSE 事件)，之后纯靠后端
-  // sampler 通过 SSE 推送。SSE 重连时 onOpen 也补一次冷启动，防漏。
+  // Fetch once on mount (avoids a blank 2.5s wait for the first SSE event);
+  // after that it's driven entirely by the backend sampler over SSE. On SSE
+  // reconnect, onOpen also fetches once more as a safety net.
   useEffect(() => {
     let cancelled = false
     api.systemStats().then((s) => {
       if (!cancelled) setStats(s)
-    }).catch(() => {/* 首次失败：等 SSE 第一帧就行 */})
+    }).catch(() => {/* initial fetch failed: fine, just wait for the first SSE frame */})
     return () => { cancelled = true }
   }, [])
 
@@ -37,8 +38,9 @@ export default function SystemStats() {
     },
     {
       onOpen: () => {
-        // SSE 重连：补一次冷启动；服务端 sampler 仍在跑，下次 tick 会自然推
-        // 上来，但这一次显式 GET 让 UI 立刻刷新
+        // SSE reconnect: fetch once more; the server sampler is still
+        // running and would push on its next tick anyway, but this explicit
+        // GET makes the UI refresh immediately.
         api.systemStats().then((s) => setStats(s)).catch(() => {})
       },
     },

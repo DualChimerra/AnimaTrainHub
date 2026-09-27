@@ -18,7 +18,6 @@ import ImagePreviewModal from '../../../components/ImagePreviewModal'
 import StepShell from '../../../components/StepShell'
 import FieldLabel from '../../../components/ds/FieldLabel'
 import KebabMenu from '../../../components/ds/KebabMenu'
-import { TranslatedTag } from '../../../components/tagDisplay/TranslatedTag'
 import { TagSuggestList } from '../../../components/tagSuggest/TagSuggestList'
 import { useTagSuggest } from '../../../components/tagSuggest/useTagSuggest'
 import { useDialog } from '../../../components/Dialog'
@@ -40,8 +39,8 @@ interface AdvancedParams {
   postprocess_max_crop_ratio: number
 }
 
-// batch_size 不暴露 — 多 train 子文件夹（5_concept / 1_general 等）共用同一 batch
-// 概念在 UI 上意义不大，保持源脚本默认 5。
+// batch_size isn't exposed -- multiple train subfolders (5_concept / 1_general etc.) share the
+// same batch, so the concept doesn't mean much in the UI; keep the source script's default of 5.
 const ADVANCED_DEFAULTS: AdvancedParams = {
   skip_similar: true,
   aspect_ratio_filter_enabled: false,
@@ -59,17 +58,18 @@ export default function RegularizationPage() {
 
   const [reg, setReg] = useState<RegStatus | null>(null)
   const [trainTags, setTrainTags] = useState<RegTagCount[]>([])
-  // excluded 既包含 train top-tag 上点掉的，也包含「自定义排除」输入框加的（这部分
-  // 在 train top-tag 列表里查不到）。后端不存这份选择，切页面回来需要按
-  // (project, version) 在 localStorage 恢复，不然用户加的自定义 tag 看着就丢了。
+  // excluded holds both tags unchecked from the train top-tag list and tags added via the
+  // "custom exclude" input (which aren't found in the train top-tag list). The backend doesn't
+  // persist this selection, so coming back to the page needs to restore it from localStorage keyed
+  // by (project, version), otherwise the user's custom tags would appear to be lost.
   const [excluded, setExcluded] = useState<Set<string>>(new Set())
   const [autoTag, setAutoTag] = useState(true)
-  // A3 — reg 自动打标的 tagger 选择。UI 暴露 wd14 / cltagger；后端 422 校验同。
+  // A3 -- tagger choice for reg auto-tagging. The UI exposes wd14 / cltagger; the backend's 422 validation matches.
   const [autoTagKind, setAutoTagKind] = useState<'wd14' | 'cltagger'>('wd14')
   // Auto dedup after the build, on by default. Whether a run keeps the
   // existing images is picked per run: "Top up" (incremental) or "Start" (full).
   const [autoDedup, setAutoDedup] = useState(true)
-  // B1（PR-2）— 构建模式 + 目标数（仅 flat 模式生效）。默认 flat，target 留空 = train 总数。
+  // B1 (PR-2) -- build mode + target count (only takes effect in flat mode). Defaults to flat; leaving target blank = the total train count.
   const [buildMode, setBuildMode] = useState<'mirror' | 'flat'>('flat')
   const [targetCount, setTargetCount] = useState<string>('')  // input value (string for blank → null)
   const [apiSource, setApiSource] = useState<'gelbooru' | 'danbooru'>('gelbooru')
@@ -80,15 +80,17 @@ export default function RegularizationPage() {
   const jobIdRef = useRef<number | null>(null)
   jobIdRef.current = job?.id ?? null
 
-  // B2（PR-2）：「设置 & 日志」+「先验生成」合并成单 tab「生成」；顶部 source picker
-  // 决定渲染 Booru 配置面板还是 AI 配置面板。「开始生成」按钮按 source 调对应 endpoint。
+  // B2 (PR-2): "Settings & logs" + "prior generation" merged into a single "Generate" tab; the
+  // source picker at the top decides whether to render the Booru config panel or the AI config
+  // panel. The "Start generating" button calls the corresponding endpoint based on source.
   const [activeTab, setActiveTab] = useState<'generate' | 'images'>('generate')
-  // 来源默认 AI 先验（#8 决策 2026-05-30）：对齐 DreamBooth 原论文 neutral prior。
-  // Booru 路径保留作"省时间"备选（不烧 GPU、更快出图）。
+  // Source defaults to AI prior (#8 decision 2026-05-30): matches the neutral prior from the
+  // original DreamBooth paper. The Booru path stays as a "save time" fallback (no GPU burn, faster images).
   const [source, setSource] = useState<'booru' | 'ai'>('ai')
 
-  // 先验生成 — base 模型对每张 train 图反向出对照图，无 LoRA 参数（DreamBooth prior preservation）。
-  // excluded tag 复用主组件 `excluded` Set，与 booru tab 双向同步。
+  // Prior generation -- the base model generates a counterpart image for each train image with no
+  // LoRA parameters (DreamBooth prior preservation). The excluded-tag list reuses the main
+  // component's `excluded` Set, kept in sync both ways with the booru tab.
   const [aiNeg, setAiNeg] = useState(
     'worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, bad anatomy, bad hands, bad feet'
   )
@@ -97,8 +99,8 @@ export default function RegularizationPage() {
   const [aiSteps, setAiSteps] = useState(25)
   const [aiCfg, setAiCfg] = useState(4.0)
   const [aiSeed, setAiSeed] = useState(0)
-  // reg 子文件夹 repeat 前缀（N_data）。reg 集独立于 train repeat，默认 1
-  // （DreamBooth 标准：reg 每张每 epoch 见 1 次）。见 anima-phase-cursor-sse-desync 周边讨论。
+  // reg subfolder repeat prefix (N_data). The reg set's repeat is independent of train's, defaulting
+  // to 1 (DreamBooth standard: each reg image is seen once per epoch). See the discussion around anima-phase-cursor-sse-desync.
   const [aiRepeat, setAiRepeat] = useState(1)
   const [aiTask, setAiTask] = useState<Task | null>(null)
   const [aiLogs, setAiLogs] = useState<string[]>([])
@@ -106,7 +108,7 @@ export default function RegularizationPage() {
   const aiTaskIdRef = useRef<number | null>(null)
   aiTaskIdRef.current = aiTask?.id ?? null
 
-  // 预览 modal
+  // preview modal
   const [previewIdx, setPreviewIdx] = useState<number | null>(null)
   const [previewCaption, setPreviewCaption] = useState<string>('')
 
@@ -137,8 +139,8 @@ export default function RegularizationPage() {
     void refreshTrainTags()
   }, [refreshReg, refreshTrainTags])
 
-  // 把 excluded 持久化到 localStorage（按 project + version 隔离），切页面回来也在。
-  // 切 version / 进入页面时先 seed 一次；之后随 setExcluded 变化自动保存。
+  // Persist excluded to localStorage (isolated per project + version) so it survives leaving and
+  // returning to the page. Seeded once on version switch / page entry; auto-saved after that on every setExcluded change.
   const excludedStorageKey = vid
     ? `studio.reg.excluded.${project.id}.${vid}`
     : null
@@ -164,10 +166,10 @@ export default function RegularizationPage() {
     if (!excludedStorageKey) return
     try {
       localStorage.setItem(excludedStorageKey, JSON.stringify(Array.from(excluded)))
-    } catch { /* quota / privacy mode：丢就丢，不打扰用户 */ }
+    } catch { /* quota / privacy mode: just drop it, don't bother the user */ }
   }, [excludedStorageKey, excluded])
 
-  // 刷新 / 进入页面时回放最近一次 reg_build job：锁回 jid + 回放历史日志
+  // On refresh / page entry, replay the most recent reg_build job: lock back onto its jid + replay its historical logs
   useEffect(() => {
     if (!vid) return
     void api
@@ -206,10 +208,11 @@ export default function RegularizationPage() {
     }
   })
 
-  // SSE 不可靠兜底（Colab 代理常断 SSE → 见 anima-phase-cursor-sse-desync）：
-  // reg 生成跑着时定时轮询后端状态，不只靠 task_state_changed / job_state_changed。
-  // 没有它，SSE 一死 badge 永远停在 "Queued #N"、aiBusy 永远 true（生成按钮锁死），
-  // 而 worker 其实正常出图（reg/ 里картинки 在涨）。状态非终态时每 3s 拉一次。
+  // SSE unreliability fallback (the Colab proxy often drops SSE → see anima-phase-cursor-sse-desync):
+  // while reg generation is running, poll the backend status on a timer rather than relying solely
+  // on task_state_changed / job_state_changed. Without this, once SSE dies the badge would stay
+  // stuck on "Queued #N" forever and aiBusy would stay true forever (generate button locked), even
+  // though the worker is actually producing images fine (the count in reg/ keeps growing). Polls every 3s while status is non-terminal.
   useEffect(() => {
     const taskLive = aiTask?.status === 'pending' || aiTask?.status === 'running'
     const jobLive = job?.status === 'pending' || job?.status === 'running'
@@ -225,8 +228,9 @@ export default function RegularizationPage() {
             if (t.status === 'done') setActiveTab('images')
           }
         }).catch(() => {})
-        // 日志同样不能只靠 SSE task_log_appended（Colab 上 SSE 死 → 日志永远空、
-        // 要手动刷新页面才见更新）。拉全量 run.log 整体替换（全量 ⊇ 增量，自愈）。
+        // Logs similarly can't rely solely on SSE task_log_appended (SSE dying on Colab → logs
+        // stay empty forever, needing a manual page refresh to see updates). Fetch the full
+        // run.log and replace wholesale (full ⊇ incremental, so it self-heals).
         void api.getLog(tid).then((r) => {
           setAiLogs(r.content ? r.content.split('\n') : [])
         }).catch(() => {})
@@ -251,12 +255,12 @@ export default function RegularizationPage() {
   }, [aiTask?.status, job?.status, vid])
 
   const trainImageCount = activeVersion?.stats?.train_image_count ?? 0
-  // 任意一种生成跑着都视为 live —— 防止 booru / AI 并发同时写 reg/。
+  // Either kind of generation running counts as live -- prevents booru / AI from concurrently writing to reg/.
   const isLive = job?.status === 'running' || job?.status === 'pending' || aiBusy
 
-  // B1（PR-2）— 现有 reg 集结构推断：meta.build_mode 优先（新 meta 写入），
-  // 否则看 reg.files 路径前缀（仅 1_data/ → flat；含 N_xxx 多种 → mirror）。
-  // 空集 → null（mode 可自由切换）。
+  // B1 (PR-2) -- infer the existing reg set's structure: meta.build_mode takes priority (written
+  // by newer meta), otherwise look at reg.files path prefixes (only 1_data/ → flat; multiple
+  // N_xxx prefixes → mirror). Empty set → null (mode is then freely switchable).
   const existingMode = useMemo<'mirror' | 'flat' | null>(() => {
     if (!reg || !reg.exists || reg.image_count === 0) return null
     if (reg.meta?.build_mode === 'mirror' || reg.meta?.build_mode === 'flat') {
@@ -270,11 +274,12 @@ export default function RegularizationPage() {
     if (prefixes.size === 1 && prefixes.has('1_data')) return 'flat'
     return 'mirror'
   }, [reg])
-  // mode 跟现有结构不一致时禁用切换（incremental 沿用会撞结构；用户必须先清空）
+  // Switching is disabled when mode doesn't match the existing structure (reusing incrementally
+  // would collide with the structure; the user must clear it first)
   const modeLocked = existingMode !== null && existingMode !== buildMode
 
-  // 现有 reg 集存在时，把 buildMode 自动对齐它（避免切到 version 看到错的初始值）。
-  // 用户点 disabled 的下拉看到 tooltip 提示「先清空」。
+  // When an existing reg set is present, auto-align buildMode to it (avoids seeing the wrong
+  // initial value when switching versions). A user clicking the disabled dropdown sees a tooltip telling them to clear it first.
   useEffect(() => {
     if (existingMode && existingMode !== buildMode) setBuildMode(existingMode)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -361,7 +366,7 @@ export default function RegularizationPage() {
     }
   }
 
-  // 预览：点击缩略图 → 加载该图 caption → 打开 modal
+  // Preview: click a thumbnail → load that image's caption → open the modal
   const openPreview = useCallback(
     async (idx: number) => {
       if (!reg || !vid) return
@@ -1014,7 +1019,7 @@ export function ExcludeTags({
     value: draft,
     inputRef,
     wholeAsToken: true,
-    // 选中候选时把整段 draft 替换；用户再按 Enter 走 addCustom 走 normalize → 落 booru 形态
+    // Selecting a candidate replaces the entire draft; pressing Enter afterward goes through addCustom → normalize → lands in booru form
     onPick: ({ suggestion }) => { setDraft(suggestion.tag) },
   })
   const trainTagSet = useMemo(
@@ -1030,7 +1035,7 @@ export function ExcludeTags({
     raw.trim().toLowerCase().replace(/\s+/g, '_')
   const addCustom = () => {
     const items = draft
-      .split(/[,，\n]+/)
+      .split(/[,\n]+/)
       .map(normalize)
       .filter(Boolean)
     if (items.length === 0) return
@@ -1055,7 +1060,7 @@ export function ExcludeTags({
                 title={custom ? t('reg.excludeCustomRemoveTitle') : undefined}
               >
                 <span className="min-w-0 truncate text-left" title={tag.replace(/_/g, ' ')}>
-                  <TranslatedTag tag={tag.replace(/_/g, ' ')} />
+                  {tag.replace(/_/g, ' ')}
                 </span>
                 <button type="button" className="ds-chip-x" onClick={() => onToggle(tag)} aria-label={t('reg.excludeCustomRemoveAria', { tag })}>
                   {Icon.x}
@@ -1109,7 +1114,7 @@ export function ExcludeTags({
                   title={t('reg.excludeClick')}
                 >
                   <span className="min-w-0 truncate text-left" title={info.tag.replace(/_/g, ' ')}>
-                    <TranslatedTag tag={info.tag.replace(/_/g, ' ')} />
+                    {info.tag.replace(/_/g, ' ')}
                   </span>
                   <b>{info.count}</b>
                 </button>
@@ -1167,7 +1172,7 @@ function RunLog({
         {lines.length > 0 ? (
           <pre ref={preRef} className="ds-console" style={{ flex: 1, minHeight: 240, margin: 0, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
             {lines.map((line, i) => (
-              <div key={i} className={/error|failed|traceback/i.test(line) ? 'ds-e' : /warn|skip/i.test(line) ? 'ds-w' : /\bdone\b|完成/i.test(line) ? 'ds-g' : undefined}>{line || ' '}</div>
+              <div key={i} className={/error|failed|traceback/i.test(line) ? 'ds-e' : /warn|skip/i.test(line) ? 'ds-w' : /\bdone\b|complete/i.test(line) ? 'ds-g' : undefined}>{line || ' '}</div>
             ))}
           </pre>
         ) : (
@@ -1195,7 +1200,7 @@ function RegImages({
   const { t } = useTranslation()
   const { toast } = useToast()
   const { confirm } = useDialog()
-  // reg.files 是相对 reg/ 的路径（含子文件夹镜像 train，例如 "5_concept/2001.png"）
+  // reg.files are paths relative to reg/ (including subfolders mirroring train, e.g. "5_concept/2001.png")
   const allItems = useMemo(
     () =>
       reg.files.map((rel) => {
@@ -1211,7 +1216,7 @@ function RegImages({
       }),
     [reg.files, pid, vid]
   )
-  // 按子文件夹分 chip；根（""，老 build 才有）放最后
+  // Group into chips by subfolder; the root ("", only present in older builds) goes last
   const folders = useMemo(() => {
     const order = Array.from(new Set(allItems.map((it) => it.folder)))
     order.sort((a, b) => {
@@ -1226,7 +1231,7 @@ function RegImages({
     for (const it of allItems) m.set(it.folder, (m.get(it.folder) ?? 0) + 1)
     return m
   }, [allItems])
-  // null = 全部；否则限定到该 folder
+  // null = all; otherwise scoped to that folder
   const [activeFolder, setActiveFolder] = useState<string | null>(null)
   const items = useMemo(
     () => (activeFolder === null ? allItems : allItems.filter((it) => it.folder === activeFolder)),
@@ -1241,12 +1246,12 @@ function RegImages({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [anchor, setAnchor] = useState<string | null>(null)
   const [active, setActive] = useState<string | null>(null)
-  // 切 folder：清空选择 + anchor。多选只在当前范围内生效。
+  // Switching folder: clear selection + anchor. Multi-select only applies within the current scope.
   useEffect(() => {
     setSelected(new Set())
     setAnchor(null)
   }, [activeFolder])
-  // reg.files 变化（删除完 refresh 后）：把已不存在的 name 从 selected 清掉
+  // reg.files changes (after a refresh following a delete): clear names that no longer exist out of selected
   useEffect(() => {
     const fileSet = new Set(allItems.map((it) => it.name))
     setSelected((prev) => {
@@ -1284,8 +1289,8 @@ function RegImages({
     }
   }
 
-  // 文件夹改名（对齐 Step 1 train 改名）：主要场景 = 改 Kohya repeat 前缀
-  // （2_data → 1_data），调 reg repeat 不必去 Colab 文件系统手动 rename。
+  // Folder rename (mirrors Step 1's train rename): the main use case is changing the Kohya repeat
+  // prefix (2_data → 1_data) -- adjusting reg's repeat without a manual rename on Colab's filesystem.
   const [renaming, setRenaming] = useState<{ from: string; value: string } | null>(null)
   const [renameBusy, setRenameBusy] = useState(false)
   const doRename = async () => {
@@ -1306,8 +1311,8 @@ function RegImages({
     }
   }
 
-  // 自动去重：用默认参数扫，把每组里的"推荐删除"项直接删，没 review panel。
-  // reg 集 quality bar 比 train 低，不需要逐组人工选保留。
+  // Auto dedup: scan with default parameters and directly delete each group's "recommended for
+  // deletion" items, with no review panel. The reg set's quality bar is lower than train's, so it doesn't need manual per-group keep decisions.
   const [dedupBusy, setDedupBusy] = useState(false)
   const onDedup = async () => {
     if (dedupBusy || isLive) return
@@ -1512,7 +1517,7 @@ function regOrigUrl(pid: number, vid: number, rel: string): string {
   const idx = rel.lastIndexOf('/')
   const folder = idx >= 0 ? rel.slice(0, idx) : ''
   const name = idx >= 0 ? rel.slice(idx + 1) : rel
-  // 768px 预览（与 PP3 alt-hover 同尺寸）
+  // 768px preview (same size as PP3's alt-hover)
   return api.versionThumbUrl(pid, vid, 'reg', name, folder, 768)
 }
 

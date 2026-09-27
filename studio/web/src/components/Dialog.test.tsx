@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { DialogProvider, useDialog } from './Dialog'
 import { useState } from 'react'
 
-// Test harness:外层组件触发 confirm/prompt/alert,把 Promise resolve 值放到
-// 屏幕上,断言 user 交互结果。
+// Test harness: the outer component triggers confirm/prompt/alert, puts the resolved
+// Promise value on screen, and the test asserts on the user interaction's result.
 function Harness({
   run,
 }: {
@@ -35,100 +35,99 @@ const wrap = (run: (api: ReturnType<typeof useDialog>) => Promise<unknown>) =>
   )
 
 describe('Dialog (useDialog API)', () => {
-  it('confirm 点确认返回 true', async () => {
+  it('confirm resolves true on OK click', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.confirm('删除？'))
+    wrap((api) => api.confirm('Delete?'))
     await user.click(screen.getByText('trigger'))
-    await user.click(screen.getByText('确认'))
+    await user.click(screen.getByRole('button', { name: 'Confirm' }))
     expect(screen.getByTestId('result')).toHaveTextContent('resolved:true')
   })
 
-  it('confirm 点取消返回 false', async () => {
+  it('confirm resolves false on cancel click', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.confirm('删除？'))
+    wrap((api) => api.confirm('Delete?'))
     await user.click(screen.getByText('trigger'))
-    await user.click(screen.getByText('取消'))
+    await user.click(screen.getByText('Cancel'))
     expect(screen.getByTestId('result')).toHaveTextContent('resolved:false')
   })
 
-  it('confirm Esc 关闭返回 false', async () => {
+  it('confirm resolves false when closed with Escape', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.confirm('删除？'))
+    wrap((api) => api.confirm('Delete?'))
     await user.click(screen.getByText('trigger'))
     await user.keyboard('{Escape}')
     expect(screen.getByTestId('result')).toHaveTextContent('resolved:false')
   })
 
-  it('confirm 自定义按钮文案', async () => {
+  it('confirm supports custom button labels', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.confirm('删除？', { okText: '焚毁', cancelText: '算了' }))
+    wrap((api) => api.confirm('Delete?', { okText: 'Burn it', cancelText: 'Nevermind' }))
     await user.click(screen.getByText('trigger'))
-    expect(screen.getByText('焚毁')).toBeInTheDocument()
-    expect(screen.getByText('算了')).toBeInTheDocument()
+    expect(screen.getByText('Burn it')).toBeInTheDocument()
+    expect(screen.getByText('Nevermind')).toBeInTheDocument()
   })
 
-  it('confirm 确认键恒为 btn-primary（tone 不换按钮底色）', async () => {
+  it('danger tone paints the confirm button red', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.confirm('删除？', { tone: 'danger' }))
+    wrap((api) => api.confirm('Delete?', { tone: 'danger' }))
     await user.click(screen.getByText('trigger'))
-    expect(screen.getByText('确认')).toHaveClass('btn-primary')
-    expect(screen.getByText('确认')).not.toHaveClass('btn-danger')
+    expect(screen.getByRole('button', { name: 'Confirm' })).toHaveClass('btn-danger')
   })
 
-  it('prompt 输入后点确定返回字符串', async () => {
+  it('prompt resolves the typed string on OK click', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.prompt('名称'))
+    wrap((api) => api.prompt('Name'))
     await user.click(screen.getByText('trigger'))
     const input = screen.getByRole('textbox')
-    // 先 click 聚焦再 type：避免 modal 刚开 / autofocus 未 settle 时 userEvent
-    // 丢首字符（CI 慢机偶发 "y-preset"）。
+    // Click to focus before typing: avoids userEvent dropping the first character
+    // right as the modal opens / before autofocus settles (occasional "y-preset" on slow CI).
     await user.click(input)
     await user.type(input, 'my-preset')
-    await user.click(screen.getByText('确定'))
+    await user.click(screen.getByText('OK'))
     expect(screen.getByTestId('result')).toHaveTextContent('resolved:"my-preset"')
   })
 
-  it('prompt 取消返回 null', async () => {
+  it('prompt resolves null on cancel', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.prompt('名称'))
+    wrap((api) => api.prompt('Name'))
     await user.click(screen.getByText('trigger'))
-    await user.click(screen.getByText('取消'))
+    await user.click(screen.getByText('Cancel'))
     expect(screen.getByTestId('result')).toHaveTextContent('resolved:null')
   })
 
-  it('prompt defaultValue 预填到输入框', async () => {
+  it('prompt defaultValue prefills the input', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.prompt('名称', { defaultValue: 'v3' }))
+    wrap((api) => api.prompt('Name', { defaultValue: 'v3' }))
     await user.click(screen.getByText('trigger'))
     expect(screen.getByRole('textbox')).toHaveValue('v3')
   })
 
-  it('prompt validate 阻止提交并显示错误', async () => {
+  it('prompt validate blocks submit and shows the error', async () => {
     const user = userEvent.setup()
     wrap((api) =>
-      api.prompt('名称', { validate: (v) => (v.length < 3 ? '至少 3 字符' : null) }),
+      api.prompt('Name', { validate: (v) => (v.length < 3 ? 'At least 3 characters' : null) }),
     )
     await user.click(screen.getByText('trigger'))
     await user.type(screen.getByRole('textbox'), 'ab')
-    await user.click(screen.getByText('确定'))
-    expect(screen.getByText('至少 3 字符')).toBeInTheDocument()
-    // 错误显示后 dialog 未关闭 — result 仍空
+    await user.click(screen.getByText('OK'))
+    expect(screen.getByText('At least 3 characters')).toBeInTheDocument()
+    // dialog stays open after the error - result is still empty
     expect(screen.getByTestId('result')).toHaveTextContent('')
   })
 
-  it('alert 点知道了 resolve', async () => {
+  it('alert resolves on Got it click', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.alert('完成'))
+    wrap((api) => api.alert('Done'))
     await user.click(screen.getByText('trigger'))
-    expect(screen.getByText('知道了')).toBeInTheDocument()
-    await user.click(screen.getByText('知道了'))
+    expect(screen.getByText('Got it')).toBeInTheDocument()
+    await user.click(screen.getByText('Got it'))
     expect(screen.getByTestId('result')).toHaveTextContent('resolved:')
   })
 
-  it('alert 没有取消按钮', async () => {
+  it('alert has no cancel button', async () => {
     const user = userEvent.setup()
-    wrap((api) => api.alert('完成'))
+    wrap((api) => api.alert('Done'))
     await user.click(screen.getByText('trigger'))
-    expect(screen.queryByText('取消')).not.toBeInTheDocument()
+    expect(screen.queryByText('Cancel')).not.toBeInTheDocument()
   })
 })

@@ -1,17 +1,17 @@
-"""tagger 家族 —— PR-3 从 services/ 平铺移到本子包。
+"""Tagger family -- PR-3 flattened out of services/ into this subpackage.
 
-文件对应：
-  - base.py            原 tagger.py（Protocol + factory + VALID_TAGGER_NAMES）
-  - caption_format.py  原 caption_format.py
-  - caption_snapshot.py 原 caption_snapshot.py
-  - onnx_base.py       原 onnx_tagger_base.py
-  - wd14.py            原 wd14_tagger.py
-  - cltagger.py        原 cltagger_tagger.py
-  - llm.py             原 llm_tagger.py
-  - joycaption.py      原 joycaption_tagger.py
+File mapping:
+  - base.py            was tagger.py (Protocol + factory + VALID_TAGGER_NAMES)
+  - caption_format.py  was caption_format.py
+  - caption_snapshot.py was caption_snapshot.py
+  - onnx_base.py       was onnx_tagger_base.py
+  - wd14.py            was wd14_tagger.py
+  - cltagger.py        was cltagger_tagger.py
+  - llm.py             was llm_tagger.py
+  - joycaption.py      was joycaption_tagger.py
 
-re-export 主流公共名供 `from studio.services.tagging import X` 使用。
-原 import 路径（`studio.services.tagger` 等）通过同层 shim 文件保持兼容。
+Re-exports the main public names for use as `from studio.services.tagging import X`.
+The old import paths (`studio.services.tagger` etc.) stay compatible via shim files at the same level.
 """
 from .base import VALID_TAGGER_NAMES, ProgressFn, TagResult, Tagger, get_tagger
 from .caption_format import (

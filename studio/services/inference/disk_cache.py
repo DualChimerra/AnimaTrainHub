@@ -1,39 +1,49 @@
-"""测试出图的加密磁盘 cache（替代之前 cache.py 的纯内存 dict）。
+"""Encrypted on-disk cache for test-generation outputs (replaces the old cache.py's pure in-memory dict).
 
-为什么改磁盘：内存 cache 吃常驻 RAM（200 张 / 500MB 上限），用户长时间炼丹 +
-batch 出图会逼到上限。挪磁盘后 RAM 压力下来；同时为 session 持久（refresh
-/ 切路由不丢历史栏）让路。
+Why move to disk: the in-memory cache ate resident RAM (a 200-image / 500MB
+cap), and users doing long training sessions plus batch generation would hit
+that ceiling. Moving to disk relieves the RAM pressure, and also makes room
+for the cache to persist across a session (surviving a refresh / route
+change without losing the history strip).
 
-为什么加密：用户在云训练机上跑测试出图时，部分国内云厂商扫盘按文件名 /
-扩展名 / PNG magic bytes / 内容分类（CNN）抓敏感图。明文 PNG 落盘哪怕只
-活几秒也可能被扫到；加密后磁盘文件是高熵随机字节，无扩展、无 magic bytes，
-扫盘识不出。
+Why encrypt: when a user runs test generation on a cloud training machine,
+some domestic cloud providers scan disks for sensitive images by filename /
+extension / PNG magic bytes / content classification (CNN). A plaintext PNG
+on disk, even for a few seconds, can get flagged; once encrypted, the file on
+disk is high-entropy random bytes with no extension and no magic bytes, so
+disk scanners can't identify it.
 
-威胁模型 = 防被动扫盘：不防本机攻击者 attach 进程 dump key、不防有人故意
-走 app 代码读取图片；这两件事这条防线本来也挡不住，加 AEAD / 真正的非对称
-crypto 就是 over-engineering。
+Threat model = defending against passive disk scanning: this does not defend
+against a local attacker attaching to the process to dump the key, nor
+against someone deliberately reading images through the app's own code -
+neither of those would be stopped by this line of defense anyway, so adding
+AEAD or real asymmetric crypto would be over-engineering.
 
-机制（"session 指纹"）：
-  - 启动时进程生成 session_id (uuid4) + aes_key (32 bytes random)，**只在进程
-    内存**，不落盘
-  - cache 目录 `studio_data/.cache/generate/session-<uuid>/`
-  - 每张图一个文件 `<file_uuid>.bin`，无扩展，self-contained：
+Mechanism ("session fingerprint"):
+  - on startup, the process generates a session_id (uuid4) + aes_key (32
+    random bytes), kept **only in process memory**, never written to disk
+  - cache directory: `studio_data/.cache/generate/session-<uuid>/`
+  - one file per image, `<file_uuid>.bin`, no extension, self-contained:
     `[16B nonce][SHAKE-128 keystream XOR(payload)]`
-    其中 payload = `[4B snapshot_len][snapshot_json_utf8][png_bytes]`
-  - 启动时扫 root 下所有 `session-*` 目录全 rmtree（包括上次 SIGKILL / 断电
-    残留）—— 新 session_id 随机，保证不撞旧目录
-  - shutdown 删 session 目录 + 进程退出 key 一起没
+    where payload = `[4B snapshot_len][snapshot_json_utf8][png_bytes]`
+  - on startup, every `session-*` directory under root is rmtree'd (this also
+    cleans up leftovers from a previous SIGKILL / power loss) - the new
+    session_id is random, so it never collides with an old directory
+  - on shutdown, the session directory is deleted, and the key disappears with the process
 
-异常退出时残留文件无 key 解不开 = 一堆乱字节，扫盘工具识别不出是图。下次
-启动 startup_clean 顺手清掉。
+Leftover files after an unclean exit have no key to decrypt them - they're
+just random bytes, unrecognizable to a disk scanner as an image. The next
+startup's startup_clean sweeps them up anyway.
 
-Crypto 选择：纯 stdlib `hashlib.shake_128` keystream + XOR。SHAKE-128 是 SHA-3
-变体（NIST 标准），C 实现，1.5MB PNG 加解密毫秒级。无 AEAD 但威胁模型不
-需要 integrity——扫盘看 magic bytes / entropy / CNN 分类的就够了。零额外
-依赖避开了 `cryptography` 库的 DLL 兼容麻烦。
+Crypto choice: pure-stdlib `hashlib.shake_128` keystream + XOR. SHAKE-128 is a
+SHA-3 variant (NIST standard), implemented in C, encrypting/decrypting a
+1.5MB PNG in milliseconds. No AEAD, but the threat model doesn't need
+integrity - defeating magic-byte/entropy/CNN-based disk scanning is enough.
+Zero extra dependencies sidesteps the `cryptography` library's DLL
+compatibility headaches.
 
-API 参考 cache.py（被本模块替代）：put + get_image + list_filenames +
-drop_task + clear_all + configure + list_index（新）。
+API mirrors cache.py (which this module replaces): put + get_image + list_filenames +
+drop_task + clear_all + configure + list_index (new).
 
 """
 from __future__ import annotations
@@ -62,25 +72,26 @@ _SNAPSHOT_LEN_HEADER = 4  # big-endian uint32
 
 @dataclass
 class _Entry:
-    """index 里一条 entry —— 文件路径 + 内存里的 snapshot 缓存 + 大小。"""
+    """One entry in the index - file path + in-memory snapshot cache + size."""
     file_path: Path
     snapshot: dict[str, Any]
     created_at: float
-    size: int  # 文件加密后的字节数（含 nonce + payload）
-    mode: str  # 'single' | 'xy'，前端历史栏分组用
+    size: int  # size in bytes of the encrypted file (nonce + payload)
+    mode: str  # 'single' | 'xy', used by the frontend's history strip grouping
     task_id: int
     filename: str
-    # XY 模式时 daemon image_done 事件里带的 {xi, yi, xv, yv}；single 模式 None。
-    # list_index 重建 xyMeta.samples 给前端 PreviewXYGrid 用。
+    # {xi, yi, xv, yv} carried by the daemon's image_done event in XY mode; None in single mode.
+    # list_index reconstructs xyMeta.samples from this for the frontend's PreviewXYGrid.
     xy_info: Optional[dict[str, Any]] = None
 
 
 @dataclass
 class SessionCache:
-    """session-scoped 加密磁盘 cache，线程安全。
+    """Session-scoped encrypted disk cache, thread-safe.
 
-    每个 server 进程持有一个实例（lifespan 启动时 init，shutdown 时 clear_all）。
-    SIGKILL / 断电后残留目录在下次启动由 startup_clean() 兜底清掉。
+    Each server process holds one instance (created at lifespan startup,
+    cleared with clear_all() at shutdown). Leftover directories from a
+    SIGKILL / power loss are cleaned up on the next startup by startup_clean().
     """
     root: Path
     max_count: int = DEFAULT_MAX_COUNT
@@ -89,7 +100,7 @@ class SessionCache:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     aes_key: bytes = field(default_factory=lambda: os.urandom(32))
     _lock: threading.RLock = field(default_factory=threading.RLock)
-    # (task_id, filename) → _Entry；OrderedDict 维护 LRU
+    # (task_id, filename) -> _Entry; OrderedDict maintains LRU order
     _index: "collections.OrderedDict[tuple[int, str], _Entry]" = field(
         default_factory=collections.OrderedDict,
     )
@@ -100,7 +111,7 @@ class SessionCache:
         return self.root / f"{_SESSION_DIR_PREFIX}{self.session_id}"
 
     def ensure_dir(self) -> None:
-        """mkdir session 目录。lifespan init 完调一次。"""
+        """mkdir the session directory. Called once after lifespan init."""
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
     # ----------------------------------------------------------------- put/get
@@ -114,13 +125,14 @@ class SessionCache:
         mode: str = "single",
         xy_info: Optional[dict[str, Any]] = None,
     ) -> None:
-        """daemon image_done 时调；同 (task_id, filename) 重复则覆盖（删旧文件 + 写新）。
+        """Called on the daemon's image_done event; a repeat (task_id, filename) overwrites (deletes the old file, writes a new one).
 
-        snapshot：前端构造的 GenerateParamsSnapshot dict，跟 PNG 绑死塞进加密
-        payload header；list_index() 也用同一份返回给前端，避免双 source。
+        snapshot: the frontend-built GenerateParamsSnapshot dict, bundled
+        into the encrypted payload header alongside the PNG; list_index()
+        returns the same copy to the frontend, avoiding a second source of truth.
 
-        xy_info：XY 模式时 daemon image_done 携带的 {xi, yi, xv, yv}，重建
-        PreviewXYGrid 用；single 模式 None。
+        xy_info: {xi, yi, xv, yv} carried by the daemon's image_done event in
+        XY mode, used to reconstruct the PreviewXYGrid; None in single mode.
         """
         snap_bytes = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
         if len(snap_bytes) >= 2**32:
@@ -132,7 +144,7 @@ class SessionCache:
 
         file_id = uuid.uuid4().hex
         file_path = self.session_dir / f"{file_id}.bin"
-        # 原子写：写 tmp + rename。session 目录是独占的，不存在并发写同名情况
+        # atomic write: write to tmp + rename. The session directory is exclusive to this process, so there's no concurrent write to the same name
         tmp = file_path.with_suffix(".bin.tmp")
         tmp.write_bytes(blob)
         tmp.replace(file_path)
@@ -158,10 +170,12 @@ class SessionCache:
             self._enforce_limits_locked()
 
     def get_image(self, task_id: int, filename: str) -> Optional[bytes]:
-        """读图：拿 file_path → 读盘 → 解密 → strip snapshot header → return PNG bytes。
+        """Read an image: look up file_path -> read from disk -> decrypt -> strip the snapshot header -> return PNG bytes.
 
-        命中 move_to_end（LRU 看作最近使用）。文件丢了（外部删 / 解密失败）
-        → 返 None 且把 index entry 也剔掉，避免一直挂着死引用。
+        A hit does move_to_end (treated as most-recently-used for LRU). If
+        the file is gone (deleted externally / decrypt failure), returns None
+        and also evicts the index entry, so it doesn't keep hanging around as
+        a dead reference.
         """
         with self._lock:
             key = (task_id, filename)
@@ -170,7 +184,7 @@ class SessionCache:
                 return None
             self._index.move_to_end(key)
             file_path = entry.file_path
-        # 解密 IO 不持锁，避免一张大图卡住整个 cache
+        # decrypt IO happens without holding the lock, so one large image doesn't stall the whole cache
         try:
             blob = file_path.read_bytes()
         except FileNotFoundError:
@@ -185,20 +199,22 @@ class SessionCache:
             logger.exception("decrypt failed for %s", file_path)
             return None
 
-    # ---------------------------------------------------------------- 列表 / 删
+    # ---------------------------------------------------------------- list / delete
     def list_filenames(self, task_id: int) -> list[str]:
         with self._lock:
             return sorted(fn for (tid, fn) in self._index if tid == task_id)
 
     def list_index(self) -> list[dict[str, Any]]:
-        """前端历史栏拉 /api/generate/cache/index 用。
+        """Used by the frontend's history strip via GET /api/generate/cache/index.
 
-        按 task_id 聚合 —— 同 task 的多张图（XY 一格一张）合成一条 history
-        entry。返回结构对齐前端 CacheEntry adapter：
+        Aggregated by task_id - multiple images from the same task (one per
+        XY grid cell) merge into a single history entry. Return shape matches
+        the frontend's CacheEntry adapter:
             { id, taskId, mode, createdAt (ms), filenames[], params, samples? }
-        其中 samples 仅 mode=xy 时存在，列 [{filename, xy:{xi,yi,xv,yv}}]
-        给 PreviewXYGrid 重建网格用。createdAt 取该 task 最新 entry 的时间。
-        按 createdAt desc 排（最新在前）。
+        `samples` only exists when mode=xy, listing [{filename,
+        xy:{xi,yi,xv,yv}}] for PreviewXYGrid to reconstruct the grid.
+        createdAt is the most recent entry's timestamp within that task.
+        Sorted by createdAt descending (newest first).
         """
         with self._lock:
             entries = list(self._index.values())
@@ -249,7 +265,7 @@ class SessionCache:
             return self._bytes_total
 
     def clear_all(self) -> None:
-        """删整个 session 目录 + 清 index。lifespan shutdown 调；测试也用。"""
+        """Delete the entire session directory + clear the index. Called at lifespan shutdown; also used by tests."""
         with self._lock:
             self._index.clear()
             self._bytes_total = 0
@@ -258,7 +274,7 @@ class SessionCache:
                 shutil.rmtree(self.session_dir)
             except OSError:
                 logger.exception("clear_all: rmtree failed for %s", self.session_dir)
-        # 让后续 put() 能继续工作（重 mkdir）
+        # let subsequent put() calls keep working (recreate the dir)
         self.ensure_dir()
 
     def configure(
@@ -267,7 +283,7 @@ class SessionCache:
         max_count: Optional[int] = None,
         max_bytes: Optional[int] = None,
     ) -> None:
-        """动态调上限。改完立刻 enforce。"""
+        """Dynamically adjust the caps. Enforced immediately after the change."""
         with self._lock:
             if max_count is not None:
                 self.max_count = int(max_count)
@@ -279,13 +295,13 @@ class SessionCache:
         while self._index and (
             len(self._index) > self.max_count or self._bytes_total > self.max_bytes
         ):
-            _, entry = self._index.popitem(last=False)  # 最旧
+            _, entry = self._index.popitem(last=False)  # oldest
             self._bytes_total -= entry.size
             _safe_unlink(entry.file_path)
 
 
 # ---------------------------------------------------------------------------
-# 模块级 singleton —— lifespan init 创建；测试可显式 init 自己的实例
+# module-level singleton - created by lifespan init; tests may init their own instance explicitly
 # ---------------------------------------------------------------------------
 
 _session: Optional[SessionCache] = None
@@ -298,14 +314,14 @@ def init(
     max_count: int = DEFAULT_MAX_COUNT,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> SessionCache:
-    """初始化 module singleton。lifespan startup 调一次。
+    """Initialize the module singleton. Called once at lifespan startup.
 
-    会先 startup_clean(root) 清掉残留 session-* 目录，再创建新 session。
+    Runs startup_clean(root) first to remove leftover session-* directories, then creates the new session.
     """
     global _session
     with _session_lock:
         if _session is not None:
-            # 已有 session 时再 init = 旧 session 不再可达，清掉再开新的
+            # calling init() again with an existing session = the old session is no longer reachable, clear it before starting a new one
             _session.clear_all()
         startup_clean(root)
         sc = SessionCache(root=root, max_count=max_count, max_bytes=max_bytes)
@@ -316,17 +332,18 @@ def init(
 
 
 def get_session() -> SessionCache:
-    """拿当前 singleton。未 init 报错（防止隐式 lazy init 隐藏调用顺序 bug）。"""
+    """Get the current singleton. Raises if not yet init'd (avoids a lazy implicit init hiding call-order bugs)."""
     if _session is None:
         raise RuntimeError("disk_cache not initialized; call init() first")
     return _session
 
 
 def startup_clean(root: Path) -> int:
-    """扫 root 下所有 `session-*` 目录全 rmtree。
+    """rmtree every `session-*` directory under root.
 
-    新 session_id 是随机 uuid，保证不会跟历史撞，所以"删所有 session-*"恒等于
-    "删 stale"。返回删了多少个目录。
+    The new session_id is a random uuid, guaranteed never to collide with a
+    historical one, so "delete every session-*" is always equivalent to
+    "delete the stale ones". Returns how many directories were deleted.
     """
     if not root.exists():
         return 0
@@ -344,7 +361,7 @@ def startup_clean(root: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 模块级 shortcut —— 替代旧 cache.py 的同名函数，调用方零改动
+# module-level shortcuts - replace the old cache.py functions of the same name, zero changes needed at call sites
 # ---------------------------------------------------------------------------
 
 
@@ -357,7 +374,7 @@ def cache_image(
     mode: str = "single",
     xy_info: Optional[dict[str, Any]] = None,
 ) -> None:
-    """daemon image_done 时调（替代旧 cache.cache_image）。snapshot 缺省 {}。"""
+    """Called on the daemon's image_done event (replaces the old cache.cache_image). snapshot defaults to {}."""
     get_session().put(
         task_id, filename, data, snapshot or {},
         mode=mode, xy_info=xy_info,
@@ -393,7 +410,7 @@ def total_bytes() -> int:
 
 
 def clear_all() -> None:
-    """lifespan shutdown 调；singleton 未 init 也是 no-op。"""
+    """Called at lifespan shutdown; a no-op if the singleton was never init'd."""
     if _session is None:
         return
     _session.clear_all()
@@ -408,15 +425,16 @@ def configure(
 
 
 # ---------------------------------------------------------------------------
-# Crypto helpers —— SHAKE-128 keystream + XOR
+# Crypto helpers - SHAKE-128 keystream + XOR
 # ---------------------------------------------------------------------------
 
 
 def _keystream(key: bytes, nonce: bytes, n: int) -> bytes:
-    """SHAKE-128(key || nonce).digest(n) —— 任意长度 keystream。
+    """SHAKE-128(key || nonce).digest(n) - a keystream of arbitrary length.
 
-    SHAKE-128 是 SHA-3 标准的可扩展输出函数（NIST FIPS 202）。给定
-    (key, nonce) 组合输出永远确定，作为 XOR 流加密的 keystream 用。
+    SHAKE-128 is the SHA-3 standard's extendable-output function (NIST FIPS
+    202). Output for a given (key, nonce) pair is always deterministic, used
+    here as the keystream for XOR stream encryption.
     """
     h = hashlib.shake_128()
     h.update(key)
@@ -425,7 +443,7 @@ def _keystream(key: bytes, nonce: bytes, n: int) -> bytes:
 
 
 def _xor(a: bytes, b: bytes) -> bytes:
-    """等长 XOR。1.5MB 走 int.from_bytes 比 zip 循环快 ~50 倍。"""
+    """Equal-length XOR. For 1.5MB, int.from_bytes is ~50x faster than a zip loop."""
     if len(a) != len(b):
         raise ValueError("xor lengths differ")
     if not a:
@@ -434,7 +452,7 @@ def _xor(a: bytes, b: bytes) -> bytes:
 
 
 def _decrypt_and_strip(key: bytes, blob: bytes) -> bytes:
-    """反向：blob → 解密 payload → strip snapshot header → return PNG bytes only。"""
+    """Reverse: blob -> decrypt payload -> strip the snapshot header -> return PNG bytes only."""
     if len(blob) < _NONCE_LEN + _SNAPSHOT_LEN_HEADER:
         raise ValueError("blob too short")
     nonce = blob[:_NONCE_LEN]

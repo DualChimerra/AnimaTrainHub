@@ -1,20 +1,20 @@
-"""Queue 任务生命周期（PR-6 commit 6 从 server.py 抽出）。
+"""Queue task lifecycle (extracted from server.py in PR-6 commit 6).
 
-14 routes：
-    GET   /api/queue                 list（默认隐藏 generate / reg_ai）
-    POST  /api/queue                 enqueue（按 preset 名，可带 scheduled_at 定时）
-    POST  /api/queue/{task_id}/start_now  scheduled 手动提前转 pending（0.17 P-B）
-    GET   /api/queue/hold            查队列挂起状态 + 等待恢复 pending 数
-    POST  /api/queue/hold            挂起队列（dispatcher 停拉新 task）
-    POST  /api/queue/release         恢复调度
-    POST  /api/queue/reorder         按 id 列表重排
-    GET   /api/queue/{task_id}       task DB 行（含 is_pausable / is_resumable 信号）
-    PUT   /api/queue/{task_id}/note    任务备注（v20 tasks.note；右键 / 详情页写）
+14 routes:
+    GET   /api/queue                 list (hides generate / reg_ai by default)
+    POST  /api/queue                 enqueue (by preset name, can carry scheduled_at)
+    POST  /api/queue/{task_id}/start_now  manually bump a scheduled task to pending (0.17 P-B)
+    GET   /api/queue/hold            query queue-hold state + pending count waiting to resume
+    POST  /api/queue/hold            hold the queue (dispatcher stops pulling new tasks)
+    POST  /api/queue/release         resume scheduling
+    POST  /api/queue/reorder         reorder by an id list
+    GET   /api/queue/{task_id}       task DB row (including is_pausable / is_resumable signals)
+    PUT   /api/queue/{task_id}/note    task note (v20 tasks.note; written from right-click / detail page)
     POST  /api/queue/{task_id}/cancel
     POST  /api/queue/{task_id}/pause   ADR 0006 §4.1
-    POST  /api/queue/{task_id}/resume  ADR 0006 §6 路径 A + Addendum 2（paused/failed/canceled）
-    POST  /api/queue/{task_id}/retry   复制 config_path / project_id / version_id 起新 task
-    DELETE /api/queue/{task_id}       仅 terminal task 可删
+    POST  /api/queue/{task_id}/resume  ADR 0006 §6 path A + Addendum 2 (paused/failed/canceled)
+    POST  /api/queue/{task_id}/retry   copies config_path / project_id / version_id into a new task
+    DELETE /api/queue/{task_id}       only a terminal task can be deleted
 """
 from __future__ import annotations
 
@@ -44,8 +44,9 @@ from ....supervisor.resources import (
 
 router = APIRouter()
 
-# R-5 档位视图：GPU 视图 = exclusive 档（train/reg_ai/generate/eval_samples），
-# 数据视图 = light + io 档。由 resources.py 档位映射派生，防漂移。
+# R-5 tier view: the GPU view = the exclusive tier (train/reg_ai/generate/eval_samples),
+# the data view = the light + io tiers. Derived from resources.py's tier mapping to
+# prevent drift.
 EXCLUSIVE_VIEW_TYPES: tuple[str, ...] = tuple(TASK_TYPE_RESOURCE_CLASS) + tuple(
     k for k, c in JOB_KIND_RESOURCE_CLASS.items() if c == RESOURCE_EXCLUSIVE
 )
@@ -54,17 +55,18 @@ DATA_VIEW_TYPES: tuple[str, ...] = tuple(
 )
 _RESOURCE_CLASS_TYPES = {"exclusive": EXCLUSIVE_VIEW_TYPES, "data": DATA_VIEW_TYPES}
 
-# resume 允许的起点状态（ADR 0006 Addendum 2）。done 不进 — 语义是重训，
-# 走 retry / ResumeFieldPicker。
+# Starting states allowed for resume (ADR 0006 Addendum 2). done is excluded -- that means
+# retraining, which goes through retry / ResumeFieldPicker.
 RESUMABLE_STATUSES = ("paused", "failed", "canceled")
 
 
 def _resume_source_paths(task: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    """按 status 取恢复点 (state_path, config_path)。
+    """Get the resume point (state_path, config_path) based on status.
 
-    paused 用 paused_*（pause 流程写入，指向 auto_epoch_state.pt）；
-    failed/canceled 用 last_*（supervisor 每 epoch 收 auto_epoch_backup_written
-    事件落 DB，ADR Addendum 2）；其余状态无恢复点。
+    paused uses paused_* (written by the pause flow, points at auto_epoch_state.pt);
+    failed/canceled use last_* (the supervisor writes these to DB on every
+    auto_epoch_backup_written event per epoch, ADR Addendum 2); other statuses have no
+    resume point.
     """
     status = task.get("status")
     if status == "paused":
@@ -75,8 +77,9 @@ def _resume_source_paths(task: dict[str, Any]) -> tuple[Optional[str], Optional[
 
 
 def _is_resumable(task: dict[str, Any]) -> bool:
-    """UI "继续训练" 按钮显隐信号。跟 resume endpoint 的放行条件保持一致：
-    state 文件必须在；config snapshot 路径有值时文件也必须在（严格 freeze）。
+    """Signal for showing/hiding the UI's "resume training" button. Kept consistent with
+    the resume endpoint's admission conditions: the state file must exist; if the config
+    snapshot path is set, that file must exist too (strict freeze).
     """
     state_path, config_path = _resume_source_paths(task)
     if not state_path or not Path(state_path).exists():
@@ -87,7 +90,7 @@ def _is_resumable(task: dict[str, Any]) -> bool:
 
 
 def _enrich_tasks(items: list[dict[str, Any]]) -> None:
-    """给每行注入 is_pausable（ADR 0006 PR-4 §8.1）+ is_resumable（Addendum 2）。就地改。"""
+    """Inject is_pausable (ADR 0006 PR-4 §8.1) + is_resumable (Addendum 2) into every row. Mutates in place."""
     try:
         sup = _supervisor()
         for it in items:
@@ -99,10 +102,10 @@ def _enrich_tasks(items: list[dict[str, Any]]) -> None:
         it["is_resumable"] = _is_resumable(it)
 
 
-# 0.17 P-E — history 分页 page_size 上限，防一次拉爆。
+# 0.17 P-E -- upper bound on page_size for history pagination, to prevent one huge pull.
 _MAX_PAGE_SIZE = 100
 
-# 备注长度上限 —— UI 是「一句话便签」，不是日志。超长截断而不是 422。
+# Note length cap -- the UI is a "one-line sticky note", not a log. Truncate rather than 422 on overflow.
 _MAX_NOTE_LEN = 500
 
 
@@ -117,17 +120,19 @@ def list_queue(
     types: Optional[str] = None,
     resource_class: Optional[str] = None,
 ) -> dict[str, Any]:
-    """队列任务列表。
+    """Queue task list.
 
-    - 不传 group：全量返回，**仍隐藏 generate/reg_ai**（兼容 Overview / Generate /
-      Topbar / Monitor 的 `listQueue()`——它们靠这个默认避免把 generate 当训练任务、
-      或自锁）。
-    - `group=live`：进行中 + 等待（running/paused/pending），不分页，`{items}`。
-    - `group=history`：已结束（done/failed/canceled），分页返回
-      `{items, total, page, page_size}`；`status` 作终态子过滤，`q` 搜 name/config_name。
+    - No `group` passed: returns everything, **still hiding generate/reg_ai** (compatible
+      with Overview / Generate / Topbar / Monitor's `listQueue()` -- they rely on this default
+      to avoid treating generate as a training task, or self-locking).
+    - `group=live`: in-progress + waiting (running/paused/pending), unpaginated, `{items}`.
+    - `group=history`: finished (done/failed/canceled), paginated:
+      `{items, total, page, page_size}`; `status` sub-filters by terminal state, `q` searches
+      name/config_name.
 
-    0.17 P-F：**live/history 不再隐藏 generate/reg_ai**（队列页要全类型可见），改由
-    `types`（逗号分隔 train/reg_ai/generate）做正向类型过滤，下沉 SQL 保证分页 total 准。
+    0.17 P-F: **live/history no longer hide generate/reg_ai** (the queue page needs all types
+    visible); instead `types` (comma-separated train/reg_ai/generate) does a positive type
+    filter, pushed down into SQL to keep the pagination total accurate.
     """
     if status and status not in db.VALID_STATUSES:
         raise ValidationError(
@@ -151,7 +156,8 @@ def list_queue(
                 code="queue.type_filter_invalid", details={"types": bad},
                 http_status=400,
             )
-    # R-5 档位视图参数：显式 types 优先（单类型已隐含档位）；否则按档位展开。
+    # R-5 tier-view param: explicit types takes priority (a single type already implies a
+    # tier); otherwise expand by tier.
     if resource_class is not None:
         if resource_class not in _RESOURCE_CLASS_TYPES:
             raise ValidationError(
@@ -162,11 +168,13 @@ def list_queue(
         if not type_tuple:
             type_tuple = _RESOURCE_CLASS_TYPES[resource_class]
 
-    # R-3 台账合并：数据作业进了 tasks 表。GPU 视图（本端点）在 R-5 档位化前
-    # 默认排除 JOB_TASK_TYPES——显式 types 过滤时不排（调用方自己指定）。
+    # R-3 ledger merge: data jobs landed in the tasks table. The GPU view (this endpoint)
+    # excludes JOB_TASK_TYPES by default, pre-dating R-5 tiering -- doesn't exclude them when
+    # an explicit types filter is given (caller specifies its own).
     if group is None:
-        # 兼容旧行为：全量 + 隐藏 generate/reg_ai（无 group 调用方依赖此默认）
-        # + 隐藏数据作业（保护 Topbar/Overview/Monitor 不把它们当训练任务）。
+        # Preserve old behavior: everything + hide generate/reg_ai (callers with no group
+        # rely on this default) + hide data jobs (protects Topbar/Overview/Monitor from
+        # treating them as training tasks).
         with db.connection_for() as conn:
             items = db.list_tasks(conn, status=status)
         items = db.filter_out_task_types(items, db.JOB_TASK_TYPES)
@@ -185,7 +193,7 @@ def list_queue(
         _enrich_tasks(items)
         return {"items": items}
 
-    # group == "history" —— 分页
+    # group == "history" -- paginated
     statuses = (
         (status,) if status in db.HISTORY_STATUSES else db.HISTORY_STATUSES
     )
@@ -236,10 +244,10 @@ def enqueue(body: EnqueueRequest) -> dict[str, Any]:
 
 @router.post("/api/queue/{task_id}/start_now")
 def start_scheduled_now(task_id: int) -> dict[str, Any]:
-    """0.17 P-B —— scheduled task 手动提前：立即转 pending 参与调度。
+    """0.17 P-B -- manually bump a scheduled task early: immediately flip to pending and join scheduling.
 
-    scheduled_at 保留作记录（「原计划 3:00，手动提前」可追溯）；仅 scheduled
-    状态可调，其余 409。
+    scheduled_at is kept as a record (so "originally planned for 3:00, started early
+    manually" stays traceable); only tasks in the scheduled state can be bumped, else 409.
     """
     with db.connection_for() as conn:
         task = db.get_task(conn, task_id)
@@ -259,7 +267,7 @@ def start_scheduled_now(task_id: int) -> dict[str, Any]:
 
 @router.get("/api/queue/hold")
 def get_queue_hold() -> dict[str, Any]:
-    """查看当前队列挂起状态 + 等待恢复调度的 pending task 数（UI banner 用）。"""
+    """View the current queue-hold state + the number of pending tasks waiting for scheduling to resume (used by the UI banner)."""
     with db.connection_for() as conn:
         held = db.get_queue_held(conn)
         pending = db.list_tasks(conn, status="pending")
@@ -268,10 +276,11 @@ def get_queue_hold() -> dict[str, Any]:
 
 @router.post("/api/queue/hold")
 def hold_queue() -> dict[str, Any]:
-    """挂起队列：dispatcher 不再拉新 task。已 running 的不受影响（ADR §3.2）。
+    """Hold the queue: the dispatcher stops pulling new tasks. Already-running tasks are unaffected (ADR §3.2).
 
-    "同时暂停 running task" 由前端 modal 拆成两步：先调本 endpoint，再
-    单独调 `/api/queue/{id}/pause`。后端不做合一操作。
+    "Also pause running tasks" is split into two steps by the frontend modal: call this
+    endpoint first, then call `/api/queue/{id}/pause` separately. The backend doesn't combine
+    these into one operation.
     """
     with db.connection_for() as conn:
         db.set_queue_held(conn, True)
@@ -281,7 +290,7 @@ def hold_queue() -> dict[str, Any]:
 
 @router.post("/api/queue/release")
 def release_queue() -> dict[str, Any]:
-    """恢复调度：dispatcher 重新按 priority + created_at 拉 pending。"""
+    """Resume scheduling: the dispatcher goes back to pulling pending tasks by priority + created_at."""
     with db.connection_for() as conn:
         db.set_queue_held(conn, False)
     bus.publish({"type": "queue_hold_changed", "held": False})
@@ -301,8 +310,9 @@ def get_queue_item(task_id: int) -> dict[str, Any]:
         task = db.get_task(conn, task_id)
     if not task:
         raise NotFoundError("Task not found", code="task.not_found", details={"task_id": task_id})
-    # ADR 0006 PR-4 — is_pausable 信号让 UI 决定是否显示暂停按钮（§8.1）。
-    # 仅 supervisor 跑得起来时计算；空载（test / 启动期）默认 False。
+    # ADR 0006 PR-4 -- the is_pausable signal lets the UI decide whether to show the pause
+    # button (§8.1). Only computed when the supervisor is actually running; defaults to
+    # False when idle (tests / during startup).
     try:
         task["is_pausable"] = _supervisor().is_task_pausable(task_id)
     except (HTTPException, DomainError):
@@ -313,11 +323,12 @@ def get_queue_item(task_id: int) -> dict[str, Any]:
 
 @router.put("/api/queue/{task_id}/note")
 def set_task_note(task_id: int, body: TaskNoteBody) -> dict[str, Any]:
-    """写 / 清 任务备注（v20 tasks.note）。
+    """Write / clear a task note (v20 tasks.note).
 
-    队列页右键任一行写，任务详情页 overview 也能编辑。纯 UI 元数据：任何
-    状态的 task 都能改（跑完很久的历史任务也能补一句「这个最好用」）。
-    空串 / 纯空白 → 清空（存 NULL）。
+    Written by right-clicking any row on the queue page; also editable from the task detail
+    page's overview. Pure UI metadata: a task in any state can be edited (even a long-finished
+    historical task can get a note like "this config worked best").
+    Empty / whitespace-only -> clears it (stores NULL).
     """
     raw = (body.note or "").strip()
     note = raw[:_MAX_NOTE_LEN] or None
@@ -328,7 +339,8 @@ def set_task_note(task_id: int, body: TaskNoteBody) -> dict[str, Any]:
             )
         db.update_task(conn, task_id, note=note)
         task = db.get_task(conn, task_id)
-    # 队列页 / 详情页可能同时开着 —— 复用 task_state_changed 让两边都刷新。
+    # The queue page / detail page may be open at the same time -- reuse task_state_changed
+    # to refresh both.
     bus.publish({
         "type": "task_state_changed",
         "task_id": task_id,
@@ -340,7 +352,7 @@ def set_task_note(task_id: int, body: TaskNoteBody) -> dict[str, Any]:
 @router.post("/api/queue/{task_id}/cancel")
 def cancel_task(task_id: int) -> dict[str, Any]:
     if not _supervisor().cancel(task_id):
-        # 可能任务已结束 / 不在 supervisor 控制
+        # The task may have already finished / not be under supervisor control
         with db.connection_for() as conn:
             task = db.get_task(conn, task_id)
         if not task:
@@ -358,14 +370,15 @@ def cancel_task(task_id: int) -> dict[str, Any]:
 
 @router.post("/api/queue/{task_id}/pause")
 def pause_task(task_id: int) -> dict[str, Any]:
-    """暂停 running task（ADR §4.1 / §4.3）。
+    """Pause a running task (ADR §4.1 / §4.3).
 
-    异步：立即返回；UI 端 modal 订阅 SSE 看保存进度。supervisor 收到子进程
-    `__EVENT__:pause_state` 后把 status 写为 paused 并 publish task_state_changed。
+    Async: returns immediately; the UI's modal subscribes to SSE to watch save progress.
+    Once the supervisor receives `__EVENT__:pause_state` from the subprocess, it writes
+    status as paused and publishes task_state_changed.
     """
     ok, reason = _supervisor().pause(task_id)
     if not ok:
-        # 区分客户端错误（404/409）vs 状态机不允许（409）
+        # Distinguish client error (404/409) from state-machine rejection (409)
         with db.connection_for() as conn:
             task = db.get_task(conn, task_id)
         if not task:
@@ -380,22 +393,25 @@ def pause_task(task_id: int) -> dict[str, Any]:
 
 @router.post("/api/queue/{task_id}/resume")
 def resume_task(task_id: int) -> dict[str, Any]:
-    """恢复 paused / failed / canceled task（ADR 0006 §6 路径 A + Addendum 2）。
+    """Resume a paused / failed / canceled task (ADR 0006 §6 path A + Addendum 2).
 
-    流程：
-      1. 校验 status ∈ RESUMABLE_STATUSES + 恢复点文件存在
-         （paused 读 paused_*；failed/canceled 读 last_*，即 epoch 末 auto backup）
-      2. task → pending；failed/canceled 把 last_* 复制进 paused_* —— 复用
-         paused 管道，cmd_builder（--resume-state 注入）/ bootstrap_phase
-         （sibling .config.json snapshot freeze）整条下游零改动
-      3. supervisor 下次 _tick 自然 pick up
-      4. 子进程 load_training_state 成功后 emit `resume_state_loaded` →
-         supervisor `_clear_pause_fields` 清 db 字段（文件保留，Addendum 2）
-      5. failed/canceled 曾把 version finalize 成 failed/canceled —— 复活后
-         reconcile 派生回 training 并 publish version_state_changed
+    Flow:
+      1. Validate status is in RESUMABLE_STATUSES + the resume-point file exists
+         (paused reads paused_*; failed/canceled read last_*, i.e. the end-of-epoch auto
+         backup)
+      2. task -> pending; for failed/canceled, copy last_* into paused_* -- reuses the
+         paused pipeline, so cmd_builder (--resume-state injection) / bootstrap_phase
+         (sibling .config.json snapshot freeze) need zero changes downstream
+      3. the supervisor naturally picks it up on its next _tick
+      4. once the subprocess's load_training_state succeeds it emits `resume_state_loaded`
+         -> the supervisor's `_clear_pause_fields` clears the db fields (the files themselves
+         are kept, Addendum 2)
+      5. failed/canceled had finalized the version to failed/canceled -- once revived,
+         reconcile derives it back to training and publishes version_state_changed
 
-    文件丢失 → 409（ADR §5.5：引导用户走 ResumeFieldPicker 起新 task）。
-    done 不可 resume（语义是重训，走 retry / ResumeFieldPicker）。
+    Missing file -> 409 (ADR §5.5: guides the user to start a new task via
+    ResumeFieldPicker instead). done cannot be resumed (that means retraining, via
+    retry / ResumeFieldPicker).
     """
     corrected_version: Optional[dict[str, Any]] = None
     with db.connection_for() as conn:
@@ -415,8 +431,9 @@ def resume_task(task_id: int) -> dict[str, Any]:
                 code="task.resume_state_missing",
             )
         if config_path and not Path(config_path).exists():
-            # snapshot 缺失虽然不致命（bootstrap_phase 会沿用 args.config yaml），
-            # 但 resume 语义会漂；按 ADR §5.7 严格 freeze 原则，拒绝继续。
+            # A missing snapshot isn't fatal on its own (bootstrap_phase would fall back to the
+            # args.config yaml), but resume semantics would drift; per ADR §5.7's strict
+            # freeze principle, refuse to continue.
             raise ConflictError(
                 "The saved training state is missing; start a new run instead",
                 code="task.resume_state_missing",
@@ -429,15 +446,17 @@ def resume_task(task_id: int) -> dict[str, Any]:
             error_msg=None,
         )
         if status in ("failed", "canceled"):
-            # ADR Addendum 2 决策 3：把恢复点搬进 paused_* 走既有管道。
+            # ADR Addendum 2 decision 3: move the resume point into paused_* to reuse the
+            # existing pipeline.
             fields["paused_state_path"] = state_path
             fields["paused_config_path"] = config_path
             fields["paused_step"] = task.get("last_state_step")
         db.update_task(conn, task_id, **fields)
         if status in ("failed", "canceled") and task.get("version_id"):
-            # ADR Addendum 2 决策 5：version status 从 failed/canceled 派生回
-            # training（task 已 pending）。dispatch 时 _write_task_running_to_db
-            # 还会再写一次，这里先改是为了 UI 立即一致。
+            # ADR Addendum 2 decision 5: derive version status back to training from
+            # failed/canceled (the task is now pending). _write_task_running_to_db will write
+            # it again at dispatch time; changing it here first is just to keep the UI
+            # immediately consistent.
             from ....services.projects import versions as _versions
             v, was_corrected = _versions.reconcile_version_status(
                 conn, int(task["version_id"])
@@ -459,16 +478,18 @@ def resume_task(task_id: int) -> dict[str, Any]:
 
 @router.post("/api/queue/{task_id}/retry")
 def retry_task(task_id: int) -> dict[str, Any]:
-    """已结束任务重新入队：复制完整训练上下文创建新 task。
+    """Re-enqueue a finished task: copy its full training context to create a new task.
 
-    需要复制的字段（PP6.1+ 引入；老的 retry 只复制 name/config_name/priority
-    会让 supervisor 走老降级路径用全局 preset 而不是 version 私有 config，
-    导致重试参数与原任务不一致）：
-    - config_path：version 私有 config 的绝对路径
-    - project_id / version_id：用于 monitor_state_path 解析与 stage 推进
+    Fields that must be copied (introduced in PP6.1+; the old retry only copied
+    name/config_name/priority, which made the supervisor fall back to the old legacy path
+    of using the global preset instead of the version's private config, causing retry
+    parameters to diverge from the original task):
+    - config_path: absolute path to the version's private config
+    - project_id / version_id: used for monitor_state_path resolution and stage advancement
 
-    不复制：status / pid / *_at / exit_code / error_msg / monitor_state_path
-    （都是「上次跑」的产物；新任务从 pending 开始，supervisor 会重新解析）。
+    Not copied: status / pid / *_at / exit_code / error_msg / monitor_state_path (all are
+    artifacts of the "last run"; the new task starts from pending and the supervisor
+    re-resolves them).
     """
     with db.connection_for() as conn:
         original = db.get_task(conn, task_id)
@@ -487,8 +508,9 @@ def retry_task(task_id: int) -> dict[str, Any]:
             commit=False,
         )
         copy_fields: dict[str, Any] = {}
-        # R-3：task_type / params 必须一并复制——数据作业类 task 重跑靠它们
-        # 路由 worker 与还原参数（漏了会退化成 train 跑错脚本）。
+        # R-3: task_type / params must be copied together -- data-job-type tasks rely on
+        # them to route to the right worker and restore parameters when re-run (missing them
+        # would degrade to a train task running the wrong script).
         for k in ("config_path", "project_id", "version_id", "task_type", "params"):
             if original.get(k) is not None:
                 copy_fields[k] = original[k]
@@ -523,18 +545,19 @@ def delete_queue_item(task_id: int) -> dict[str, Any]:
                 code="task.not_deletable", http_status=400,
             )
         db.delete_task(conn, task_id)
-    # task-scoped 档案（snapshot/config.yaml / monitor/state.json / samples/ /
-    # run.log）跟 task DB 行同生命周期 —— 删 task 一并清。老 task 散在
-    # studio_data/logs/<id>.log / studio_data/monitors/task_<id>/ 的不动
-    # （不写迁移脚本，留作老版本兼容性测试数据）。
+    # task-scoped artifacts (snapshot/config.yaml / monitor/state.json / samples/ / run.log)
+    # share the task DB row's lifecycle -- deleting the task cleans them up too. Old tasks
+    # scattered at studio_data/logs/<id>.log / studio_data/monitors/task_<id>/ are left
+    # untouched (no migration script written; kept as old-version compatibility test data).
     import shutil
     tdir = task_dir(task_id)
     if tdir.exists():
         shutil.rmtree(tdir, ignore_errors=True)
-    # ADR Addendum 2 决策 4：**旧布局**恢复点（<version>/output/state/task_<id>/，
-    # 本 Addendum 之前的存量）不在 task_dir 下，单独清；新布局
-    # （tasks/<id>/state/）已被上面的 task_dir rmtree 覆盖。目录名必须
-    # 精确等于 task_<id> 才动手 —— 防 DB 路径异常时误删别的目录。
+    # ADR Addendum 2 decision 4: **old-layout** resume points (<version>/output/state/task_<id>/,
+    # leftovers from before this Addendum) aren't under task_dir, so they're cleaned
+    # separately; the new layout (tasks/<id>/state/) is already covered by the task_dir
+    # rmtree above. Only act when the directory name exactly equals task_<id> -- guards
+    # against accidentally deleting another directory if a DB path is malformed.
     for col in ("last_state_path", "paused_state_path"):
         p = task.get(col)
         if not p:

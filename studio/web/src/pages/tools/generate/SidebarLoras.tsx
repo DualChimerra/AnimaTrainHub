@@ -6,15 +6,16 @@ import AddSlotButton from './AddSlotButton'
 import InlineLoraPicker, { type PickedLora } from './InlineLoraPicker'
 import type { LoraCatalog } from './useLoraCatalog'
 
-/** Sidebar 的 LoRA 区：每个 LoRA = 一个常驻 picker 槽（项目下拉 + ckpt chip + 权重 + ×）。
+/** Sidebar's LoRA section: each LoRA = one persistent picker slot (project dropdown + ckpt chips + weight + x).
  *
- * 数据模型统一：所有 picker 槽都用 loras[] 表示，path='' 表示「空槽」（用户
- * 点了 + 添加 LoRA 但还没挑 ckpt）。这样：
- *   - 「+ 添加 LoRA」push 一条空 entry → 新增一个 picker（key 稳定，不会闪）
- *   - 反选 (点已选 chip) = 槽 path 设回 ''，picker 自己仍渲染 → 跟初次打开一样
- *   - × = 真正把 entry 从数组里删掉
- * Generate.tsx handleGenerate 在送 backend 前会 `loras.filter((l) => l.path.trim())`
- * 过滤空槽，不影响 enqueue。 */
+ * Unified data model: every picker slot is represented in loras[], with path='' meaning an
+ * "empty slot" (the user clicked + Add LoRA but hasn't picked a ckpt yet). This means:
+ *   - "+ Add LoRA" pushes an empty entry -> a new picker appears (stable key, no flicker)
+ *   - Deselecting (clicking an already-selected chip) sets the slot's path back to '', and the
+ *     picker keeps rendering -> visually identical to a freshly opened slot
+ *   - x actually removes the entry from the array
+ * Generate.tsx's handleGenerate runs `loras.filter((l) => l.path.trim())` before sending to the
+ * backend, filtering out empty slots without affecting the enqueue. */
 export default function SidebarLoras({
   loras, onChange, catalog,
 }: {
@@ -27,7 +28,7 @@ export default function SidebarLoras({
   // Slot whose checkpoint picker is unfolded (empty slots always show it).
   const [editingIdx, setEditingIdx] = useState<number | null>(null)
 
-  // 已选 path（互相 disable，避免重复添加）—— 排除空槽
+  // Already-selected paths (mutually disable each other to avoid adding duplicates) -- empty slots excluded
   const existingPaths = useMemo(
     () => new Set(loras.filter((l) => l.path).map((l) => l.path)),
     [loras],
@@ -42,7 +43,7 @@ export default function SidebarLoras({
           version_id: picked.versionId,
         }
       : {
-          // 反选：槽保留但 path 清空，picker 仍渲染（视觉等同初次打开的空槽）
+          // Deselect: keep the slot but clear path, picker still renders (visually identical to a freshly opened empty slot)
           path: '',
           scale: weight,
           project_id: null,
@@ -73,15 +74,16 @@ export default function SidebarLoras({
     <div className="flex flex-col gap-2">
       {loras.map((l, i) => {
         const hasCkpt = !!l.path
-        // 决策 #8 / plan §3：历史回填后 resolve 失败的 LoRA（path='' && name 保留）
-        // 渲染 ⚠ placeholder 卡片，提示用户重选；不要静默 path 空让用户困惑
+        // Decision #8 / plan §3: a LoRA that failed to resolve after history backfill
+        // (path='' && name retained) renders a warning placeholder card prompting the user to
+        // re-pick it -- don't silently leave path empty and let the user wonder why
         if (!hasCkpt && l.name) {
           return (
             <PlaceholderLoraCard
               key={`lora-${i}`}
               name={l.name}
               onPick={() => {
-                // 清掉 name 让 InlineLoraPicker 出来供用户重选
+                // Clear name so InlineLoraPicker shows up for the user to re-pick
                 onChange(loras.map((lo, idx) => (
                   idx === i ? { ...lo, name: null } : lo
                 )))
@@ -148,7 +150,7 @@ export default function SidebarLoras({
 
       <AddSlotButton onClick={handleAddSlot}>{t('generate.addLora')}</AddSlotButton>
 
-      {/* placeholder 卡片渲染：path='' && name 保留 */}
+      {/* External-file picker for a slot */}
       {externalForIdx !== null && (
         <PathPicker
           dirOnly={false}
@@ -159,7 +161,7 @@ export default function SidebarLoras({
               project_id: null,
               version_id: null,
             }
-            // 覆盖目标槽的内容；existingPaths 已排除空 path，外部文件可叠加
+            // Overwrite the target slot's contents; existingPaths already excludes empty paths, so external files can stack
             void existingPaths
             onChange(loras.map((l, idx) => (idx === externalForIdx ? entry : l)))
             setExternalForIdx(null)
@@ -176,9 +178,9 @@ function slotName(path: string): string {
   return (path.split(/[\\/]/).pop() ?? path).replace(/\.safetensors$/i, '')
 }
 
-/** 历史回填后 resolve 失败的 LoRA 槽渲染（决策 #8 / plan §3）。
- *  样式跟 InlineLoraPicker 一致（card 风格 + border），但内容显示 ⚠ + name +
- *  [重选] [移除]，不阻断 submit（path='' 会被过滤）。 */
+/** Renders a LoRA slot that failed to resolve after history backfill (decision #8 / plan §3).
+ *  Styled to match InlineLoraPicker (card style + border), but shows a warning + name +
+ *  [Re-pick] [Remove] instead; it doesn't block submit (path='' gets filtered out). */
 function PlaceholderLoraCard({
   name, onPick, onRemove, t,
 }: {
