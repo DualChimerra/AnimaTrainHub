@@ -10,7 +10,7 @@ wraps it with:
     - calling run + sys.exit
 
 Optional helper `reconfigure_console_utf8()` -- the Windows console defaults to
-cp932/cp936, so writing non-ASCII / emoji raises UnicodeEncodeError; calling this once
+a legacy ANSI codepage, so writing non-ASCII / emoji raises UnicodeEncodeError; calling this once
 switches stdout/stderr to UTF-8 + replace mode. Currently only tag_worker needs it (other
 workers don't write non-ASCII captions).
 """
@@ -68,7 +68,7 @@ def _worker_kind_from_argv() -> str:
 
 
 def reconfigure_console_utf8() -> None:
-    """The Windows console defaults to cp932/cp936, so writing non-ASCII / emoji raises
+    """The Windows console defaults to a legacy ANSI codepage, so writing non-ASCII / emoji raises
     UnicodeEncodeError. Forces stdout/stderr to UTF-8 + replace-unencodable-chars, so
     progress output never throws.
 

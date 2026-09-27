@@ -113,3 +113,6 @@ _ui_backup/
 # The whole directory can be deleted at any time; deleting it just means
 # it gets re-downloaded next time.
 /.cache/
+
+# Local research notes (contain private training names)
+/docs/research/

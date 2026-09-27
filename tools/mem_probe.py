@@ -171,7 +171,7 @@ class _GpuReader:
 
 # ---------------------------------------------------------------- main loop
 def main() -> None:
-    # The console may be cp932/gbk or some other non-utf-8 codepage (this machine uses cp932);
+    # The console may be cp932 or some other non-utf-8 codepage (this machine uses cp932);
     # non-ASCII print output would raise UnicodeEncodeError and crash the probe itself.
     # Force utf-8 + errors=replace uniformly.
     for _s in (sys.stdout, sys.stderr):

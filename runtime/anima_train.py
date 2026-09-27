@@ -40,7 +40,7 @@ for _p in (_REPO_ROOT, _REPO_ROOT / "runtime"):
     if _ps not in sys.path:
         sys.path.insert(0, _ps)
 
-# The Windows console defaults to cp936; logging / print writing non-ASCII text
+# The Windows console defaults to the ANSI codepage; logging / print writing non-ASCII text
 # raises UnicodeEncodeError, and the default handler's errors='backslashreplace'
 # turns it into \uXXXX escapes -- that's the source of the garbled text seen in task logs.
 # Force stdout/stderr to UTF-8 + replace so non-ASCII text / emoji always print directly.

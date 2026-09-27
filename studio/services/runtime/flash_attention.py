@@ -106,7 +106,7 @@ def detect_env() -> dict[str, Any]:
     # the driver version is always stored separately as `driver_cuda_ver` for the UI to display and for troubleshooting (so the user can see
     # a case like "driver supports cu130, PyTorch is cu128" and immediately understand why the wheel should be cu128).
     driver_cuda_ver: Optional[str] = None
-    # Historically only caught (subprocess.SubprocessError, OSError); on a Windows Chinese locale (cp936),
+    # Historically only caught (subprocess.SubprocessError, OSError); on a non-UTF-8 Windows locale,
     # decoding nvidia-smi output with text=True could raise UnicodeDecodeError (not one of those subclasses),
     # causing a raw 500. Switched to errors='replace' to avoid that, and widened the except to Exception.
     try:

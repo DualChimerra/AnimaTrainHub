@@ -441,7 +441,7 @@ export default function TrainPage() {
     } catch (e) {
       const msg = String(e)
       // Match on the error code, not on the message: the message is localized
-      // (and was never Chinese to begin with), so a text match silently turned
+      // so a text match silently turned
       // the overwrite prompt into a plain error toast.
       if ((e as ApiError).code === 'preset.exists') {
         const overwrite = await confirm(t('train.alreadyExists', { name: trimmed }), {

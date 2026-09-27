@@ -79,7 +79,7 @@ was never emitted."
 ### Parent stdout's own encoding
 
 A minor pitfall unrelated to the main project: on Windows, the shell's default
-codepage (cp936 / cp932) raises `UnicodeEncodeError` when encoding non-ASCII
+ANSI codepage raises `UnicodeEncodeError` when encoding non-ASCII
 `print` output. `env["PYTHONIOENCODING"] = "utf-8"` only takes effect for the
 **child process** — the parent itself needs
 `sys.stdout.reconfigure(encoding="utf-8")`. The real supervisor writes to

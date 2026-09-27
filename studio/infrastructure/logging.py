@@ -230,7 +230,7 @@ class HumanConsoleFormatter(logging.Formatter):
 
 
 def reconfigure_console_utf8() -> None:
-    """Windows consoles default to cp932/cp936, so writing non-ASCII text / emoji raises
+    """Windows consoles default to a legacy ANSI codepage, so writing non-ASCII text / emoji raises
     UnicodeEncodeError. Forces stdout/stderr into UTF-8 + replace mode so the logger never
     raises.
 

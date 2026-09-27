@@ -26,7 +26,7 @@ def test_studio_bat_is_pure_ascii() -> None:
             f"studio.bat contains {len(bad_offsets)} non-ASCII byte(s) (first 5 detailed below):\n"
             + "\n".join(snippets)
             + "\n\nstudio.bat must stay pure ASCII -- cmd.exe parses it with the system ANSI "
-            "codepage before chcp 65001 runs, and UTF-8 Chinese bytes get split into garbled "
+            "codepage before chcp 65001 runs, and multi-byte UTF-8 characters get split into garbled "
             "commands. Put any non-ASCII messages inside echo, routed through a Python "
             "process that has already set PYTHONUTF8 / chcp 65001."
         )

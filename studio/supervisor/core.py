@@ -1365,7 +1365,7 @@ class Supervisor:
         creationflags = 0
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-        # Windows defaults stdout to cp936; any worker writing Chinese text / emoji
+        # Windows defaults stdout to the ANSI codepage; any worker writing non-ASCII text / emoji
         # would trigger a UnicodeEncodeError, and logging's default backslashreplace
         # would turn it into \uXXXX, filling the task log with garbled text. Give
         # every child process a UTF-8 + unbuffered fallback here.
