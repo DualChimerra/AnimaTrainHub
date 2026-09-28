@@ -24,6 +24,7 @@ import MonitorDashboard, {
   type EvalMetricKey,
 } from '../components/MonitorDashboard'
 import { fmtParamValue, jobJumpPath, paramLabel } from './queue/jobUtils'
+import HelpTip from '../components/ds/HelpTip'
 
 type Tab = 'overview' | 'log' | 'monitor' | 'eval' | 'outputs' | 'snapshot'
 const ALL_TABS: readonly Tab[] = ['overview', 'log', 'monitor', 'eval', 'outputs', 'snapshot']
@@ -223,7 +224,7 @@ export default function QueueDetailPage() {
       bits.push(t('queueDetail.finishedAtShort', { time: fmt.clock(task.finished_at) }))
       if (task.started_at) bits.push(t('queueDetail.lasted', { time: fmt.dur(task.finished_at - task.started_at) }))
     }
-    return bits.map((b, i) => <span key={i}>{i > 0 && ' · '}{b}</span>)
+    return bits.map((b, i) => <span key={i}>{i > 0 && ', '}{b}</span>)
   })()
 
   const primary = (() => {
@@ -275,7 +276,7 @@ export default function QueueDetailPage() {
     <div className="fade-in">
       <PageHead
         eyebrow={t('queueDetail.eyebrow', { kind: String(kind).toUpperCase() })}
-        title={task ? `#${task.id} · ${task.name}` : `#${taskId}`}
+        title={task ? `#${task.id} ${task.name}` : `#${taskId}`}
         subtitle={subtitle}
         tools={
           <>
@@ -675,7 +676,7 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
       {zoom != null && items && items[zoom] && (
         <ImagePreviewModal
           src={api.sampleImageUrl(items[zoom].filename, taskId)}
-          caption={`${mark(items[zoom])} · ${items[zoom].filename}`}
+          caption={`${mark(items[zoom])}, ${items[zoom].filename}`}
           index={zoom}
           total={items.length}
           hasPrev={zoom > 0}
@@ -731,7 +732,7 @@ function PropsCard({ task, fmt, onSaved }: { task: Task; fmt: QueueFormat; onSav
         </div>
       </div>
       <div className="ds-card-body" style={{ paddingTop: 0 }}>
-        <Kv k={t('queueDetail.idSource')} v={`${task.id} · ${task.task_type ?? 'train'} ${task.config_name}`} />
+        <Kv k={t('queueDetail.idSource')} v={`${task.id}, ${task.task_type ?? 'train'} ${task.config_name}`} />
         {task.project_id != null && task.version_id != null && (
           <Kv k={t('queueDetail.source')} v={<Link to={`/projects/${task.project_id}?version=${task.version_id}`} style={{ color: 'var(--green-text)' }}>{t('queueDetail.sourceLink', { projectId: task.project_id, versionId: task.version_id })}</Link>} />
         )}
@@ -1051,22 +1052,19 @@ function EvalTab({ task }: { task: Task }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
         <div className="ds-card">
           <div className="ds-card-head ds-pad">
-            <div><div className="ds-card-title">{t('queueDetail.howToRead')}</div><div className="ds-card-sub">{t('queueDetail.howToReadSub')}</div></div>
+            <div><div className="ds-card-title">{t('queueDetail.howToRead')}<HelpTip><>{t('queueDetail.howToReadSub')} {t('queueDetail.evalWhereToEnable')}</></HelpTip></div></div>
           </div>
           <div className="ds-card-body" style={{ paddingTop: 0 }}>
             {EVAL_METRIC_KEYS.map((k) => (
               <div key={k} className="ds-kv"><span className="ds-k ds-mono">{METRIC_CODE[k]}</span><span className="ds-v" style={{ fontFamily: 'inherit' }}>{t(`queueDetail.metricHint.${k}`)}</span></div>
             ))}
-            <div className="ds-note ds-info" style={{ marginTop: 11 }}>
-              <span>{t('queueDetail.evalWhereToEnable')}</span>
-            </div>
           </div>
         </div>
         {last && (
           <div className="ds-card">
             <div className="ds-card-head ds-pad"><div><div className="ds-card-title">{t('queueDetail.evalRunTitle')}</div><div className="ds-card-sub">{t('queueDetail.evalRunSub')}</div></div></div>
             <div className="ds-card-body" style={{ paddingTop: 0 }}>
-              <Kv k={t('queueDetail.idSource')} v={`${task.id} · ${last.version_label ?? task.config_name}`} />
+              <Kv k={t('queueDetail.idSource')} v={`${task.id}, ${last.version_label ?? task.config_name}`} />
               <Kv k={t('queueDetail.evalRunId')} v={last.run_id} />
               {last.sample_run?.summary?.total != null && <Kv k={t('queueDetail.evalImages')} v={last.sample_run.summary.total} />}
               {last.checkpoint?.path && <Kv k={t('queueDetail.checkpoint')} v={tail(last.checkpoint.path, 1)} title={last.checkpoint.path} />}
@@ -1349,7 +1347,7 @@ export function OutputsTab({ taskId, onChanged }: { taskId: number; onChanged?: 
             <div className="ds-card-title">{t('queueDetail.tabOutputs')}</div>
             <div className="ds-card-sub ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={data?.output_dir ?? undefined}>
               {data?.output_dir || (data ? t('queueDetail.noProjectAssoc') : t('common.loading'))}
-              {hasFiles && ` · ${t('queueDetail.filesCount', { count: sortedFiles.length })} · ${fmt.bytes(totalSize)}`}
+              {hasFiles && `, ${t('queueDetail.filesCount', { count: sortedFiles.length })}, ${fmt.bytes(totalSize)}`}
             </div>
           </div>
           {data?.output_dir && (

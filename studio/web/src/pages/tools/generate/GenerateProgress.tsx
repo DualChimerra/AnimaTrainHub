@@ -71,7 +71,7 @@ export default function GenerateProgressBar({
     phaseLabel = t('generate.phaseSample', { step: progress.currentStep ?? 0, total: progress.totalSteps ?? 0 })
   else phaseLabel = t('generate.progressPreparing')
 
-  const batchTag = bt && bt > 1 && bi != null ? `${bi + 1}/${bt} · ` : ''
+  const batchTag = bt && bt > 1 && bi != null ? `${bi + 1}/${bt}, ` : ''
 
   if (!active && !status && !params) return null
   const meterPct = active ? pct : status?.tone === 'ok' ? 100 : status ? 0 : null
@@ -85,7 +85,7 @@ export default function GenerateProgressBar({
       )}
       {active ? (
         <span className="ds-mono" style={{ fontSize: 11.5, color: 'var(--ink-2)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {batchTag}{phaseLabel} · {pct}%
+          {batchTag}{phaseLabel}, {pct}%
         </span>
       ) : status ? (
         <span

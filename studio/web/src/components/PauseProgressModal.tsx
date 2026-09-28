@@ -139,7 +139,7 @@ export function PauseProgressModal({ taskId, taskName, onClose }: PauseProgressM
           className="m-0 text-lg font-semibold text-fg-primary"
         >
           {t('queue.pauseProgress.title', { id: taskId })}
-          {taskName ? ` · ${taskName}` : ''}
+          {taskName ? `, ${taskName}` : ''}
         </h2>
 
         {state.phase === 'saving' && (

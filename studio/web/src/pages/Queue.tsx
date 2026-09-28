@@ -17,6 +17,7 @@ import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { buildTrainingForecast } from '../lib/queueEstimates'
 import { useQueueFormat, type QueueFormat } from '../lib/queueFormat'
 import { jobJumpPath } from './queue/jobUtils'
+import HelpTip from '../components/ds/HelpTip'
 
 /** Note input cap -- matches the backend's _MAX_NOTE_LEN (the backend truncates past this; we block it here first). */
 const MAX_NOTE_LEN = 500
@@ -410,7 +411,6 @@ export default function QueuePage() {
   return (
     <div className="fade-in">
       <PageHead
-        eyebrow={t('queue.eyebrow')}
         title={t('queue.title')}
         subtitle={t('queue.description')}
         tools={
@@ -492,7 +492,7 @@ export default function QueuePage() {
                     const run = s.task.status === 'running'
                     const label = run
                       ? `#${s.task.id}`
-                      : `#${s.task.id} · ${s.task.name}${s.span != null ? ` · ~${fmt.dur(s.span)}` : ''}`
+                      : `#${s.task.id} ${s.task.name}${s.span != null ? `, ~${fmt.dur(s.span)}` : ''}`
                     return (
                       <button
                         key={s.task.id}
@@ -832,7 +832,7 @@ function QueueCard({
         <span className="ds-qtitle">
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{task.name}</span>
           {badge}
-          <span className="ds-qid">#{task.id} · {task.config_name}</span>
+          <span className="ds-qid">#{task.id} {task.config_name}</span>
         </span>
         <span className="ds-qtime">{time}</span>
         <span className="ds-actgroup" onClick={(e) => e.stopPropagation()}>
@@ -911,8 +911,7 @@ function DataTasksCard({ live, history, projectTitles, fmt, onOpen, onJump, onCa
     <div className="ds-card">
       <div className="ds-card-head ds-pad">
         <div style={{ flex: 1 }}>
-          <div className="ds-card-title">{t('queue.dataTitle')}</div>
-          <div className="ds-card-sub">{t('queue.dataSub')}</div>
+          <div className="ds-card-title">{t('queue.dataTitle')}<HelpTip>{t('queue.dataSub')}</HelpTip></div>
         </div>
       </div>
       {rows.length === 0 ? (

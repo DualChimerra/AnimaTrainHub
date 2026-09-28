@@ -403,7 +403,7 @@ export default function TagEditPage() {
               <div className="ds-card-title">{t('tagEdit.imagesTitle')}</div>
               <div className="ds-card-sub">
                 {t('tagEdit.imagesSub', { n: filteredKeys.length })}
-                {pickedTag && ` · ${t('tagEdit.withTag', { n: pickedCount, tag: pickedTag })}`}
+                {pickedTag && `, ${t('tagEdit.withTag', { n: pickedCount, tag: pickedTag })}`}
               </div>
             </div>
             <div className="ds-card-tools">
@@ -417,7 +417,7 @@ export default function TagEditPage() {
               >
                 <option value="">{t('tagEdit.allFolders', { n: keys.length })}</option>
                 {folderNames.map((f) => (
-                  <option key={f} value={f}>{f} · {folderCounts.get(f) ?? 0}</option>
+                  <option key={f} value={f}>{f}, {folderCounts.get(f) ?? 0}</option>
                 ))}
               </select>
             </div>
@@ -461,7 +461,7 @@ export default function TagEditPage() {
               </div>
               <div className="ds-card-sub">
                 {activeKey
-                  ? [dims && `${dims.w} × ${dims.h}`, activeFolder, activeIndex >= 0 && `${activeIndex + 1} / ${navKeys.length}`].filter(Boolean).join(' · ')
+                  ? [dims && `${dims.w} × ${dims.h}`, activeFolder, activeIndex >= 0 && `${activeIndex + 1} / ${navKeys.length}`].filter(Boolean).join(', ')
                   : '—'}
               </div>
             </div>

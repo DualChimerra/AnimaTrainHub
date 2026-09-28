@@ -17,6 +17,7 @@ import { useDialog } from '../../../components/Dialog'
 import { useToast } from '../../../components/Toast'
 import { parseFolderMeta } from '../../../lib/folderMeta'
 import { useEventStream } from '../../../lib/useEventStream'
+import HelpTip from '../../../components/ds/HelpTip'
 
 // ---------- sorting ----------
 type SortMode =
@@ -742,7 +743,7 @@ export default function CurationPage() {
           <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
             <div className="ds-card-head ds-pad">
               <div>
-                <div className="ds-card-title">{isVal ? t('curate.valPanelTitle') : t('curate.trainPanelTitle')}</div>
+                <div className="ds-card-title">{isVal ? <>{t('curate.valPanelTitle')}<HelpTip>{t('curate.valHint')}</HelpTip></> : t('curate.trainPanelTitle')}</div>
                 <div className="ds-card-sub">
                   {isVal
                     ? t('curate.valSubtitle', { total: valView?.val_total ?? 0, sel: rightSel.size })
@@ -763,9 +764,7 @@ export default function CurationPage() {
               </div>
             </div>
 
-            {isVal ? (
-              <div style={{ padding: '0 17px 10px' }}><div className="ds-note" style={{ fontSize: 11.5 }}>{t('curate.valHint')}</div></div>
-            ) : (
+            {isVal ? null : (
               <div style={{ padding: '0 17px 10px', display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
                 {folderNames.length === 0 && <span className="ds-muted" style={{ fontSize: 12 }}>{t('curate.noTrainFolders')}</span>}
                 {folderNames.map((f) => {

@@ -142,7 +142,7 @@ function entryCaption(entry: HistoryEntry): string {
   const p = entry.params as Partial<HistoryEntry['params']> | undefined
   if (!p || p.seed == null) return entryDisplayLabel(entry)
   const w = p.loras?.[0]?.scale
-  return w != null ? `seed ${p.seed} · w ${w.toFixed(2)}` : `seed ${p.seed}`
+  return w != null ? `seed ${p.seed}, w ${w.toFixed(2)}` : `seed ${p.seed}`
 }
 
 function HistoryItem({ entry, selected, onSelect }: { entry: HistoryEntry; selected: boolean; onSelect: () => void }) {
@@ -152,7 +152,7 @@ function HistoryItem({ entry, selected, onSelect }: { entry: HistoryEntry; selec
       className={`ds-thumb${selected ? ' ds-sel' : ''}`}
       style={{ width: '100%', height: ITEM_SIZE, padding: 0, cursor: 'pointer' }}
       onClick={onSelect}
-      title={`${entryDisplayLabel(entry)} · ${new Date(entry.createdAt).toLocaleString()}`}
+      title={`${entryDisplayLabel(entry)}, ${new Date(entry.createdAt).toLocaleString()}`}
     >
       <img
         src={entryThumbUrl(entry)}
@@ -174,7 +174,7 @@ function LiveItem({ task, selected, onSelect, onCancel }: { task: Task; selected
       className={`ds-thumb${selected ? ' ds-sel' : ''}`}
       style={{ width: '100%', height: ITEM_SIZE, cursor: running ? 'pointer' : undefined, outline: running ? undefined : '1px dashed var(--line-3)', outlineOffset: -1 }}
       onClick={running ? onSelect : undefined}
-      title={`#${task.id} · ${running ? t('status.running') : t('status.queued')}`}
+      title={`#${task.id} ${running ? t('status.running') : t('status.queued')}`}
     >
       {running
         ? <span className="ds-dot ds-dot-run" style={{ transform: 'scale(1.4)' }} />

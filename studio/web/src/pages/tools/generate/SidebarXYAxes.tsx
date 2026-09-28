@@ -109,7 +109,7 @@ function AxisLoraCkptPicker({
           <span className="font-medium" style={{ color: 'var(--fg-secondary)' }}>
             {matchedLabel ?? ckptStemFromPath(bound.path)}
           </span>
-          <span className="font-mono">· {t('generate.nCkpts', { count: pickedCount })}</span>
+          <span className="font-mono">{t('generate.nCkpts', { count: pickedCount })}</span>
         </div>
       )}
       <InlineLoraPicker

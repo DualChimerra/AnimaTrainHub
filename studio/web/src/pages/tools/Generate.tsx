@@ -874,12 +874,12 @@ export default function GeneratePage() {
   const firstLora = shown.loras[0]
   const resultSub = [
     firstLora
-      ? `${firstLora.name.replace(/\.safetensors$/i, '')} · ${t('generate.weightShort', { w: firstLora.scale.toFixed(2) })}`
+      ? `${firstLora.name.replace(/\.safetensors$/i, '')}, ${t('generate.weightShort', { w: firstLora.scale.toFixed(2) })}`
       : t('generate.noLora'),
     shown.loras.length > 1 ? `+${shown.loras.length - 1}` : null,
     `seed ${shown.seed}`,
-  ].filter(Boolean).join(' · ')
-  const paramsLine = `${t('generate.stepsN', { count: shown.steps })} · guidance ${shown.cfg.toFixed(1)} · ${schemaEnumLabel('sample_sampler_name', shown.sampler, t)} / ${schemaEnumLabel('sample_scheduler', shown.scheduler, t)}`
+  ].filter(Boolean).join(', ')
+  const paramsLine = `${t('generate.stepsN', { count: shown.steps })}, guidance ${shown.cfg.toFixed(1)}, ${schemaEnumLabel('sample_sampler_name', shown.sampler, t)} / ${schemaEnumLabel('sample_scheduler', shown.scheduler, t)}`
   const footerStatus = historyOverride || !currentTask || busy
     ? null
     : currentTask.status === 'done'
@@ -911,7 +911,6 @@ export default function GeneratePage() {
   return (
     <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <PageHead
-        eyebrow={t('generate.eyebrow')}
         title={t('generate.title')}
         subtitle={t('generate.subtitle')}
         tools={

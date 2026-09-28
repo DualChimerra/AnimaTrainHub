@@ -493,7 +493,7 @@ export default function PreprocessPage() {
             visibleRows[previewIdx].filename,
             visibleRows[previewIdx].folder, 1600,
           ) + `&_=${visibleRows[previewIdx].mtime}`}
-          caption={`${visibleRows[previewIdx].name} · ${
+          caption={`${visibleRows[previewIdx].name}, ${
             visibleRows[previewIdx].status === 'processed' ? t('ppFrame.previewProcessed') : t('ppFrame.previewPending')
           }`}
           index={previewIdx}
@@ -592,7 +592,7 @@ function OperationPanel({
             <b>{t('preprocess.needDownload')}</b>{' '}
             {upscaler?.kind === 'custom'
               ? t('preprocess.customModelLocal')
-              : `${upscaler?.hf_repo ?? upscaler?.ms_repo ?? '—'} · ~${upscaler?.size_mb ?? 64} MB`}
+              : `${upscaler?.hf_repo ?? upscaler?.ms_repo ?? '—'}, ~${upscaler?.size_mb ?? 64} MB`}
           </span>
           <button type="button" className="ds-btn-primary" style={{ height: 28, alignSelf: 'flex-start' }} onClick={onDownloadModel} disabled={downloadingModel || upscaler?.kind === 'custom'}>
             {downloadingModel ? t('preprocess.modelDownloading') : t('preprocess.downloadModel', { model: selectedModel })}

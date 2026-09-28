@@ -752,7 +752,10 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 select.ds-inp{cursor:pointer}
 select.ds-select-open{border-color:var(--green-600);box-shadow:0 0 0 3px var(--green-soft)}
 .ds-stepper button:hover:not(:disabled){background:var(--hover);color:var(--ink)}
-.ds-meter i,.ds-slider-track i{transition:width .45s var(--ease-out)}
+/* no width transition: animating width re-lays out the whole page every frame
+   and makes the first scroll stutter; a bar jumps once per data update */
+.ds-meter i,.ds-slider-track i{transition:none}
+.ds-meter{contain:paint}
 
 /* switch knob slides instead of jumping */
 .ds-switch{transition:background-color .2s ease}
@@ -914,3 +917,88 @@ input[type=range]{accent-color:var(--green-600)}
 @keyframes ds-palette-in{from{opacity:0;transform:translateX(-50%) translateY(-6px) scale(.98)}to{opacity:1;transform:translateX(-50%)}}
 .ds-palette{animation:ds-palette-in .2s var(--ease-out) both}
 @media (prefers-reduced-motion:reduce){.ds-palette{animation:none}}
+
+/* ===========================================================================
+   v9 · settings form: a grid of cells instead of a long list of rows
+   Short settings (numbers, selects) sit side by side, flags are compact
+   tiles, long controls (paths, lists, option cards) take a whole grid row.
+   =========================================================================== */
+.ds-fgroup-head{padding:14px 16px 2px}
+.ds-fgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px 16px;padding:10px 16px 16px;align-items:end}
+.ds-fcell{display:flex;flex-direction:column;gap:6px;min-width:0;position:relative}
+.ds-fcell.ds-full{grid-column:1/-1}
+.ds-fcell-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:18px;line-height:1.3}
+.ds-fcell-head .ds-label{font-size:12.5px;font-weight:500;color:var(--ink-2)}
+.ds-fcell-was{font-size:11px;color:var(--ink-3)}
+.ds-fcell-ctl{display:flex;flex-direction:column;gap:6px;min-width:0}
+.ds-fcell-ctl > .ds-inp{width:100%}
+.ds-fcell .ds-lockchip,.ds-fcell .ds-tag{flex:none}
+
+/* flag tile: name and switch in one box of the input height */
+.ds-togglebox{display:flex;align-items:center;gap:8px;min-height:32px;padding:5px 7px 5px 11px;border:1px solid var(--line-2);border-radius:var(--r-ctl);background:var(--card);box-shadow:var(--sh-card);cursor:pointer;min-width:0;transition:background-color .16s ease,border-color .16s ease}
+.ds-togglebox:hover{border-color:var(--line-3)}
+.ds-togglebox.ds-on{background:var(--green-soft);border-color:var(--green-line)}
+.ds-togglebox.ds-is-disabled{opacity:.55;cursor:not-allowed}
+.ds-togglebox-name{flex:1;min-width:0;line-height:1.3}
+.ds-togglebox-name .ds-label{font-size:12.5px;font-weight:500;color:var(--ink)}
+.ds-togglebox .ds-switch{flex:none}
+.ds-togglebox .ds-switch:focus-within{box-shadow:0 0 0 3px var(--green-soft)}
+
+/* trigger word: a gated sub-block under DOP / on top of the data tab */
+.ds-trigger-slot{padding:14px 16px 0}
+.ds-trigger{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--area)}
+.ds-trigger-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.ds-trigger-row .ds-inp{flex:1 1 220px;max-width:380px;background:var(--card)}
+.ds-trigger-cands{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11.5px}
+.ds-trigger-cands .ds-chip{height:24px;padding-right:9px;font-size:11px}
+.ds-trigger-msg{font-size:11.5px;color:var(--ink-3)}
+.ds-trigger-msg.ds-warn{color:var(--amber-text)}
+@media (max-width:760px){.ds-fgrid{grid-template-columns:minmax(0,1fr)}}
+
+/* the one help affordance: a small "?" after a name or a title */
+.ds-help{display:inline-grid;place-items:center;width:15px;height:15px;margin-left:6px;padding:0;border-radius:999px;border:1px solid var(--line-3);background:var(--card);color:var(--ink-3);font:600 9.5px/1 var(--font);letter-spacing:0;vertical-align:1px;cursor:help;flex:none;transition:color .15s ease,border-color .15s ease,background-color .15s ease}
+.ds-help:hover,.ds-help.ds-is-open{color:var(--ink);border-color:var(--ink-3)}
+.ds-help:focus-visible{outline:none;box-shadow:0 0 0 2px var(--green-600)}
+.ds-cap .ds-help{text-transform:none}
+
+/* tabs everywhere: a soft pill for the active tab instead of an underline */
+.ds-tabs{gap:4px;padding:8px 12px;align-items:center;border-bottom:1px solid var(--line)}
+.ds-tab{height:30px;padding:0 12px;margin:0;border:0;border-radius:8px;font-size:12.5px;font-weight:500;color:var(--ink-3);background:transparent;transition:background-color .16s ease,color .16s ease,box-shadow .16s ease}
+.ds-tab:not(.ds-is-active):hover{color:var(--ink);background:var(--hover)}
+.ds-tab.ds-is-active{color:var(--ink);font-weight:600;background:var(--sunken);box-shadow:inset 0 0 0 1px var(--line-2);border:0}
+.ds-tab .ds-badge{margin-left:2px}
+
+/* scroll panes scroll on the compositor: on 100%-scale screens Chrome
+   otherwise scrolls them on the main thread (non-opaque background + LCD
+   text), so any render work at that moment stalls the first scroll frames */
+main,.ds-train-scroll,.ds-scroll,.ds-pp-side,.ds-crop-side,.ds-set-rail,.overflow-auto,.overflow-y-auto{will-change:scroll-position}
+
+/* switches of a card: a compact two-column list, switch then name on one line */
+.ds-switches{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:2px 12px;padding:6px 8px 10px}
+.ds-switches.ds-after{margin:0 8px;padding:8px 0 10px;border-top:1px solid var(--line)}
+.ds-switchrow{min-width:0}
+.ds-switchrow-hit{display:flex;align-items:center;gap:10px;height:34px;padding:0 8px;border-radius:8px;cursor:pointer;min-width:0;transition:background-color .15s ease}
+.ds-switchrow-hit:hover{background:var(--hover)}
+.ds-switchrow-hit.ds-is-disabled{opacity:.5;cursor:not-allowed}
+.ds-switchrow-name{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
+.ds-switchrow-name .ds-label{font-size:12.5px;font-weight:500;color:var(--ink)}
+.ds-switchrow .ds-lockchip,.ds-switchrow .ds-tag{flex:none}
+.ds-switch.ds-sm{width:30px;height:18px}
+.ds-switch.ds-sm i{top:2px;left:2px;width:14px;height:14px}
+.ds-switch.ds-sm.ds-on i{transform:translateX(12px)}
+.ds-switch.ds-sm:focus-within{box-shadow:0 0 0 3px var(--green-soft)}
+.ds-fafter{padding:0 16px 16px}
+
+/* v10 · settings cards: gray cards on the white card body, the line between
+   inputs and switches runs edge to edge */
+.ds-fgroups{background:var(--card)}
+.ds-fgroup{background:var(--area);border-color:var(--line);box-shadow:none}
+.ds-switches.ds-after{margin:0;padding:8px 8px 10px;border-top:1px solid var(--line)}
+.ds-switches.ds-before{margin:0;padding:6px 8px 8px;border-bottom:1px solid var(--line)}
+.ds-switches.ds-before + .ds-fgrid{padding-top:14px}
+.ds-fgroup .ds-switchrow-hit:hover{background:rgba(20,22,20,.045)}
+/* trigger word inside the DOP card: an ordinary cell, no box of its own */
+.ds-fgrid .ds-trigger{padding:0;border:0;background:none;border-radius:0}
+
+/* the tab strip's own hairline is the only line under the tabs */
+.ds-tabs + .ds-fgroups,.ds-tabs + * + .ds-fgroups{border-top:0}

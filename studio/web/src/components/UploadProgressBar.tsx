@@ -67,20 +67,17 @@ export default function UploadProgressBar({ state, className }: Props) {
         ) : isUploading ? (
           <>
             <span>{pct.toFixed(0)}%</span>
-            <span>·</span>
             <span>
               {formatBytes(state.loaded)}
               {state.total > 0 && ` / ${formatBytes(state.total)}`}
             </span>
             {state.speedBps > 0 && (
               <>
-                <span>·</span>
                 <span>{formatSpeed(state.speedBps)}</span>
               </>
             )}
             {state.etaSec != null && (
               <>
-                <span>·</span>
                 <span>
                   {t('upload.etaPrefix')} {formatEta(state.etaSec)}
                 </span>

@@ -250,9 +250,9 @@ export default function DownloadPage() {
   const nextTo = activeVersion ? `/projects/${project.id}/v/${activeVersion.id}/curate` : `/projects/${project.id}`
   const uploadDetail = uploader.busy ? (uploader.processing ? t('download.uploadProcessing') : t('download.uploading')) : null
   const logDetail = jobActive && job
-    ? `#${job.id} ${t('dataset.logScrape')}${jobProgress ? ` · ${jobProgress.n.toLocaleString()} / ${jobProgress.total.toLocaleString()}` : ''}`
+    ? `#${job.id} ${t('dataset.logScrape')}${jobProgress ? `, ${jobProgress.n.toLocaleString()} / ${jobProgress.total.toLocaleString()}` : ''}`
     : uploadDetail
-      ? `${t('dataset.logUpload')} · ${uploadDetail}`
+      ? `${t('dataset.logUpload')}, ${uploadDetail}`
       : null
 
   return (
@@ -641,7 +641,7 @@ function UploadCard({ uploader, lastUpload, onDismissResult }: {
             <summary style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, listStyle: 'none' }}>
               <span>
                 {t('download.added')} <b>{lastUpload.added.length}</b>
-                {lastUpload.skipped.length > 0 && <> · {t('download.skipped')} <b>{lastUpload.skipped.length}</b></>}
+                {lastUpload.skipped.length > 0 && <> {t('download.skipped')} <b>{lastUpload.skipped.length}</b></>}
               </span>
               <span style={{ flex: 1 }} />
               <button type="button" aria-label={t('common.close')} onClick={(e) => { e.preventDefault(); onDismissResult() }}>{Icon.x}</button>
@@ -719,7 +719,7 @@ function StatsCard({ project, files, selected }: {
             {formats.map((f, i) => (
               <span key={f.ext} className="ds-legend">
                 <s style={{ background: FORMAT_COLORS[i % FORMAT_COLORS.length] }} />
-                {f.ext} · {f.n.toLocaleString()} · {Math.round((f.n / files.length) * 100)}%
+                {f.ext}, {f.n.toLocaleString()}, {Math.round((f.n / files.length) * 100)}%
               </span>
             ))}
           </div>

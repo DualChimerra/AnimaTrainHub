@@ -166,7 +166,7 @@ export default function CommandPalette({ open, onClose }: Props) {
     for (const task of tasks) {
       items.push({
         id: `task:${task.id}`,
-        label: `#${task.id} · ${task.name}`,
+        label: `#${task.id} ${task.name}`,
         sub: t(`status.${task.status === 'pending' ? 'queued' : task.status}`),
         group: gTasks,
         kind: 'task',
@@ -178,6 +178,7 @@ export default function CommandPalette({ open, onClose }: Props) {
     items.push({ id: 'home',     label: t('commandPalette.home'), sub: t('commandPalette.homeSub'),     group: gActions, kind: 'page', icon: 'folder',  path: '/' })
     items.push({ id: 'queue',    label: t('nav.queue'),           sub: t('commandPalette.queueSub'),    group: gActions, kind: 'page', icon: 'queue',   path: '/queue' })
     items.push({ id: 'generate', label: t('nav.generate'),        sub: t('commandPalette.generateSub'), group: gActions, kind: 'page', icon: 'image',   path: '/tools/generate' })
+    items.push({ id: 'graph',    label: t('nav.graph'),           sub: t('commandPalette.graphSub'),    group: gActions, kind: 'page', icon: 'monitor', path: '/tools/graph' })
     items.push({ id: 'presets',  label: t('nav.presets'),         sub: t('commandPalette.presetsSub'),  group: gActions, kind: 'page', icon: 'preset',  path: '/tools/presets' })
     items.push({ id: 'monitor',  label: t('nav.monitor'),         sub: t('commandPalette.monitorSub'),  group: gActions, kind: 'page', icon: 'monitor', path: '/tools/monitor' })
     items.push({ id: 'settings', label: t('nav.settings'),        sub: t('commandPalette.settingsSub'), group: gActions, kind: 'setting', icon: 'cog', action: () => settingsDrawer.open() })
@@ -342,7 +343,7 @@ export default function CommandPalette({ open, onClose }: Props) {
                       <span className="ds-palette-ico">{ITEM_ICONS[item.icon]}</span>
                       <span className="ds-palette-name">
                         <Highlight text={item.label} q={q} />
-                        {item.sub && <span style={{ color: 'var(--ink-4)' }}> · <Highlight text={item.sub} q={q} /></span>}
+                        {item.sub && <span style={{ color: 'var(--ink-4)' }}>, <Highlight text={item.sub} q={q} /></span>}
                       </span>
                       <span className="ds-palette-kind">{t(`commandPalette.kind.${item.kind}`)}</span>
                     </button>

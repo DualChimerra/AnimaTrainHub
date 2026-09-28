@@ -35,6 +35,7 @@ import GeneratePage from './pages/tools/Generate'
 import MonitorPage from './pages/tools/Monitor'
 import PresetsPage from './pages/tools/Presets'
 import SoupPage from './pages/tools/Soup'
+import GraphPage from './pages/tools/Graph'
 
 /**
  * Compatibility redirect for the old `/tools/settings?section=…` path: jumps to
@@ -186,6 +187,7 @@ const router = createBrowserRouter(
         { path: '/tools/settings', element: <SettingsRedirect /> },
         { path: '/tools/generate', element: <GeneratePage /> },
         { path: '/tools/soup', element: <SoupPage /> },
+        { path: '/tools/graph', element: <GraphPage /> },
         { path: '/configs', element: <Navigate to="/tools/presets" replace /> },
         { path: '/monitor', element: <Navigate to="/tools/monitor" replace /> },
         { path: '/datasets', element: <Navigate to="/" replace /> },

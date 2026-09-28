@@ -440,9 +440,9 @@ function AdvancedSection({ preset, onUpdate }: {
             fontSize: 'var(--t-xs)',
             color: 'var(--fg-tertiary)',
           }}
-          title={`temperature ${preset.temperature} · max_tokens ${preset.max_tokens} · concurrency ${preset.concurrency} · max_requests_per_minute ${preset.max_requests_per_minute || 0} · max_side ${preset.max_side}px · jpeg_quality ${preset.jpeg_quality}`}
+          title={`temperature ${preset.temperature}, max_tokens ${preset.max_tokens}, concurrency ${preset.concurrency}, max_requests_per_minute ${preset.max_requests_per_minute || 0}, max_side ${preset.max_side}px, jpeg_quality ${preset.jpeg_quality}`}
         >
-          {preset.temperature} · {preset.max_tokens}t · c{preset.concurrency} · m{preset.max_requests_per_minute || 0} · {preset.max_side}px · q{preset.jpeg_quality}
+          {preset.temperature}, {preset.max_tokens}t, c{preset.concurrency}, m{preset.max_requests_per_minute || 0}, {preset.max_side}px, q{preset.jpeg_quality}
         </span>
       </summary>
       {/* Expanded content: 03 Sampling + 04 Image preprocessing stacked as-is */}

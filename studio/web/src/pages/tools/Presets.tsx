@@ -257,7 +257,7 @@ export default function PresetsPage() {
     if (autoSyncPaths) {
       const node = (
         <>
-          {t('train.globalAutoLockedPrefix')} ·{' '}
+          {t('train.globalAutoLockedPrefix')},{' '}
           <button
             type="button"
             onClick={() => settingsDrawer.open({ section: 'models' })}
@@ -549,7 +549,6 @@ export default function PresetsPage() {
       />
 
       <PageHead
-        eyebrow={t('presets.eyebrow')}
         title={t('presets.title')}
         subtitle={t('presets.subtitle')}
         tools={
@@ -652,7 +651,7 @@ export default function PresetsPage() {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="ds-card-title ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected}</div>
                     <div className="ds-card-sub">
-                      {[descriptions[selected], yamlFieldCount ? t('presets.fieldsN', { count: yamlFieldCount }) : null].filter(Boolean).join(' · ')}
+                      {[descriptions[selected], yamlFieldCount ? t('presets.fieldsN', { count: yamlFieldCount }) : null].filter(Boolean).join(', ')}
                     </div>
                   </div>
                   <div className="ds-card-tools">
@@ -680,7 +679,7 @@ export default function PresetsPage() {
                   {kv(t('presets.kvEpochs'), raw(summaryConfig.epochs))}
                   {kv('Timestep', raw(summaryConfig.timestep_sampling))}
                 </div>
-                <div className="ds-tabs" style={{ padding: '0 17px' }} role="tablist">
+                <div className="ds-tabs" role="tablist">
                   {(['yaml', 'toml'] as const).map((f) => (
                     <button
                       key={f}
@@ -737,7 +736,7 @@ export default function PresetsPage() {
             {/* header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '18px 24px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
               <h2 style={{ margin: 0, fontSize: 17, fontWeight: 600, letterSpacing: '-.02em' }}>
-                {isNew ? t('presets.newPresetBtn') : <>{t('presets.editPrefix')} · <span className="mono">{selected}</span></>}
+                {isNew ? t('presets.newPresetBtn') : <>{t('presets.editPrefix')}: <span className="mono">{selected}</span></>}
               </h2>
               <span style={{ flex: 1 }} />
               <button type="button" onClick={() => setEditorOpen(false)} className="ds-kebab" aria-label={t('common.cancel')}>
@@ -801,6 +800,7 @@ export default function PresetsPage() {
                   values={config}
                   onChange={setConfig}
                   disabledFields={disabledFields}
+                  hiddenFields={disabledFields}
                   disabledHints={disabledHints}
                   autoHints={autoHints}
                   fieldSuffixes={fieldSuffixes}

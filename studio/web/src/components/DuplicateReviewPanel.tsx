@@ -186,7 +186,7 @@ function DuplicateItemCell({ projectId, versionId, item, remove, busy, onToggle,
 }) {
   const { t } = useTranslation()
   const { folder, filename } = splitRel(item.name)
-  const title = `${item.name}\n${item.width}×${item.height} · ${item.filesize_kb} KB${item.metrics ? `\n${item.metrics.match_type} · ${item.metrics.score}` : ''}`
+  const title = `${item.name}\n${item.width}×${item.height}, ${item.filesize_kb} KB${item.metrics ? `\n${item.metrics.match_type}, ${item.metrics.score}` : ''}`
   return (
     <div className={`ds-thumb group${remove ? '' : ' ds-sel'}`} style={{ aspectRatio: '1', opacity: remove ? 0.55 : 1 }} title={title}>
       <button type="button" className="absolute inset-0" onClick={onToggle} disabled={busy}

@@ -388,15 +388,15 @@ export default function PreprocessInpaintPage() {
           </div>
           {activeImage && (
             <span className="ds-crop-imginfo" title={activeImage.name}>
-              <b>{activeImage.name}</b> · {activeImage.w}×{activeImage.h}
+              <b>{activeImage.name}</b> {activeImage.w}×{activeImage.h}
             </span>
           )}
           <span style={{ flex: 1 }} />
           <span className="ds-actgroup">
-            <button type="button" className="ds-ico" onClick={undo} disabled={!activeName || activeHistory.length === 0} title={`${t('preprocessInpaint.undo')} · Ctrl+Z`} aria-label={t('preprocessInpaint.undo')}>
+            <button type="button" className="ds-ico" onClick={undo} disabled={!activeName || activeHistory.length === 0} title={`${t('preprocessInpaint.undo')}, Ctrl+Z`} aria-label={t('preprocessInpaint.undo')}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg>
             </button>
-            <button type="button" className="ds-ico" onClick={redo} disabled={!activeName || activeRedo.length === 0} title={`${t('preprocessInpaint.redo')} · Ctrl+Shift+Z`} aria-label={t('preprocessInpaint.redo')}>
+            <button type="button" className="ds-ico" onClick={redo} disabled={!activeName || activeRedo.length === 0} title={`${t('preprocessInpaint.redo')}, Ctrl+Shift+Z`} aria-label={t('preprocessInpaint.redo')}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 14 5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></svg>
             </button>
           </span>

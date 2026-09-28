@@ -463,7 +463,7 @@ export default function FreeCropEditor({
           >
             <div className="crop-rect-info font-mono">
               {Math.round(draft.w * image.w)}×{Math.round(draft.h * image.h)}
-              <span> · {arLabel(draft.w * image.w, draft.h * image.h)}</span>
+              <span> {arLabel(draft.w * image.w, draft.h * image.h)}</span>
             </div>
           </div>
         )}

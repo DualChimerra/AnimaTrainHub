@@ -54,7 +54,7 @@ export default function DaemonControls({ queued, logOpen, onToggleLog }: {
     status ? t(`generate.daemonState.${status.state}`) : t('generate.daemonLoading'),
     status && (status.model_loaded ? t('generate.daemonModelLoaded') : t('generate.daemonModelNotLoaded')),
     t('generate.daemonQueue', { n: queued }),
-  ].filter(Boolean).join(' · ')
+  ].filter(Boolean).join(', ')
 
   return (
     <div className="ds-logbar">

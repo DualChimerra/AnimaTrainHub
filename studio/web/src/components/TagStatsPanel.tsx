@@ -100,7 +100,7 @@ export default function TagStatsPanel({
           <div className="ds-card-title">{t('tagStats.title')}</div>
           <div className="ds-card-sub">
             {t('tagStats.unique', { n: items.length })}
-            {usingSelection && ` · ${t('tagStats.inSelected', { n: selectedKeys.length })}`}
+            {usingSelection && `, ${t('tagStats.inSelected', { n: selectedKeys.length })}`}
           </div>
         </div>
       </div>

@@ -30,14 +30,14 @@ function marks(s: TaskSample): string {
   const parts: string[] = []
   if (s.epoch != null) parts.push(`ep ${s.epoch.toLocaleString()}`)
   if (s.step != null) parts.push(`step ${s.step.toLocaleString()}`)
-  return parts.join(' · ')
+  return parts.join(', ')
 }
 
 function shortMarks(s: TaskSample): string {
   const parts: string[] = []
   if (s.epoch != null) parts.push(`ep ${s.epoch}`)
   if (s.step != null) parts.push(s.step.toLocaleString())
-  return parts.join(' · ')
+  return parts.join(', ')
 }
 
 // Memoized: the queue page re-renders on every monitor_progress delta of the running task;
@@ -177,7 +177,7 @@ function TaskSampleStrip({ taskId, live = false }: {
         <ImagePreviewModal
           src={api.sampleImageUrl(items[zoomIdx].filename, taskId)}
           caption={[marks(items[zoomIdx]), items[zoomIdx].filename]
-            .filter(Boolean).join(' · ')}
+            .filter(Boolean).join(', ')}
           index={zoomIdx}
           total={items.length}
           hasPrev={zoomIdx > 0}

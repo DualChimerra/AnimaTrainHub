@@ -50,7 +50,7 @@ export default function VersionStatusBadge({
     <span className={`badge ${entry.badge}`}>
       {entry.dot && DOT_RUNNING}
       {STATUS_MAP[status] ? t(entry.key) : status}
-      {suffixKey ? ` · ${t(suffixKey)}` : ''}
+      {suffixKey ? `, ${t(suffixKey)}` : ''}
     </span>
   )
 }

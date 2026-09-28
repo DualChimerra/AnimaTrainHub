@@ -150,7 +150,7 @@ export default function DataJobsPanel({
               {KIND_LABEL[kindOf] ?? kindOf}
             </div>
             <div className="text-xs text-fg-tertiary mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap">
-              {projectLabel}{task.version_id ? ` · v${task.version_id}` : ''}
+              {projectLabel}{task.version_id ? `, v${task.version_id}` : ''}
             </div>
           </div>
           <span className={`badge badge-${JOB_STATUS_TONE[task.status] ?? 'neutral'} text-xs text-center`}>

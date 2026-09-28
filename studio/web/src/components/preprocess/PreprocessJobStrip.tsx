@@ -39,7 +39,7 @@ export default function PreprocessJobStrip({
         <span className={STATUS_COLOR[job.status]}>{job.status}</span>
         <span className="mono text-fg-secondary">job #{job.id}</span>
         {elapsed && elapsed > 0 && (
-          <span className="text-fg-tertiary">· {Math.round(elapsed)}s</span>
+          <span className="text-fg-tertiary">{Math.round(elapsed)}s</span>
         )}
         <span className="mono truncate flex-1 min-w-0 text-fg-secondary text-xs">
           {lastLine}
