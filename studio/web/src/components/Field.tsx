@@ -37,22 +37,16 @@ interface Props {
   disabledEnumOptions?: string[]
   disabledOptionHint?: string
   /** Value the field had before this session's edits; set only when it
-   *  differs, and shown as a green dot plus "was: …" under the control. */
+   *  differs, and marked with a green dot next to the name. */
   changedFrom?: { value: unknown }
 }
 
-function formatWas(v: unknown): string {
-  if (v === null || v === undefined || v === '') return '—'
-  if (Array.isArray(v)) return v.join(', ')
-  if (typeof v === 'object') return JSON.stringify(v)
-  return String(v)
-}
-
-/** One setting row as in the mockup (.field): name, parameter key and badges,
- *  and the control on the right. The explanation opens on hover over the name.
- *  Multi-line controls take the full width under the text instead (stack). */
+/** One setting as a grid cell: name (explanation on hover) and badges on top,
+ *  the control under it. Cells sit in a responsive grid, so related short
+ *  settings (rank / alpha, lr / scheduler) line up side by side instead of a
+ *  long list of rows. Multi-line controls span the whole grid row (stack). */
 function FieldShell({
-  name, label, hintNode, helpNode, changedFrom, stack, children, below,
+  name, label, hintNode, helpNode, changedFrom, stack, hideLabel, children, below,
 }: {
   name: string
   label: string
@@ -60,26 +54,24 @@ function FieldShell({
   helpNode: React.ReactNode
   changedFrom?: { value: unknown }
   stack?: boolean
+  /** Option cards speak for themselves; the card title already names them. */
+  hideLabel?: boolean
   children: React.ReactNode
-  /** Rendered after the row (pickers anchored to it). */
+  /** Rendered after the cell content (pickers anchored to it). */
   below?: React.ReactNode
 }) {
-  const { t } = useTranslation()
   return (
-    <div className={`ds-field${stack ? ' ds-stack' : ''}`} data-field={name} style={{ position: 'relative' }}>
-      <div className="ds-field-txt">
-        <div className="ds-field-name">
+    <div className={`ds-fcell${stack ? ' ds-full' : ''}`} data-field={name}>
+      {!hideLabel && (
+        <div className="ds-fcell-head">
           {changedFrom && <span className="ds-changed-dot" aria-hidden="true" />}
           {/* The config key is for reference, not for reading: it sits in the
-              hover tip under the explanation instead of crowding the row. */}
+              hover tip under the explanation instead of crowding the cell. */}
           <FieldLabel label={label} tip={<>{helpNode}<span className="ds-tip-key">{name}</span></>} />
           {hintNode}
         </div>
-      </div>
-      <div className="ds-field-ctl">
-        {children}
-        {changedFrom && <span className="ds-ctl-note">{t('field.was', { value: formatWas(changedFrom.value) })}</span>}
-      </div>
+      )}
+      <div className="ds-fcell-ctl">{children}</div>
       {below}
     </div>
   )
@@ -131,22 +123,34 @@ export default function Field({
   const shell = { name, label, hintNode, helpNode, changedFrom }
 
   // bool ----------------------------------------------------------------
+  // A switch is one line of a compact list: switch first, then the name, so
+  // the switches of a card line up in a column instead of boxed tiles.
   if (kind === 'bool') {
     const on = Boolean(value)
     return (
-      <FieldShell {...shell}>
-        <label className={`ds-switch${on ? ' ds-on' : ''}`} style={disabled ? { opacity: 0.5, cursor: 'not-allowed' } : { cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            className="sr-only"
-            checked={on}
-            onChange={(e) => onChange(e.target.checked)}
-            disabled={disabled}
-            aria-label={label}
-          />
-          <i />
+      <div className="ds-switchrow" data-field={name}>
+        <label
+          className={`ds-switchrow-hit${disabled ? ' ds-is-disabled' : ''}`}
+
+        >
+          <span className={`ds-switch ds-sm${on ? ' ds-on' : ''}`}>
+            <input
+              type="checkbox"
+              className="sr-only"
+              checked={on}
+              onChange={(e) => onChange(e.target.checked)}
+              disabled={disabled}
+              aria-label={label}
+            />
+            <i />
+          </span>
+          <span className="ds-switchrow-name">
+            <FieldLabel label={label} tip={<>{helpNode}<span className="ds-tip-key">{name}</span></>} />
+          </span>
+          {changedFrom && <span className="ds-changed-dot" aria-hidden="true" />}
+          {hintNode}
         </label>
-      </FieldShell>
+      </div>
     )
   }
 
@@ -179,7 +183,7 @@ export default function Field({
     const opts = (enumOptions ?? prop.enum ?? []).map(String)
     const cur = String(value ?? '')
     return (
-      <FieldShell {...shell} stack>
+      <FieldShell {...shell} stack hideLabel>
         <div className="ds-optcards ds-compact" role="radiogroup" aria-label={label} style={{ gridTemplateColumns: `repeat(${Math.min(opts.length, 3)}, minmax(0, 1fr))` }}>
           {opts.map((opt) => {
             const on = opt === cur
@@ -257,8 +261,7 @@ export default function Field({
   if (kind === 'string-list') {
     return (
       <FieldShell {...shell} stack>
-        <StringListField value={value} onChange={onChange} disabled={disabled} label={label} />
-        <span className="ds-ctl-note">{t('field.multilineHint')}</span>
+        <StringListField value={value} onChange={onChange} disabled={disabled} label={label} placeholder={t('field.multilineHint')} />
       </FieldShell>
     )
   }
@@ -328,6 +331,7 @@ interface TextareaFieldProps {
   onChange: (v: unknown) => void
   disabled?: boolean
   label: string
+  placeholder?: string
 }
 
 const areaStyle = (disabled: boolean): React.CSSProperties => ({
@@ -360,7 +364,7 @@ function TextareaField({ value, onChange, disabled = false, label }: TextareaFie
  *  user's original input; the parsed array is still synced to the parent on
  *  every keystroke, and raw gets normalized (blank lines / leading-trailing
  *  whitespace stripped) on blur. */
-function StringListField({ value, onChange, disabled = false, label }: TextareaFieldProps) {
+function StringListField({ value, onChange, disabled = false, label, placeholder }: TextareaFieldProps) {
   const joined = Array.isArray(value) ? (value as string[]).join('\n') : ''
   const [raw, setRaw] = useState<string>(joined)
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -385,6 +389,7 @@ function StringListField({ value, onChange, disabled = false, label }: TextareaF
       onBlur={() => setRaw(parse(raw).join('\n'))}
       disabled={disabled}
       aria-label={label}
+      placeholder={placeholder}
       className="ds-inp ds-mono"
       style={areaStyle(disabled)}
     />
@@ -582,7 +587,6 @@ interface NumberFieldProps {
 function NumberField({
   kind, value, defaultValue, minimum, maximum, onChange, disabled = false, label,
 }: NumberFieldProps) {
-  const { t } = useTranslation()
   const formatNum = (v: unknown) =>
     v === null || v === undefined ? '' : String(v)
   const [raw, setRaw] = useState<string>(() => formatNum(value))
@@ -625,7 +629,9 @@ function NumberField({
     setRaw(String(next))
   }
 
-  const input = (
+  // Integers and decimals look the same (rank next to alpha must not read as
+  // two different kinds of control); integers step with the arrow keys.
+  return (
     <input
       ref={inputRef}
       type="text"
@@ -637,24 +643,15 @@ function NumberField({
         if (e.key === 'Enter') {
           e.preventDefault()
           commit()
+        } else if (kind === 'int' && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+          e.preventDefault()
+          bump(e.key === 'ArrowUp' ? 1 : -1)
         }
       }}
       disabled={disabled}
       aria-label={label}
-      className={kind === 'int' ? undefined : 'ds-inp ds-mono'}
+      className="ds-inp ds-mono"
     />
-  )
-  if (kind !== 'int') return input
-  return (
-    <span className="ds-stepper" style={disabled ? { opacity: 0.55 } : undefined}>
-      {input}
-      <button type="button" aria-label={t('field.less')} onClick={() => bump(-1)} disabled={disabled}>
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M5 12h14" /></svg>
-      </button>
-      <button type="button" aria-label={t('field.more')} onClick={() => bump(1)} disabled={disabled}>
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
-      </button>
-    </span>
   )
 }
 
@@ -728,7 +725,7 @@ function PathStringField({
     >
       {kind === 'path' ? (
         // input + folder button on one row, as in the mockup
-        <span style={{ display: 'flex', gap: 6, width: '100%' }}>
+        <span style={{ display: 'flex', gap: 6, width: '100%', alignItems: 'center' }}>
           <input
             type="text"
             value={text}
@@ -763,7 +760,7 @@ function PathStringField({
         />
       )}
       {suffix && (
-        <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>{suffix}</span>
+        <span style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>{suffix}</span>
       )}
     </FieldShell>
   )

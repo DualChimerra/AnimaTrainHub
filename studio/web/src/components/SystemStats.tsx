@@ -55,7 +55,7 @@ export default function SystemStats() {
   const gpuExtra = stats.gpu && stats.gpu.length > 1
     ? ` (+${stats.gpu.length - 1} more)`
     : ''
-  const gpuTempText = gpu0?.temp_c != null ? ` · ${gpu0.temp_c}°C` : ''
+  const gpuTempText = gpu0?.temp_c != null ? `, ${gpu0.temp_c}°C` : ''
   const gpuLabel = gpu0 ? `${gpu0.name}${gpuTempText}${gpuExtra}` : ''
 
   return (
@@ -65,7 +65,7 @@ export default function SystemStats() {
           label="GPU"
           value={`${Math.round(gpu0.util_pct)}%`}
           pct={gpu0.util_pct}
-          tooltip={`GPU utilization · ${gpuLabel}`}
+          tooltip={`GPU utilization, ${gpuLabel}`}
         />
       )}
       {gpu0 && (
@@ -73,7 +73,7 @@ export default function SystemStats() {
           label="VRAM"
           value={`${gpu0.vram_used_gb.toFixed(1)} / ${Math.round(gpu0.vram_total_gb)}`}
           pct={vramPct}
-          tooltip={`VRAM ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%) · ${gpuLabel}`}
+          tooltip={`VRAM ${gpu0.vram_used_gb.toFixed(1)} / ${gpu0.vram_total_gb.toFixed(1)} GB (${vramPct.toFixed(0)}%), ${gpuLabel}`}
         />
       )}
       <MeterItem

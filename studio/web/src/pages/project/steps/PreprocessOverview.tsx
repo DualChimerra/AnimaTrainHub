@@ -135,7 +135,7 @@ export default function PreprocessOverviewPage() {
           previewUrl: api.projectThumbUrl(project.id, im.source, 'download', 1600, im.mtime, true),
           compareSrc: trainThumb(1600),
           badge: t('preprocessOverview.badgeProcessed'),
-          caption: `${im.name} · ${im.w}×${im.h}`,
+          caption: `${im.name}, ${im.w}×${im.h}`,
         }
       }
       // Unprocessed, unchanged: the image in train is just a copy of the download original
@@ -143,7 +143,7 @@ export default function PreprocessOverviewPage() {
         name: im.name,
         thumbUrl: trainThumb(256),
         previewUrl: trainThumb(1600),
-        caption: `${im.name} · ${im.w}×${im.h}`,
+        caption: `${im.name}, ${im.w}×${im.h}`,
       }
     }),
     [workspace, project.id, vid, t],
@@ -154,7 +154,7 @@ export default function PreprocessOverviewPage() {
       // duplicate_removed is physically deleted; thumbnails go through the download bucket + im.source (origin)
       thumbUrl: api.projectThumbUrl(project.id, im.source, 'download', 256, im.mtime, true),
       previewUrl: api.projectThumbUrl(project.id, im.source, 'download', 1600, im.mtime, true),
-      caption: im.w && im.h ? `${im.source} · ${im.w}×${im.h}` : im.source,
+      caption: im.w && im.h ? `${im.source}, ${im.w}×${im.h}` : im.source,
     })),
     [removed, project.id],
   )

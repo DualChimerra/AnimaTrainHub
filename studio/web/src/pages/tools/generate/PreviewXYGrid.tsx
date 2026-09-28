@@ -236,7 +236,7 @@ export default function PreviewXYGrid({
         <span className="caption">
           {t('generate.xyGridCount', { x: xLen, y: yLen, n: xLen * yLen, axis: yDraft ? ` × ${yLen}` : '' })}
           {samples.length < xLen * yLen && samples.length > 0 && (
-            <span className="text-fg-tertiary"> · {t('generate.generatedCount', { n: samples.length })}</span>
+            <span className="text-fg-tertiary"> {t('generate.generatedCount', { n: samples.length })}</span>
           )}
         </span>
         <div className="flex items-center gap-2 text-2xs text-fg-tertiary font-mono">
@@ -322,7 +322,7 @@ export default function PreviewXYGrid({
           <FullscreenViewer
             src={s.imageUrl ?? api.generateSampleUrl(taskId, fn)}
             alt={fn}
-            caption={captionParts.join(' · ')}
+            caption={captionParts.join(', ')}
             index={fullscreenIdx}
             total={samples.length}
             onClose={() => setFullscreenIdx(null)}
@@ -387,7 +387,7 @@ function Row({
         const tooltip = t('generate.xyCellTooltip', {
           label: !yDraft
             ? `${axisLabel(xDraft.axis)}=${formatAxisValue(xDraft.axis, xv)}`
-            : `${axisLabel(xDraft.axis)}=${formatAxisValue(xDraft.axis, xv)} · ${axisLabel(yDraft.axis)}=${formatAxisValue(yDraft.axis, yv ?? '')}`,
+            : `${axisLabel(xDraft.axis)}=${formatAxisValue(xDraft.axis, xv)}, ${axisLabel(yDraft.axis)}=${formatAxisValue(yDraft.axis, yv ?? '')}`,
         })
         return (
           <GridCell

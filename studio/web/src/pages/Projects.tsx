@@ -302,7 +302,6 @@ export default function ProjectsPage() {
   return (
     <div className="fade-in">
       <PageHead
-        eyebrow={t('projects.eyebrow')}
         title={t('projects.title')}
         subtitle={t('projects.subtitle')}
         tools={
@@ -527,8 +526,10 @@ function LiveTaskRow({ task, project, forecast, runningPct, onOpen }: {
   const badge = task.status === 'running'
     ? <span className="ds-badge ds-ok"><span className="ds-dot ds-dot-run" />{t('status.running')}</span>
     : task.status === 'paused'
-      ? <span className="ds-badge ds-mute">{t('status.paused')}</span>
-      : <span className="ds-badge ds-warn">{t(task.status === 'scheduled' ? 'status.scheduled' : 'status.pending')}</span>
+      ? <span className="ds-badge ds-warn">{t('status.paused')}</span>
+      : task.status === 'scheduled'
+        ? <span className="ds-badge ds-mute">{t('status.scheduled')}</span>
+        : <span className="ds-badge ds-warn">{t('status.pending')}</span>
 
   let progress: React.ReactNode = <span className="ds-muted" style={{ fontSize: 11.5 }}>—</span>
   if (task.status === 'running' && runningPct != null) {
@@ -720,7 +721,7 @@ function ProjectCard({ project: p, extras, queueInfo, progress, finishedAt, onAr
           <span className="ds-sect-icon" style={tileStyle}>{trainingNow ? Icon.hex(16) : Icon.folder(16)}</span>
           <span style={{ flex: 1, minWidth: 0 }}>
             <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-.02em', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.title}</span>
-            <span className="ds-cell-key">{p.slug}{p.active_version_label ? ` · ${p.active_version_label}` : ''}</span>
+            <span className="ds-cell-key">{p.slug}{p.active_version_label ? `, ${p.active_version_label}` : ''}</span>
           </span>
         </Link>
         <KebabMenu

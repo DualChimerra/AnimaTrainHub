@@ -104,7 +104,7 @@ export default function RuntimeModeGate() {
               mode: t(`runtimeMode.${info.detected}.name`),
             })}</div>
             <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono">
-              <span>{env.platform} · Python {env.python}</span>
+              <span>{env.platform}, Python {env.python}</span>
               {env.gpu ? <span>GPU: {env.gpu}</span> : <span>{t('runtimeMode.noGpu')}</span>}
               <span>{t('runtimeMode.diskFree', {
                 free: formatBytes(env.disk_free),

@@ -184,7 +184,6 @@ export default function SoupPage() {
         onChange={(e) => void handleUpload(e.target.files)}
       />
       <PageHead
-        eyebrow={t('soup.eyebrow')}
         title={t('soup.title')}
         subtitle={t('soup.subtitle')}
         tools={<span className="ds-badge ds-mute">{t('soup.compatBadge')}</span>}
@@ -286,7 +285,7 @@ export default function SoupPage() {
                 <div style={{ minWidth: 0 }}>
                   <div className="ds-card-title">{t('soup.resultTitle')}</div>
                   <div className="ds-card-sub ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {result ? `${result.name} · ${fmtSize(result.size)}` : t('soup.resultEmpty')}
+                    {result ? `${result.name}, ${fmtSize(result.size)}` : t('soup.resultEmpty')}
                   </div>
                 </div>
               </div>
@@ -385,7 +384,7 @@ function IngredientRow({ ing, info, share, method, onWeight, onRemove }: {
         {/* The share is what the merge really applies — in average mode a weight
             of 1 next to a weight of 3 means 25%, not 100%. */}
         <span className="ds-cell-key">
-          {[ing.origin, net].filter(Boolean).join(' · ')} · <span>{method === 'average' ? `${Math.round(share * 100)}%` : `×${share.toFixed(2)}`}</span>
+          {[ing.origin, net].filter(Boolean).join(', ')}, <span>{method === 'average' ? `${Math.round(share * 100)}%` : `×${share.toFixed(2)}`}</span>
         </span>
       </span>
       <span style={{ width: 170, display: 'flex', alignItems: 'center', gap: 9 }}>
@@ -528,12 +527,12 @@ function SourcePicker({ uploads, outputs, chosen, onPick, onClose, onUploadsChan
                   <PickRow
                     key={c.path}
                     label={basename(c.path)}
-                    sub={`${project?.title ?? ''} · ${g.label} · ${c.label}`}
+                    sub={`${project?.title ?? ''}, ${g.label}, ${c.label}`}
                     disabled={chosen.has(c.path)}
                     onPick={() => pick({
                       path: c.path,
                       label: basename(c.path),
-                      origin: `${project?.title ?? ''} · ${g.label}`,
+                      origin: `${project?.title ?? ''}, ${g.label}`,
                       weight: 1,
                     })}
                   />

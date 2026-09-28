@@ -5,6 +5,7 @@
 @import './styles/preprocess-crop.css';
 @import './styles/responsive.css';
 @import './styles/mobile.css';
+@import './styles/graph.css';
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

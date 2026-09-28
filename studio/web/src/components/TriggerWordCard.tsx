@@ -71,46 +71,16 @@ export default function TriggerWordCard({
   const missing = dopEnabled && !saved.trim()
   const inCaptions = detected?.candidates.find((c) => c.word.toLowerCase() === value.trim().toLowerCase())
 
-  // A field row like the schema ones; under DOP it is the gated row the mockup
-  // draws with a green rule, since DOP cannot run without it.
+  // Same cell as the schema settings around it: name on top, the input with
+  // its actions in one line under it, then the caption candidates.
   return (
-    <div
-      className="ds-field"
-      data-testid="trigger-word-card"
-      style={dopEnabled ? { background: 'var(--area)', borderLeft: '2px solid var(--green-600)', paddingLeft: 26 } : undefined}
-    >
-      <div className="ds-field-txt">
-        <div className="ds-field-name">
-          <FieldLabel label={t('trigger.title')} tip={t('trigger.hint')} />
-          <span className="ds-key">trigger_word</span>
-          {dopEnabled && <span className="ds-tag ds-gate">{t('trigger.gateDop')}</span>}
-        </div>
-        {detected && detected.candidates.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-            <span className="ds-kpi-meta">{t('trigger.candidates', { n: detected.total })}</span>
-            {detected.candidates.map((c) => (
-              <button
-                key={c.word}
-                type="button"
-                onClick={() => setValue(c.word)}
-                className={`ds-chip ds-mono${c.word === value.trim() ? ' ds-is-active' : ''}`}
-                style={{ height: 24, paddingRight: 9, fontSize: 11 }}
-                title={t('trigger.coverage', { pct: Math.round(c.coverage * 100) })}
-              >
-                {c.word} <b>{Math.round(c.coverage * 100)}%</b>
-              </button>
-            ))}
-          </div>
-        )}
-        {detected && detected.total > 0 && detected.candidates.length === 0 && (
-          <div className="ds-field-desc">{t('trigger.noneFound')}</div>
-        )}
-        {detected && value.trim() && !inCaptions && detected.total > 0 && (
-          <div className="ds-field-desc" style={{ color: 'var(--amber-text)' }}>{t('trigger.notInCaptions')}</div>
-        )}
-        {missing && <div className="ds-field-desc" style={{ color: 'var(--amber-text)' }}>{t('trigger.dopNeedsTrigger')}</div>}
+    <div className="ds-trigger" data-testid="trigger-word-card">
+      <div className="ds-fcell-head">
+        <FieldLabel label={t('trigger.title')} tip={t('trigger.hint')} />
+        {dopEnabled && <span className="ds-tag ds-gate">{t('trigger.gateDop')}</span>}
+        {inCaptions && <span className="ds-badge ds-ok">{t('trigger.inCaptionsPct', { pct: Math.round(inCaptions.coverage * 100) })}</span>}
       </div>
-      <div className="ds-field-ctl">
+      <div className="ds-trigger-row">
         <input
           className="ds-inp ds-mono"
           value={value}
@@ -123,16 +93,36 @@ export default function TriggerWordCard({
           aria-label={t('trigger.title')}
           style={missing ? { borderColor: 'var(--amber-line)' } : undefined}
         />
-        <span style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          {inCaptions && <span className="ds-badge ds-ok">{t('trigger.inCaptionsPct', { pct: Math.round(inCaptions.coverage * 100) })}</span>}
-          <button type="button" className="ds-ctl ds-ghost" style={{ height: 24 }} onClick={() => void detect(true)} disabled={detecting}>
-            {detecting ? t('trigger.detecting') : t('trigger.detect')}
-          </button>
-          <button type="button" className="ds-btn-primary" style={{ height: 24 }} onClick={() => void save()} disabled={!dirty || busy}>
-            {busy ? t('common.saving') : t('common.save')}
-          </button>
-        </span>
+        <button type="button" className="ds-ctl" onClick={() => void detect(true)} disabled={detecting}>
+          {detecting ? t('trigger.detecting') : t('trigger.detect')}
+        </button>
+        <button type="button" className="ds-btn-primary" onClick={() => void save()} disabled={!dirty || busy}>
+          {busy ? t('common.saving') : t('common.save')}
+        </button>
       </div>
+      {detected && detected.candidates.length > 0 && (
+        <div className="ds-trigger-cands">
+          <span className="ds-muted">{t('trigger.candidates', { n: detected.total })}</span>
+          {detected.candidates.map((c) => (
+            <button
+              key={c.word}
+              type="button"
+              onClick={() => setValue(c.word)}
+              className={`ds-chip ds-mono${c.word === value.trim() ? ' ds-is-active' : ''}`}
+              title={t('trigger.coverage', { pct: Math.round(c.coverage * 100) })}
+            >
+              {c.word} <b>{Math.round(c.coverage * 100)}%</b>
+            </button>
+          ))}
+        </div>
+      )}
+      {detected && detected.total > 0 && detected.candidates.length === 0 && (
+        <div className="ds-trigger-msg">{t('trigger.noneFound')}</div>
+      )}
+      {detected && value.trim() && !inCaptions && detected.total > 0 && (
+        <div className="ds-trigger-msg ds-warn">{t('trigger.notInCaptions')}</div>
+      )}
+      {missing && <div className="ds-trigger-msg ds-warn">{t('trigger.dopNeedsTrigger')}</div>}
     </div>
   )
 }

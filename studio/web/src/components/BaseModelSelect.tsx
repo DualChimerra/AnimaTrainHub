@@ -62,7 +62,7 @@ export function useBaseModelOptions(family: BaseModelFamily = 'anima'): {
     for (const v of section.variants) {
       if (!v.exists) continue
       const badge = v.purpose
-        ? ` · ${t(`baseModel.purpose.${v.purpose}`)}`
+        ? `, ${t(`baseModel.purpose.${v.purpose}`)}`
         : ''
       out.push({
         value: v.variant,

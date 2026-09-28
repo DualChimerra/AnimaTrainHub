@@ -593,7 +593,7 @@ export function EvalMetricsPanel({ state, connected, taskId }: {
         <div className="min-w-0">
           <div className="text-sm font-semibold">{t('monitor.metrics')}</div>
           <div className="text-xs text-fg-tertiary font-mono truncate">
-            {state?.project_slug ?? `project ${pid}`} · {state?.version_label ?? `version ${vid}`}
+            {state?.project_slug ?? `project ${pid}`}, {state?.version_label ?? `version ${vid}`}
           </div>
         </div>
         <span className="flex-1" />
@@ -889,7 +889,7 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
   const markText = [
     curM.epoch != null ? `ep ${curM.epoch.toLocaleString()}` : null,
     curM.step != null ? `step ${curM.step.toLocaleString()}` : null,
-  ].filter(Boolean).join(' · ')
+  ].filter(Boolean).join(', ')
 
   return (
     <div className="flex flex-col gap-2.5 w-full flex-1">
@@ -907,12 +907,12 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
           const thumbTitle = [
             m.epoch != null ? `ep ${m.epoch}` : null,
             m.step != null ? `step ${m.step}` : null,
-          ].filter(Boolean).join(' · ') || fn
+          ].filter(Boolean).join(', ') || fn
           // The badge sits on the line below the thumbnail, not overlaid on the 64px thumbnail (would be unreadable).
           const thumbCaption = [
             m.epoch != null ? `ep${m.epoch}` : null,
             m.step != null ? `${m.step}` : null,
-          ].filter(Boolean).join('·')
+          ].filter(Boolean).join(', ')
           return (
             <button
               key={`${fn}-${i}`}
@@ -963,7 +963,7 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
         {(curM.epoch != null || curM.step != null) && (
           <div className="absolute bottom-2.5 left-1/2 -translate-x-1/2 border border-subtle rounded-sm px-2.5 py-0.5 text-xs font-mono text-fg-secondary bg-surface/85">
             {curM.epoch != null && (
-              <>ep <strong className="text-accent">{curM.epoch.toLocaleString()}</strong>{curM.step != null && ' · '}</>
+              <>ep <strong className="text-accent">{curM.epoch.toLocaleString()}</strong>{curM.step != null && ', '}</>
             )}
             {curM.step != null && (
               <>step <strong className="text-accent">{curM.step.toLocaleString()}</strong></>
@@ -977,7 +977,7 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
       {zoomOpen && (
         <ImagePreviewModal
           src={fullUrl}
-          caption={[markText, filename].filter(Boolean).join(' · ')}
+          caption={[markText, filename].filter(Boolean).join(', ')}
           index={active}
           total={list.length}
           hasPrev={active > 0}
@@ -1084,20 +1084,17 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
         {connected ? 'Live' : 'Disconnected'}
         {totalSteps > 0 && (
           <>
-            <span className="text-dim">·</span>
             <span>{step.toLocaleString()} / {totalSteps.toLocaleString()} steps</span>
-            <span className="text-dim">·</span>
             <span>{progress.toFixed(1)}%</span>
             <div className="flex-1 h-1 bg-overlay rounded overflow-hidden monitor-progress">
               <div
-                className="h-full bg-accent rounded transition-[width] duration-[1s] ease-out"
+                className="h-full bg-accent rounded"
                 style={{ width: `${progress}%` }}
               />
             </div>
             <span>Elapsed {elapsed}</span>
             {eta !== '--' && (
               <>
-                <span className="text-dim">·</span>
                 <span>ETA {eta}</span>
               </>
             )}
@@ -1129,11 +1126,11 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
         <StatCard label="avg loss" value={avgLoss != null ? avgLoss.toFixed(4) : '--'}
           sub={losses.length ? `${losses.length} pts raw mean` : 'awaiting'} />
         <StatCard label="lr" value={fmtLr(lastLr)}
-          sub={lastD != null ? `actual · d ${fmtMetric(lastD)}` : lrHistory.length ? 'learning rate' : undefined} />
+          sub={lastD != null ? `actual, d ${fmtMetric(lastD)}` : lrHistory.length ? 'learning rate' : undefined} />
         <StatCard
           label={vram ? 'vram' : 'speed'}
           value={vram ? `${vram.toFixed(1)} GB` : speed ? `${speed.toFixed(2)} it/s` : '--'}
-          sub={vramTotal ? `of ${vramTotal.toFixed(0)} GB · ${((vram! / vramTotal) * 100).toFixed(0)}%` : undefined}
+          sub={vramTotal ? `of ${vramTotal.toFixed(0)} GB, ${((vram! / vramTotal) * 100).toFixed(0)}%` : undefined}
           tone={vramTone}
         />
         <StatCard label="eta" value={eta} sub={speed ? `${speed.toFixed(2)} it/s` : undefined} />

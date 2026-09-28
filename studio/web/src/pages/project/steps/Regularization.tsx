@@ -683,7 +683,7 @@ function StatusCard({
           m ? (m.generation_method === 'ai_base' ? t('reg.sourceAi') : t('reg.sourceBooru')) : '—',
           m
             ? [m.generation_method === 'ai_base' ? t('reg.sourceAiSub') : m.api_source,
-              m.auto_tagged ? (m.auto_tag_kind ?? t('reg.taggerUnknown')) : t('reg.statusTaggerOff')].join(' · ')
+              m.auto_tagged ? (m.auto_tag_kind ?? t('reg.taggerUnknown')) : t('reg.statusTaggerOff')].join(', ')
             : '—')}
         {cell(false, t('reg.statusCellInvalidTags'),
           <span style={{ color: failed.length > 0 ? 'var(--amber-text)' : undefined }}>{m ? failed.length : '—'}</span>,
@@ -1410,7 +1410,7 @@ function RegImages({
         <div style={{ borderTop: '1px solid var(--line)', padding: '10px 17px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="ds-kpi-meta">
             {t('reg.imagesFooter', { n: allItems.length, folders: folders.length })}
-            {selected.size > 0 && ` · ${t('reg.regPreviewSelected', { n: selected.size })}`}
+            {selected.size > 0 && `, ${t('reg.regPreviewSelected', { n: selected.size })}`}
           </span>
           <span style={{ flex: 1 }} />
           {activeFolder !== null && activeFolder !== '' && (

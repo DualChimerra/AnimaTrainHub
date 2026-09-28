@@ -17,6 +17,7 @@ import StepShell from '../../../components/StepShell'
 import PreprocessToolsBar, { PreprocessCard, PreprocessHeadTools } from '../../../components/preprocess/PreprocessToolsBar'
 import { useToast } from '../../../components/Toast'
 import { useEventStream } from '../../../lib/useEventStream'
+import HelpTip from '../../../components/ds/HelpTip'
 
 interface Ctx {
   project: ProjectDetail
@@ -276,7 +277,7 @@ function DuplicateOperationPanel({ options, busy, onOptionsChange, result, selec
       </div>
 
       <div>
-        <div className="ds-cap" style={{ marginBottom: 6 }}>{t('duplicates.statsTitle')}</div>
+        <div className="ds-cap" style={{ marginBottom: 6 }}>{t('duplicates.statsTitle')}<HelpTip>{t('ppFrame.dupNote')}</HelpTip></div>
         <div className="ds-kv"><span className="ds-k">{t('duplicates.statsGroups')}</span><span className="ds-v">{result?.group_count ?? '—'}</span></div>
         <div className="ds-kv"><span className="ds-k">{t('duplicates.statsCandidates')}</span><span className="ds-v">{result?.candidate_count ?? '—'}</span></div>
         <div className="ds-kv"><span className="ds-k">{t('duplicates.statsCrops')}</span><span className="ds-v">{result?.crop_relation_count ?? '—'}</span></div>
@@ -285,8 +286,6 @@ function DuplicateOperationPanel({ options, busy, onOptionsChange, result, selec
         <div className="ds-kv"><span className="ds-k">{t('duplicates.statsCompared')}</span><span className="ds-v">{result?.stats.compared_pairs ?? '—'}</span></div>
         <div className="ds-kv"><span className="ds-k">{t('duplicates.statsElapsed')}</span><span className="ds-v">{result ? `${result.elapsed_seconds}s` : '—'}</span></div>
       </div>
-
-      <div className="ds-note ds-info" style={{ fontSize: 11.5 }}>{t('ppFrame.dupNote')}</div>
 
       <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
         <button type="button" className="ds-ctl" style={{ justifyContent: 'center', height: 34 }} onClick={onScan} disabled={busy}>

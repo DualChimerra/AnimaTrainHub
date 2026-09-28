@@ -27,6 +27,7 @@ from .routers import (
     data_exports,
     events_sse,
     generate,
+    graph,
     health,
     installs,
     logs,
@@ -105,6 +106,7 @@ app.include_router(models_storage.router)
 # PR-6 commit 5: generate router (8 routes: image generation + daemon status + TAEFlux)
 app.include_router(generate.router)
 app.include_router(soup.router)
+app.include_router(graph.router)
 app.include_router(tunnel.router)
 # PR-6 commit 6: 3 files in the queue subpackage (lifecycle 12 + io 3 + outputs 5 = 20 routes)
 # Registration order: io must come before lifecycle (FastAPI matches paths in

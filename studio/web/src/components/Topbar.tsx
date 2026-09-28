@@ -96,6 +96,7 @@ function useBreadcrumbs(): Crumb[] {
       settings: t('breadcrumb.settings'),
       generate: t('breadcrumb.generate'),
       soup: t('breadcrumb.soup'),
+      graph: t('breadcrumb.graph'),
     }
     return [{ label: labels[parts[1]] ?? parts[1] }]
   }
@@ -225,13 +226,13 @@ export default function Topbar({
   const taskLabel = projectLabel ? `${projectLabel} / ${configName}` : configName
 
   const progressSuffix = (() => {
-    if (!progress) return runningTask?.started_at ? ` · ${t('topbar.running', { elapsed: formatElapsed(runningTask.started_at) })}` : ''
+    if (!progress) return runningTask?.started_at ? `, ${t('topbar.running', { elapsed: formatElapsed(runningTask.started_at) })}` : ''
     if ('pct' in progress) {
       const p = progress as { current: number; total: number; unit: string; eta?: string }
       const nums = `${p.current.toLocaleString()} / ${p.total.toLocaleString()}`
-      return ` · ${p.unit} ${nums}${p.eta ? ` ${p.eta}` : ''}`
+      return `, ${p.unit} ${nums}${p.eta ? ` ${p.eta}` : ''}`
     }
-    if ('currentUnit' in progress) return ` · ${(progress as { currentUnit: string }).currentUnit}`
+    if ('currentUnit' in progress) return `, ${(progress as { currentUnit: string }).currentUnit}`
     return ''
   })()
 
@@ -275,14 +276,14 @@ export default function Topbar({
               type="button"
               onClick={() => navigate(`/queue/${runningTask.id}`)}
               className="ds-tb-chip shrink-0 max-w-[340px]"
-              title={`${t('topbar.trainingLabel')} · ${taskLabel}${progressSuffix}`}
-              aria-label={`${t('topbar.trainingLabel')} · ${taskLabel}`}
+              title={`${t('topbar.trainingLabel')}, ${taskLabel}${progressSuffix}`}
+              aria-label={`${t('topbar.trainingLabel')}, ${taskLabel}`}
             >
               <span className="ds-dot ds-dot-run" />
               <span className="truncate">
                 #{runningTask.id}
                 {progress && 'pct' in progress
-                  ? ` · ${(progress as { current: number }).current.toLocaleString()} / ${(progress as { total: number }).total.toLocaleString()}`
+                  ? `, ${(progress as { current: number }).current.toLocaleString()} / ${(progress as { total: number }).total.toLocaleString()}`
                   : ''}
               </span>
             </button>

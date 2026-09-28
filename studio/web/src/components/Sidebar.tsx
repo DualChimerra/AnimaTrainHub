@@ -66,6 +66,7 @@ const I = {
   cog:      svg(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   image:    svg(<><rect x="3" y="3" width="16" height="16" rx="2" /><circle cx="9" cy="9" r="1.6" fill="currentColor" /><path d="m21 15-5-5L5 21" /></>),
   soup:     svg(<><path d="M3 11h18a9 9 0 0 1-9 9 9 9 0 0 1-9-9Z" /><path d="M2 21h20" /><path d="M8 7c0-1.2 1-1.8 1-3" /><path d="M12 6c0-1.2 1-1.8 1-3" /><path d="M16 7c0-1.2 1-1.8 1-3" /></>),
+  graph:    svg(<><circle cx="6" cy="6" r="2.2" /><circle cx="18" cy="8" r="2.2" /><circle cx="9" cy="18" r="2.2" /><circle cx="19" cy="18" r="1.8" /><path d="M8.1 6.5 15.8 7.6M6.9 8.1l1.4 7.7M16.7 9.9l-6.3 6.3M11.2 18h6" /></>),
   overview: svg(<><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></>),
   download: svg(<path d="M12 4v12m0 0-4-4m4 4 4-4M4 20h16" />),
   branch:   svg(<><circle cx="6" cy="6" r="2.4" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="8" r="2.4" /><path d="M6 8.4v7.2" /><path d="M18 10.4c0 3.4-3.2 3.9-6 4.4" /></>, 11, 2),
@@ -567,6 +568,7 @@ export default function Sidebar({
         <NavItem to="/queue" label={t('nav.queue')} icon={I.queue} active={isMain('/queue')} collapsed={collapsed} tail={queue.pending > 0 ? queue.pending : undefined} />
         <NavItem to="/tools/generate" label={t('nav.generate')} icon={I.image} active={isMain('/tools/generate')} collapsed={collapsed} />
         <NavItem to="/tools/soup" label={t('nav.soup')} icon={I.soup} active={isMain('/tools/soup')} collapsed={collapsed} />
+        <NavItem to="/tools/graph" label={t('nav.graph')} icon={I.graph} active={isMain('/tools/graph')} collapsed={collapsed} />
       </nav>
 
       <div className={`ds-sidefoot ${collapsed ? '!px-2' : ''}`}>

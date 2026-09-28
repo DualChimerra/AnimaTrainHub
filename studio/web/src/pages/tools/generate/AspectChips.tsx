@@ -53,7 +53,7 @@ export default function AspectChips({
           type="button"
           className={`ds-pill${aspect === p.ratio ? ' ds-is-active' : ''}`}
           style={{ height: 26, padding: '0 10px', fontFamily: 'var(--mono)', fontSize: 11.5 }}
-          title={`${p.kind} · ${p.w}×${p.h}`}
+          title={`${p.kind}, ${p.w}×${p.h}`}
           aria-pressed={aspect === p.ratio}
           onClick={() => onPick(p.ratio, p.w, p.h)}
         >

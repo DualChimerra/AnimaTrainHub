@@ -10,7 +10,7 @@ function labelOf(s: Sample, xDraft: XYAxisDraft, yDraft: XYAxisDraft | null): st
   if (!s.xy) return ''
   const x = `${axisLabel(xDraft.axis)}=${formatAxisValue(xDraft.axis, String(s.xy.xv ?? ''))}`
   if (yDraft && s.xy.yv != null) {
-    return `${x} · ${axisLabel(yDraft.axis)}=${formatAxisValue(yDraft.axis, String(s.xy.yv))}`
+    return `${x}, ${axisLabel(yDraft.axis)}=${formatAxisValue(yDraft.axis, String(s.xy.yv))}`
   }
   return x
 }

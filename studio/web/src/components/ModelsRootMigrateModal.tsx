@@ -230,7 +230,7 @@ export default function ModelsRootMigrateModal({ target, onClose, onDone }: {
               <div className="text-xs text-fg-tertiary font-mono flex justify-between gap-2">
                 <span className="truncate">{progress.currentFile}</span>
                 <span className="shrink-0">
-                  {progress.doneFiles}/{progress.totalFiles} · {formatBytes(progress.doneBytes)}/{formatBytes(progress.totalBytes)} · {pct}%
+                  {progress.doneFiles}/{progress.totalFiles}, {formatBytes(progress.doneBytes)}/{formatBytes(progress.totalBytes)}, {pct}%
                 </span>
               </div>
             </>

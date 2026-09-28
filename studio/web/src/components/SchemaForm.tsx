@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { SchemaResponse, ConfigData } from '../api/client'
-import { evalShowWhen, schemaAltDescription, schemaDisableHint, schemaDescription, schemaGroupLabel } from '../lib/schema'
+import { controlKind, evalShowWhen, schemaAltDescription, schemaDisableHint, schemaDescription, schemaGroupLabel } from '../lib/schema'
 import Field from './Field'
 import RuleImpactDialog, { type RuleImpactChange } from './RuleImpactDialog'
 
@@ -32,6 +32,45 @@ interface Props {
   afterField?: Record<string, ReactNode>
   /** Shown when the filters leave nothing to render. */
   emptyHint?: string
+  /** Fields kept in the config but not rendered (e.g. model paths while they
+   * are synced from global Settings). */
+  hiddenFields?: string[]
+}
+
+/** Schema groups shown as several cards. Titles: schema.subgroups.<key>.
+ *  `rest` takes the group's fields no card lists (new optimizer / scheduler
+ *  options land there); `switchesFirst` puts the card's switches above the
+ *  line, for cards whose switch turns the rest on (EMA, DOP). */
+interface Subgroup { key: string; fields: string[]; rest?: boolean; switchesFirst?: boolean }
+const rank = (list: string[], f: string) => { const i = list.indexOf(f); return i < 0 ? list.length : i }
+const SUBGROUPS: Record<string, Subgroup[]> = {
+  lora: [
+    { key: 'loraMain', fields: ['lora_type', 'lora_rank', 'lora_alpha', 'lokr_factor', 'tlora_min_rank', 'tlora_alpha_rank_scale', 'tlora_use_ortho'], rest: true },
+    { key: 'loraDropout', fields: ['lora_dropout', 'lora_rank_dropout', 'lora_module_dropout'] },
+    { key: 'loraExtra', fields: ['lora_dora', 'lora_rs'] },
+    { key: 'loraBlocks', fields: ['lora_reg_dims'] },
+  ],
+  dataset: [
+    { key: 'datasetMain', fields: ['resolution', 'aspect_ratio_limit', 'bucket_min_reso', 'bucket_max_reso', 'bucket_step'], rest: true },
+    { key: 'regSet', fields: ['reg_caption', 'reg_weight'] },
+  ],
+  training: [
+    { key: 'trainMain', fields: ['epochs', 'max_steps', 'batch_size', 'grad_accum', 'grad_checkpoint'] },
+    { key: 'trainLr', fields: ['learning_rate', 'lr_scheduler', 'lr_scheduler_eta_min', 'optimizer_type'], rest: true },
+    { key: 'trainEma', fields: ['ema_enabled', 'ema_decay', 'ema_start_ratio'], switchesFirst: true },
+  ],
+  loss: [
+    { key: 'lossMain', fields: [], rest: true },
+    { key: 'lossDop', fields: ['dop_enabled', 'dop_weight', 'dop_ratio'], switchesFirst: true },
+  ],
+  system: [
+    { key: 'sysMain', fields: ['mixed_precision', 'attention_backend', 'num_workers', 'cache_latents', 'block_swap_preflight', 'cache_encode_tiled', 'cache_encode_tile_px', 'cache_encode_tile_overlap', 'cache_encode_max_pixels'] },
+    { key: 'sysOpt', fields: ['vae_cache_batch_size', 'blocks_to_swap', 'vae_tiling', 'navit_packing', 'kv_trim'], rest: true },
+  ],
+  output: [
+    { key: 'outMain', fields: ['save_every_epochs', 'save_every_steps', 'save_state_every_epochs', 'save_state_every_steps', 'seed'], rest: true },
+    { key: 'outResume', fields: ['resume_lora', 'resume_state'] },
+  ],
 }
 
 /** Computes which groups have at least one visible field under the current advancedMode (used for sidebar anchor navigation).
@@ -60,10 +99,11 @@ export function visibleSchemaGroups(
  */
 export default function SchemaForm({
   schema, values, onChange, disabledFields, disabledHints, autoHints, fieldSuffixes, advancedMode = true,
-  groupKeys, fieldFilter, baseline, afterField, emptyHint,
+  groupKeys, fieldFilter, baseline, afterField, emptyHint, hiddenFields,
 }: Props) {
   const { t } = useTranslation()
   const disabledSet = new Set(disabledFields ?? [])
+  const hiddenSet = new Set(hiddenFields ?? [])
   const dHints = disabledHints ?? {}
   const aHints = autoHints ?? {}
   const suffixes = fieldSuffixes ?? {}
@@ -154,7 +194,7 @@ export default function SchemaForm({
   // below makes the whole section disappear automatically.
   const buckets = new Map<string, string[]>()
   for (const [name, prop] of Object.entries(props)) {
-    if (prop.hidden) continue
+    if (prop.hidden || hiddenSet.has(name)) continue
     if (prop.advanced && !advancedMode) continue
     const g = prop.group ?? 'misc'
     if (!buckets.has(g)) buckets.set(g, [])
@@ -171,13 +211,59 @@ export default function SchemaForm({
     )
     if (fields.length === 0) return null
     rendered += fields.length
+    // A group can be split into several cards (SUBGROUPS); fields not listed
+    // there land in the first card. The first card carries the group anchor.
+    const subs = SUBGROUPS[key]
+    const restIdx = subs ? Math.max(0, subs.findIndex((x) => x.rest)) : 0
+    const cards: Array<{ key: string; title: string; fields: string[]; switchesFirst?: boolean }> = subs
+      ? subs.map((s, i) => ({
+          key: s.key,
+          title: t(`schema.subgroups.${s.key}`),
+          switchesFirst: s.switchesFirst,
+          fields: fields.filter((f) => s.fields.includes(f)
+            || (i === restIdx && !subs.some((x) => x.fields.includes(f))))
+            // listed fields in the listed order, the rest after them in schema order
+            .sort((a, b) => rank(s.fields, a) - rank(s.fields, b)),
+        })).filter((c) => c.fields.length > 0)
+      : [{ key, title: groupLabel, fields }]
     return (
-      <section key={key} id={`schema-group-${key}`} className="ds-fgroup">
-        <div className="ds-fgroup-head">
-          <span className="ds-fgroup-title">{groupLabel}</span>
-          <span className="ds-fgroup-count">{t('schema.fieldCount', { n: fields.length, count: fields.length })}</span>
-        </div>
-        {fields.map((name) => {
+      <Fragment key={key}>
+        {cards.map((c, ci) => (
+          <section key={c.key} id={ci === 0 ? `schema-group-${key}` : undefined} className="ds-fgroup">
+            <div className="ds-fgroup-head">
+              <span className="ds-fgroup-title">{c.title}</span>
+            </div>
+            {renderGrid(c.fields, c.switchesFirst)}
+          </section>
+        ))}
+      </Fragment>
+    )
+  })
+
+  // Inputs go into the grid; switches get their own compact list, split from
+  // the inputs by a full-width line: under them, or above them when the switch
+  // turns the card on. Rows attached to a switch (afterField) join the grid.
+  function renderGrid(fields: string[], switchesFirst = false) {
+    const isBool = (n: string) => controlKind(props[n]) === 'bool'
+    const inputs = fields.filter((n) => !isBool(n))
+    const bools = fields.filter(isBool)
+    const attached = bools.filter((n) => afterField?.[n])
+    const hasGrid = inputs.length > 0 || attached.length > 0
+    const grid = hasGrid && (
+      <div className="ds-fgrid">
+        {inputs.map((n) => renderField(n))}
+        {attached.map((n) => <div key={`after-${n}`} className="ds-fcell ds-full">{afterField![n]}</div>)}
+      </div>
+    )
+    const switches = bools.length > 0 && (
+      <div className={`ds-switches${hasGrid ? (switchesFirst ? ' ds-before' : ' ds-after') : ''}`}>
+        {bools.map((n) => renderField(n, true))}
+      </div>
+    )
+    return switchesFirst ? <>{switches}{grid}</> : <>{grid}{switches}</>
+  }
+
+  function renderField(name: string, inSwitchList = false) {
           const prop = props[name]
           // disable_when (schema-driven conditional disable, e.g. Prodigy -> lr_scheduler)
           // has lower priority than the global disabledFields (project pre-fill).
@@ -215,7 +301,7 @@ export default function SchemaForm({
             : undefined
           const changed = baseline && name in baseline && !sameValue(baseline[name], values[name])
           return (
-            <div key={name}>
+            <Fragment key={name}>
               <Field
                 name={name}
                 prop={prop}
@@ -230,13 +316,10 @@ export default function SchemaForm({
                 disabledOptionHint={schemaDisableHint(name, prop.disable_hint, t)}
                 changedFrom={changed ? { value: baseline![name] } : undefined}
               />
-              {afterField?.[name]}
-            </div>
+              {!inSwitchList && afterField?.[name] && <div className="ds-fcell ds-full">{afterField[name]}</div>}
+            </Fragment>
           )
-        })}
-      </section>
-    )
-  })
+  }
 
   return (
     <div className="ds-fgroups">

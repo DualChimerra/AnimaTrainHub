@@ -49,7 +49,7 @@ export default function JobProgress({ job, logs, onCancel }: Props) {
         </span>
         {elapsed && elapsed > 0 && (
           <span className="text-xs text-fg-tertiary">
-            · {Math.round(elapsed)}s
+            {Math.round(elapsed)}s
           </span>
         )}
         <span className="flex-1" />

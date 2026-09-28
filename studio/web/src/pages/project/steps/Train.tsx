@@ -39,6 +39,7 @@ import {
 } from '../../../lib/preset-helpers'
 import FamilySwitchDialog from '../../../components/FamilySwitchDialog'
 import TriggerWordCard from '../../../components/TriggerWordCard'
+import HelpTip from '../../../components/ds/HelpTip'
 
 // Global model fields come from global settings and are read-only per version
 const GLOBAL_MODEL_FIELDS = [
@@ -47,6 +48,11 @@ const GLOBAL_MODEL_FIELDS = [
   'text_encoder_path',
   't5_tokenizer_path',
 ]
+
+// Filled in by the project (train/, reg/, output/ of the version); hidden on this page.
+const DATASET_PATH_FIELDS = ['data_dir', 'reg_data_dir', 'output_dir', 'output_name']
+// Continue-training fields live on their own tab (Finishing).
+const RESUME_FIELDS = ['resume_lora', 'resume_state']
 
 interface Ctx {
   project: ProjectDetail
@@ -229,12 +235,15 @@ export default function TrainPage() {
   // values; OFF (users with independent models): the fields are editable + get a
   // reset button, and on fork the preset's absolute paths are respected.
   const disabledFields = autoSyncPaths ? GLOBAL_MODEL_FIELDS : []
+  // Temporarily hidden: while the paths are synced from Settings they are
+  // read-only noise on this page (values still round-trip through the config).
+  const hiddenFields = [...(autoSyncPaths ? GLOBAL_MODEL_FIELDS : []), ...DATASET_PATH_FIELDS]
   const disabledHints = useMemo(() => {
     const h: Record<string, React.ReactNode> = {}
     if (autoSyncPaths) {
       const node = (
         <>
-          {t('train.globalAutoLockedPrefix')} ·{' '}
+          {t('train.globalAutoLockedPrefix')},{' '}
           <button
             type="button"
             onClick={() => settingsDrawer.open({ section: 'models' })}
@@ -610,7 +619,7 @@ export default function TrainPage() {
   /** Fields of a group as the form would show them right now. */
   const groupFields = (key: string): string[] =>
     Object.entries(props)
-      .filter(([, p]) => !p.hidden && (p.group ?? 'misc') === key
+      .filter(([n, p]) => !p.hidden && !hiddenFields.includes(n) && (p.group ?? 'misc') === key
         && (!config || evalShowWhen(p.show_when, config)))
       .map(([n]) => n)
   const tabGroups = (id: TrainTabId): string[] => {
@@ -622,32 +631,6 @@ export default function TrainPage() {
   }
   const tabOf = (groupKey: string): TrainTabId =>
     TRAIN_TABS.find((x) => (x.groups as readonly string[]).includes(groupKey))?.id ?? 'system'
-  const tabFieldNames = (id: TrainTabId) => tabGroups(id).flatMap(groupFields)
-  const currentFields = tabFieldNames(tab)
-  const totalFields = TRAIN_TABS.reduce((s, x) => s + tabFieldNames(x.id).length, 0)
-
-  const resetTab = async () => {
-    const cur = configRef.current
-    if (!cur || !schema) return
-    const keep = new Set([...GLOBAL_MODEL_FIELDS, ...(configResp?.project_specific_fields ?? [])])
-    const next: ConfigData = { ...cur }
-    let n = 0
-    for (const name of currentFields) {
-      if (keep.has(name) || isLocked(name)) continue
-      const def = props[name]?.default
-      if (def === undefined || sameValue(def, cur[name])) continue
-      next[name] = def
-      n++
-    }
-    if (n === 0) {
-      toast(t('train.resetTabNothing'), 'success')
-      return
-    }
-    const ok = await confirm(t('train.resetTabConfirm', { count: n, tab: t(`train.tab_${tab}`) }), { tone: 'warn', okText: t('train.resetTabOk') })
-    if (!ok) return
-    onFormChange(next)
-  }
-
   const openGroup = (key: string) => {
     setTab(tabOf(key))
     requestAnimationFrame(() => {
@@ -661,10 +644,13 @@ export default function TrainPage() {
     return base.replace(/\.(safetensors|ckpt|pt|bin|gguf)$/i, '') || String(config?.model_family ?? '—')
   })()
   const subtitle = config
-    ? <><code>{modelName}</code>{' · '}{[`${LORA_TYPE_LABEL[String(config.lora_type ?? 'lora')] ?? String(config.lora_type)} r${String(config.lora_rank ?? '—')}`, t('train.nParams', { count: totalFields })].join(' · ')}</>
+    ? t('train.subtitleModel', {
+        model: modelName,
+        type: LORA_TYPE_LABEL[String(config.lora_type ?? 'lora')] ?? String(config.lora_type),
+        rank: String(config.lora_rank ?? '—'),
+      })
     : t('steps.train.subtitle')
 
-  const triggerUnderDop = !!config?.dop_enabled && groupFields('loss').includes('dop_enabled')
   const triggerRow = config ? (
     <TriggerWordCard
       projectId={project.id}
@@ -870,28 +856,23 @@ export default function TrainPage() {
                       className={`ds-tab${tab === x.id ? ' ds-is-active' : ''}`}
                       onClick={() => setTab(x.id)}
                     >
-                      {t(`train.tab_${x.id}`)}<span className="ds-badge ds-mute">{tabFieldNames(x.id).length}</span>
+                      {t(`train.tab_${x.id}`)}
                     </button>
                   ))}
-                  <span style={{ flex: 1 }} />
-                  <button type="button" className="ds-ctl ds-sm" style={{ alignSelf: 'center' }} onClick={() => void resetTab()} title={t('train.resetTab')}>
-                    {TrainIcon.reset}{t('train.resetTabShort')}
-                  </button>
                 </div>
-                {/* Trigger word: under DOP (gated row) when DOP is on and its field is
-                    shown; otherwise at the top of the data tab, next to captions. */}
-                {tab === 'data' && !triggerUnderDop && triggerRow}
                 <SchemaForm
                   schema={schema}
                   values={config}
                   onChange={onFormChange}
                   disabledFields={disabledFields}
+                  hiddenFields={hiddenFields}
                   disabledHints={disabledHints}
                   autoHints={autoHints}
                   fieldSuffixes={makeResetSuffixes(config, applyEdit)}
                   groupKeys={tabGroups(tab)}
                   baseline={baseline}
-                  afterField={triggerUnderDop ? { dop_enabled: triggerRow } : undefined}
+                  afterField={{ dop_enabled: triggerRow }}
+                  fieldFilter={tab === 'finish' ? (n) => RESUME_FIELDS.includes(n) : tab === 'system' ? (n) => !RESUME_FIELDS.includes(n) : undefined}
                 />
                 {familySwitchTarget && (
                   <FamilySwitchDialog
@@ -954,7 +935,7 @@ export default function TrainPage() {
 // TrainSystem / TrainOutput)
 // ---------------------------------------------------------------------------
 
-type TrainTabId = 'model' | 'data' | 'optim' | 'system'
+type TrainTabId = 'model' | 'data' | 'optim' | 'system' | 'finish'
 
 /** Which schema groups each tab of the form shows. */
 /** How the network type reads in the page subtitle (the mockup writes "LoKr r32"). */
@@ -965,6 +946,7 @@ const TRAIN_TABS = [
   { id: 'data', groups: ['dataset', 'caption'] },
   { id: 'optim', groups: ['training', 'timestep_sampling', 'loss', 'noise_augmentation'] },
   { id: 'system', groups: ['system', 'output', 'sample', 'eval_validation', 'monitor'] },
+  { id: 'finish', groups: ['output'] },
 ] as const satisfies ReadonlyArray<{ id: TrainTabId; groups: readonly string[] }>
 
 interface ChangeEntry {
@@ -1306,7 +1288,7 @@ function TrainKpis({ stats }: { stats: TrainStats }) {
         <div className="ds-kpi-top">
           <span className="ds-kpi-icon">{TrainIcon.gpu}</span>
           <span style={{ marginLeft: 'auto' }} className="ds-kpi-meta">
-            {sys ? [t('train.kpiCpu', { n: Math.round(sys.cpu_pct) }), gpu?.temp_c != null ? `${gpu.temp_c} °C` : null].filter(Boolean).join(' · ') : ''}
+            {sys ? [t('train.kpiCpu', { n: Math.round(sys.cpu_pct) }), gpu?.temp_c != null ? `${gpu.temp_c} °C` : null].filter(Boolean).join(', ') : ''}
           </span>
         </div>
         <div className="ds-kpi-val" style={{ marginTop: 16 }}>
@@ -1352,9 +1334,9 @@ function StepBudget({ stats, activeVersion }: { stats: TrainStats; activeVersion
     n: stats.shownEffective || null,
     drop: stats.navitOn
       ? t('train.budgetNavitSamples')
-      : [repeats.length ? repeats.map((r) => `×${r}`).join(' · ') + ' ' + t('train.budgetByFolders') : null,
+      : [repeats.length ? repeats.map((r) => `×${r}`).join(', ') + ' ' + t('train.budgetByFolders') : null,
         stats.resoCount > 1 ? t('train.budgetResos', { n: stats.resoCount }) : null,
-        regImages > 0 ? t('train.budgetPlusReg') : null].filter(Boolean).join(' · '),
+        regImages > 0 ? t('train.budgetPlusReg') : null].filter(Boolean).join(', '),
     tone: 'soft',
     dropTone: 'mute',
   })
@@ -1364,7 +1346,7 @@ function StepBudget({ stats, activeVersion }: { stats: TrainStats; activeVersion
     drop: stats.navitOn
       ? (stats.navitEst ? t('train.budgetNavitSteps', { packs: formatNum(stats.navitEst.packs_per_epoch, lang), ga: stats.ga }) : t('train.navitEstimating'))
       : t('train.budgetStepsNote', { bs: stats.bs, ga: stats.ga, epochs: stats.epochs, total: stats.finalTotal != null ? formatNum(stats.finalTotal, lang) : '—' })
-        + (stats.maxStepsTruncates ? ` · ${t('train.maxStepsLabel', { n: stats.maxSteps })}` : ''),
+        + (stats.maxStepsTruncates ? `, ${t('train.maxStepsLabel', { n: stats.maxSteps })}` : ''),
     tone: 'green',
     dropTone: 'mute',
   })
@@ -1372,7 +1354,7 @@ function StepBudget({ stats, activeVersion }: { stats: TrainStats; activeVersion
   return (
     <div className="ds-card">
       <div className="ds-card-head">
-        <div><div className="ds-card-title">{t('train.budgetTitle')}</div><div className="ds-card-sub">{t('train.budgetSub')}</div></div>
+        <div><div className="ds-card-title">{t('train.budgetTitle')}<HelpTip>{t('train.budgetSub')}</HelpTip></div></div>
       </div>
       <div style={{ padding: '12px 17px 16px' }}>
         {rows.map((r) => (
@@ -1503,7 +1485,7 @@ function BucketBars({ dist }: { dist: BucketDistribution | null }) {
     <div style={{ borderTop: '1px solid var(--line)', paddingTop: 13 }}>
       <div className="ds-cap" style={{ marginBottom: 10 }}>{native ? t('train.navitDistTitle') : t('train.bucketDistTitle')}</div>
       <div className="ds-barset">
-        {top.map((b) => <i key={`${b.w}x${b.h}`} style={{ height: `${(b.count / max) * 100}%` }} title={`${b.w}×${b.h} · ${b.count}`} />)}
+        {top.map((b) => <i key={`${b.w}x${b.h}`} style={{ height: `${(b.count / max) * 100}%` }} title={`${b.w}×${b.h}, ${b.count}`} />)}
         {restCount > 0 && <i className="ds-mute" style={{ height: `${(restCount / max) * 100}%` }} title={t('train.bucketRest', { n: restCount })} />}
       </div>
       <div className="ds-axis">
@@ -1654,7 +1636,7 @@ function RecentChanges({ changes, schema, onRevert }: {
   return (
     <div className="ds-card">
       <div className="ds-card-head ds-pad">
-        <div><div className="ds-card-title">{t('train.recentTitle')}</div><div className="ds-card-sub">{t('train.recentSub')}</div></div>
+        <div><div className="ds-card-title">{t('train.recentTitle')}<HelpTip>{t('train.recentSub')}</HelpTip></div></div>
       </div>
       {changes.length === 0 ? (
         <div className="ds-muted" style={{ padding: '0 17px 16px', fontSize: 12.5 }}>{t('train.recentEmpty')}</div>
@@ -1730,8 +1712,8 @@ function TrainLogBar({ project, vid }: { project: ProjectDetail; vid: number }) 
         `#${task.id} train`,
         monitor?.epoch != null && monitor.total_epochs ? t('train.logbarEpoch', { e: monitor.epoch, total: monitor.total_epochs }) : null,
         lastLoss != null ? `loss ${lastLoss.toFixed(4)}` : null,
-      ].filter(Boolean).join(' · ')
-    : `#${task.id} train · ${t(`train.runStatus_${task.status}`, { defaultValue: task.status })}`
+      ].filter(Boolean).join(', ')
+    : `#${task.id} train, ${t(`train.runStatus_${task.status}`, { defaultValue: task.status })}`
   const pct = running && monitor?.step != null && monitor.total_steps ? (monitor.step / monitor.total_steps) * 100 : null
   return <JobLogBar title={t('train.logbarTitle')} running={running} detail={detail} pct={pct} log={log} />
 }

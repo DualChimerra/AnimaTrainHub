@@ -17,6 +17,7 @@ import { useToast } from '../../../components/Toast'
 import { useEventStream } from '../../../lib/useEventStream'
 import { arBucket, arLabel } from '../../../lib/aspectRatio'
 import { clusterByAspectRatio } from '../../../lib/cropClustering'
+import HelpTip from '../../../components/ds/HelpTip'
 
 interface Ctx {
   project: ProjectDetail
@@ -386,7 +387,7 @@ export default function PreprocessCropPage() {
           </div>
           {activeImage && (
             <span className="ds-crop-imginfo" title={activeImage.name}>
-              <b>{activeImage.name}</b> · {activeImage.w}×{activeImage.h} · {arLabel(activeImage.w, activeImage.h)}
+              <b>{activeImage.name}</b> {activeImage.w}×{activeImage.h}, {arLabel(activeImage.w, activeImage.h)}
             </span>
           )}
           <span style={{ flex: 1 }} />
@@ -841,7 +842,7 @@ function RightRail({
   return (
     <section className="ds-crop-panel">
       <header className="ds-crop-panel-head">
-        <span className="ds-crop-panel-title">{t('preprocessCrop.rrProgress')}</span>
+        <span className="ds-crop-panel-title">{t('preprocessCrop.rrProgress')}<HelpTip>{t('preprocessCrop.rrNote')}</HelpTip></span>
         <span className="ds-kpi-meta" style={{ marginLeft: 'auto' }}>{pct}%</span>
       </header>
       <div style={{ padding: '0 14px 12px' }}>
@@ -853,7 +854,6 @@ function RightRail({
         {lastClusterK !== null && (
           <StatRow label={t('preprocessCrop.rrSource')} value={`Cluster k=${lastClusterK}`} accent="ok" />
         )}
-        <p className="ds-kpi-meta" style={{ margin: '8px 0 0' }}>{t('preprocessCrop.rrNote')}</p>
       </div>
       <header className="ds-crop-panel-head" style={{ borderTop: '1px solid var(--line)' }}>
         <span className="ds-crop-panel-title">{t('preprocessCrop.rrArDist')}</span>

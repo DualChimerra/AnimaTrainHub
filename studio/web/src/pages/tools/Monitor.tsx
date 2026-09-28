@@ -18,6 +18,7 @@ import {
 } from '../../components/MonitorDashboard'
 import { useToast } from '../../components/Toast'
 import { evalProgressFromResults } from '../../lib/useEvalProgress'
+import HelpTip from '../../components/ds/HelpTip'
 
 const METRIC_CODE: Record<EvalMetricKey, string> = {
   clip_t: 'CLIP-T', clip_i: 'CLIP-I', dino_i: 'DINO-I', ccip_i: 'CCIP-I', tag_recall: 'TAG RECALL',
@@ -145,7 +146,6 @@ export default function MonitorPage() {
   return (
     <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <PageHead
-        eyebrow={t('monitor.eyebrow')}
         title={t('monitor.title')}
         subtitle={t('monitor.subtitle')}
         tools={
@@ -159,7 +159,7 @@ export default function MonitorPage() {
             >
               {taskId === null && <option value="">{t('monitor.latestHint')}</option>}
               {tasks.map((x) => (
-                <option key={x.id} value={x.id}>#{x.id} · {x.name} · {statusText(x.status)}</option>
+                <option key={x.id} value={x.id}>#{x.id} {x.name}, {statusText(x.status)}</option>
               ))}
             </select>
             <button type="button" className={`ds-ctl${pickerOpen ? ' ds-is-on' : ''}`} onClick={openPicker} disabled={!pid || !vid}>
@@ -198,8 +198,7 @@ export default function MonitorPage() {
               <div className="ds-card">
                 <div className="ds-card-head ds-pad">
                   <div style={{ flex: 1 }}>
-                    <div className="ds-card-title">{t('monitor.pickCkpts')}</div>
-                    <div className="ds-card-sub">{t('monitor.pickCkptsHint')}</div>
+                    <div className="ds-card-title">{t('monitor.pickCkpts')}<HelpTip>{t('monitor.pickCkptsHint')}</HelpTip></div>
                   </div>
                   {ckpts && ckpts.length > 0 && (
                     <div className="ds-card-tools">

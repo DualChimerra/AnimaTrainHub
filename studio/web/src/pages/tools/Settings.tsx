@@ -28,6 +28,7 @@ import { useToast } from '../../components/Toast'
 import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
 import { useSettingsData } from '../../lib/SettingsData'
 import { useSettingsDrawer } from '../../lib/SettingsDrawer'
+import HelpTip from '../../components/ds/HelpTip'
 
 const MASK = '***'
 
@@ -398,11 +399,8 @@ export default function SettingsPage() {
 
       <div className="ds-set-grid">
         <div className="ds-set-rail">
-          <div className="ds-cap" style={{ margin: '0 0 9px 9px' }}>{t('settings.sectionsCap')}</div>
+          <div className="ds-cap" style={{ margin: '0 0 9px 9px' }}>{t('settings.sectionsCap')}<HelpTip>{t('settings.railNote')}</HelpTip></div>
           <SectionIndex sections={TRAINING_SECTIONS} scrollContainer={scrollContainerRef} />
-          <div className="ds-note ds-info" style={{ marginTop: 14, fontSize: 11 }}>
-            <span>{t('settings.railNote')}</span>
-          </div>
         </div>
 
       <div ref={scrollContainerRef} style={{ overflowY: 'auto', minHeight: 0 }}>
@@ -768,7 +766,7 @@ function RemoteAccessSection() {
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-fg-secondary">
-              {t('remote.ngrokDomain')}{' '}
+              {t('remote.ngrokDomain')}<HelpTip>{t('remote.ngrokHint')}</HelpTip>{' '}
               <a href={state.providers.ngrok.domains_url} target="_blank" rel="noreferrer" className="text-accent underline">
                 {t('remote.whereToGet')}
               </a>
@@ -779,7 +777,6 @@ function RemoteAccessSection() {
               autoCapitalize="off" autoCorrect="off" spellCheck={false}
             />
           </label>
-          <p className="m-0 text-xs text-fg-tertiary">{t('remote.ngrokHint')}</p>
           <div>
             <button
               type="button" className="ds-ctl ds-sm"
@@ -1502,7 +1499,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                   style={{ accentColor: 'var(--accent)' }}
                   title={t('settings.selectDefaultVae')}
                 />
-                <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)} · <code>{catalog.anima_vae.repo}</code></span>
+                <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)}, <code>{catalog.anima_vae.repo}</code></span>
                 <ModelStatusBadge exists={catalog.anima_vae.exists} size={catalog.anima_vae.size} status={catalog.downloads.anima_vae?.status} />
                 <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
               </li>
@@ -1634,7 +1631,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                       style={{ accentColor: 'var(--accent)' }}
                       title={t('settings.selectDefaultTe')}
                     />
-                    <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'qwen3', m.description, t)} · <code>{m.repo}</code></span>
+                    <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'qwen3', m.description, t)}, <code>{m.repo}</code></span>
                     <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
                     <DownloadButton exists={allExist} status={dl?.status} busy={busy.has('qwen3')} onClick={() => void start('qwen3')} />
                   </li>
@@ -1665,7 +1662,7 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             return (
               <ModelGroupCard key={id} title={m.name}>
                 <div className="ds-model-row">
-                  <span className="text-fg-tertiary">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, id, m.description, t)} · <code>{m.repo}</code></span>
+                  <span className="text-fg-tertiary">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, id, m.description, t)}, <code>{m.repo}</code></span>
                   <span style={{ flex: 1 }} />
                   <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
                   <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(id)} onClick={() => void start(id)} />

@@ -295,9 +295,9 @@ export default function ProjectOverview() {
   const subtitle = (
     <>
       {t('overview.downloads', { count: project.download_image_count ?? 0 })}
-      {' · '}{t('projects.versions', { count: project.versions.length })}
-      {' · '}{t('overview.createdOn', { date: fmtDate(project.created_at, i18n.language, true) })}
-      {activeVersion && <>{' · '}{t('overview.activeLabel')} <code>{activeVersion.label}</code></>}
+      {', '}{t('projects.versions', { count: project.versions.length })}
+      {', '}{t('overview.createdOn', { date: fmtDate(project.created_at, i18n.language, true) })}
+      {activeVersion && <>{', '}{t('overview.activeLabel')} <code>{activeVersion.label}</code></>}
       {project.note && <span style={{ display: 'block', marginTop: 4 }}>{project.note}</span>}
     </>
   )
@@ -548,7 +548,7 @@ function ckptLabel(t: (k: string, o?: Record<string, unknown>) => string, name: 
   let label = step ? t('overview.ckptStep', { n: Number(step[1]).toLocaleString() })
     : epoch ? t('overview.ckptEpoch', { n: Number(epoch[1]) })
       : t('overview.ckptFinal')
-  if (ema) label += ' · EMA'
+  if (ema) label += ', EMA'
   return label
 }
 
@@ -800,7 +800,7 @@ function FilesTable({ version, rows, outputs, taskId, onRender }: {
     <>
       <div style={{ padding: '13px 17px 0', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span className="ds-kpi-meta">
-          output/ · {t('projects.ckpts', { count: rows.length })}{sized ? ` · ${fmtBytes(t, total)}` : ''}
+          output/, {t('projects.ckpts', { count: rows.length })}{sized ? `, ${fmtBytes(t, total)}` : ''}
         </span>
         <span style={{ flex: 1 }} />
         {taskId != null && relPaths.length > 0 && (
@@ -851,7 +851,7 @@ function FilesTable({ version, rows, outputs, taskId, onRender }: {
                       <span className="ds-sect-icon" style={isFinal ? { background: '#fff' } : undefined}>{Icon.hex(13)}</span>
                       <span style={isFinal ? { fontWeight: 600 } : undefined}>
                         {row.name}
-                        <span className="ds-cell-key">{ckptLabel(t, row.name)}{isFinal ? ` · ${t('overview.ckptResult')}` : ''}</span>
+                        <span className="ds-cell-key">{ckptLabel(t, row.name)}{isFinal ? `, ${t('overview.ckptResult')}` : ''}</span>
                       </span>
                     </span>
                   </td>
@@ -938,7 +938,7 @@ function VersionsCard({ project, selectedVid, tasks, onOpen, onCreate, onActivat
           <div className="ds-card-title">{t('overview.versions')}</div>
           <div className="ds-card-sub">
             {t('projects.versions', { count: project.versions.length })}
-            {active && <>{' · '}{t('overview.activeLabel')} {active.label}</>}
+            {active && <>{', '}{t('overview.activeLabel')} {active.label}</>}
           </div>
         </div>
         <div className="ds-card-tools">
@@ -976,7 +976,7 @@ function VersionsCard({ project, selectedVid, tasks, onOpen, onCreate, onActivat
             >
               <span style={{ minWidth: 0 }}>
                 <span className="ds-verrow-name"><span className="ds-nm">{v.label}</span>{badgeOf(v)}</span>
-                {meta.length > 0 && <span className="ds-cell-key" style={{ display: 'block', marginTop: 4 }}>{meta.join(' · ')}</span>}
+                {meta.length > 0 && <span className="ds-cell-key" style={{ display: 'block', marginTop: 4 }}>{meta.join(', ')}</span>}
               </span>
               <span className="ds-verrow-tools">
                 <KebabMenu label={t('overview.versionActions', { label: v.label })} items={itemsFor(v).map((it) => ({ ...it, label: String(it.label) }))} />
@@ -1037,10 +1037,10 @@ function CompositionCard({ version, sizes }: {
     }
     const sorted = Array.from(m.values()).sort((a, b) => b.n - a.n)
     const out = sorted.slice(0, 4).map((b) => ({
-      label: b.w === b.h ? `${b.w}²` : `${b.w}×${b.h}`, title: `${b.w}×${b.h} · ${b.n}`, n: b.n, mute: false,
+      label: b.w === b.h ? `${b.w}²` : `${b.w}×${b.h}`, title: `${b.w}×${b.h}, ${b.n}`, n: b.n, mute: false,
     }))
     const other = sorted.slice(4).reduce((s, b) => s + b.n, 0)
-    if (other > 0) out.push({ label: t('overview.compOther'), title: `${t('overview.compOther')} · ${other}`, n: other, mute: true })
+    if (other > 0) out.push({ label: t('overview.compOther'), title: `${t('overview.compOther')}, ${other}`, n: other, mute: true })
     return out
   }, [sizes, t])
   const maxBucket = Math.max(1, ...buckets.map((b) => b.n))

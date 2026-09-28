@@ -180,7 +180,7 @@ export function PreprocessHeadTools({ projectId, versionId }: { projectId: numbe
         disabled={busy || s.processed === 0}
         title={t('ppFrame.restoreAllTitle')}
       >
-        {t('ppFrame.restoreAll')}{s.processed > 0 ? ` · ${s.processed}` : ''}
+        {t('ppFrame.restoreAll')}{s.processed > 0 ? `, ${s.processed}` : ''}
       </button>
       <Link className="ds-btn-primary" to={`/projects/${projectId}/v/${versionId}/edit`}>{t('ppFrame.next')}<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13m-5-6 6 6-6 6" /></svg></Link>
     </>
