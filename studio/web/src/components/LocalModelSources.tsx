@@ -100,7 +100,7 @@ export function LocalModelRows({
   }
 
   return (
-    <ul className="list-none m-0 p-0 flex flex-col gap-1">
+    <>
       {local.map((row) => (
         <li
           key={row.value}
@@ -112,31 +112,21 @@ export function LocalModelRows({
             checked={row.is_current}
             disabled={!row.exists || busy === row.value}
             onChange={() => void onSelect(row.value)}
-            className="shrink-0"
-            style={{ accentColor: 'var(--accent)' }}
             title={row.exists
               ? t('settings.selectLocalModel')
               : t('settings.localModelMissing')}
           />
-          <code
-            className="font-mono text-fg-primary w-32 shrink-0 truncate"
-            title={row.value}
-          >{row.label}</code>
-          <span className="ds-badge ds-mute shrink-0">
-            {t('settings.localBaseModel')}
-          </span>
+          <code className="ds-model-name" title={row.value}>{row.label}</code>
+          <span className="ds-badge ds-mute">{t('settings.localBaseModel')}</span>
           <span className={`ds-badge ds-mono ${row.exists ? 'ds-ok' : 'ds-err'}`}>
             {row.exists ? `✓ ${fmtBytes(row.size)}` : t('settings.localModelMissing')}
           </span>
-          <span style={{ flex: 1 }} />
           {familyOptions && familyOptions.length > 1 && (
             <select
               value={domain}
               disabled={busy === row.value}
               onChange={(e) => void changeFamily(row, e.target.value)}
-              className="ds-inp ds-mono shrink-0"
-              // ds-inp is width:100%; narrowed here so the remove button stays on the row
-              style={{ height: 26, padding: '0 6px', width: 96 }}
+              className="ds-inp ds-mono ds-set-minisel"
               title={t('settings.localModelFamilyHint')}
             >
               {familyOptions.map((f) => (
@@ -147,14 +137,14 @@ export function LocalModelRows({
           <button
             onClick={() => void unregister(row)}
             disabled={busy === row.value}
-            className="ds-ctl ds-ghost ds-sm shrink-0"
+            className="ds-ctl ds-ghost ds-sm"
             title={t('settings.localModelRemoveHint')}
           >
             {t('settings.localModelRemove')}
           </button>
         </li>
       ))}
-    </ul>
+    </>
   )
 }
 
@@ -194,11 +184,14 @@ export function AddLocalModelButton({
   }
 
   return (
-    <div className="flex items-center gap-2 mt-1.5">
+    <div>
       <button
         onClick={() => setPicking(true)}
         disabled={saving}
         className="ds-ctl ds-sm"
+        title={runtime?.mode === 'colab'
+          ? t('settings.localModelPathHintColab')
+          : t('settings.localModelPathHintLocal')}
       >
         {saving
           ? t('common.saving')
@@ -206,11 +199,6 @@ export function AddLocalModelButton({
             ? t('settings.addLocalModelDir')
             : t('settings.addLocalModelFile')}
       </button>
-      <span className="text-fg-tertiary text-xs">
-        {runtime?.mode === 'colab'
-          ? t('settings.localModelPathHintColab')
-          : t('settings.localModelPathHintLocal')}
-      </span>
       {picking && (
         <PathPicker
           initialPath={initialPath}

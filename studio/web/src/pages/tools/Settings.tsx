@@ -62,7 +62,6 @@ const TRAINING_SECTIONS: { id: string; labelKey: string }[] = [
   { id: 'runtime-mode', labelKey: 'runtimeMode.current' },
   { id: 'remote-access', labelKey: 'remote.title' },
   { id: 'download-source', labelKey: 'settings.modelSource' },
-  { id: 'queue', labelKey: 'settings.queueSchedule' },
   { id: 'training-runtime', labelKey: 'settings.trainingRuntime' },
   { id: 'pytorch', labelKey: 'settings.torch' },
   { id: 'flash-attn', labelKey: 'settings.flashAttn' },
@@ -403,14 +402,10 @@ export default function SettingsPage() {
           <SectionIndex sections={TRAINING_SECTIONS} scrollContainer={scrollContainerRef} />
         </div>
 
-      <div ref={scrollContainerRef} style={{ overflowY: 'auto', minHeight: 0 }}>
-      <div className="flex flex-col min-w-0">
+      <div ref={scrollContainerRef} className="ds-set-scroll">
+      <div className="ds-set-cards">
 
-      {error && (
-        <div className="ds-note ds-err ds-mono" style={{ margin: '12px 18px 0' }}>
-          {error}
-        </div>
-      )}
+      {error && <div className="ds-note ds-err ds-mono">{error}</div>}
 
       <AppearanceSection />
 
@@ -418,91 +413,69 @@ export default function SettingsPage() {
 
       <RemoteAccessSection />
 
-      <SettingsSection id="download-source" title={t('settings.modelSource')}>
-        <SettingsField
-          label={t('settings.downloadSource')}
-          helpTooltip={
-            <p>{t('settings.downloadSourceHelp')}</p>
-          }
-        >
-          <DownloadSourceSelect
-            value={draft.download_source}
-            onChange={(v) => updateTop('download_source', v)}
-          />
-        </SettingsField>
+      <SettingsSection id="download-source" title={t('settings.modelSource')} tip={t('settings.downloadSourceHelp')}>
+        <div className="ds-fgrid">
+          <SetCell label={t('settings.downloadSource')}>
+            <DownloadSourceSelect
+              value={draft.download_source}
+              onChange={(v) => updateTop('download_source', v)}
+            />
+          </SetCell>
 
-        {/* Below, the matching credential config is rendered conditionally on the
-         * current download source. HF/ModelScope tokens both stay in secrets (not
-         * lost even when switching sources), only one is shown in the UI at a time. */}
-        {draft.download_source === 'huggingface' ? (
-          <>
-            <SettingsField
-              label="token"
-              helpTooltip={
-                <p>{t('settings.hfTokenHelp')}</p>
-              }
-            >
-              <SensitiveInput
-                value={draft.huggingface.token}
-                serverValue={server?.huggingface.token ?? ''}
-                onChange={(v) => update('huggingface', 'token', v)}
-              />
-            </SettingsField>
-            <SettingsField
-              label="endpoint"
-              helpTooltip={<p>{t('settings.hfEndpointHelp')}</p>}
-            >
-              <HFEndpointSelect
-                value={draft.huggingface.endpoint}
-                onChange={(v) => update('huggingface', 'endpoint', v)}
-              />
-            </SettingsField>
-          </>
-        ) : (
-          <SettingsField
-            label="token"
-            helpTooltip={
-              <>
+          {/* HF/ModelScope tokens both stay in secrets (not lost when switching
+           * sources); only the current source's credentials are shown. */}
+          {draft.download_source === 'huggingface' ? (
+            <>
+              <SetCell label={t('settings.tokenLabel')} tip={t('settings.hfTokenHelp')}>
+                <SensitiveInput
+                  value={draft.huggingface.token}
+                  serverValue={server?.huggingface.token ?? ''}
+                  onChange={(v) => update('huggingface', 'token', v)}
+                />
+              </SetCell>
+              <SetCell label={t('settings.endpointLabel')} tip={t('settings.hfEndpointHelp')}>
+                <HFEndpointSelect
+                  value={draft.huggingface.endpoint}
+                  onChange={(v) => update('huggingface', 'endpoint', v)}
+                />
+              </SetCell>
+            </>
+          ) : (
+            <SetCell
+              label={t('settings.tokenLabel')}
+              tip={<>
                 <p>{t('settings.modelscopeTokenHelp')}</p>
                 <p><Trans i18nKey="settings.modelscopeInstallHelp" components={{ code: <code /> }} /></p>
-              </>
-            }
-          >
-            <SensitiveInput
-              value={draft.modelscope.token}
-              serverValue={server?.modelscope.token ?? ''}
-              onChange={(v) => update('modelscope', 'token', v)}
-            />
-          </SettingsField>
-        )}
-      </SettingsSection>
-
-      <SettingsSection id="queue" title={t('settings.queueSchedule')}>
-        <SettingsField label={t('settings.lightTasksDuringTrain')}>
-          <div className="flex items-center gap-3">
-            <Bool value={draft.queue.light_tasks_during_train} onChange={(v) => update('queue', 'light_tasks_during_train', v)} />
-            <span className="text-xs text-warn">
-              {t('settings.lightTasksDuringTrainHint')}
-            </span>
-          </div>
-        </SettingsField>
+              </>}
+            >
+              <SensitiveInput
+                value={draft.modelscope.token}
+                serverValue={server?.modelscope.token ?? ''}
+                onChange={(v) => update('modelscope', 'token', v)}
+              />
+            </SetCell>
+          )}
+        </div>
       </SettingsSection>
 
       <SettingsSection id="training-runtime" title={t('settings.trainingRuntime')}>
-        <SettingsField
-          label={t('settings.trainingRamGuard')}
-          helpTooltip={
-            <>
+        <div className="ds-switches">
+          <SwitchRow
+            label={t('settings.lightTasksDuringTrain')}
+            tip={t('settings.lightTasksDuringTrainHint')}
+            value={draft.queue.light_tasks_during_train}
+            onChange={(v) => update('queue', 'light_tasks_during_train', v)}
+          />
+          <SwitchRow
+            label={t('settings.trainingRamGuard')}
+            tip={<>
               <p>{t('settings.trainingRamGuardHelp')}</p>
               <p>{t('settings.trainingRamGuardDefaultHelp')}</p>
-            </>
-          }
-        >
-          <Bool
+            </>}
             value={draft.training.ram_guard}
             onChange={(v) => update('training', 'ram_guard', v)}
           />
-        </SettingsField>
+        </div>
       </SettingsSection>
 
       <PyTorchSection />
@@ -524,9 +497,7 @@ export default function SettingsPage() {
       </div>
       </div>
 
-      <div style={{ borderTop: '1px solid var(--line)', padding: '11px 18px', display: 'flex', alignItems: 'center', gap: 9, flex: 'none' }}>
-        <span className="ds-kpi-meta">{dirty ? t('settings.footerDirty') : t('settings.footerSaved')}</span>
-        <span style={{ marginLeft: 'auto' }} />
+      <div className="ds-set-foot">
         {dirty && (
           <button type="button" className="ds-btn-primary" onClick={save} disabled={saving}>
             {saving ? t('common.saving') : t('common.save')}
@@ -573,8 +544,13 @@ function RuntimeModeSection() {
   }
 
   return (
-    <SettingsSection id="runtime-mode" title={t('runtimeMode.current')}>
-      <div className="ds-optcards">
+    <SettingsSection
+      id="runtime-mode"
+      title={t('runtimeMode.current')}
+      tip={<span style={{ wordBreak: 'break-all' }}>studio_data: {info.environment.studio_data}</span>}
+    >
+      <div className="ds-set-pad">
+      <div className="ds-optcards ds-compact">
         {info.modes.map((m) => (
           <button
             key={m}
@@ -601,12 +577,8 @@ function RuntimeModeSection() {
         ))}
       </div>
       {info.locked && (
-        <p className="m-0 text-xs text-warn">
-          {t('runtimeMode.lockedBy', { env: 'ALS_RUNTIME_MODE' })}
-        </p>
+        <div className="ds-note ds-warn">{t('runtimeMode.lockedBy', { env: 'ALS_RUNTIME_MODE' })}</div>
       )}
-      <div className="ds-ctl-note" style={{ wordBreak: 'break-all' }}>
-        studio_data: {info.environment.studio_data}
       </div>
     </SettingsSection>
   )
@@ -700,20 +672,15 @@ function RemoteAccessSection() {
   }
 
   return (
-    <SettingsSection id="remote-access" title={t('remote.title')}>
-      <p className="m-0 text-xs text-fg-tertiary">{t('remote.blurb')}</p>
-
-      {/* provider */}
-      <div className="flex flex-col gap-2">
-        <span className="ds-cap">{t('remote.providerLabel')}</span>
-        <div className="flex flex-col gap-1.5">
+    <SettingsSection id="remote-access" title={t('remote.title')} tip={t('remote.blurb')}>
+      <div className="ds-set-pad">
+        <div className="ds-optcards ds-compact ds-set-provs">
           {TUNNEL_PROVIDERS.map((p) => {
             const active = provider === p
             return (
               <label
                 key={p}
-                className={`ds-optcard${active ? ' ds-is-on' : ''}`}
-                style={{ cursor: state.running ? 'not-allowed' : 'pointer', opacity: state.running ? 0.7 : 1 }}
+                className={`ds-optcard${active ? ' ds-is-on' : ''}${state.running ? ' ds-is-locked' : ''}`}
               >
                 <input
                   type="radio" name="tunnel-provider" className="sr-only"
@@ -721,12 +688,7 @@ function RemoteAccessSection() {
                   onChange={() => void run(() => api.configureTunnel({ provider: p }))}
                 />
                 <span className="ds-optcard-txt">
-                  <span className="ds-optcard-name" style={{ flexWrap: 'wrap' }}>
-                    {t(`remote.provider.${p}.name`)}
-                    <span className={`ds-badge ${p === 'cloudflare' ? 'ds-mute' : 'ds-ok'}`}>
-                      {p === 'cloudflare' ? t('remote.addressChanges') : t('remote.addressPermanent')}
-                    </span>
-                  </span>
+                  <span className="ds-optcard-name">{t(`remote.provider.${p}.name`)}</span>
                   <span className="ds-optcard-desc">{t(`remote.provider.${p}.hint`)}</span>
                 </span>
                 <span className={`ds-radio${active ? ' ds-on' : ''}`} />
@@ -734,65 +696,25 @@ function RemoteAccessSection() {
             )
           })}
         </div>
-      </div>
 
-      {/* provider-specific setup */}
-      {provider === 'tailscale' && !installed && (
-        <p className="m-0 text-xs text-warn">
-          {t('remote.tailscaleMissing')}{' '}
-          <a href={state.providers.tailscale.download_url} target="_blank" rel="noreferrer" className="text-accent underline">
-            tailscale.com/download
-          </a>
-        </p>
-      )}
-      {provider === 'tailscale' && installed && !state.running && (
-        <p className="m-0 text-xs text-fg-tertiary">{t('remote.tailscaleSteps')}</p>
-      )}
-
-      {provider === 'ngrok' && (
-        <div className="ds-note ds-mute" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-fg-secondary">
-              {t('remote.ngrokToken')}{' '}
-              <a href={state.providers.ngrok.token_url} target="_blank" rel="noreferrer" className="text-accent underline">
-                {t('remote.whereToGet')}
+        {/* provider-specific setup */}
+        {provider === 'tailscale' && !installed && (
+          <div className="ds-note ds-warn">
+            <span>
+              {t('remote.tailscaleMissing')}{' '}
+              <a href={state.providers.tailscale.download_url} target="_blank" rel="noreferrer" className="underline">
+                tailscale.com/download
               </a>
             </span>
-            <input
-              className="ds-inp ds-mono" type="password" autoComplete="off"
-              placeholder={state.has_ngrok_token ? t('remote.ngrokTokenSaved') : t('remote.ngrokTokenPlaceholder')}
-              value={token} onChange={(e) => setToken(e.target.value)} disabled={state.running}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-fg-secondary">
-              {t('remote.ngrokDomain')}<HelpTip>{t('remote.ngrokHint')}</HelpTip>{' '}
-              <a href={state.providers.ngrok.domains_url} target="_blank" rel="noreferrer" className="text-accent underline">
-                {t('remote.whereToGet')}
-              </a>
-            </span>
-            <input
-              className="ds-inp ds-mono" placeholder="calm-otter-123.ngrok-free.app"
-              value={domain} onChange={(e) => setDomain(e.target.value)} disabled={state.running}
-              autoCapitalize="off" autoCorrect="off" spellCheck={false}
-            />
-          </label>
-          <div>
-            <button
-              type="button" className="ds-ctl ds-sm"
-              disabled={busy || state.running || (!token.trim() && domain.trim() === (state.ngrok_domain ?? ''))}
-              onClick={() => void saveNgrok()}
-            >
-              {t('common.save')}
-            </button>
           </div>
-        </div>
-      )}
+        )}
 
-      {provider !== 'tailscale' && !installed && (
-        <div className="flex flex-col gap-1.5">
-          <p className="m-0 text-xs text-warn">{t(provider === 'ngrok' ? 'remote.ngrokNotInstalled' : 'remote.notInstalled')}</p>
-          <div>
+        {provider !== 'tailscale' && !installed && (
+          <div className="ds-note ds-warn ds-set-note-row">
+            <span style={{ flex: 1 }}>
+              {t(provider === 'ngrok' ? 'remote.ngrokNotInstalled' : 'remote.notInstalled')}
+              {!info?.can_install && <HelpTip>{t('remote.installManually')}</HelpTip>}
+            </span>
             <button
               type="button" className="ds-ctl ds-sm" disabled={busy || !info?.can_install}
               onClick={() => void run(() => api.installTunnel(provider))}
@@ -800,64 +722,89 @@ function RemoteAccessSection() {
               {busy ? t('remote.installing') : t(provider === 'ngrok' ? 'remote.installNgrok' : 'remote.install')}
             </button>
           </div>
-          {!info?.can_install && (
-            <p className="m-0 text-xs text-fg-tertiary">{t('remote.installManually')}</p>
-          )}
-        </div>
-      )}
-
-      {/* autostart */}
-      <div className="ds-field">
-        <div className="ds-field-txt">
-          <div className="ds-field-name">
-            <FieldLabel
-              label={t('remote.autostart')}
-              tip={state.permanent ? t('remote.autostartHintPermanent') : t('remote.autostartHintQuick')}
-            />
-          </div>
-        </div>
-        <Bool value={state.autostart} disabled={busy} onChange={(v) => void run(() => api.configureTunnel({ autostart: v }))} />
+        )}
       </div>
 
-      {/* link / start / stop */}
-      {state.running && state.url ? (
-        <>
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="flex-1 min-w-[200px] text-xs font-mono break-all p-2.5 rounded-md bg-sunken border border-subtle">
-              {state.url}
-            </code>
-            <button type="button" className="ds-ctl ds-sm" onClick={() => void copy()}>
-              {copied ? t('remote.copied') : t('remote.copy')}
-            </button>
-          </div>
-          {runningOther && <p className="m-0 text-xs text-fg-tertiary">{t('remote.restartToApply')}</p>}
-          <p className="m-0 text-xs text-warn">{t('remote.shareWarning')}</p>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button" className="ds-ctl ds-sm" disabled={busy}
-              onClick={() => void run(api.stopTunnel)}
-            >
-              {t('remote.stop')}
-            </button>
-            <button type="button" className="ds-ctl ds-ghost ds-sm" disabled={busy} onClick={() => void rotate()}>
-              {t('remote.rotate')}
-            </button>
-          </div>
-        </>
-      ) : (
-        <>
-          <div>
-            <button
-              type="button" className="ds-btn-primary ds-sm"
-              disabled={busy || !installed || !ngrokReady}
-              onClick={() => void run(api.startTunnel)}
-            >
-              {busy ? t('remote.starting') : t('remote.start')}
-            </button>
-          </div>
-          {state.error && <p className="m-0 text-xs text-err break-words">{linkify(state.error)}</p>}
-        </>
+      {provider === 'ngrok' && (
+        <div className="ds-fgrid ds-set-grid-tight">
+          <SetCell
+            label={t('remote.ngrokToken')}
+            extra={<a href={state.providers.ngrok.token_url} target="_blank" rel="noreferrer" className="ds-set-link">{t('remote.whereToGet')}</a>}
+          >
+            <input
+              className="ds-inp ds-mono" type="password" autoComplete="off"
+              placeholder={state.has_ngrok_token ? t('remote.ngrokTokenSaved') : t('remote.ngrokTokenPlaceholder')}
+              value={token} onChange={(e) => setToken(e.target.value)} disabled={state.running}
+            />
+          </SetCell>
+          <SetCell
+            label={t('remote.ngrokDomain')}
+            tip={t('remote.ngrokHint')}
+            extra={<a href={state.providers.ngrok.domains_url} target="_blank" rel="noreferrer" className="ds-set-link">{t('remote.whereToGet')}</a>}
+          >
+            <div className="ds-set-inline">
+              <input
+                className="ds-inp ds-mono" placeholder="calm-otter-123.ngrok-free.app"
+                value={domain} onChange={(e) => setDomain(e.target.value)} disabled={state.running}
+                autoCapitalize="off" autoCorrect="off" spellCheck={false}
+              />
+              <button
+                type="button" className="ds-ctl"
+                disabled={busy || state.running || (!token.trim() && domain.trim() === (state.ngrok_domain ?? ''))}
+                onClick={() => void saveNgrok()}
+              >
+                {t('common.save')}
+              </button>
+            </div>
+          </SetCell>
+        </div>
       )}
+
+      {/* link / start / stop */}
+      <div className="ds-set-pad ds-set-bar">
+        {state.running && state.url ? (
+          <>
+            <div className="ds-set-inline">
+              <code className="ds-set-url">{state.url}</code>
+              <button type="button" className="ds-ctl" onClick={() => void copy()}>
+                {copied ? t('remote.copied') : t('remote.copy')}
+              </button>
+              <button type="button" className="ds-ctl" disabled={busy} onClick={() => void run(api.stopTunnel)}>
+                {t('remote.stop')}
+              </button>
+              <button type="button" className="ds-ctl ds-ghost" disabled={busy} onClick={() => void rotate()}>
+                {t('remote.rotate')}
+              </button>
+            </div>
+            {runningOther && <div className="ds-note ds-info">{t('remote.restartToApply')}</div>}
+            <div className="ds-note ds-warn">{t('remote.shareWarning')}</div>
+          </>
+        ) : (
+          <>
+            <div className="ds-set-inline">
+              <button
+                type="button" className="ds-btn-primary"
+                disabled={busy || !installed || !ngrokReady}
+                onClick={() => void run(api.startTunnel)}
+              >
+                {busy ? t('remote.starting') : t('remote.start')}
+              </button>
+              {provider === 'tailscale' && installed && <HelpTip>{t('remote.tailscaleSteps')}</HelpTip>}
+            </div>
+            {state.error && <div className="ds-note ds-err" style={{ wordBreak: 'break-word' }}><span>{linkify(state.error)}</span></div>}
+          </>
+        )}
+      </div>
+
+      <div className="ds-switches ds-after">
+        <SwitchRow
+          label={t('remote.autostart')}
+          tip={state.permanent ? t('remote.autostartHintPermanent') : t('remote.autostartHintQuick')}
+          value={state.autostart}
+          disabled={busy}
+          onChange={(v) => void run(() => api.configureTunnel({ autostart: v }))}
+        />
+      </div>
     </SettingsSection>
   )
 }
@@ -882,7 +829,8 @@ function AppearanceSection() {
 
   return (
     <SettingsSection id="appearance" title={t('settings.appearance')}>
-      <SettingsField label={t('settings.language')} desc={t('settings.languageDesc')}>
+      <div className="ds-fgrid">
+      <SetCell label={t('settings.language')} tip={t('settings.languageDesc')}>
         <div className="ds-seg" style={{ alignSelf: 'flex-start' }}>
           {LANGUAGES.map((option) => (
             <button
@@ -896,42 +844,118 @@ function AppearanceSection() {
             </button>
           ))}
         </div>
-      </SettingsField>
-      <SettingsField label={t('settings.sounds')} desc={t('settings.soundsDesc')}>
-        <label className={`ds-switch${soundOn ? ' ds-on' : ''}`} style={{ cursor: 'pointer', alignSelf: 'flex-start' }}>
-          <input
-            type="checkbox"
-            className="sr-only"
-            checked={soundOn}
-            onChange={(e) => {
-              setSoundOn(e.target.checked)
-              if (e.target.checked) playSound('success')
-            }}
-            aria-label={t('settings.sounds')}
-          />
-          <i />
-        </label>
-      </SettingsField>
+      </SetCell>
+      </div>
+      <div className="ds-switches ds-after">
+        <SwitchRow
+          label={t('settings.sounds')}
+          tip={t('settings.soundsDesc')}
+          value={soundOn}
+          onChange={(v) => {
+            setSoundOn(v)
+            if (v) playSound('success')
+          }}
+        />
+      </div>
     </SettingsSection>
   )
 }
 
+/** One settings card, the same grey card the training config uses. The body
+ *  is up to the caller: a `.ds-fgrid` of cells, a `.ds-switches` list, or a
+ *  padded block. Longer explanations go under the "?" next to the title. */
 function SettingsSection({
-  id, title, headerExtras, children,
+  id, title, tip, extra, children,
 }: {
   id?: string
   title: string
-  headerExtras?: React.ReactNode  // Optional slot: rendered right next to the h2, for things like an (i) tooltip
+  tip?: React.ReactNode
+  /** Right side of the header (status badge and the like). */
+  extra?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
-    <section id={id} className="ds-set-sect">
-      <div className="ds-set-head">
-        <h2 className="ds-cap" style={{ margin: 0 }}>{title}</h2>
-        {headerExtras}
+    <section id={id} className="ds-fgroup ds-set-card">
+      <div className="ds-fgroup-head">
+        <h2 className="ds-fgroup-title">{title}</h2>
+        {tip && <HelpTip>{tip}</HelpTip>}
+        {extra && <span className="ds-set-extra">{extra}</span>}
       </div>
-      <div className="ds-set-body">{children}</div>
+      {children}
     </section>
+  )
+}
+
+/** Same as SettingsSection, folded by default unless something needs attention. */
+function CollapsibleSection({
+  id, title, tip, extra, open, children,
+}: {
+  id: string
+  title: string
+  tip?: React.ReactNode
+  extra?: React.ReactNode
+  open: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <details id={id} open={open} className="ds-fgroup ds-set-card ds-set-fold">
+      <summary className="ds-fgroup-head">
+        <svg className="ds-set-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+        <h2 className="ds-fgroup-title">{title}</h2>
+        {tip && <HelpTip>{tip}</HelpTip>}
+        {extra && <span className="ds-set-extra">{extra}</span>}
+      </summary>
+      {children}
+    </details>
+  )
+}
+
+/** A labelled cell of a `.ds-fgrid`, same shape as the training config cells. */
+function SetCell({ label, tip, extra, full, children }: {
+  label: string
+  tip?: React.ReactNode
+  /** Small trailing item in the label row (a link, a badge). */
+  extra?: React.ReactNode
+  full?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <div className={`ds-fcell${full ? ' ds-full' : ''}`}>
+      <div className="ds-fcell-head">
+        <FieldLabel label={label} tip={tip} />
+        {extra}
+      </div>
+      <div className="ds-fcell-ctl">{children}</div>
+    </div>
+  )
+}
+
+/** One line of a `.ds-switches` list: switch, then the name. */
+function SwitchRow({ label, tip, value, onChange, disabled }: {
+  label: string
+  tip?: React.ReactNode
+  value: boolean
+  onChange: (v: boolean) => void
+  disabled?: boolean
+}) {
+  return (
+    <div className="ds-switchrow">
+      <label className={`ds-switchrow-hit${disabled ? ' ds-is-disabled' : ''}`}>
+        <span className={`ds-switch ds-sm${value ? ' ds-on' : ''}`}>
+          <input
+            type="checkbox"
+            role="switch"
+            className="sr-only"
+            checked={value}
+            disabled={disabled}
+            onChange={(e) => onChange(e.target.checked)}
+            aria-label={label}
+          />
+          <i />
+        </span>
+        <span className="ds-switchrow-name"><FieldLabel label={label} tip={tip} /></span>
+      </label>
+    </div>
   )
 }
 
@@ -1007,45 +1031,6 @@ function SectionIndex({
         </a>
       ))}
     </nav>
-  )
-}
-
-function SettingsField({ label, desc, helpTooltip, children }: {
-  label: string
-  desc?: string
-  /** Optional (i) tooltip slot, rendered next to the label. Medium-to-long
-   *  explanations (>=20 words / detailed usage) fit best here, to avoid an inline
-   *  desc stretching the field name row too long. Usually pick one of desc or this. */
-  helpTooltip?: React.ReactNode
-  children: React.ReactNode
-}) {
-  // Descriptions open on hover over the name (same as the training config).
-  const tip = desc || helpTooltip
-    ? <>{desc && <p style={{ margin: 0 }}>{desc}</p>}{helpTooltip}</>
-    : undefined
-  return (
-    <div className="ds-field ds-stack">
-      <div className="ds-field-txt">
-        <div className="ds-field-name"><FieldLabel label={label} tip={tip} /></div>
-      </div>
-      <div className="ds-field-ctl">{children}</div>
-    </div>
-  )
-}
-
-function Bool({ value, onChange, disabled }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={value}
-      disabled={disabled}
-      onClick={() => onChange(!value)}
-      className={`ds-switch${value ? ' ds-on' : ''}`}
-      style={{ flex: 'none' }}
-    >
-      <i />
-    </button>
   )
 }
 
@@ -1129,7 +1114,7 @@ function HFEndpointSelect({ value, onChange }: {
             onChange(v)
           }
         }}
-        className={`${textInputClass} max-w-md`}
+        className={textInputClass}
       >
         {HF_ENDPOINT_PRESETS.map(p => (
           <option key={p.value} value={p.value}>
@@ -1143,7 +1128,7 @@ function HFEndpointSelect({ value, onChange }: {
           value={value && !isPreset ? value : ''}
           placeholder="https://your-mirror.example.com"
           onChange={(e) => onChange(e.target.value.trim())}
-          className={`${textInputClass} max-w-md`}
+          className={textInputClass}
         />
       )}
     </div>
@@ -1160,7 +1145,7 @@ function DownloadSourceSelect({ value, onChange }: {
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={`${textInputClass} max-w-xs`}
+      className={textInputClass}
     >
       <option value="huggingface">{t('settings.downloadSourceHuggingface')}</option>
       <option value="modelscope">{t('settings.downloadSourceModelscope')}</option>
@@ -1397,43 +1382,51 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
     }
   }
 
-  const rootDirty = rootDraft.trim() !== (serverRoot ?? '')
+  const rootDirty = rootDraft.trim() !== (serverRoot ?? catalog?.models_root ?? '')
   const error = catalogError
 
   return (
-    <SettingsSection id="models" title={t('settings.trainingModelsOneClick')}>
-      <SettingsField label={t('settings.modelsRoot')}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input
-            type="text"
-            value={rootDraft}
-            onChange={(e) => setRootDraft(e.target.value)}
-            className={`${textInputClass} ds-mono flex-1`}
-          />
-          <button onClick={saveRoot} disabled={!rootDirty || savingRoot} className="ds-btn-primary ds-sm"
-            title={rootDirty ? t('settings.savePathConfig') : t('settings.notModified')}>
-            {savingRoot ? t('common.saving') : t('settings.savePath')}
-          </button>
-          <button onClick={() => setRootDraft(serverRoot ?? (catalog?.models_root ?? ''))} disabled={!rootDirty || savingRoot}
-            className="ds-iconbtn"
-            aria-label={t('common.reset')}
-            title={t('common.reset')}
-          >↻</button>
+    <>
+      <SettingsSection id="models" title={t('settings.trainingModels')}>
+        <div className="ds-fgrid">
+          <SetCell label={t('settings.modelsRoot')} full>
+            <div className="ds-set-inline">
+              <input
+                type="text"
+                value={rootDraft}
+                onChange={(e) => setRootDraft(e.target.value)}
+                className={`${textInputClass} ds-mono`}
+              />
+              <button onClick={saveRoot} disabled={!rootDirty || savingRoot} className="ds-ctl"
+                title={rootDirty ? t('settings.savePathConfig') : t('settings.notModified')}>
+                {savingRoot ? t('common.saving') : t('common.save')}
+              </button>
+              {rootDirty && (
+                <button onClick={() => setRootDraft(serverRoot ?? (catalog?.models_root ?? ''))} disabled={savingRoot}
+                  className="ds-iconbtn"
+                  aria-label={t('common.reset')}
+                  title={t('common.reset')}
+                >↺</button>
+              )}
+            </div>
+          </SetCell>
         </div>
-      </SettingsField>
+        <div className="ds-switches ds-after">
+          <SwitchRow
+            label={t('settings.autoSyncPathsLabel')}
+            tip={t('settings.autoSyncPathsHelp')}
+            value={autoSyncPaths}
+            disabled={savingAutoSync}
+            onChange={(v) => void saveAutoSync(v)}
+          />
+        </div>
+      </SettingsSection>
 
-      <SettingsField
-        label={t('settings.autoSyncPathsLabel')}
-        helpTooltip={<p>{t('settings.autoSyncPathsHelp')}</p>}
-      >
-        <Bool value={autoSyncPaths} disabled={savingAutoSync} onChange={(v) => void saveAutoSync(v)} />
-      </SettingsField>
-
-      {error && <div className="text-err text-xs font-mono">{error}</div>}
+      {error && <div className="ds-note ds-err ds-mono">{error}</div>}
       {!catalog ? (
-        <p className="text-fg-tertiary text-xs">{t('settings.loadingModelCatalog')}</p>
+        <div className="ds-set-empty">{t('settings.loadingModelCatalog')}</div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <>
           {/* Anima base model */}
           <ModelGroupCard
             title={translatedCatalogText(MODEL_NAME_KEYS, 'anima_main', catalog.anima_main.name, t)}
@@ -1443,32 +1436,28 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
                 <p><Trans i18nKey="settings.defaultTransformerHelp" components={{ strong: <strong /> }} /></p>
               </>
             }
+            add={<AddLocalModelButton domain="anima" shape="file" initialPath={catalog.models_root} onChanged={reloadSources} />}
           >
-            <ul className="list-none m-0 p-0 flex flex-col gap-1">
-              {catalog.anima_main.variants.map((v) => {
-                const key = `anima_main:${v.variant}`
-                const dl = catalog.downloads[key]
-                const isSel = v.variant === selectedAnima
-                const canSelect = v.exists && dl?.status !== 'running'
-                return (
-                  <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
-                    <input type="radio" name="anima_variant" checked={isSel} disabled={!canSelect}
-                      onChange={() => void pickAnima(v.variant)}
-                      className="shrink-0"
-                      style={{ accentColor: 'var(--accent)' }}
-                      title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
-                    />
-                    <code className="font-mono text-fg-primary w-32 shrink-0 truncate" title={v.variant}>{v.variant}</code>
-                    <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
-                    <span style={{ flex: 1 }} />
-                    {v.kind === 'custom'
-                      ? <span className="text-fg-tertiary shrink-0" title={v.target_path}>{t('settings.localBaseModel')}</span>
-                      : <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('anima_main', v.variant)} />}
-                  </li>
-                )
-              })}
-            </ul>
-            {/* Own weights: register a local .safetensors, in the same radio group as the official variants */}
+            {catalog.anima_main.variants.map((v) => {
+              const key = `anima_main:${v.variant}`
+              const dl = catalog.downloads[key]
+              const isSel = v.variant === selectedAnima
+              const canSelect = v.exists && dl?.status !== 'running'
+              return (
+                <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
+                  <input type="radio" name="anima_variant" checked={isSel} disabled={!canSelect}
+                    onChange={() => void pickAnima(v.variant)}
+                    title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                  />
+                  <code className="ds-model-name" title={v.variant}>{v.variant}</code>
+                  <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
+                  {v.kind === 'custom'
+                    ? <span className="ds-badge ds-mute" title={v.target_path}>{t('settings.localBaseModel')}</span>
+                    : <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('anima_main', v.variant)} />}
+                </li>
+              )
+            })}
+            {/* Own weights: a local .safetensors, in the same radio group as the official variants */}
             <LocalModelRows
               domain="anima"
               rows={sourceRows('anima')}
@@ -1478,32 +1467,26 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
               familyOptions={FAMILY_DOMAIN_OPTIONS}
               selectInDomain={selectMainInDomain}
             />
-            <AddLocalModelButton
-              domain="anima"
-              shape="file"
-              initialPath={catalog.models_root}
-              onChanged={reloadSources}
-            />
           </ModelGroupCard>
 
           {/* VAE (shared by both families, can be swapped for your own local weights) */}
           <ModelGroupCard
             title={catalog.anima_vae.name}
-            helpTooltip={<p>{t('settings.vaeHelp')}</p>}
+            helpTooltip={<>
+              <p>{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)}</p>
+              <p>{t('settings.vaeHelp')}</p>
+            </>}
+            add={<AddLocalModelButton domain="vae" shape="file" initialPath={catalog.models_root} onChanged={reloadSources} />}
           >
-            <ul className="list-none m-0 p-0 flex flex-col gap-1">
-              <li className={`model-row ds-model-row${selectedVae === '' ? ' ds-is-on' : ''}`}>
-                <input type="radio" name="vae_source" checked={selectedVae === ''}
-                  onChange={() => void pickVae('')}
-                  className="shrink-0"
-                  style={{ accentColor: 'var(--accent)' }}
-                  title={t('settings.selectDefaultVae')}
-                />
-                <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)}, <code>{catalog.anima_vae.repo}</code></span>
-                <ModelStatusBadge exists={catalog.anima_vae.exists} size={catalog.anima_vae.size} status={catalog.downloads.anima_vae?.status} />
-                <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
-              </li>
-            </ul>
+            <li className={`model-row ds-model-row${selectedVae === '' ? ' ds-is-on' : ''}`}>
+              <input type="radio" name="vae_source" checked={selectedVae === ''}
+                onChange={() => void pickVae('')}
+                title={t('settings.selectDefaultVae')}
+              />
+              <code className="ds-model-name" title={catalog.anima_vae.repo}>{catalog.anima_vae.repo}</code>
+              <ModelStatusBadge exists={catalog.anima_vae.exists} size={catalog.anima_vae.size} status={catalog.downloads.anima_vae?.status} />
+              <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
+            </li>
             <LocalModelRows
               domain="vae"
               rows={sourceRows('vae')}
@@ -1511,144 +1494,39 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
               onSelect={(value) => void pickVae(value)}
               onChanged={reloadSources}
             />
-            <AddLocalModelButton
-              domain="vae"
-              shape="file"
-              initialPath={catalog.models_root}
-              onChanged={reloadSources}
-            />
           </ModelGroupCard>
 
-          {/* Krea 2 base model (0.20's second model family; shares qwen_image_vae with Anima for VAE) */}
-          {catalog.krea2_main && (
-            <ModelGroupCard
-              title={translatedCatalogText(MODEL_NAME_KEYS, 'krea2_main', catalog.krea2_main.name, t)}
-              helpTooltip={<p>{t('settings.krea2MainHelp')}</p>}
-            >
-              <ul className="list-none m-0 p-0 flex flex-col gap-1">
-                {catalog.krea2_main.variants.map((v) => {
-                  const key = `krea2_main:${v.variant}`
-                  const dl = catalog.downloads[key]
-                  const isSel = v.variant === selectedKrea2
-                  const canSelect = v.exists && dl?.status !== 'running'
-                  return (
-                    <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
-                      <input type="radio" name="krea2_variant" checked={isSel} disabled={!canSelect}
-                        onChange={() => void pickKrea2(v.variant)}
-                        className="shrink-0"
-                        style={{ accentColor: 'var(--accent)' }}
-                        title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
-                      />
-                      <code className="font-mono text-fg-primary w-32 shrink-0 truncate" title={v.variant}>{v.variant}</code>
-                      {v.purpose && (
-                        <span className={`ds-badge ${v.purpose === 'training' ? 'ds-ok' : 'ds-mute'}`}>
-                          {v.purpose === 'training' ? t('settings.purposeTraining') : t('settings.purposeInference')}
-                        </span>
-                      )}
-                      <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
-                      <span style={{ flex: 1 }} />
-                      <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('krea2_main', v.variant)} />
-                    </li>
-                  )
-                })}
-              </ul>
-              <LocalModelRows
-                domain="krea2"
-                rows={sourceRows('krea2')}
-                radioName="krea2_variant"
-                onSelect={(value) => void pickKrea2(value)}
-                onChanged={reloadSources}
-                familyOptions={FAMILY_DOMAIN_OPTIONS}
-                selectInDomain={selectMainInDomain}
-              />
-              <AddLocalModelButton
-                domain="krea2"
-                shape="file"
-                initialPath={catalog.models_root}
-                onChanged={reloadSources}
-              />
-            </ModelGroupCard>
-          )}
-
-          {/* Krea 2 text encoder Qwen3-VL: bf16 directory version + the official fp8 single-file version (radio) */}
-          {catalog.krea2_text_encoder && (
-            <ModelGroupCard title={catalog.krea2_text_encoder.name} helpTooltip={<p>{t('settings.krea2TeHelp')}</p>}>
-              <ul className="list-none m-0 p-0 flex flex-col gap-1">
-                {([['bf16', catalog.krea2_text_encoder], ['fp8', catalog.krea2_text_encoder_fp8]] as const).map(([teKey, m]) => {
-                  if (!m) return null
-                  const dlKey = teKey === 'bf16' ? 'krea2_text_encoder' : 'krea2_text_encoder_fp8'
-                  const dl = catalog.downloads[dlKey]
-                  const allExist = m.files.every((f) => f.exists)
-                  const totalSize = m.files.reduce((s, f) => s + f.size, 0)
-                  const isSel = teKey === selectedKrea2Te
-                  const canSelect = allExist && dl?.status !== 'running'
-                  return (
-                    <li key={teKey} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
-                      <input type="radio" name="krea2_te" checked={isSel} disabled={!canSelect}
-                        onChange={() => void pickKrea2Te(teKey)}
-                        className="shrink-0"
-                        style={{ accentColor: 'var(--accent)' }}
-                        title={canSelect ? t('settings.selectDefaultTe') : allExist ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
-                      />
-                      <code className="font-mono text-fg-primary w-32 shrink-0 truncate">{teKey}</code>
-                      <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
-                      <span style={{ flex: 1 }} />
-                      <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(dlKey)} onClick={() => void start(dlKey)} />
-                    </li>
-                  )
-                })}
-              </ul>
-              {/* Custom text encoder: a local transformers directory (containing config.json) */}
-              <LocalModelRows
-                domain="krea2_te"
-                rows={sourceRows('krea2_te')}
-                radioName="krea2_te"
-                onSelect={(value) => void pickKrea2Te(value)}
-                onChanged={reloadSources}
-              />
-              <AddLocalModelButton
-                domain="krea2_te"
-                shape="dir"
-                initialPath={catalog.krea2_text_encoder?.target_dir ?? catalog.models_root}
-                onChanged={reloadSources}
-              />
-            </ModelGroupCard>
-          )}
-
           {/* Anima text encoder: the official Qwen3 directory + a user-registered local encoder (radio) */}
-          <ModelGroupCard title={catalog.qwen3.name} helpTooltip={<p>{t('settings.animaTeHelp')}</p>}>
-            <ul className="list-none m-0 p-0 flex flex-col gap-1">
-              {(() => {
-                const m = catalog.qwen3
-                const dl = catalog.downloads.qwen3
-                const allExist = m.files.every((f) => f.exists)
-                const totalSize = m.files.reduce((sum, f) => sum + f.size, 0)
-                return (
-                  <li className={`model-row ds-model-row${selectedAnimaTe === '' ? ' ds-is-on' : ''}`}>
-                    <input type="radio" name="anima_te" checked={selectedAnimaTe === ''}
-                      onChange={() => void pickAnimaTe('')}
-                      className="shrink-0"
-                      style={{ accentColor: 'var(--accent)' }}
-                      title={t('settings.selectDefaultTe')}
-                    />
-                    <span className="text-fg-tertiary flex-1">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'qwen3', m.description, t)}, <code>{m.repo}</code></span>
-                    <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
-                    <DownloadButton exists={allExist} status={dl?.status} busy={busy.has('qwen3')} onClick={() => void start('qwen3')} />
-                  </li>
-                )
-              })()}
-            </ul>
+          <ModelGroupCard
+            title={catalog.qwen3.name}
+            helpTooltip={<>
+              <p>{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'qwen3', catalog.qwen3.description, t)}</p>
+              <p>{t('settings.animaTeHelp')}</p>
+            </>}
+            add={<AddLocalModelButton domain="anima_te" shape="dir" initialPath={catalog.qwen3.target_dir} onChanged={reloadSources} />}
+          >
+            {(() => {
+              const m = catalog.qwen3
+              const dl = catalog.downloads.qwen3
+              const allExist = m.files.every((f) => f.exists)
+              const totalSize = m.files.reduce((sum, f) => sum + f.size, 0)
+              return (
+                <li className={`model-row ds-model-row${selectedAnimaTe === '' ? ' ds-is-on' : ''}`}>
+                  <input type="radio" name="anima_te" checked={selectedAnimaTe === ''}
+                    onChange={() => void pickAnimaTe('')}
+                    title={t('settings.selectDefaultTe')}
+                  />
+                  <code className="ds-model-name" title={m.repo}>{m.repo}</code>
+                  <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
+                  <DownloadButton exists={allExist} status={dl?.status} busy={busy.has('qwen3')} onClick={() => void start('qwen3')} />
+                </li>
+              )
+            })()}
             <LocalModelRows
               domain="anima_te"
               rows={sourceRows('anima_te')}
               radioName="anima_te"
               onSelect={(value) => void pickAnimaTe(value)}
-              onChanged={reloadSources}
-            />
-            <AddLocalModelButton
-              domain="anima_te"
-              shape="dir"
-              initialPath={catalog.qwen3.target_dir}
               onChanged={reloadSources}
             />
           </ModelGroupCard>
@@ -1660,57 +1538,134 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
             const allExist = m.files.every((f) => f.exists)
             const totalSize = m.files.reduce((s, f) => s + f.size, 0)
             return (
-              <ModelGroupCard key={id} title={m.name}>
-                <div className="ds-model-row">
-                  <span className="text-fg-tertiary">{translatedCatalogText(MODEL_DESCRIPTION_KEYS, id, m.description, t)}, <code>{m.repo}</code></span>
-                  <span style={{ flex: 1 }} />
+              <ModelGroupCard key={id} title={m.name} helpTooltip={translatedCatalogText(MODEL_DESCRIPTION_KEYS, id, m.description, t)}>
+                <li className="ds-model-row">
+                  <code className="ds-model-name" title={m.repo}>{m.repo}</code>
                   <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
                   <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(id)} onClick={() => void start(id)} />
-                </div>
+                </li>
               </ModelGroupCard>
             )
           })}
 
+          {/* Krea 2 base model (the second model family; shares qwen_image_vae with Anima for VAE) */}
+          {catalog.krea2_main && (
+            <ModelGroupCard
+              title={translatedCatalogText(MODEL_NAME_KEYS, 'krea2_main', catalog.krea2_main.name, t)}
+              helpTooltip={t('settings.krea2MainHelp')}
+              add={<AddLocalModelButton domain="krea2" shape="file" initialPath={catalog.models_root} onChanged={reloadSources} />}
+            >
+              {catalog.krea2_main.variants.map((v) => {
+                const key = `krea2_main:${v.variant}`
+                const dl = catalog.downloads[key]
+                const isSel = v.variant === selectedKrea2
+                const canSelect = v.exists && dl?.status !== 'running'
+                return (
+                  <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
+                    <input type="radio" name="krea2_variant" checked={isSel} disabled={!canSelect}
+                      onChange={() => void pickKrea2(v.variant)}
+                      title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                    />
+                    <code className="ds-model-name" title={v.variant}>{v.variant}</code>
+                    {v.purpose && (
+                      <span className="ds-badge ds-mute">
+                        {v.purpose === 'training' ? t('settings.purposeTraining') : t('settings.purposeInference')}
+                      </span>
+                    )}
+                    <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
+                    <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('krea2_main', v.variant)} />
+                  </li>
+                )
+              })}
+              <LocalModelRows
+                domain="krea2"
+                rows={sourceRows('krea2')}
+                radioName="krea2_variant"
+                onSelect={(value) => void pickKrea2(value)}
+                onChanged={reloadSources}
+                familyOptions={FAMILY_DOMAIN_OPTIONS}
+                selectInDomain={selectMainInDomain}
+              />
+            </ModelGroupCard>
+          )}
+
+          {/* Krea 2 text encoder Qwen3-VL: bf16 directory version + the official fp8 single-file version (radio) */}
+          {catalog.krea2_text_encoder && (
+            <ModelGroupCard
+              title={catalog.krea2_text_encoder.name}
+              helpTooltip={t('settings.krea2TeHelp')}
+              add={<AddLocalModelButton domain="krea2_te" shape="dir" initialPath={catalog.krea2_text_encoder?.target_dir ?? catalog.models_root} onChanged={reloadSources} />}
+            >
+              {([['bf16', catalog.krea2_text_encoder], ['fp8', catalog.krea2_text_encoder_fp8]] as const).map(([teKey, m]) => {
+                if (!m) return null
+                const dlKey = teKey === 'bf16' ? 'krea2_text_encoder' : 'krea2_text_encoder_fp8'
+                const dl = catalog.downloads[dlKey]
+                const allExist = m.files.every((f) => f.exists)
+                const totalSize = m.files.reduce((s, f) => s + f.size, 0)
+                const isSel = teKey === selectedKrea2Te
+                const canSelect = allExist && dl?.status !== 'running'
+                return (
+                  <li key={teKey} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
+                    <input type="radio" name="krea2_te" checked={isSel} disabled={!canSelect}
+                      onChange={() => void pickKrea2Te(teKey)}
+                      title={canSelect ? t('settings.selectDefaultTe') : allExist ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
+                    />
+                    <code className="ds-model-name">{teKey}</code>
+                    <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
+                    <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(dlKey)} onClick={() => void start(dlKey)} />
+                  </li>
+                )
+              })}
+              {/* Custom text encoder: a local transformers directory (containing config.json) */}
+              <LocalModelRows
+                domain="krea2_te"
+                rows={sourceRows('krea2_te')}
+                radioName="krea2_te"
+                onSelect={(value) => void pickKrea2Te(value)}
+                onChanged={reloadSources}
+              />
+            </ModelGroupCard>
+          )}
+
           {/* Download log */}
           {Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length > 0 && (
-            <details className="text-xs">
-              <summary className="cursor-pointer text-fg-tertiary">
-                {t('settings.downloadLogs', { n: Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length })}
-              </summary>
-              <div className="mt-1 flex flex-col gap-2">
+            <SettingsSection title={t('settings.downloadLogs', { n: Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length })}>
+              <div className="ds-set-pad">
                 {Object.values(catalog.downloads).map((d) => (
-                  <div key={d.key} className="rounded-sm border border-subtle bg-sunken p-2">
-                    <div className="flex items-center gap-2 mb-1">
-                      <code className="font-mono text-fg-secondary">{d.key}</code>
+                  <div key={d.key} className="ds-set-box">
+                    <div className="ds-set-inline">
+                      <code className="ds-mono">{d.key}</code>
                       <ModelStatusBadge exists={d.status === 'done'} size={0} status={d.status} />
-                      {d.message && <span className="text-err overflow-hidden text-ellipsis whitespace-nowrap">{d.message}</span>}
+                      {d.message && <span className="ds-set-errline">{d.message}</span>}
                     </div>
-                    <pre className="text-xs font-mono text-fg-tertiary max-h-32 overflow-auto whitespace-pre-wrap m-0">
-                      {d.log_tail.join('\n') || t('settings.emptyLog')}
-                    </pre>
+                    <pre className="ds-set-log">{d.log_tail.join('\n') || t('settings.emptyLog')}</pre>
                   </div>
                 ))}
               </div>
-            </details>
+            </SettingsSection>
           )}
-        </div>
+        </>
       )}
-    </SettingsSection>
+    </>
   )
 }
 
 function ModelGroupCard({
-  title, helpTooltip, children,
+  title, helpTooltip, add, children,
 }: {
   title: string
   helpTooltip?: React.ReactNode
+  /** "Pick a file / folder" entry for own weights, under the list. */
+  add?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
-    <div className="ds-model-group">
-      <h4 className="ds-model-group-title" style={{ margin: 0 }}><FieldLabel label={title} tip={helpTooltip} /></h4>
-      {children}
-    </div>
+    <SettingsSection title={title} tip={helpTooltip}>
+      <div className="ds-set-pad">
+        <ul className="ds-set-list">{children}</ul>
+        {add}
+      </div>
+    </SettingsSection>
   )
 }
 
@@ -1742,16 +1697,37 @@ function StatusLabel({ fg, text, pulse }: { bg: string; fg: string; text: string
   )
 }
 
+/** Inline "name value" facts about an installed package or the environment. */
+function KV({ items }: { items: [string, string | null | undefined][] }) {
+  return (
+    <div className="ds-set-kv">
+      {items.filter(([, v]) => v).map(([k, v]) => (
+        <span key={k}><span className="ds-set-kv-k">{k}</span><code>{v}</code></span>
+      ))}
+    </div>
+  )
+}
+
+function RefreshButton({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) {
+  const { t } = useTranslation()
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} className="ds-iconbtn"
+      title={t('settings.refreshStatus')} aria-label={t('settings.refreshStatus')}>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
+    </button>
+  )
+}
+
 function DownloadButton({ exists, status, busy, onClick }: {
   exists: boolean; status?: ModelDownloadStatus['status']; busy: boolean; onClick: () => void
 }) {
   const { t } = useTranslation()
   const running = status === 'running' || busy
   if (running) {
-    return <button disabled className="ds-ctl ds-sm" style={{ opacity: 0.5 }}>...</button>
+    return <button disabled className="ds-ctl ds-ghost ds-sm">…</button>
   }
   return (
-    <button onClick={onClick} className={exists ? 'ds-ctl ds-sm' : 'ds-btn-primary ds-sm'}
+    <button onClick={onClick} className={exists ? 'ds-ctl ds-ghost ds-sm' : 'ds-btn-primary ds-sm'}
       title={exists ? t('settings.redownloadTitle') : t('common.download')}>
       {exists ? t('settings.redownload') : t('settings.downloadAction')}
     </button>
@@ -1828,71 +1804,52 @@ function PyTorchSection() {
               : `CPU ${status.cuda_build}`
 
   return (
-    <details id="pytorch" open={!!hasIssue} className="ds-set-sect group">
-      <summary className="ds-set-head cursor-pointer list-none" style={{ paddingBottom: 15, flexWrap: 'wrap' }}>
-        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
-        <h2 className="ds-cap" style={{ margin: 0 }}>PyTorch</h2>
-        <span className="text-xs text-fg-tertiary">{t('settings.trainingCoreDependency')}</span>
-        <span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : status?.is_cpu_with_gpu ? 'ds-err' : 'ds-warn'}`} style={{ marginLeft: 'auto' }}>
-          {statusLabel}
-        </span>
-      </summary>
-
-      <div className="ds-set-body" style={{ paddingTop: 0 }}>
-        {error && <div className="text-err text-xs font-mono">{error}</div>}
-        {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
+    <CollapsibleSection
+      id="pytorch"
+      title="PyTorch"
+      tip={t('settings.trainingCoreDependency')}
+      open={!!hasIssue}
+      extra={<span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : status?.is_cpu_with_gpu ? 'ds-err' : 'ds-warn'}`}>{statusLabel}</span>}
+    >
+      <div className="ds-set-pad">
+        {error && <div className="ds-note ds-err ds-mono">{error}</div>}
+        {!error && !status && <div className="ds-set-empty">{t('settings.loadingStatus')}</div>}
 
         {status && (<>
-          {/* Current status card */}
-          <div className="rounded-sm border border-subtle bg-sunken p-2 flex flex-col gap-1 text-xs">
-            <div className="flex gap-4 flex-wrap">
-              <span className="text-fg-tertiary">torch: <code className="text-fg-secondary font-mono">{status.version ?? t('settings.notInstalledParen')}</code></span>
-              {status.cuda_build && (
-                <span className="text-fg-tertiary">build: <code className="text-fg-secondary font-mono">{status.cuda_build}</code></span>
-              )}
-              {status.cuda_available && status.device_name && (
-                <span className="text-fg-tertiary">GPU: <code className="text-fg-secondary font-mono">{status.device_name}</code></span>
-              )}
-            </div>
-            <div className="flex gap-4 flex-wrap">
-              <span className="text-fg-tertiary">
-                {t('settings.driverLabel')}:{' '}
-                <code className="text-fg-secondary font-mono">
-                  {status.cuda_detect.driver_version ?? t('settings.notDetected')}
-                </code>
-              </span>
-              {status.cuda_detect.gpu_name && !status.cuda_available && (
-                <span className="text-fg-tertiary">
-                  {t('settings.systemGpu')}:{' '}
-                  <code className="text-fg-secondary font-mono">{status.cuda_detect.gpu_name}</code>
-                </span>
-              )}
-            </div>
-          </div>
+          <KV items={[
+            ['torch', status.version ?? t('settings.notInstalledParen')],
+            ['build', status.cuda_build],
+            ['GPU', status.cuda_available ? status.device_name : null],
+            [t('settings.driverLabel'), status.cuda_detect.driver_version ?? t('settings.notDetected')],
+            [t('settings.systemGpu'), !status.cuda_available ? status.cuda_detect.gpu_name : null],
+          ]} />
 
           {/* Mis-installed: CPU torch + a GPU present */}
           {status.is_cpu_with_gpu && (
-            <div className="rounded-sm border border-err bg-err-soft px-2 py-1.5 text-err text-xs">
-              <Trans
-                i18nKey="settings.torchCpuWithGpuWarning"
-                values={{ tag: status.recommended_cu_tag }}
-                components={{ code: <code className="font-mono" /> }}
-              />
+            <div className="ds-note ds-err">
+              <span>
+                <Trans
+                  i18nKey="settings.torchCpuWithGpuWarning"
+                  values={{ tag: status.recommended_cu_tag }}
+                  components={{ code: <code className="font-mono" /> }}
+                />
+              </span>
             </div>
           )}
 
           {/* CUDA build present but unusable at runtime: driver / WSL issue */}
           {status.is_cuda_build_unavailable && (
-            <div className="rounded-sm border border-warn bg-warn-soft px-2 py-1.5 text-warn text-xs">
-              <Trans
-                i18nKey="settings.torchCudaUnavailableWarning"
-                components={{ code: <code className="font-mono" /> }}
-              />
+            <div className="ds-note ds-warn">
+              <span>
+                <Trans
+                  i18nKey="settings.torchCudaUnavailableWarning"
+                  components={{ code: <code className="font-mono" /> }}
+                />
+              </span>
             </div>
           )}
 
-          {/* Action buttons */}
-          <div className="flex gap-1.5 items-center flex-wrap">
+          <div className="ds-set-inline">
             <button
               onClick={() => void reinstall('auto')}
               disabled={busy || !status.cuda_detect.available}
@@ -1905,44 +1862,37 @@ function PyTorchSection() {
                 ? t('settings.reinstallCudaBuild', { tag: status.recommended_cu_tag })
                 : t('settings.reinstallAuto', { tag: status.recommended_cu_tag })}
             </button>
-            <button onClick={() => void refresh()} disabled={busy}
-              className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm">↻</button>
+            <RefreshButton onClick={() => void refresh()} disabled={busy} />
             <button type="button" onClick={() => setAdvancedOpen(!advancedOpen)}
-              className="ds-ctl ds-ghost ds-sm text-xs text-fg-tertiary ml-auto">
-              {advancedOpen ? '▾' : '▸'} {t('settings.advancedManualCuda')}
+              className="ds-ctl ds-ghost ds-sm" style={{ marginLeft: 'auto' }}>
+              {t('settings.advancedManualCuda')}
             </button>
           </div>
 
           {/* Manually pick a version */}
           {advancedOpen && (
-            <div className="flex flex-col gap-1.5 pt-2 border-t border-subtle text-xs">
-              <p className="text-fg-tertiary m-0">
-                {t('settings.manualCudaHint')}
-              </p>
-              <div className="flex gap-1.5 flex-wrap">
-                {(['cu128', 'cu126', 'cu124', 'cu118', 'cpu'] as const).map((tag) => (
-                  <button
-                    key={tag}
-                    onClick={() => void reinstall(tag)}
-                    disabled={busy}
-                    className={`ds-ctl ds-sm ${
-                      status.cuda_build === tag ? 'border-accent' : ''
-                    }`}
-                    title={
-                      tag === 'cpu'
-                        ? t('settings.installCpuBuildHint')
-                        : t('settings.installCudaBuildHint', { tag })
-                    }
-                  >
-                    {tag}{status.cuda_build === tag ? ' ✓' : ''}
-                  </button>
-                ))}
-              </div>
+            <div className="ds-set-inline ds-set-sub">
+              {(['cu128', 'cu126', 'cu124', 'cu118', 'cpu'] as const).map((tag) => (
+                <button
+                  key={tag}
+                  onClick={() => void reinstall(tag)}
+                  disabled={busy}
+                  className={`ds-ctl ds-sm ds-mono${status.cuda_build === tag ? ' ds-is-on' : ''}`}
+                  title={
+                    tag === 'cpu'
+                      ? t('settings.installCpuBuildHint')
+                      : t('settings.installCudaBuildHint', { tag })
+                  }
+                >
+                  {tag}
+                </button>
+              ))}
+              <HelpTip>{t('settings.manualCudaHint')}</HelpTip>
             </div>
           )}
         </>)}
       </div>
-    </details>
+    </CollapsibleSection>
   )
 }
 
@@ -2013,92 +1963,78 @@ function FlashAttentionSection() {
   const statusOk = status?.installed && !error
 
   return (
-    <details id="flash-attn" open={!!hasIssue} className="ds-set-sect group">
-      <summary className="ds-set-head cursor-pointer list-none" style={{ paddingBottom: 15, flexWrap: 'wrap' }}>
-        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
-        <h2 className="ds-cap" style={{ margin: 0 }}>Flash Attention</h2>
-        <span className="text-xs text-fg-tertiary">{t('settings.trainingAccelerationOptional')}</span>
-        <span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : 'ds-warn'}`} style={{ marginLeft: 'auto' }}>{statusLabel}</span>
-      </summary>
-
-      <div className="ds-set-body" style={{ paddingTop: 0 }}>
-        {error && <div className="text-err text-xs font-mono">{error}</div>}
-        {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
+    <CollapsibleSection
+      id="flash-attn"
+      title="Flash Attention"
+      tip={t('settings.trainingAccelerationOptional')}
+      open={!!hasIssue}
+      extra={<span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : 'ds-warn'}`}>{statusLabel}</span>}
+    >
+      <div className="ds-set-pad">
+        {error && <div className="ds-note ds-err ds-mono">{error}</div>}
+        {!error && !status && <div className="ds-set-empty">{t('settings.loadingStatus')}</div>}
 
         {status && env && (<>
-          {/* Environment info */}
-          <div className="rounded-sm border border-subtle bg-sunken p-2 flex flex-col gap-1 text-xs">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-fg-tertiary shrink-0">flash_attn:</span>
-              <code className="font-mono text-fg-primary">
-                {status.installed ? `v${status.version ?? '?'}` : t('settings.notInstalledParen')}
-              </code>
-              {status.installed && <StatusLabel bg="bg-ok-soft" fg="text-ok" text={t('settings.installed')} />}
-            </div>
-            <div className="flex gap-4 flex-wrap">
-              <span className="text-fg-tertiary">Python: <code className="text-fg-secondary font-mono">{env.python_tag}</code></span>
-              <span className="text-fg-tertiary">CUDA: <code className="text-fg-secondary font-mono">{env.cuda_tag ?? t('settings.notDetected')}</code></span>
-              <span className="text-fg-tertiary">PyTorch: <code className="text-fg-secondary font-mono">{env.torch_tag ?? t('settings.notDetected')}</code></span>
-              <span className="text-fg-tertiary">{t('settings.platform')}: <code className="text-fg-secondary font-mono">{env.platform ?? t('settings.unsupported')}</code></span>
-            </div>
-          </div>
+          <KV items={[
+            ['flash_attn', status.installed ? `v${status.version ?? '?'}` : t('settings.notInstalledParen')],
+            ['Python', env.python_tag],
+            ['CUDA', env.cuda_tag ?? t('settings.notDetected')],
+            ['PyTorch', env.torch_tag ?? t('settings.notDetected')],
+            [t('settings.platform'), env.platform ?? t('settings.unsupported')],
+          ]} />
 
           {/* GitHub API failure */}
           {fetchError && (
-            <div className="rounded-sm border border-err bg-err-soft px-2 py-1.5 text-err text-xs">
-              {t('settings.githubApiFailed')}
-              <code className="block mt-0.5 break-all">{fetchError}</code>
+            <div className="ds-note ds-err">
+              <span>
+                {t('settings.githubApiFailed')}
+                <code className="block mt-0.5 break-all">{fetchError}</code>
+              </span>
             </div>
           )}
 
           {/* No matching wheel */}
           {!canAutoInstall && !fetchError && env.platform && env.torch_tag && (
-            <div className="rounded-sm border border-warn bg-warn-soft px-2 py-1.5 text-warn text-xs">
-              {t('settings.noWheelForPython', { python: env.python_tag })}
-            </div>
+            <div className="ds-note ds-warn">{t('settings.noWheelForPython', { python: env.python_tag })}</div>
           )}
 
-          {/* Action buttons */}
-          <div className="flex gap-1.5 items-center flex-wrap">
+          <div className="ds-set-inline">
             <button
               onClick={() => void install(null)}
               disabled={busy || !canAutoInstall}
-              className="ds-btn-primary ds-sm"
+              className="ds-ctl ds-sm"
               title={canAutoInstall
                 ? t('settings.autoSelect', { tag: bestCandidate?.name ?? '' })
                 : t('settings.noWheelManual')}
             >
               {busy ? t('settings.installing') : status.installed ? t('settings.reinstallAutoMatch') : t('settings.autoMatchInstall')}
             </button>
-            <button onClick={() => void refresh()} disabled={busy}
-              className="px-2 py-0.5 text-fg-tertiary bg-transparent border-none cursor-pointer rounded-sm">↻</button>
+            <RefreshButton onClick={() => void refresh()} disabled={busy} />
             <button type="button" onClick={() => setCandidatesOpen(!candidatesOpen)}
-              className="ds-ctl ds-ghost ds-sm text-xs text-fg-tertiary ml-auto">
-              {candidatesOpen ? '▾' : '▸'} {t('settings.candidateWheels', { n: usable.length })}
+              className="ds-ctl ds-ghost ds-sm" style={{ marginLeft: 'auto' }}>
+              {t('settings.candidateWheels', { n: usable.length })}
             </button>
           </div>
 
           {/* Candidate list + manual URL */}
           {candidatesOpen && (
-            <div className="flex flex-col gap-2 pt-2 border-t border-subtle">
+            <div className="ds-set-sub">
               {candidates.length === 0 ? (
-                <p className="text-xs text-fg-tertiary m-0">{t('settings.wheelQueryFailed')}</p>
+                <div className="ds-set-empty">{t('settings.wheelQueryFailed')}</div>
               ) : (
-                <ul className="list-none m-0 p-0 flex flex-col gap-1">
+                <ul className="ds-set-list">
                   {candidates.map((c) => (
-                    <li key={c.url} className={`flex items-start gap-2 text-xs px-2 py-1.5 rounded-sm border ${
-                      c.usable ? 'border-subtle bg-sunken' : 'border-transparent bg-transparent opacity-50'
-                    }`}>
-                      <div className="flex flex-col gap-0.5 flex-1 min-w-0">
-                        <code className="font-mono text-fg-primary text-[11px] break-all">{c.name}</code>
+                    <li key={c.url} className="ds-model-row" style={c.usable ? undefined : { opacity: 0.55 }}>
+                      <span className="ds-model-name" style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <code className="ds-mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{c.name}</code>
                         {c.notes.map((n, i) => (
-                          <span key={i} className="text-warn text-[10px]">{n}</span>
+                          <span key={i} className="ds-set-warnline">{n}</span>
                         ))}
-                      </div>
+                      </span>
                       <button
                         onClick={() => void install(c.url)}
                         disabled={busy}
-                        className={c.usable ? 'ds-btn-primary ds-sm shrink-0' : 'ds-ctl ds-sm shrink-0'}
+                        className={c.usable ? 'ds-btn-primary ds-sm' : 'ds-ctl ds-sm'}
                         title={c.usable ? t('settings.installWheel') : t('settings.wheelAbiIncompatible')}
                       >
                         {c.usable ? t('settings.installAction') : t('settings.forceInstall')}
@@ -2108,20 +2044,20 @@ function FlashAttentionSection() {
                 </ul>
               )}
 
-              <div className="flex flex-col gap-1 pt-1 border-t border-subtle">
-                <p className="text-xs text-fg-tertiary m-0">{t('settings.manualUrl')}</p>
-                <div className="flex gap-1.5">
+              <div className="ds-fcell">
+                <div className="ds-fcell-head"><span className="ds-label">{t('settings.manualUrl')}</span></div>
+                <div className="ds-set-inline">
                   <input
                     type="text"
                     value={manualUrl}
                     onChange={(e) => setManualUrl(e.target.value)}
                     placeholder="https://github.com/.../flash_attn-...whl"
-                    className={`${textInputClass} flex-1`}
+                    className={`${textInputClass} ds-mono`}
                   />
                   <button
                     onClick={() => { if (manualUrl.trim()) void install(manualUrl.trim()) }}
                     disabled={busy || !manualUrl.trim()}
-                    className="ds-ctl ds-sm shrink-0"
+                    className="ds-ctl"
                   >{t('settings.install')}</button>
                 </div>
               </div>
@@ -2129,7 +2065,7 @@ function FlashAttentionSection() {
           )}
         </>)}
       </div>
-    </details>
+    </CollapsibleSection>
   )
 }
 
@@ -2188,41 +2124,29 @@ function XformersSection() {
   const hasIssue = !!error
 
   return (
-    <details id="xformers" open={!!hasIssue} className="ds-set-sect group">
-      <summary className="ds-set-head cursor-pointer list-none" style={{ paddingBottom: 15, flexWrap: 'wrap' }}>
-        <span className="text-fg-tertiary text-xs transition-transform group-open:rotate-90 inline-block w-3">▸</span>
-        <h2 className="ds-cap" style={{ margin: 0 }}>
-          <FieldLabel
-            label="xformers"
-            tip={<>
-              <p><Trans i18nKey="settings.xformersHelp1" components={{ strong: <strong />, code: <code /> }} /></p>
-              <p>{t('settings.xformersHelp2')}</p>
-              <p>{t('settings.xformersHelp3')}</p>
-            </>}
-          />
-        </h2>
-        <span className="text-xs text-fg-tertiary">{t('settings.xformersSubtitle')}</span>
-        <span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : 'ds-warn'}`} style={{ marginLeft: 'auto' }}>{statusLabel}</span>
-      </summary>
-
-      <div className="ds-set-body" style={{ paddingTop: 0 }}>
-        {error && <div className="text-err text-xs font-mono">{error}</div>}
-        {!error && !status && <div className="text-xs text-fg-tertiary">{t('settings.loadingStatus')}</div>}
+    <CollapsibleSection
+      id="xformers"
+      title="xformers"
+      tip={<>
+        <p>{t('settings.xformersSubtitle')}</p>
+        <p><Trans i18nKey="settings.xformersHelp1" components={{ strong: <strong />, code: <code /> }} /></p>
+        <p>{t('settings.xformersHelp2')}</p>
+        <p>{t('settings.xformersHelp3')}</p>
+      </>}
+      open={!!hasIssue}
+      extra={<span className={`ds-badge ds-mono ${statusOk ? 'ds-ok' : 'ds-warn'}`}>{statusLabel}</span>}
+    >
+      <div className="ds-set-pad">
+        {error && <div className="ds-note ds-err ds-mono">{error}</div>}
+        {!error && !status && <div className="ds-set-empty">{t('settings.loadingStatus')}</div>}
 
         {status && (<>
-          <div className="rounded-sm border border-subtle bg-sunken p-2 flex items-center gap-2 text-xs">
-            <span className="text-fg-tertiary shrink-0">xformers:</span>
-            <code className="font-mono text-fg-primary">
-              {status.installed ? `v${status.version ?? '?'}` : t('settings.notInstalledParen')}
-            </code>
-            {status.installed && <StatusLabel bg="bg-ok-soft" fg="text-ok" text={t('settings.installed')} />}
-          </div>
-
-          <div className="flex gap-2">
+          <KV items={[['xformers', status.installed ? `v${status.version ?? '?'}` : t('settings.notInstalledParen')]]} />
+          <div className="ds-set-inline">
             <button
               onClick={() => void install()}
               disabled={busy}
-              className="ds-btn-primary ds-sm"
+              className="ds-ctl ds-sm"
             >
               {busy
                 ? t('settings.installing')
@@ -2230,15 +2154,10 @@ function XformersSection() {
                   ? t('settings.reinstallAutoMatchPlain')
                   : t('settings.installAutoMatchPlain')}
             </button>
-            <button
-              onClick={() => void refresh()}
-              disabled={busy}
-              className="ds-ctl ds-ghost ds-sm"
-              title={t('settings.refreshStatus')}
-            >↻</button>
+            <RefreshButton onClick={() => void refresh()} disabled={busy} />
           </div>
         </>)}
       </div>
-    </details>
+    </CollapsibleSection>
   )
 }
