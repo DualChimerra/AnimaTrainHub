@@ -535,7 +535,7 @@ describe('SettingsPage (PP0)', () => {
   it('picking a variant writes new-style selected.{family} (multi-model P4-5)', async () => {
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('link', { name: 'Training' }))
+    await user.click(await screen.findByRole('link', { name: 'Models' }))
     await screen.findByRole('heading', { name: 'Krea 2 main model' })
     const customRow = screen.getByText('my-krea2.safetensors').closest('li')!
     await user.click(within(customRow).getByRole('radio'))
@@ -550,6 +550,23 @@ describe('SettingsPage (PP0)', () => {
         models: { selected: { krea2: '/tmp/models/my-krea2.safetensors' } },
       })
     })
+  })
+
+  it('only enables saving the models folder after the effective path changes', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const pathInput = await screen.findByDisplayValue('/tmp/anima')
+    const section = pathInput.closest('section')!
+    const saveButton = within(section).getByRole('button', { name: 'Save' })
+    expect(saveButton).toBeDisabled()
+
+    await user.clear(pathInput)
+    await user.type(pathInput, '/tmp/other-models')
+    expect(saveButton).toBeEnabled()
+
+    await user.click(within(section).getByRole('button', { name: 'Reset' }))
+    expect(pathInput).toHaveValue('/tmp/anima')
+    expect(saveButton).toBeDisabled()
   })
 
   it('opens LLM preset editor modal with rate limit controls from the preset list', async () => {

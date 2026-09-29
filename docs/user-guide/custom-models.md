@@ -1,6 +1,6 @@
 # Using your own weights: base model / VAE / text encoder
 
-In Settings → **Training Models**, every category of weights can be swapped out from the official download for a file you already have on disk:
+In Settings → **Models**, every category of weights can be swapped out from the official download for a file you already have on disk:
 
 | Weight | Form | Card |
 |---|---|---|
@@ -14,7 +14,7 @@ In Settings → **Training Models**, every category of weights can be swapped ou
 2. The selected path appears as a "local" candidate row below the official variant; click its radio button to make it the default.
 3. To stop using it, click **Unregister** — this only removes it from the list, **the file on disk is left untouched**. If the unregistered entry was the currently selected one, the selection automatically falls back to the official weights.
 
-> **The path is relative to the machine running Studio.** In local mode that's your own computer; in cloud modes like Colab / Kaggle, the file picker browses the container's disk, so a local `D:\...` path doesn't exist there — upload the weights to the cloud drive (or the Drive mount point) first, then select them. The gray text next to the button tells you which case you're in.
+> **The path is relative to the machine running Studio.** In local mode that's your own computer; in cloud modes like Colab / Kaggle, the file picker browses the container's disk, so a local `D:\...` path doesn't exist there — upload the weights to the cloud drive (or the Drive mount point) first, then select them. Hover over the file or directory button for the hint about your current mode.
 
 If a file is deleted or moved, resolution automatically falls back to the official location instead of writing a dead path into the training config; the corresponding row on the card is marked "file not found" and its radio button is grayed out.
 

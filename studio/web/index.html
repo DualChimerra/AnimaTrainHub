@@ -6,18 +6,9 @@
     <title>AnimaTrainHub</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link id="favicon" rel="icon" type="image/png" href="./icons/noal_smug.png" />
-    <script type="module">
-      // Picks a random favicon out of 10 noal expression icons on every refresh.
-      const icons = [
-        'noal_conf2.png', 'noal_confused.png', 'noal_emb.png',
-        'noal_heart.png', 'noal_sad.png', 'noal_shock.png',
-        'noal_shy_mad.png', 'noal_shy_mad2.png', 'noal_sleepy.png',
-        'noal_smug.png',
-      ]
-      const pick = icons[Math.floor(Math.random() * icons.length)]
-      document.getElementById('favicon').href = `${import.meta.env.BASE_URL}icons/${pick}`
-    </script>
+    <link rel="icon" type="image/png" sizes="512x512" href="./icons/noal.png" />
+    <link rel="icon" href="./icons/noal.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="./icons/noal-180.png" />
   </head>
   <body>
     <div id="root"></div>

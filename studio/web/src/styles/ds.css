@@ -1002,3 +1002,48 @@ main,.ds-train-scroll,.ds-scroll,.ds-pp-side,.ds-crop-side,.ds-set-rail,.overflo
 
 /* the tab strip's own hairline is the only line under the tabs */
 .ds-tabs + .ds-fgroups,.ds-tabs + * + .ds-fgroups{border-top:0}
+
+/* ── Settings v2: the same grey cards on white as the training config ── */
+.ds-set-scroll{overflow-y:auto;min-height:0;background:var(--card)}
+.ds-set-cards{display:flex;flex-direction:column;gap:12px;padding:16px 18px 28px;min-width:0}
+.ds-set-card{scroll-margin-top:12px}
+.ds-set-card h2.ds-fgroup-title{margin:0}
+.ds-set-extra{margin-left:auto;display:flex;align-items:center;gap:6px;min-width:0}
+.ds-set-pad{display:flex;flex-direction:column;gap:10px;padding:10px 16px 16px;font-size:12.5px;min-width:0}
+.ds-set-pad + .ds-set-pad,.ds-set-pad + .ds-fgrid,.ds-fgrid + .ds-set-pad{padding-top:0}
+.ds-set-fold > summary{cursor:pointer;list-style:none;padding-bottom:14px;user-select:none}
+.ds-set-fold > summary::-webkit-details-marker{display:none}
+.ds-set-fold[open] > summary{padding-bottom:2px}
+.ds-set-chev{color:var(--ink-3);flex:none;transition:transform .15s ease}
+.ds-set-fold[open] .ds-set-chev{transform:rotate(90deg)}
+.ds-set-inline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.ds-set-inline > .ds-inp{flex:1;min-width:160px;width:auto}
+.ds-set-sub{display:flex;flex-direction:column;gap:10px;padding-top:12px;border-top:1px solid var(--line)}
+.ds-set-inline.ds-set-sub{flex-direction:row}
+.ds-set-list{list-style:none;margin:0;padding:3px;display:flex;flex-direction:column;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+.ds-set-list .ds-model-row{flex-wrap:nowrap;min-height:38px;padding:5px 6px 5px 10px;gap:8px}
+.ds-model-row input[type=radio]{flex:none;margin:0}
+.ds-model-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:12px;color:var(--ink)}
+.ds-model-row .ds-badge{flex:none}
+.ds-set-minisel{height:26px;padding:0 6px;width:92px;flex:none;font-size:11.5px}
+.ds-set-kv{display:flex;flex-wrap:wrap;gap:6px 18px;padding:9px 12px;background:var(--card);border:1px solid var(--line);border-radius:10px;font-size:12px}
+.ds-set-kv-k{color:var(--ink-3);margin-right:6px}
+.ds-set-kv code{font-family:var(--mono);color:var(--ink)}
+.ds-ctl.ds-is-on{box-shadow:inset 0 0 0 1px var(--green-600);color:var(--green-text)}
+.ds-set-url{flex:1;min-width:200px;height:32px;display:flex;align-items:center;padding:0 11px;border-radius:var(--r-ctl);background:var(--card);border:1px solid var(--line);font-family:var(--mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ds-set-link{margin-left:auto;font-size:11.5px;color:var(--ink-3);text-decoration:underline;text-underline-offset:2px}
+.ds-set-link:hover{color:var(--ink)}
+.ds-set-note-row{align-items:center}
+.ds-set-empty{font-size:12px;color:var(--ink-3)}
+.ds-set-box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 12px;display:flex;flex-direction:column;gap:6px}
+.ds-set-log{margin:0;max-height:128px;overflow:auto;white-space:pre-wrap;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.ds-set-errline{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--red-text);font-size:11.5px}
+.ds-set-warnline{color:var(--amber-text);font-size:10.5px}
+label.ds-optcard{cursor:pointer}
+.ds-optcard.ds-is-locked{cursor:not-allowed;opacity:.7}
+.ds-optcards.ds-set-provs{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:900px){.ds-optcards.ds-set-provs{grid-template-columns:minmax(0,1fr)}}
+.ds-set-foot{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex:none;padding:11px 18px;border-top:1px solid var(--line)}
+.ds-set-foot:empty{display:none}
+.ds-set-card .ds-seg{background:var(--card);box-shadow:inset 0 0 0 1px var(--line)}
+.ds-set-card .ds-seg-item.ds-is-active{background:var(--sunken)}
