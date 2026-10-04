@@ -21,6 +21,9 @@ from training.schedulers import (
     cosine_cycles,
     cosine_with_restart,
     cosine_with_warmup,
+    polynomial,
+    rex,
+    rex_annealing_warm_restarts,
 )
 
 __all__ = ["BUILDERS", "build_scheduler", "validate_schema_consistency"]
@@ -33,6 +36,9 @@ BUILDERS: dict[str, Callable] = {
     "cosine_cycles": cosine_cycles.build,
     "cosine_with_restart": cosine_with_restart.build,
     "cosine_with_warmup": cosine_with_warmup.build,
+    "polynomial": polynomial.build,
+    "rex": rex.build,
+    "rex_annealing_warm_restarts": rex_annealing_warm_restarts.build,
 }
 
 # schema allows "none" but BUILDERS doesn't list it; validate_schema_consistency exempts it

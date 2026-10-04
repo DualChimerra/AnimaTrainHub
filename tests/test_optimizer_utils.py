@@ -22,6 +22,7 @@ from utils.optimizer_utils import (
     Automagic,
     Automagic2,
     Lion,
+    SimplifiedAdEMAMix,
     create_automagic,
     create_automagic_v2,
     create_came,
@@ -450,6 +451,72 @@ def test_create_lion_rejects_invalid_betas() -> None:
     model = nn.Linear(2, 1)
     with pytest.raises(ValueError, match="Invalid beta1"):
         create_optimizer("lion", model.parameters(), learning_rate=1e-4, betas=(1.0, 0.99))
+
+
+def _reference_simplified_ademamix_step(p, grad, state, *, lr, beta1, beta2, alpha, eps, wd):
+    """One step of DepenM/Simplified-AdEMAMix (bias_correction1=False, bias_correction2=True)."""
+    state["m"] = beta1 * state["m"] + grad
+    state["v"] = beta2 * state["v"] + (1 - beta2) * grad * grad
+    state["den"] = beta2 * state["den"] + (1 - beta2)
+    denom = state["v"].sqrt() + eps * state["den"] ** 0.5
+    update = (alpha * grad + state["m"]) / denom * state["den"] ** 0.5
+    update = update + wd * p
+    return p - lr * update
+
+
+def test_simplified_ademamix_matches_reference_formula() -> None:
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(4, 3))
+    ref = p.detach().clone()
+    ref_state = {"m": torch.zeros_like(ref), "v": torch.zeros_like(ref), "den": 0.0}
+    optim = create_optimizer(
+        "simplified_ademamix", [p], learning_rate=1e-3,
+        betas=(0.99, 0.999), weight_decay=0.01, alpha=2.0,
+    )
+    assert isinstance(optim, SimplifiedAdEMAMix)
+    for _ in range(3):
+        grad = torch.randn_like(ref)
+        p.grad = grad.clone()
+        optim.step()
+        ref = _reference_simplified_ademamix_step(
+            ref, grad, ref_state, lr=1e-3, beta1=0.99, beta2=0.999, alpha=2.0, eps=1e-8, wd=0.01,
+        )
+    assert torch.allclose(p.detach(), ref, atol=1e-6)
+    assert optim.state[p]["step"] == 3
+
+
+def test_simplified_ademamix_beta1_warmup_starts_from_min_beta1() -> None:
+    p = nn.Parameter(torch.zeros(2))
+    optim = SimplifiedAdEMAMix([p], lr=1e-3, betas=(0.99, 0.999), beta1_warmup=10, min_beta1=0.5)
+    p.grad = torch.ones(2)
+    optim.step()
+    p.grad = torch.ones(2)
+    optim.step()
+    # step 1 uses beta1 close to min_beta1, not 0.99: m = beta1_at_step2 * 1 + 1
+    m = optim.state[p]["exp_avg"][0].item()
+    assert 1.5 <= m < 1.99
+
+
+def test_simplified_ademamix_respects_param_group_weight_decay_and_resumes() -> None:
+    a = nn.Parameter(torch.ones(2))
+    b = nn.Parameter(torch.ones(2))
+    groups = [{"params": [a], "weight_decay": 0.1}, {"params": [b], "weight_decay": 0.0}]
+    optim = create_optimizer("simplified_ademamix", groups, learning_rate=1e-2, weight_decay=0.1)
+    a.grad = torch.zeros(2)
+    b.grad = torch.zeros(2)
+    optim.step()
+    assert torch.all(a < 1.0)
+    assert torch.allclose(b.detach(), torch.ones(2))
+
+    restored = create_optimizer("simplified_ademamix", groups, learning_rate=1e-2, weight_decay=0.1)
+    restored.load_state_dict(optim.state_dict())
+    assert restored.state[a]["step"] == 1
+    assert restored.state[a]["den_sum"] == pytest.approx(optim.state[a]["den_sum"])
+
+
+def test_simplified_ademamix_rejects_invalid_betas() -> None:
+    with pytest.raises(ValueError, match="Invalid beta1"):
+        create_optimizer("simplified_ademamix", [nn.Parameter(torch.ones(1))], learning_rate=1e-6, betas=(1.0, 0.999))
 
 
 def test_monitor_metrics_uses_plain_lr_for_adamw() -> None:

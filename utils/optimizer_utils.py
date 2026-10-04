@@ -20,6 +20,8 @@ Supports multiple optimizers:
    to save memory + confidence guidance (instability EMA) to suppress the update noise
    introduced by the factorization approximation.
    Derived from the official implementation yangluo7/CAME (MIT, Copyright (c) 2023 Yang Luo).
+10. SimplifiedAdEMAMix - single raw-gradient momentum + current-gradient mix
+   (Morwani et al., 2025, arxiv 2502.02431). Adapted from DepenM/Simplified-AdEMAMix.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import inspect
 import logging
+import math
 from typing import List, Dict, Any, Optional, Iterator
 
 import torch
@@ -244,11 +247,21 @@ def create_optimizer(
             **kwargs,
         )
 
+    elif optimizer_type == "simplified_ademamix":
+        return create_simplified_ademamix(
+            params=params,
+            lr=learning_rate,
+            betas=betas,
+            weight_decay=weight_decay,
+            eps=eps,
+            **kwargs,
+        )
+
     else:
         raise ValueError(
             f"Unknown optimizer type: {optimizer_type}. "
             f"Choose from: adamw, automagic, automagic_v2, came, lion, prodigy, "
-            f"prodigy_plus_schedulefree, soap, soap_sf"
+            f"prodigy_plus_schedulefree, simplified_ademamix, soap, soap_sf"
         )
 
 
@@ -1094,6 +1107,151 @@ def create_lion(
     optimizer = Lion(param_list, lr=lr, betas=betas, weight_decay=weight_decay, **kwargs)
     print(f"Creating Lion optimizer (lr={lr}, betas={betas}, weight_decay={weight_decay})")
     print("  [OK] Lion optimizer created")
+    return optimizer
+
+
+def _ademamix_beta1_warmup(step: int, beta_end: float, beta_start: float, warmup: int) -> float:
+    """Half-life-linear beta1 warmup from the AdEMAMix paper (linear in the EMA half-life)."""
+    if warmup <= 0 or step >= warmup:
+        return beta_end
+
+    def half_life(beta: float, eps: float = 1e-8) -> float:
+        return math.log(0.5) / math.log(beta + eps) - 1
+
+    def from_half_life(t: float) -> float:
+        return math.pow(0.5, 1 / (t + 1))
+
+    a = step / float(warmup)
+    return from_half_life((1.0 - a) * half_life(beta_start) + a * half_life(beta_end))
+
+
+class SimplifiedAdEMAMix(Optimizer):
+    """Simplified AdEMAMix (Morwani et al., 2025).
+
+    Paper: "Connections between Schedule-Free Optimizers, AdEMAMix, and
+        Accelerated SGD Variants"  https://arxiv.org/abs/2502.02431
+
+    Reference implementation: https://github.com/DepenM/Simplified-AdEMAMix
+    (adapted from apple/ml-ademamix). A single momentum buffer accumulates raw
+    gradients (no 1-beta1 factor), mixed with alpha * current gradient:
+        m = beta1 * m + g
+        update = (alpha * g + m) / (sqrt(v) + eps)
+    Without numerator bias correction the update is ~1/(1-beta1) larger than
+    Adam's, so lr has to be scaled down by roughly (1 - beta1).
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float = 1e-6,
+        betas: tuple[float, float] = (0.99, 0.999),
+        alpha: float = 0.0,
+        beta1_warmup: int = 0,
+        min_beta1: float = 0.9,
+        eps: float = 1e-8,
+        weight_decay: float = 0.0,
+        bias_correction1: bool = False,
+        bias_correction2: bool = True,
+    ) -> None:
+        if lr < 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if eps < 0.0:
+            raise ValueError(f"Invalid eps: {eps}")
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError(f"Invalid beta1: {betas[0]}")
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError(f"Invalid beta2: {betas[1]}")
+        if weight_decay < 0.0:
+            raise ValueError(f"Invalid weight_decay: {weight_decay}")
+        if alpha < 0.0:
+            raise ValueError(f"Invalid alpha: {alpha}")
+        defaults = dict(
+            lr=lr, betas=betas, alpha=alpha, beta1_warmup=int(beta1_warmup or 0),
+            min_beta1=min_beta1, eps=eps, weight_decay=weight_decay,
+            bias_correction1=bias_correction1, bias_correction2=bias_correction2,
+        )
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            eps = group["eps"]
+            beta1_final, beta2 = group["betas"]
+            alpha = group["alpha"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+                if grad.is_sparse:
+                    raise RuntimeError("SimplifiedAdEMAMix does not support sparse gradients")
+
+                state = self.state[p]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["num_sum"] = 0.0
+                    state["den_sum"] = 0.0
+                exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
+
+                state["step"] += 1
+                beta1 = _ademamix_beta1_warmup(
+                    state["step"], beta1_final, group["min_beta1"], group["beta1_warmup"],
+                )
+
+                exp_avg.mul_(beta1).add_(grad)
+                state["num_sum"] = beta1 * state["num_sum"] + 1.0
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                state["den_sum"] = beta2 * state["den_sum"] + (1.0 - beta2)
+
+                denom = exp_avg_sq.sqrt().add_(eps * math.sqrt(state["den_sum"]))
+                update = exp_avg.add(grad, alpha=alpha) if alpha != 0.0 else exp_avg.clone()
+                update.div_(denom)
+                if group["bias_correction1"]:
+                    update.div_(state["num_sum"])
+                if group["bias_correction2"]:
+                    update.mul_(math.sqrt(state["den_sum"]))
+                if weight_decay != 0.0:
+                    update.add_(p, alpha=weight_decay)
+
+                p.add_(update, alpha=-lr)
+
+        return loss
+
+
+def create_simplified_ademamix(
+    params: Iterator[nn.Parameter],
+    lr: float,
+    betas: tuple = (0.99, 0.999),
+    weight_decay: float = 0.0,
+    eps: float = 1e-8,
+    **kwargs,
+) -> Optimizer:
+    # Without numerator bias correction the step is ~1/(1-beta1) times Adam's
+    # (100x at beta1=0.99), so an AdamW-scale lr diverges almost immediately.
+    adam_equivalent = lr / max(1e-12, 1.0 - float(betas[0]))
+    if not kwargs.get("bias_correction1", False) and adam_equivalent >= 1e-3:
+        logger.warning(
+            "SimplifiedAdEMAMix lr=%.2e with beta1=%s behaves like AdamW lr~%.2e; "
+            "scale lr by (1 - beta1), e.g. AdamW 1e-4 -> %.0e",
+            lr, betas[0], adam_equivalent, 1e-4 * (1.0 - float(betas[0])),
+        )
+    param_list = params if _is_param_groups(params) else list(params)
+    optimizer = SimplifiedAdEMAMix(
+        param_list, lr=lr, betas=betas, weight_decay=weight_decay, eps=eps, **kwargs,
+    )
+    print(
+        f"Creating SimplifiedAdEMAMix optimizer (lr={lr}, betas={betas}, "
+        f"weight_decay={weight_decay}, {kwargs})"
+    )
+    print("  [OK] SimplifiedAdEMAMix optimizer created")
     return optimizer
 
 

@@ -33,11 +33,11 @@ def test_adapter_builders_dict_has_lokr_loha_lora() -> None:
     assert set(BUILDERS) == {"lokr", "loha", "lora", "ortho", "tlora"}
 
 
-def test_optimizer_builders_dict_has_9_variants() -> None:
+def test_optimizer_builders_dict_has_10_variants() -> None:
     from training.optimizers import BUILDERS, VALIDATORS
     assert set(BUILDERS) == {
         "adamw", "adamw8bit", "automagic", "came", "lion", "prodigy",
-        "prodigy_plus_schedulefree", "soap", "soap_sf",
+        "prodigy_plus_schedulefree", "simplified_ademamix", "soap", "soap_sf",
     }
     assert set(VALIDATORS) == {
         "adamw8bit", "automagic", "prodigy_plus_schedulefree", "soap_sf",
@@ -85,6 +85,25 @@ def test_adamw8bit_validate_rejects_missing_bitsandbytes(monkeypatch) -> None:
     adamw8bit.validate(argparse.Namespace())
 
 
+def test_simplified_ademamix_build_passes_schema_fields() -> None:
+    torch = pytest.importorskip("torch")
+    from training.optimizers import build_optimizer
+
+    param = torch.nn.Parameter(torch.ones(2))
+    args = argparse.Namespace(
+        optimizer_type="simplified_ademamix",
+        ademamix_beta1=0.95, ademamix_beta2=0.99, ademamix_alpha=1.5,
+        ademamix_beta1_warmup=20, ademamix_min_beta1=0.8,
+    )
+    optimizer = build_optimizer(args, [param], 1e-6, 0.0)
+    group = optimizer.param_groups[0]
+    assert type(optimizer).__name__ == "SimplifiedAdEMAMix"
+    assert group["betas"] == (0.95, 0.99)
+    assert group["alpha"] == 1.5
+    assert group["beta1_warmup"] == 20
+    assert group["min_beta1"] == 0.8
+
+
 def test_scheduler_builders_dict_excludes_none() -> None:
     from training.schedulers import BUILDERS, SCHEMA_ONLY_OPTIONS
     assert set(BUILDERS) == {
@@ -93,6 +112,9 @@ def test_scheduler_builders_dict_excludes_none() -> None:
         "cosine_cycles",
         "cosine_with_restart",
         "cosine_with_warmup",
+        "polynomial",
+        "rex",
+        "rex_annealing_warm_restarts",
     }
     assert SCHEMA_ONLY_OPTIONS == {"none"}
 
@@ -180,6 +202,110 @@ def test_cosine_with_warmup_zero_warmup_starts_at_base_lr() -> None:
     assert optimizer.param_groups[0]["lr"] == pytest.approx(1.0)
     scheduler.step()
     assert optimizer.param_groups[0]["lr"] == pytest.approx(0.5 * (1.0 + math.cos(math.pi * 0.25)))
+
+
+def _scheduler_lrs(name: str, steps: int, total_steps: int, **extra) -> list[float]:
+    torch = pytest.importorskip("torch")
+    from training.schedulers import build_scheduler
+
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.SGD([param], lr=1.0)
+    args = argparse.Namespace(lr_scheduler=name, **extra)
+    scheduler = build_scheduler(args, optimizer, total_steps=total_steps)
+    lrs = [optimizer.param_groups[0]["lr"]]
+    for _ in range(steps):
+        optimizer.step()
+        scheduler.step()
+        lrs.append(optimizer.param_groups[0]["lr"])
+    return lrs
+
+
+def test_polynomial_warmup_then_power_decay_to_floor() -> None:
+    lrs = _scheduler_lrs(
+        "polynomial", 10, 10,
+        lr_scheduler_warmup_steps=2, lr_scheduler_power=2.0, lr_scheduler_eta_min=0.1,
+    )
+    assert lrs[0] == pytest.approx(0.0)
+    assert lrs[1] == pytest.approx(0.5)
+    assert lrs[2] == pytest.approx(1.0)
+    # step 6: progress = 4/8 -> 0.1 + 0.9 * 0.5**2
+    assert lrs[6] == pytest.approx(0.1 + 0.9 * 0.25)
+    assert lrs[10] == pytest.approx(0.1)
+
+
+def test_polynomial_power_one_is_linear() -> None:
+    lrs = _scheduler_lrs(
+        "polynomial", 4, 4,
+        lr_scheduler_warmup_steps=0, lr_scheduler_power=1.0, lr_scheduler_eta_min=0.0,
+    )
+    assert lrs == pytest.approx([1.0, 0.75, 0.5, 0.25, 0.0])
+
+
+def test_rex_matches_paper_formula() -> None:
+    lrs = _scheduler_lrs(
+        "rex", 4, 4, lr_scheduler_warmup_steps=0, lr_scheduler_eta_min=0.0, lr_scheduler_rex_d=0.5,
+    )
+    expected = []
+    for step in range(5):
+        z = 1.0 - step / 4
+        expected.append(z / (0.5 + 0.5 * z))
+    assert lrs == pytest.approx(expected)
+    # REX holds above linear decay until the very end
+    assert all(lr >= 1.0 - i / 4 for i, lr in enumerate(lrs))
+
+
+def test_rex_d_controls_curve_shape() -> None:
+    paper = _scheduler_lrs("rex", 4, 4, lr_scheduler_warmup_steps=0, lr_scheduler_eta_min=0.0, lr_scheduler_rex_d=0.5)
+    sharp = _scheduler_lrs("rex", 4, 4, lr_scheduler_warmup_steps=0, lr_scheduler_eta_min=0.0, lr_scheduler_rex_d=0.9)
+    # z=0.5: 0.5 / (0.1 + 0.45)
+    assert sharp[2] == pytest.approx(0.5 / 0.55)
+    assert sharp[2] > paper[2]
+    assert sharp[4] == pytest.approx(0.0)
+
+
+def _rawr_lrs(total: int, **extra) -> list[float]:
+    params = dict(
+        lr_scheduler_cycle_count=2, lr_scheduler_cycle_multiplier=1.0, lr_scheduler_gamma=0.5,
+        lr_scheduler_rex_d=0.5, lr_scheduler_eta_min=0.0, lr_scheduler_warmup_steps=0,
+    )
+    params.update(extra)
+    return _scheduler_lrs("rex_annealing_warm_restarts", total, total, **params)
+
+
+def test_rawr_restarts_with_gamma_scaled_peak() -> None:
+    lrs = _rawr_lrs(8)
+    # two cycles of 4 steps: REX(d=0.5) inside each, second peak scaled by gamma
+    rex = [z / (0.5 + 0.5 * z) for z in (1.0, 0.75, 0.5, 0.25)]
+    assert lrs[:4] == pytest.approx(rex)
+    assert lrs[4:8] == pytest.approx([0.5 * v for v in rex])
+
+
+def test_rawr_warmup_repeats_each_cycle_and_respects_floor() -> None:
+    lrs = _rawr_lrs(12, lr_scheduler_warmup_steps=2, lr_scheduler_eta_min=0.1, lr_scheduler_gamma=1.0)
+    # cycle = 2 warmup + 4 decay; warmup ramps from the floor
+    assert lrs[0] == pytest.approx(0.1)
+    assert lrs[1] == pytest.approx(0.55)
+    assert lrs[2] == pytest.approx(1.0)
+    assert lrs[6] == pytest.approx(0.1)
+    assert lrs[8] == pytest.approx(1.0)
+    assert min(lrs) >= 0.1 - 1e-9
+
+
+def test_rawr_cycle_multiplier_fills_total_steps() -> None:
+    from training.schedulers.rex_annealing_warm_restarts import cycle_lengths
+
+    lengths = cycle_lengths(700, 3, 2.0, 0)
+    assert lengths == [100, 200, 400]
+    assert sum(cycle_lengths(1000, 4, 1.5, 10)) == pytest.approx(1000, abs=3)
+
+
+def test_rex_warmup_and_floor() -> None:
+    lrs = _scheduler_lrs(
+        "rex", 6, 6, lr_scheduler_warmup_steps=2, lr_scheduler_eta_min=0.2,
+    )
+    assert lrs[1] == pytest.approx(0.5)
+    assert lrs[2] == pytest.approx(1.0)
+    assert lrs[6] == pytest.approx(0.2)
 
 
 def test_cosine_with_warmup_multi_param_group_respects_eta_min() -> None:

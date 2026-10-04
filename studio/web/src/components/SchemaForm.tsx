@@ -148,6 +148,17 @@ export default function SchemaForm({
         reason: t('ruleImpact.automagicLr'),
       })
     }
+    // Simplified AdEMAMix sums raw gradients, so its step is ~1/(1-β1) times AdamW's:
+    // an AdamW-scale lr (1e-4) diverges; the equivalent at β1=0.99 is 1e-6.
+    if (
+      triggerField === 'optimizer_type' && next.optimizer_type === 'simplified_ademamix'
+      && Number(next.learning_rate) > 1e-5
+    ) {
+      writes.push({
+        field: 'learning_rate', from: next.learning_rate, to: 1e-6,
+        reason: t('ruleImpact.simplifiedAdemamixLr'),
+      })
+    }
     return writes
   }
 
