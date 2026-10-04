@@ -132,6 +132,9 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     cosine_with_warmup: 'schema.enums.lrScheduler.cosineWithWarmup',
     cosine_cycles: 'schema.enums.lrScheduler.cosineCycles',
     constant_then_cosine: 'schema.enums.lrScheduler.constantThenCosine',
+    polynomial: 'schema.enums.lrScheduler.polynomial',
+    rex: 'schema.enums.lrScheduler.rex',
+    rex_annealing_warm_restarts: 'schema.enums.lrScheduler.rexAnnealingWarmRestarts',
   },
   optimizer_type: {
     adamw: 'schema.enums.optimizerType.adamw',
@@ -141,6 +144,7 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     lion: 'schema.enums.optimizerType.lion',
     prodigy: 'schema.enums.optimizerType.prodigy',
     prodigy_plus_schedulefree: 'schema.enums.optimizerType.prodigyPlusSchedulefree',
+    simplified_ademamix: 'schema.enums.optimizerType.simplifiedAdemamix',
   },
   timestep_sampling: {
     logit_normal: 'schema.enums.timestepSampling.logitNormal',

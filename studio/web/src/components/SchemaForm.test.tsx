@@ -40,7 +40,7 @@ const schema: SchemaResponse = {
     properties: {
       optimizer_type: {
         type: 'string',
-        enum: ['adamw', 'prodigy', 'prodigy_plus_schedulefree', 'automagic'],
+        enum: ['adamw', 'prodigy', 'prodigy_plus_schedulefree', 'automagic', 'simplified_ademamix'],
         default: 'adamw',
         group: 'training',
         description: 'Optimizer',
@@ -355,6 +355,23 @@ describe('SchemaForm rule takeover confirm (R6)', () => {
     fireEvent.click(screen.getByText('ruleImpact.ok'))
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ optimizer_type: 'automagic', learning_rate: 1e-6 }),
+    )
+  })
+
+  it('switching to simplified_ademamix suggests an lr scaled by (1 - beta1)', () => {
+    const onChange = vi.fn()
+    const values: ConfigData = { ...base }
+    render(<SchemaForm schema={schema} values={values} onChange={onChange} advancedMode />)
+    const optimizerSelect = screen
+      .getAllByRole('combobox')
+      .find((el) =>
+        Array.from((el as HTMLSelectElement).options).some((o) => o.value === 'adamw'),
+      ) as HTMLSelectElement
+    fireEvent.change(optimizerSelect, { target: { value: 'simplified_ademamix' } })
+    expect(screen.getByText('ruleImpact.simplifiedAdemamixLr')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('ruleImpact.ok'))
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ optimizer_type: 'simplified_ademamix', learning_rate: 1e-6 }),
     )
   })
 })

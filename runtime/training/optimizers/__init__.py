@@ -24,6 +24,7 @@ from training.optimizers import (
     lion,
     prodigy,
     prodigy_plus_schedulefree,
+    simplified_ademamix,
     soap,
     soap_sf,
 )
@@ -40,6 +41,7 @@ BUILDERS: dict[str, Callable] = {
     "lion": lion.build,
     "prodigy": prodigy.build,
     "prodigy_plus_schedulefree": prodigy_plus_schedulefree.build,
+    "simplified_ademamix": simplified_ademamix.build,
     "soap": soap.build,
     "soap_sf": soap_sf.build,
 }

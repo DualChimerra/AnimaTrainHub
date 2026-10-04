@@ -103,8 +103,10 @@ def test_schema_carries_ui_metadata(client: TestClient) -> None:
     assert props["came_clip_threshold"]["show_when"] == "optimizer_type==came"
     assert "automagic" not in props["learning_rate"]["disable_when"]
     assert props["lr_scheduler"]["disable_when"] == "optimizer_type==automagic||optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree||optimizer_type==soap_sf"
-    assert props["lr_scheduler_warmup_steps"]["show_when"] == "lr_scheduler==cosine_with_warmup"
-    assert props["lr_scheduler_cycle_count"]["show_when"] == "lr_scheduler==cosine_cycles"
+    assert props["lr_scheduler_warmup_steps"]["show_when"] == "lr_scheduler==cosine_with_warmup||lr_scheduler==polynomial||lr_scheduler==rex||lr_scheduler==rex_annealing_warm_restarts"
+    assert props["lr_scheduler_power"]["show_when"] == "lr_scheduler==polynomial"
+    assert props["ademamix_beta1"]["show_when"] == "optimizer_type==simplified_ademamix"
+    assert props["lr_scheduler_cycle_count"]["show_when"] == "lr_scheduler==cosine_cycles||lr_scheduler==rex_annealing_warm_restarts"
     assert props["lr_scheduler_decay_start_ratio"]["show_when"] == "lr_scheduler==constant_then_cosine"
     assert props["automagic_min_lr"]["show_when"] == "optimizer_type==automagic"
     assert props["automagic_max_lr"]["show_when"] == "optimizer_type==automagic"

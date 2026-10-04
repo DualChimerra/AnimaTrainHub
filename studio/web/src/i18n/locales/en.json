@@ -378,7 +378,10 @@
         "cosineWithRestart": "Cosine with warm restarts",
         "cosineWithWarmup": "Cosine with warmup",
         "cosineCycles": "Cosine with equal cycles",
-        "constantThenCosine": "Constant with cosine decay"
+        "constantThenCosine": "Constant with cosine decay",
+        "polynomial": "Polynomial decay",
+        "rex": "REX",
+        "rexAnnealingWarmRestarts": "REX with warm restarts (RAWR)"
       },
       "optimizerType": {
         "adamw": "AdamW",
@@ -387,7 +390,8 @@
         "came": "CAME",
         "lion": "Lion",
         "prodigy": "Prodigy",
-        "prodigyPlusSchedulefree": "Prodigy + Schedule-Free"
+        "prodigyPlusSchedulefree": "Prodigy + Schedule-Free",
+        "simplifiedAdemamix": "Simplified AdEMAMix"
       },
       "timestepSampling": {
         "logitNormal": "Logit Normal",
@@ -497,20 +501,24 @@
       "batch_size": "Batch size",
       "grad_checkpoint": "Gradient checkpointing (saves VRAM, roughly +1/3 compute)",
       "grad_accum": "Gradient accumulation steps (effective batch = batch_size × grad_accum)",
-      "learning_rate": "Learning rate. Automagic recommends 1e-6 (auto-applied on switch); Lion recommends AdamW lr / 3; Prodigy / PPSF require 1.0",
-      "lr_scheduler": "How the learning rate changes over the run. Constant: it stays the same. Cosine: it eases down to the end. Cosine with warmup: a ramp-up first, then a smooth decay. Cosine with warm restarts: decays and restarts, each cycle longer than the last. Cosine with equal cycles: N identical cosine cycles, each can have its own peak. Constant with cosine decay: flat learning rate, then a smooth decay at the end. Prodigy, PPSF, Automagic and SOAP-SF always use Constant.",
+      "learning_rate": "Learning rate. Automagic recommends 1e-6 (auto-applied on switch); Lion recommends AdamW lr / 3; Simplified AdEMAMix recommends AdamW lr × (1 − β1), i.e. 1e-6 at β1=0.99 (auto-applied on switch); Prodigy / PPSF require 1.0",
+      "lr_scheduler": "How the learning rate changes over the run. Constant: it stays the same. Cosine: it eases down to the end. Cosine with warmup: a ramp-up first, then a smooth decay. Cosine with warm restarts: decays and restarts, each cycle longer than the last. Cosine with equal cycles: N identical cosine cycles, each can have its own peak. Constant with cosine decay: flat learning rate, then a smooth decay at the end. Polynomial decay: warmup, then (1 − progress)^power down to the floor (power 1 = linear). REX: warmup, then holds near the peak longer than linear and drops sharply at the end. REX with warm restarts (RAWR): several REX cycles with a warmup at the start of each; every next peak is lower by gamma and cycles can grow longer. Prodigy, PPSF, Automagic and SOAP-SF always use Constant.",
       "lr_scheduler_t0": "First cosine_with_restart cycle length (unit: step)",
       "lr_scheduler_t_mult": "cosine_with_restart cycle-length multiplier relative to the previous cycle (>1 = lengthening cycles)",
-      "lr_scheduler_eta_min": "LR decay floor for cosine schedules; should be much smaller than the initial lr (e.g. 1e-6 for an initial lr of 1e-4)",
-      "lr_scheduler_warmup_steps": "cosine_with_warmup warmup steps",
-      "lr_scheduler_cycle_count": "Number of equal-length cosine peaks. Default: 3.",
+      "lr_scheduler_eta_min": "LR decay floor for cosine / polynomial / REX / RAWR schedules; should be much smaller than the initial lr (e.g. 1e-6 for an initial lr of 1e-4)",
+      "lr_scheduler_warmup_steps": "Warmup steps for cosine_with_warmup / polynomial / REX (linear ramp from 0 to the peak lr); for RAWR the warmup repeats at the start of every cycle. 0 = no warmup",
+      "lr_scheduler_power": "Polynomial decay power. 1 = linear decay to the floor; >1 drops faster early and flattens near the end; <1 holds the lr longer and drops at the end",
+      "lr_scheduler_rex_d": "REX / RAWR curve shape d. 0.5 is the curve from the REX paper; 0.9 (LoRA Easy Training Scripts default) holds the peak longer and drops more sharply at the end",
+      "lr_scheduler_cycle_multiplier": "RAWR: each next cycle is this many times longer than the previous one (1 = equal cycles, 2 = doubling). Lengths are fitted so all cycles fill the run",
+      "lr_scheduler_gamma": "RAWR: peak lr multiplier after each restart (1 = every cycle restarts at the full lr; 0.9 = each peak 10% lower)",
+      "lr_scheduler_cycle_count": "Number of cycles (peaks) for cosine with equal cycles / RAWR; together they fill the whole run. Default: 3.",
       "lr_scheduler_cycle_max_lr": "Maximum LR shared by all peaks. Leave empty to use learning_rate.",
       "lr_scheduler_cycle_min_lr": "Minimum LR shared by all peaks. Per-peak values override it.",
       "lr_scheduler_cycle_max_lrs": "Optional maximum LR for each peak, comma-separated. The value count must match the peak count.",
       "lr_scheduler_cycle_min_lrs": "Optional minimum LR for each peak, comma-separated. The value count must match the peak count.",
       "lr_scheduler_decay_start_ratio": "Training fraction after which the final cosine decay starts. 0.6667 means the last third.",
       "lr_scheduler_decay_min_lr": "Learning rate at the end of the final cosine decay.",
-      "optimizer_type": "Optimizer. adamw is the baseline; automagic adapts per-parameter lr (recommend lr=1e-6); came uses confidence-guided factored second moments (less state VRAM than AdamW, lr at AdamW scale); lion uses ~half the state of AdamW (recommend lr = AdamW lr / 3); prodigy / prodigy_plus_schedulefree self-estimate lr (fill 1.0)",
+      "optimizer_type": "Optimizer. adamw is the baseline; automagic adapts per-parameter lr (recommend lr=1e-6); came uses confidence-guided factored second moments (less state VRAM than AdamW, lr at AdamW scale); lion uses ~half the state of AdamW (recommend lr = AdamW lr / 3); prodigy / prodigy_plus_schedulefree self-estimate lr (fill 1.0); simplified_ademamix keeps one long momentum of raw gradients mixed with the current gradient (same VRAM as AdamW; lr = AdamW lr × (1 − β1), e.g. 1e-6)",
       "prodigy_d_coef": "Overall scaling coefficient on Prodigy's estimated d; larger = larger effective lr. Raise (2.0+) when underfitting; lower (0.5) when overfitting or on small datasets",
       "prodigy_safeguard_warmup": "Prevent d from being inflated by early high gradients during Prodigy warmup; default on for stability",
       "came_beta1": "CAME β1 (update momentum EMA decay)",
@@ -521,6 +529,11 @@
       "came_clip_threshold": "CAME update RMS clipping threshold (same as Adafactor's d)",
       "lion_beta1": "Lion β1 (momentum interpolation coefficient)",
       "lion_beta2": "Lion β2 (momentum accumulation coefficient)",
+      "ademamix_beta1": "Simplified AdEMAMix β1 (momentum decay; higher = longer gradient memory, and lr must shrink by (1 − β1))",
+      "ademamix_beta2": "Simplified AdEMAMix β2 (second-moment EMA decay)",
+      "ademamix_alpha": "Simplified AdEMAMix α: weight of the current gradient added on top of the momentum (0 = momentum only)",
+      "ademamix_beta1_warmup": "Steps over which β1 ramps up from the starting β1 to β1 (0 = off). Stabilizes the start with a high β1",
+      "ademamix_min_beta1": "Starting β1 for the β1 warmup (used only when β1 warmup > 0)",
       "automagic_min_lr": "Automagic per-parameter learning-rate floor",
       "automagic_max_lr": "Automagic per-parameter learning-rate ceiling",
       "automagic_lr_bump": "Automagic learning-rate adjustment step",
@@ -3736,7 +3749,8 @@
     "title": "Linked parameters will be adjusted",
     "intro": "Setting {{field}} to {{value}} will also adjust these modified parameters:",
     "ok": "Apply",
-    "automagicLr": "Automagic starts from a per-parameter learning rate; the recommended initial value is 1e-6 (starting at AdamW magnitude makes adaptation ~100× slower to converge)"
+    "automagicLr": "Automagic starts from a per-parameter learning rate; the recommended initial value is 1e-6 (starting at AdamW magnitude makes adaptation ~100× slower to converge)",
+    "simplifiedAdemamixLr": "Simplified AdEMAMix accumulates raw gradients, so its step is ~1/(1 − β1) times AdamW's; at β1=0.99 the AdamW-equivalent of 1e-4 is 1e-6"
   },
   "baseModel": {
     "purpose": {

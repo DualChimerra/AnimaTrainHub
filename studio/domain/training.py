@@ -445,6 +445,9 @@ class TrainingConfig(BaseModel):
         "cosine_with_warmup",
         "cosine_cycles",
         "constant_then_cosine",
+        "polynomial",
+        "rex",
+        "rex_annealing_warm_restarts",
     ] = Field(
         "none",
         description="Learning rate schedule (none = constant; Prodigy / PPSF / Automagic / SOAP-SF are fixed to none)",
@@ -467,22 +470,46 @@ class TrainingConfig(BaseModel):
     )
     lr_scheduler_eta_min: float = Field(
         1e-6, ge=0.0,
-        description="Learning rate floor: cosine schedules stop decreasing once they reach this value; usually much smaller than the initial lr (e.g. 1e-4 initial with 1e-6 floor)",
+        description="Learning rate floor: cosine / polynomial / rex / RAWR schedules stop decreasing once they reach this value; usually much smaller than the initial lr (e.g. 1e-4 initial with 1e-6 floor)",
         json_schema_extra=_meta(
             "training",
-            show_when="lr_scheduler==cosine||lr_scheduler==cosine_with_restart||lr_scheduler==cosine_with_warmup",
+            show_when="lr_scheduler==cosine||lr_scheduler==cosine_with_restart||lr_scheduler==cosine_with_warmup||lr_scheduler==polynomial||lr_scheduler==rex||lr_scheduler==rex_annealing_warm_restarts",
             advanced=True,
         ),
     )
     lr_scheduler_warmup_steps: int = Field(
         100, ge=0,
-        description="cosine_with_warmup warmup steps",
-        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_with_warmup", advanced=True),
+        description="Warmup steps for cosine_with_warmup / polynomial / rex (linear ramp from 0 to the peak lr); for RAWR the warmup repeats at the start of every cycle. 0 = no warmup",
+        json_schema_extra=_meta(
+            "training",
+            show_when="lr_scheduler==cosine_with_warmup||lr_scheduler==polynomial||lr_scheduler==rex||lr_scheduler==rex_annealing_warm_restarts",
+            advanced=True,
+        ),
+    )
+    lr_scheduler_power: float = Field(
+        1.0, gt=0.0,
+        description="polynomial: decay power. 1 = linear decay to the floor; >1 drops faster early and flattens near the end; <1 holds the lr longer and drops at the end",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==polynomial"),
+    )
+    lr_scheduler_rex_d: float = Field(
+        0.9, gt=0.0, le=1.0,
+        description="rex / RAWR curve shape d: factor = z / ((1 - d) + d·z), z = remaining fraction. 0.5 = the REX paper; 0.9 (LoRA Easy Training Scripts default) holds the peak longer and drops more sharply at the end",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==rex||lr_scheduler==rex_annealing_warm_restarts", advanced=True),
+    )
+    lr_scheduler_cycle_multiplier: float = Field(
+        1.0, gt=0.0,
+        description="RAWR: each next cycle is this many times longer than the previous one (1 = equal cycles, 2 = doubling). Cycle lengths are fitted so all cycles fill the run",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==rex_annealing_warm_restarts"),
+    )
+    lr_scheduler_gamma: float = Field(
+        0.9, gt=0.0, le=1.0,
+        description="RAWR: peak lr multiplier after each restart (1 = every cycle restarts at the full lr; 0.9 = each peak 10% lower)",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==rex_annealing_warm_restarts"),
     )
     lr_scheduler_cycle_count: int = Field(
         3, ge=1, le=100,
-        description="Number of peaks for cosine_cycles; total training steps are divided evenly into this many periods",
-        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_cycles"),
+        description="Number of peaks for cosine_cycles / RAWR; the cycles together fill the whole run (cosine_cycles splits it evenly)",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==cosine_cycles||lr_scheduler==rex_annealing_warm_restarts"),
     )
     lr_scheduler_cycle_max_lr: Optional[float] = Field(
         None, gt=0.0,
@@ -514,9 +541,9 @@ class TrainingConfig(BaseModel):
         description="constant_then_cosine: LR at the very end of training",
         json_schema_extra=_meta("training", show_when="lr_scheduler==constant_then_cosine"),
     )
-    optimizer_type: Literal["adamw", "adamw8bit", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree", "soap", "soap_sf"] = Field(
+    optimizer_type: Literal["adamw", "adamw8bit", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree", "simplified_ademamix", "soap", "soap_sf"] = Field(
         "adamw",
-        description="Optimizer. adamw standard baseline; adamw8bit same as AdamW but with state quantized to int8 (state VRAM ~1/4 of AdamW, hyperparameters carry over directly, requires bitsandbytes); automagic adaptive per-parameter lr (recommended lr=1e-6); came confidence-guided + factored second moment (lower state VRAM than AdamW, lr on the same scale as AdamW); lion roughly half AdamW's VRAM (recommended lr=AdamW lr / 3); prodigy / prodigy_plus_schedulefree adaptively estimates lr (set lr to 1.0); soap Adam-in-Shampoo-eigenbasis second-order preconditioning (fits faster, lr on the same scale as AdamW); soap_sf SOAP + Schedule-Free (lr_scheduler fixed to none)",
+        description="Optimizer. adamw standard baseline; adamw8bit same as AdamW but with state quantized to int8 (state VRAM ~1/4 of AdamW, hyperparameters carry over directly, requires bitsandbytes); automagic adaptive per-parameter lr (recommended lr=1e-6); came confidence-guided + factored second moment (lower state VRAM than AdamW, lr on the same scale as AdamW); lion roughly half AdamW's VRAM (recommended lr=AdamW lr / 3); prodigy / prodigy_plus_schedulefree adaptively estimates lr (set lr to 1.0); simplified_ademamix one raw-gradient momentum + current-gradient mix (lr ≈ AdamW lr × (1 − β1), e.g. 1e-6 at β1=0.99); soap Adam-in-Shampoo-eigenbasis second-order preconditioning (fits faster, lr on the same scale as AdamW); soap_sf SOAP + Schedule-Free (lr_scheduler fixed to none)",
         json_schema_extra=_meta("training"),
     )
     prodigy_d_coef: float = Field(
@@ -572,6 +599,34 @@ class TrainingConfig(BaseModel):
         0.99, ge=0.0, lt=1.0,
         description="Lion β2 (momentum accumulation coefficient)",
         json_schema_extra=_meta("training", show_when="optimizer_type==lion", advanced=True),
+    )
+    # ------------------------- Simplified AdEMAMix-specific fields -------------------------
+    # Morwani et al. 2025 (arxiv 2502.02431). The momentum sums raw gradients
+    # (no 1-β1 factor), so lr is ~(1-β1) times the AdamW lr.
+    ademamix_beta1: float = Field(
+        0.99, ge=0.0, lt=1.0,
+        description="Simplified AdEMAMix β1 (momentum decay; higher = longer gradient memory, and lr must shrink by (1 − β1))",
+        json_schema_extra=_meta("training", show_when="optimizer_type==simplified_ademamix", advanced=True),
+    )
+    ademamix_beta2: float = Field(
+        0.999, ge=0.0, lt=1.0,
+        description="Simplified AdEMAMix β2 (second-moment EMA decay)",
+        json_schema_extra=_meta("training", show_when="optimizer_type==simplified_ademamix", advanced=True),
+    )
+    ademamix_alpha: float = Field(
+        0.0, ge=0.0,
+        description="Simplified AdEMAMix α: weight of the current gradient added on top of the momentum (0 = momentum only)",
+        json_schema_extra=_meta("training", show_when="optimizer_type==simplified_ademamix", advanced=True),
+    )
+    ademamix_beta1_warmup: int = Field(
+        0, ge=0,
+        description="Simplified AdEMAMix: steps over which β1 ramps up from the starting β1 to β1 (0 = off). Stabilizes the start with a high β1",
+        json_schema_extra=_meta("training", show_when="optimizer_type==simplified_ademamix", advanced=True),
+    )
+    ademamix_min_beta1: float = Field(
+        0.9, ge=0.0, lt=1.0,
+        description="Simplified AdEMAMix: starting β1 for the β1 warmup",
+        json_schema_extra=_meta("training", show_when="optimizer_type==simplified_ademamix", advanced=True),
     )
     automagic_variant: Literal["v1", "v2"] = Field(
         "v1",
