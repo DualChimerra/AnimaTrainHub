@@ -421,15 +421,13 @@ function matchPatch(opt: ParamOption): Record<string, unknown> | null {
 
 /** Is this parameter tied to the training config at all? */
 export function isLinked(p: Param): boolean {
-  if (p.type === 'number') return !!p.config?.key
-  if (p.type === 'text') return false
+  if (p.type === 'number' || p.type === 'text') return !!p.config?.key
   return p.options.some((o) => matchPatch(o) !== null)
 }
 
 /** Can the Graph write this parameter into a config (not only read it)? */
 export function isApplicable(p: Param): boolean {
-  if (p.type === 'number') return !!p.config?.key
-  if (p.type === 'text') return false
+  if (p.type === 'number' || p.type === 'text') return !!p.config?.key
   return p.options.some((o) => o.config && Object.keys(o.config.apply ?? {}).length > 0)
 }
 
@@ -451,6 +449,11 @@ export function valuesFromConfig(cfg: Record<string, unknown>, params: Param[]):
   const out: Values = {}
   for (const p of params) {
     if (p.archived) continue
+    if (p.type === 'text' && p.config?.key) {
+      const v = cfg[p.config.key]
+      if (v !== undefined && v !== null) out[p.id] = p.config.json ? JSON.stringify(v) : String(v)
+      continue
+    }
     if (p.type === 'number' && p.config?.key) {
       let v = cfg[p.config.key]
       if (Array.isArray(v)) v = v.length === 1 ? v[0] : undefined
@@ -486,6 +489,9 @@ export function configPatch(values: Values, params: Param[]): { patch: Record<st
     if (v === undefined) continue
     if (p.type === 'number' && p.config?.key && typeof v === 'number') {
       patch[p.config.key] = p.config.list ? [v] : v
+    } else if (p.type === 'text' && p.config?.key && typeof v === 'string') {
+      try { patch[p.config.key] = p.config.json ? JSON.parse(v) : v }
+      catch { skipped.push(p.id) }
     } else if (p.type === 'list' || p.type === 'bool') {
       const o = optionOf(p, v)
       const apply = o?.config?.apply

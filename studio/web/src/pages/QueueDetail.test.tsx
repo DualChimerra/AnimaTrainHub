@@ -4,7 +4,7 @@
  *  component shallow-clones task every 2s for the elapsed-time tick; the old
  *  implementation used [task] as a dep, which made the snapshot config
  *  refetch along with it every 2s -- browser stutter, loading flash. */
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ToastProvider } from '../components/Toast'
@@ -74,6 +74,14 @@ function setup(task: Task | null) {
 }
 
 describe('SnapshotConfigTab', () => {
+  it('offers a YAML download even when the training is not linked to a version', async () => {
+    setup(makeTask({ project_id: null, version_id: null }))
+    const download = await screen.findByRole('link', { name: 'Download config' })
+    expect(download).toHaveAttribute('href', '/api/queue/1/snapshot/config/file')
+    expect(download).toHaveAttribute('download', 'task_1.yaml')
+    expect(screen.queryByText('Apply this config')).not.toBeInTheDocument()
+  })
+
   it('a 2s shallow clone of task by the parent does not trigger a refetch -- the snapshot is immutable', async () => {
     const task = makeTask()
     const view = setup(task)
@@ -172,6 +180,30 @@ describe('QueueDetailPage pause button SSE refresh', () => {
     vi.stubGlobal('EventSource', FakeEventSource)
   })
 
+  it('keeps training tabs without Monitor and updates the current LR from progress events', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === QUEUE_ITEM_URL) return Promise.resolve(queueItemResponse(makeTask({ id: 119, task_type: 'train' })))
+      if (url === '/api/queue/119/snapshot/config') return Promise.resolve({
+        ok: true, status: 200, json: async () => ({ yaml: 'lr_scheduler: cosine\n', config: { lr_scheduler: 'cosine' } }),
+      } as Response)
+      if (url.startsWith('/api/state?')) return Promise.resolve({
+        ok: true, status: 200,
+        json: async () => ({ step: 10, total_steps: 100, lr_history: [{ step: 1, lr: 0.0001 }, { step: 10, lr: 0.00008 }] }),
+      } as Response)
+      return Promise.resolve({ ok: false, status: 404, json: async () => null, text: async () => '', headers: new Headers() } as Response)
+    })
+    renderDetailPage()
+    await screen.findByText('8.00e-5')
+    expect(await screen.findByText('scheduler: cosine')).toBeInTheDocument()
+    expect(screen.getByText('LR')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Monitor' })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Snapshot config' })).toBeInTheDocument()
+    act(() => FakeEventSource.instances[0].emit({ type: 'monitor_progress', task_id: 119,
+      delta: { step: 11, appended_lr: [{ step: 11, lr: 0.00007 }] },
+    }))
+    await screen.findByText('7.00e-5')
+  })
+
   it('an auto_epoch_backup_written event triggers a refetch -> pause button appears', async () => {
     // getTask: first fetch has is_pausable=false (train loop / first epoch
     // backup not ready yet), then is_pausable=true (first epoch backup written).
@@ -192,7 +224,7 @@ describe('QueueDetailPage pause button SSE refresh', () => {
 
     // Initially: the running header has rendered (title includes the task
     // name), but is_pausable=false -> pause button absent
-    await waitFor(() => expect(screen.getByText(/^#119 · /)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('heading', { name: '#119 train' })).toBeInTheDocument())
     expect(screen.queryByTestId('detail-pause-btn')).not.toBeInTheDocument()
 
     // Backend writes the first epoch backup -> is_pausable flips; push an SSE event
@@ -218,7 +250,7 @@ describe('QueueDetailPage pause button SSE refresh', () => {
     })
 
     renderDetailPage()
-    await waitFor(() => expect(screen.getByText(/^#119 · /)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('heading', { name: '#119 train' })).toBeInTheDocument())
     const before = getTaskCalls()
 
     await waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThan(0))

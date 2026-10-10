@@ -31,6 +31,15 @@ def _auto_sync_paths() -> bool:
         return True
 
 
+def create_edit_version_config(project: dict[str, Any], version: dict[str, Any]) -> dict[str, Any]:
+    """Edit projects without a config get the recommended edit settings (no preset needed)."""
+    data = TrainingConfig().model_dump()
+    data.update(version_config.EDIT_CONFIG_DEFAULTS)
+    data.update(model_downloader.default_paths_for_new_version(family="anima"))
+    version_config.write_version_config(project, version, data, force_project_overrides=True)
+    return version_config.read_version_config(project, version)
+
+
 def fork_preset_for_version(
     src_preset_name: str,
     project: dict[str, Any],
@@ -49,6 +58,8 @@ def fork_preset_for_version_with_warnings(
     """Copies a global preset into the version's private config, returning compatibility warnings."""
     src, dropped, defaulted = presets_io.read_preset_with_warnings(src_preset_name)
     new_data = deepcopy(src)
+    if project.get("kind") == "edit":
+        new_data.update(version_config.EDIT_CONFIG_DEFAULTS)
     new_data.update(version_config.project_specific_overrides(project, version))
     if _auto_sync_paths():
         # Takes the path per the family declared in the preset -- overwriting with a krea2 preset's paths on an anima config would corrupt it

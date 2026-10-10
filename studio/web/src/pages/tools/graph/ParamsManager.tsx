@@ -1,6 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { formatNumber, newId, numberRange, parseNumber, sameValue, scientific } from './model'
+import { api, type SchemaResponse } from '../../../api/client'
+import { schemaFieldLabel } from '../../../lib/schema'
+import { configKeys, formatNumber, newId, numberRange, parseNumber, sameValue, scientific } from './model'
+import { paramFromSchema, schemaParamGroups } from './schemaParams'
 import type { Param, ParamOption, ParamType, Run, RunValue } from './types'
 import { Chip, Ico, Modal, useValueLabel } from './ui'
 import HelpTip from '../../../components/ds/HelpTip'
@@ -27,6 +30,27 @@ export default function ParamsManager({ params, runs, onClose, onSave }: {
   const [saving, setSaving] = useState(false)
   const [newName, setNewName] = useState('')
   const [newType, setNewType] = useState<ParamType>('list')
+  const [schema, setSchema] = useState<SchemaResponse | null>(null)
+  const [schemaError, setSchemaError] = useState(false)
+  const [newKey, setNewKey] = useState('')
+  const usedKeys = useMemo(() => new Set(configKeys(draft)), [draft])
+  const groups = useMemo(() => schema ? schemaParamGroups(schema, t) : [], [schema, t])
+
+  useEffect(() => {
+    let cancelled = false
+    api.schema().then((s) => { if (!cancelled) setSchema(s) })
+      .catch(() => { if (!cancelled) setSchemaError(true) })
+    return () => { cancelled = true }
+  }, [])
+
+  const addFromConfig = () => {
+    const property = schema?.schema.properties[newKey]
+    if (!property || usedKeys.has(newKey)) return
+    const p = paramFromSchema(newKey, property, t)
+    setDraft((d) => [...d, p])
+    setNewKey('')
+    setOpenId(p.id)
+  }
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(params) || remaps.length > 0
 
@@ -98,6 +122,30 @@ export default function ParamsManager({ params, runs, onClose, onSave }: {
           />
         ))}
 
+        <div className="gr-pm-add-config">
+          <label className="gr-mfield">
+            <span className="gr-pfield-name">{t('graph.trainingParam')}</span>
+            <select className="ds-inp" value={newKey} onChange={(e) => setNewKey(e.target.value)}
+              disabled={!schema} aria-label={t('graph.trainingParam')}>
+              <option value="">{schema ? t('graph.chooseTrainingParam') : schemaError ? t('graph.loadParamsFailed') : t('common.loading')}</option>
+              {groups.map((group) => (
+                <optgroup key={group.key} label={group.label}>
+                  {group.fields.map(([key]) => (
+                    <option key={key} value={key} disabled={usedKeys.has(key)}>
+                      {schemaFieldLabel(key, t)}{usedKeys.has(key) ? ` — ${t('graph.paramAlreadyAdded')}` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="ds-ctl" onClick={addFromConfig} disabled={!newKey || usedKeys.has(newKey)}>
+            {Ico.plus}{t('graph.addParam')}
+          </button>
+          <span className="ds-ctl-note">{t('graph.trainingParamHint')}</span>
+        </div>
+
+        <div className="ds-cap">{t('graph.customParam')}</div>
         <div className="gr-pm-add">
           <input className="ds-inp" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={t('graph.newParamName')}
             onKeyDown={(e) => { if (e.key === 'Enter') add() }} aria-label={t('graph.newParamName')} />

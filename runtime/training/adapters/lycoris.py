@@ -33,4 +33,6 @@ def build(args, *, preset: dict[str, Any]) -> AdapterProtocol:
         weight_decompose=bool(getattr(args, "lora_dora", False)),
         rs_lora=bool(getattr(args, "lora_rs", False)),
         lora_reg_dims=getattr(args, "lora_reg_dims", None) or None,
+        train_norm=bool(getattr(args, "train_norm", False)),
+        text_encoder_lr=float(getattr(args, "text_encoder_lr", 1e-5)),
     )

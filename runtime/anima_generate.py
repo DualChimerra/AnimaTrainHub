@@ -93,6 +93,20 @@ def main() -> None:
     negative_prompt: str = cfg.get("negative_prompt", "")
     width: int = int(cfg.get("width", 1024))
     height: int = int(cfg.get("height", 1024))
+    # Edit LoRA source image (cosmos temporal reference), same as the daemon path.
+    ref_kwargs: dict = {}
+    if cfg.get("reference_image"):
+        from PIL import Image
+        from training.families.anima.sampling import reference_size
+
+        _refs = []
+        for _key in ("reference_image", "reference_image_2"):
+            if cfg.get(_key):
+                with Image.open(cfg[_key]) as _ref:
+                    _refs.append(_ref.convert("RGB"))
+        ref_kwargs = {"reference_images": _refs}
+        if cfg.get("reference_match_size", True):
+            width, height = reference_size(_refs[0], width * height, 16)
     steps: int = int(cfg.get("steps", 25))
     cfg_scale: float = float(cfg.get("cfg_scale", 4.0))
     sampler_name: str = cfg.get("sampler_name", "er_sde")
@@ -200,7 +214,7 @@ def main() -> None:
         for lc in lora_configs
     ]
     _adapters = apply_loras(model, specs, device, torch.float32,  # noqa: F841 -- keep the reference alive
-                            family_id=family.spec.family_id)
+                            family_id=family.spec.family_id, text_stack=text_stack)
 
     model.eval()
 
@@ -221,6 +235,7 @@ def main() -> None:
             distilled=distilled,
             height=height,
             width=width,
+            ref_kwargs=ref_kwargs,
             family=family, model=model, vae=vae, text=text_stack,
             device=device, dtype=dtype,
             output_dir=output_dir,
@@ -248,6 +263,7 @@ def main() -> None:
                     prompt,
                     height=height,
                     width=width,
+                    **ref_kwargs,
                     steps=steps,
                     cfg_scale=cfg_scale,
                     negative_prompt=negative_prompt,
@@ -285,6 +301,9 @@ def _set_lora_multiplier(adapter, scale: float) -> None:
     network.multiplier is the global multiplier read during forward;
     per-lora.multiplier is a fallback (different lycoris versions read it via different paths).
     """
+    if callable(getattr(adapter, "set_multiplier", None)):
+        adapter.set_multiplier(scale)
+        return
     if adapter.network is None:
         return
     adapter.network.multiplier = float(scale)
@@ -338,6 +357,7 @@ def _run_xy_matrix(
     height: int,
     width: int,
     family, model, vae, text,
+    ref_kwargs: dict | None = None,
     device: str, dtype,
     output_dir,
     update_monitor,
@@ -358,6 +378,7 @@ def _run_xy_matrix(
       - base_seed=0 -> randomized once and shared across all cells (XY should
         only show the axis effect); axis=seed overrides per cell value.
     """
+    ref_kwargs = ref_kwargs or {}
     x_spec = xy_matrix["x"]
     y_spec = xy_matrix.get("y")
     x_values = x_spec["values"]
@@ -434,6 +455,7 @@ def _run_xy_matrix(
                     prompt,
                     height=height,
                     width=width,
+                    **ref_kwargs,
                     steps=cur_steps,
                     cfg_scale=cur_cfg_scale,
                     negative_prompt=negative_prompt,

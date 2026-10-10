@@ -4,10 +4,14 @@ import { api } from '../../../api/client'
 import { graphApi } from './api'
 import type { GraphTask, Param, Run, TaskSampleInfo, Values } from './types'
 import { Ico, Modal, fmtDate, useValueLabel } from './ui'
+import SampleThumbnail from '../../../components/SampleThumbnail'
 
 /** Pick a queue training to turn into a card. */
-export function ImportTaskDialog({ tasks, runs, params, taskValues, onClose, onPick }: {
+export function ImportTaskDialog({ tasks, loading, error, onRefresh, runs, params, taskValues, onClose, onPick }: {
   tasks: GraphTask[]
+  loading: boolean
+  error: boolean
+  onRefresh: () => void
   runs: Run[]
   params: Param[]
   taskValues: Map<number, Values>
@@ -28,7 +32,12 @@ export function ImportTaskDialog({ tasks, runs, params, taskValues, onClose, onP
         {Ico.search}
         <input className="ds-inp" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('graph.searchTasks')} autoFocus />
       </div>
-      {list.length === 0 && <div className="ds-empty">{t('graph.noTasks')}</div>}
+      {error && <div className="ds-note ds-warn" role="alert">
+        {t('graph.loadTasksFailed')}
+        <button type="button" className="gr-link" disabled={loading} onClick={onRefresh}>{t('graph.retry')}</button>
+      </div>}
+      {loading && !tasks.length && <div className="ds-cell-key" role="status">{t('common.loading')}</div>}
+      {!loading && !error && list.length === 0 && <div className="ds-empty">{t('graph.noTasks')}</div>}
       <div className="gr-tasklist">
         {list.map((task) => {
           const vals = taskValues.get(task.id) ?? {}
@@ -123,13 +132,14 @@ export function SamplePickerDialog({ taskId, run, onClose, onImport }: {
                       const on = sel.has(it.filename)
                       const done = taken(it.filename)
                       return (
-                        <button key={it.filename} type="button" disabled={done}
+                        <SampleThumbnail key={it.filename} disabled={done}
                           className={`gr-sample gr-sample-lg${on ? ' gr-on' : ''}${done ? ' gr-done' : ''}`}
+                          src={api.sampleImageUrl(it.filename, taskId, 256)} previewSrc={api.sampleImageUrl(it.filename, taskId, 720)}
+                          caption={it.epoch != null ? t('graph.epochN', { n: it.epoch }) : it.step != null ? t('graph.stepN', { n: it.step }) : it.filename}
+                          latest={it.epoch != null && it.epoch === Math.max(...items.map((sample) => sample.epoch ?? -1))}
                           onClick={() => toggle([it.filename], !on)} title={[it.filename, it.prompt].filter(Boolean).join('\n')}>
-                          <img src={api.sampleImageUrl(it.filename, taskId, 256)} alt="" loading="lazy" decoding="async" />
-                          <span className="gr-step">{it.step != null ? t('graph.stepN', { n: it.step }) : it.filename}</span>
                           {done && <span className="gr-sample-done">{t('graph.alreadyAdded')}</span>}
-                        </button>
+                        </SampleThumbnail>
                       )
                     })}
                   </div>

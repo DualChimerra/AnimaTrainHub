@@ -19,7 +19,7 @@ import logging
 import math
 import re
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Optional
 
@@ -121,6 +121,8 @@ class LycorisAdapter:
         lora_reg_dims: Optional[dict[str, int]] = None,
         tlora_min_rank: int = 8,
         tlora_alpha_rank_scale: float = 1.0,
+        train_norm: bool = False,
+        text_encoder_lr: float = 1e-5,
     ):
         # Family knowledge (target/exclude/prefix) is injected by the caller; see families/<fam>/preset.py
         self._preset = preset
@@ -133,6 +135,11 @@ class LycorisAdapter:
         self.module_dropout = module_dropout
         self.weight_decompose = weight_decompose
         self.rs_lora = rs_lora
+        self.train_norm = train_norm
+        self.norms = None
+        self.text_adapter = None
+        self._text_model = None
+        self.text_encoder_lr = text_encoder_lr
         # Layered rank: a dict of regex -> rank, matched against lora_name with re.fullmatch
         self.lora_reg_dims: Optional[dict[str, int]] = lora_reg_dims or None
         self.use_timestep_mask = (algo == "tlora")
@@ -170,7 +177,8 @@ class LycorisAdapter:
         previous = getattr(self.network, "multiplier", 1.0)
         try:
             self.network.set_multiplier(0.0)
-            yield
+            with self.text_adapter.disabled() if self.text_adapter is not None else nullcontext():
+                yield
         finally:
             self.network.set_multiplier(previous)
 
@@ -184,7 +192,11 @@ class LycorisAdapter:
                 "LycorisAdapter requires an explicit preset (family knowledge is no longer "
                 "built in; see runtime/training/families/<fam>/preset.py)"
             )
-        LycorisNetwork.apply_preset(self._preset)
+        preset = dict(self._preset)
+        norm_names = preset.pop("train_norm_names", [])
+        if self.train_norm and not norm_names:
+            raise ValueError("train_norm is not supported by this model family's preset")
+        LycorisNetwork.apply_preset(preset)
 
         # algo name mapping: anima_train uses 'lora'/'tlora', lycoris uses 'locon' (with conv disabled it's equivalent to lora)
         net_module = self.algo
@@ -286,12 +298,27 @@ class LycorisAdapter:
 
         def _train_with_lycoris(mode: bool = True):
             _network.train(mode)
+            if self.text_adapter is not None:
+                self._text_model.train(mode)
             return _orig_train(mode)
 
         model.train = _train_with_lycoris  # type: ignore[method-assign]
         self.network.train(model.training)
         self._orig_train = _orig_train
         self._injected_model = model
+
+        from utils.train_norm import TrainNorm
+
+        self.norms = TrainNorm(
+            model, norm_names, preset.get("lora_prefix", "lora_unet"),
+            lambda: float(self.network.multiplier) if self.network is not None else 0.0,
+            trainable=self.train_norm,
+        )
+        if ref is not None:
+            for target in self.norms.patches.values():
+                target.patch.to(device=ref.device)
+        if self.train_norm:
+            logger.info("Training %d normalization tensors (ComfyUI diff export)", len(self.norms.patches))
 
         n = len(self.network.loras)
         forward_path = "bypass (low-rank)" if extra.get("bypass_mode") else "rebuild (ΔW)"
@@ -307,6 +334,35 @@ class LycorisAdapter:
                     n,
                 )
         return {lora.lora_name: lora for lora in self.network.loras}
+
+    def inject_text(self, model: nn.Module, *, preset: dict, training: bool = False) -> None:
+        """Attach a second adapter to the family's text model, saved in the same file."""
+        if self.text_adapter is not None:
+            raise RuntimeError("Text adapter already injected")
+        text_preset = dict(preset)
+        root_path = text_preset.pop("root_module", "")
+        target = model.get_submodule(root_path) if root_path else model
+        child = LycorisAdapter(
+            preset=text_preset, algo=self.algo, rank=self.rank, alpha=self.alpha,
+            factor=self.factor, dropout=self.dropout, rank_dropout=self.rank_dropout,
+            module_dropout=self.module_dropout, weight_decompose=self.weight_decompose,
+            rs_lora=self.rs_lora,
+        )
+        layers = child.inject(target)
+        if not layers:
+            child.detach()
+            raise ValueError("No supported text encoder adapter layers found")
+        self.text_adapter = child
+        self._text_model = model
+        model._train_text_encoder = training
+        model.train(training)
+        logger.info("Text encoder adapter: %d layers, lr=%s", len(layers), self.text_encoder_lr)
+
+    def set_multiplier(self, scale: float) -> None:
+        if self.network is not None:
+            self.network.set_multiplier(float(scale))
+        if self.text_adapter is not None:
+            self.text_adapter.set_multiplier(scale)
 
     def _install_tlora_masks(self) -> None:
         if self.network is None:
@@ -473,11 +529,20 @@ class LycorisAdapter:
 
         Idempotent across multiple calls (once self.network is None it's a straight no-op).
         """
+        text_ok = True
+        if self.text_adapter is not None:
+            self._text_model._train_text_encoder = False
+            text_ok = self.text_adapter.detach()
+            self.text_adapter = None
+            self._text_model = None
+        if self.norms is not None:
+            self.norms.detach()
+            self.norms = None
         if self.network is None:
             return True
 
         # First try lycoris' built-in restore; the interface name differs across versions, try each
-        ok = True
+        ok = text_ok
         for restore_attr in ("restore", "restore_apply", "remove_apply"):
             fn = getattr(self.network, restore_attr, None)
             if callable(fn):
@@ -510,11 +575,23 @@ class LycorisAdapter:
     # --------------------------------------------------------------- params
     def get_params(self) -> list[nn.Parameter]:
         """All trainable parameters (equivalent to the original LoRAInjector.get_params)"""
+        return self._main_params() + (self.text_adapter.get_params() if self.text_adapter is not None else [])
+
+    def _main_params(self) -> list[nn.Parameter]:
         if self.network is None:
             return []
-        return [p for p in self.network.parameters() if p.requires_grad]
+        return [p for p in self.network.parameters() if p.requires_grad] + (
+            self.norms.parameters() if self.norms is not None else []
+        )
 
     def get_param_groups(self, weight_decay: float) -> list[dict]:
+        groups = self._main_param_groups(weight_decay)
+        if self.text_adapter is not None:
+            groups.extend(dict(group, lr=self.text_encoder_lr)
+                          for group in self.text_adapter.get_param_groups(weight_decay))
+        return groups
+
+    def _main_param_groups(self, weight_decay: float) -> list[dict]:
         """In LoKr mode, excludes w1 from weight_decay (equivalent to the original LoRAInjector).
 
         For other algorithms there's no grouping; all parameters share weight_decay.
@@ -523,7 +600,7 @@ class LycorisAdapter:
             return [{"params": [], "weight_decay": weight_decay}]
 
         if not self.use_lokr or weight_decay == 0:
-            return [{"params": self.get_params(), "weight_decay": weight_decay}]
+            return [{"params": self._main_params(), "weight_decay": weight_decay}]
 
         no_decay = []  # lokr_w1 (full-matrix branch) / lokr_w1_a/b (if decompose_both is enabled)
         decay = []
@@ -536,6 +613,8 @@ class LycorisAdapter:
                     no_decay.append(p)
                 else:
                     decay.append(p)
+        if self.norms is not None:
+            decay.extend(self.norms.parameters())
         return [
             {"params": decay, "weight_decay": weight_decay},
             {"params": no_decay, "weight_decay": 0.0},
@@ -549,17 +628,43 @@ class LycorisAdapter:
         """
         if self.network is None:
             return {}
-        return self.network.state_dict()
+        sd = self.network.state_dict()
+        if self.norms is not None:
+            sd.update(self.norms.state_dict())
+        if self.text_adapter is not None:
+            sd.update(self.text_adapter.state_dict())
+        return sd
 
     def load_state_dict(self, sd: dict[str, torch.Tensor], strict: bool = True) -> Any:
         if self.network is None:
             raise RuntimeError("AnimaLycorisAdapter.inject() must be called first")
-        return self.network.load_state_dict(sd, strict=strict)
+        text_sd = ({key: value for key, value in sd.items() if key.startswith("lora_te_")}
+                   if self._preset.get("lora_prefix") != "lora_te" else {})
+        if text_sd and self.text_adapter is None:
+            raise ValueError("This LoRA contains text encoder weights; enable text encoder training or attach the text encoder for inference")
+        text_result = None
+        if self.text_adapter is not None:
+            text_result = self.text_adapter.load_state_dict(text_sd, strict=strict)
+            sd = {key: value for key, value in sd.items() if key not in text_sd}
+        missing_norms = []
+        if self.norms is not None:
+            sd, missing_norms = self.norms.load(sd)
+        result = self.network.load_state_dict(sd, strict=strict)
+        if strict and missing_norms:
+            raise RuntimeError(f"Missing normalization weights: {missing_norms}")
+        result.missing_keys.extend(missing_norms)
+        if text_result is not None:
+            result.missing_keys.extend(text_result.missing_keys)
+            result.unexpected_keys.extend(text_result.unexpected_keys)
+        return result
 
     # --------------------------------------------------------------- safetensors
     def save(self, path: str | Path) -> None:
         """Save as safetensors (with ss_* metadata, ComfyUI/sd-scripts compatible)"""
         sd = self.state_dict()
+        sd = {key: value for key, value in sd.items() if not key.startswith("train_norm_")}
+        norm_sd = self.norms.export() if self.norms is not None else {}
+        sd.update(norm_sd)
         # Recompute each layer's .alpha from the current (scale, lora_dim) so that the
         # downstream standard formula alpha/rank recovers the training scale. The .alpha
         # written by lycoris init is already scale*lora_dim; but _apply_reg_dims_ changes
@@ -570,6 +675,8 @@ class LycorisAdapter:
         # Rewritten here from each lora's current real (scale, lora_dim): a no-op for
         # non-layered layers, a correction for layered ones.
         _rewrite_per_layer_alpha_(self.network, sd)
+        if self.text_adapter is not None:
+            _rewrite_per_layer_alpha_(self.text_adapter.network, sd)
         # lora_reg_dims must be written: training changed some layers' rank by pattern, and
         # rebuilding the network for inference needs the same dict so lokr_w2_a/b shapes
         # line up with the checkpoint.
@@ -581,6 +688,8 @@ class LycorisAdapter:
             "module_dropout": self.module_dropout,
             "weight_decompose": self.weight_decompose,
             "rs_lora": self.rs_lora,
+            "train_norm": self.train_norm,
+            "train_text_encoder": self.text_adapter is not None,
         }
         if self.lora_reg_dims:
             ss_args["lora_reg_dims"] = self.lora_reg_dims
@@ -594,6 +703,11 @@ class LycorisAdapter:
             "ss_network_module": "lycoris.kohya",
             "ss_network_args": json.dumps(ss_args),
         }
+        if norm_sd:
+            meta["ss_train_norm_exported_count"] = str(len(norm_sd))
+            meta["ss_train_norm_export_format"] = "comfyui_diff"
+        if self.text_adapter is not None:
+            meta["ss_text_encoder_lr"] = str(self.text_encoder_lr)
         save_file(sd, str(path), metadata=meta)
         logger.info(f"LoRA saved to: {path}")
 

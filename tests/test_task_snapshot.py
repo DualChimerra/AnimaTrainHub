@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from studio import db, server
@@ -154,3 +155,42 @@ def test_endpoint_returns_snapshot_data(
     body = resp.json()
     assert body["yaml"] == "lr: 0.001\noptimizer: adamw\n"
     assert body["config"] == {"lr": 0.001, "optimizer": "adamw"}
+
+
+@pytest.mark.parametrize("has_snapshot", [True, False])
+def test_config_download_matches_graph(
+    client: TestClient, isolated, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    has_snapshot: bool,
+) -> None:
+    from studio.infrastructure import paths as _paths
+
+    monkeypatch.setattr(_paths, "STUDIO_DATA", isolated["data"])
+    tid = _create_task(isolated)
+    source = tmp_path / "training.yaml"
+    config = {"learning_rate": 0.0001, "lora_rank": 32, "sample_prompt": "Кот", "resolution": [768, 1024]}
+    source.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    if has_snapshot:
+        task_snapshot.freeze_config(tid, source)
+        source.write_text("learning_rate: 99\n", encoding="utf-8")
+    with db.connection_for() as conn:
+        db.update_task(conn, tid, config_path=str(source))
+    bid = client.post("/api/graph/boards", json={"name": "Downloads", "empty": True}).json()["board"]["id"]
+    rid = client.post(f"/api/graph/boards/{bid}/runs", json={"task_id": tid}).json()["id"]
+
+    download = client.get(f"/api/queue/{tid}/snapshot/config/file")
+    graph = client.get(f"/api/graph/runs/{rid}/config")
+    assert download.status_code == graph.status_code == 200
+    assert download.content == graph.content
+    assert yaml.safe_load(download.text) == config
+    assert download.headers["content-type"].startswith("application/x-yaml")
+    assert download.headers["content-disposition"] == f'attachment; filename="task_{tid}.yaml"'
+
+
+def test_config_download_missing_task_or_config(client: TestClient, isolated) -> None:
+    missing_task = client.get("/api/queue/99999/snapshot/config/file")
+    assert missing_task.status_code == 404
+    assert missing_task.json()["error"]["code"] == "task.not_found"
+    tid = _create_task(isolated)
+    missing_config = client.get(f"/api/queue/{tid}/snapshot/config/file")
+    assert missing_config.status_code == 404
+    assert missing_config.json()["error"]["code"] == "task.snapshot_not_found"

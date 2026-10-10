@@ -4,13 +4,14 @@
  * Data source: GET /api/state?task_id=N fetches a downsampled snapshot + SSE monitor_progress
  * goes through the useMonitorProgress hook for delta merging (PR #37's incremental protocol).
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, type EvalJobInfo, type EvalMetricResult, type EvalMetricState, type LoraCkpt, type MonitorState } from '../api/client'
 import { evalProgressFromResults } from '../lib/useEvalProgress'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { useTranslation } from 'react-i18next'
 import { InfoButton } from './InfoButton'
 import ImagePreviewModal from './ImagePreviewModal'
+import SampleThumbnail from './SampleThumbnail'
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -73,12 +74,13 @@ function SmoothControl({ alpha, setAlpha, min, max, step }: {
   step: number
 }) {
   return (
-    <label className="flex items-center gap-1 cursor-pointer text-xs text-fg-tertiary">
+    <label className="ds-monitor-smooth">
       smooth
       <input
         type="range" min={min} max={max} step={step} value={alpha}
+        className="ds-range"
         onChange={(e) => setAlpha(parseFloat(e.target.value))}
-        style={{ width: 60, accentColor: 'var(--accent)' }}
+        style={{ width: 60, '--p': `${Math.max(0, Math.min(100, (alpha - min) / (max - min) * 100))}%` } as React.CSSProperties}
       />
       <span className="font-mono w-[4ch] text-right">
         {alpha >= 0.999 ? 'off' : alpha.toFixed(alpha < 0.1 ? 3 : 2)}
@@ -92,7 +94,7 @@ function SmoothControl({ alpha, setAlpha, min, max, step }: {
 // Shared by loss / lr / d: pass rawColor/smoothColor for custom coloring, pass yFormat to control
 // the y-axis number format (scientific notation vs. fixed point).
 
-function SeriesChart({ data, rawColor, smoothColor, fillColor, emaAlpha, yFormat, height, minHeight, axes = true, refLine }: {
+function SeriesChart({ data, rawColor, smoothColor, fillColor, emaAlpha, yFormat, height, minHeight, axes = true, refLine, appearance }: {
   data: Array<{ step: number; value: number }>
   rawColor: string
   smoothColor: string
@@ -107,6 +109,7 @@ function SeriesChart({ data, rawColor, smoothColor, fillColor, emaAlpha, yFormat
   axes?: boolean
   /** Optional horizontal reference line (eval: the pure-base-model baseline value); the y range accounts for it. */
   refLine?: number
+  appearance?: 'overview'
 }) {
   // ResizeObserver measures the real pixel size, the viewBox uses that real size -> the SVG renders 1:1,
   // so text/line widths aren't distorted by preserveAspectRatio's non-uniform scaling.
@@ -154,13 +157,14 @@ function SeriesChart({ data, rawColor, smoothColor, fillColor, emaAlpha, yFormat
           yFormat={yFormat}
           axes={axes}
           refLine={refLine}
+          appearance={appearance}
         />
       ) : null}
     </div>
   )
 }
 
-function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFormat, axes, refLine }: {
+function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFormat, axes, refLine, appearance }: {
   data: Array<{ step: number; value: number }>
   W: number
   H: number
@@ -171,7 +175,10 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
   yFormat: (v: number) => string
   axes: boolean
   refLine?: number
+  appearance?: 'overview'
 }) {
+  const gradientId = useId()
+  const overview = appearance === 'overview'
   const pts = downsample(data, 600)
   const raw = pts.map((p) => p.value)
   // alpha = 1 -> skip EMA, pure raw (avoids redundant visual double-lines)
@@ -217,25 +224,32 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
   // text/line widths render at real pixel size, no longer distorted by the parent's aspect ratio.
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: '100%', display: 'block' }}>
+      {overview && fillColor && <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={smoothColor} stopOpacity=".18" />
+          <stop offset="100%" stopColor={smoothColor} stopOpacity="0" />
+        </linearGradient>
+      </defs>}
       {axes && (
         <>
           {/* axis lines */}
-          <line x1={PX} y1={PY} x2={PX} y2={H - PY} stroke="var(--border-subtle)" />
-          <line x1={PX} y1={H - PY} x2={W - RX} y2={H - PY} stroke="var(--border-subtle)" />
+          <line x1={PX} y1={PY} x2={PX} y2={H - PY} stroke={overview ? 'var(--line)' : 'var(--border-subtle)'} />
+          <line x1={PX} y1={H - PY} x2={W - RX} y2={H - PY} stroke={overview ? 'var(--line)' : 'var(--border-subtle)'} />
           {/* grid */}
           {[0.25, 0.5, 0.75].map((t) => (
             <line key={t} x1={PX} y1={PY + t * (H - 2 * PY)} x2={W - RX} y2={PY + t * (H - 2 * PY)}
-              stroke="var(--border-subtle)" strokeDasharray="3 3" />
+              stroke={overview ? 'var(--line)' : 'var(--border-subtle)'} strokeDasharray={overview ? undefined : '3 3'} />
           ))}
         </>
       )}
       {/* area (smooth fill, optional) */}
-      {areaPath && <path d={areaPath} fill={fillColor} opacity="0.5" />}
+      {areaPath && <path d={areaPath} fill={overview ? `url(#${gradientId})` : fillColor} opacity={overview ? 1 : 0.5} />}
       {/* raw -- dimmed when smooth is shown, the main line when there's no smoothing */}
       <path
         d={rawPath}
         stroke={showSmoothLayer ? rawColor : smoothColor}
-        strokeWidth={showSmoothLayer ? 1 : 2}
+        strokeWidth={showSmoothLayer ? 1 : overview ? 1.8 : 2}
+        strokeDasharray={overview && !fillColor ? '4 3' : undefined}
         strokeOpacity={showSmoothLayer ? 0.45 : 1}
         fill="none"
         strokeLinejoin="round"
@@ -243,10 +257,10 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
       />
       {/* smooth */}
       {showSmoothLayer && (
-        <path d={smoothPath} stroke={smoothColor} strokeWidth="2" fill="none" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={smoothPath} stroke={smoothColor} strokeWidth={overview ? 1.8 : 2} strokeDasharray={overview && !fillColor ? '4 3' : undefined} fill="none" strokeLinejoin="round" strokeLinecap="round" />
       )}
       {/* last point */}
-      <circle cx={x(smooth.length - 1)} cy={lastY} r="4" fill={smoothColor} stroke="var(--bg-surface)" strokeWidth="2" />
+      {!overview && <circle cx={x(smooth.length - 1)} cy={lastY} r="4" fill={smoothColor} stroke="var(--bg-surface)" strokeWidth="2" />}
       {/* Baseline reference line (pure base model) + a "base" label: curve above it = better than base, below = worse than base */}
       {hasRef && (
         <>
@@ -264,7 +278,7 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
         <>
           {/* y axis labels -- y offset +4.5 = fontSize/2 + a small baseline tweak to vertically center the text on the tick */}
           {yTicks.map(({ v, y: yt, label }) => (
-            <text key={v} x={PX - 4} y={yt + 4.5} fontSize="13" fill="var(--fg-tertiary)"
+            <text key={v} x={PX - 4} y={yt + 4.5} fontSize={overview ? 10.5 : 13} fill={overview ? 'var(--ink-3)' : 'var(--fg-tertiary)'}
               fontFamily="var(--font-mono)" textAnchor="end">{label}</text>
           ))}
           {/* x axis labels -- the first/last ticks sit right at the SVG edge, a middle anchor would clip half the text;
@@ -272,7 +286,7 @@ function ChartSvg({ data, W, H, rawColor, smoothColor, fillColor, emaAlpha, yFor
           {xTicks.map(({ i: idx, x: xt, label }, i, arr) => {
             const anchor = i === 0 ? 'start' : i === arr.length - 1 ? 'end' : 'middle'
             return (
-              <text key={idx} x={xt} y={H - 3} fontSize="13" fill="var(--fg-tertiary)"
+              <text key={idx} x={xt} y={H - 3} fontSize={overview ? 10.5 : 13} fill={overview ? 'var(--ink-3)' : 'var(--fg-tertiary)'}
                 fontFamily="var(--font-mono)" textAnchor={anchor}>{label}</text>
             )
           })}
@@ -844,6 +858,7 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
   samples: Array<{ path: string; step?: number }>
   taskId: number
 }) {
+  const { t } = useTranslation()
   // Laid out in the array's original order (newest last, matching the training timeline). Multiple prompts at the
   // same step just show up as adjacent items with the same step, repeated indices visually convey "same step, different prompt".
   const list = samples
@@ -896,7 +911,7 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
       {/* Top thumbnail strip -- scrolls horizontally, laid out in the array's original order */}
       <div
         ref={stripRef}
-        className="flex gap-1.5 overflow-x-auto pb-1 shrink-0"
+        className="ds-samples-row shrink-0"
         style={{ scrollbarWidth: 'thin' }}
       >
         {list.map((s, i) => {
@@ -908,38 +923,13 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
             m.epoch != null ? `ep ${m.epoch}` : null,
             m.step != null ? `step ${m.step}` : null,
           ].filter(Boolean).join(', ') || fn
-          // The badge sits on the line below the thumbnail, not overlaid on the 64px thumbnail (would be unreadable).
-          const thumbCaption = [
-            m.epoch != null ? `ep${m.epoch}` : null,
-            m.step != null ? `${m.step}` : null,
-          ].filter(Boolean).join(', ')
+          const thumbCaption = m.epoch != null ? t('queueDetail.epochN', { n: m.epoch })
+            : m.step != null ? t('queue.stepN', { n: m.step }) : fn
           return (
-            <button
-              key={`${fn}-${i}`}
-              onClick={() => setActive(i)}
-              className="shrink-0 flex flex-col items-center gap-0.5 p-0 bg-transparent border-none cursor-pointer"
-              title={thumbTitle}
-            >
-              <div
-                className={[
-                  'rounded-sm overflow-hidden border transition-colors bg-sunken',
-                  isActive ? 'border-accent ring-2 ring-accent-soft' : 'border-subtle hover:border-bold',
-                ].join(' ')}
-                style={{ width: 64, height: 64 }}
-              >
-                <img
-                  src={thumbUrl}
-                  alt=""
-                  loading="lazy"
-                  className="w-full h-full object-cover block"
-                />
-              </div>
-              {thumbCaption && (
-                <span className={`text-[10px] font-mono leading-tight text-center ${isActive ? 'text-fg-primary' : 'text-fg-tertiary'}`}>
-                  {thumbCaption}
-                </span>
-              )}
-            </button>
+            <SampleThumbnail key={`${fn}-${i}`} src={thumbUrl} previewSrc={api.sampleImageUrl(fn, taskId, 720)}
+              caption={thumbCaption} title={thumbTitle} selected={isActive}
+              latest={m.epoch != null ? m.epoch === sampleMarks(list[list.length - 1]).epoch : i === list.length - 1}
+              style={{ width: 84, height: 112, flex: 'none' }} onClick={() => setActive(i)} />
           )
         })}
       </div>
@@ -997,6 +987,7 @@ const SampleViewer = memo(function SampleViewer({ samples, taskId }: {
 // ── Main Component ─────────────────────────────────────────────────────────
 
 export default function MonitorDashboard({ taskId }: { taskId: number }) {
+  const { t } = useTranslation()
   const { state, connected } = useMonitorProgress(taskId)
   const [emaAlpha, setEmaAlpha] = useState(0.02)
   // LR / d don't get EMA by default (the data is already an EMA-derived quantity); the slider only smooths once pulled below 1
@@ -1161,35 +1152,53 @@ export default function MonitorDashboard({ taskId }: { taskId: number }) {
             minHeight 140 = readable floor (a smaller chart is hard to read and would trigger the outer scrollbar instead of shrinking further);
             maxHeight 300 = prevents cards from being stretched to an unbalanced height on 4K/large screens (leaves the remaining space for the left column's samples). */}
         <div className="flex flex-col gap-3.5 min-h-0">
-          <div className="card p-4 flex-1 flex flex-col monitor-chart-card" style={{ minHeight: 140, maxHeight: 300 }}>
-            <div className="flex items-center justify-between mb-2 shrink-0">
-              <span className="text-sm font-semibold">loss</span>
-              <SmoothControl alpha={emaAlpha} setAlpha={setEmaAlpha} min={0.001} max={0.3} step={0.001} />
+          <div className="ds-card ds-monitor-chart-card monitor-chart-card" style={{ minHeight: 140, maxHeight: 300 }}>
+            <div className="ds-card-head ds-pad">
+              <div style={{ flex: 1 }}>
+                <div className="ds-card-title">loss</div>
+                <div className="ds-card-sub">{t('queueDetail.curvesSub', { total: totalSteps.toLocaleString() })}</div>
+              </div>
+              <div className="ds-card-tools">
+                <span className="ds-legend"><s style={{ background: '#6e8f42' }} />loss</span>
+                <SmoothControl alpha={emaAlpha} setAlpha={setEmaAlpha} min={0.001} max={0.3} step={0.001} />
+              </div>
             </div>
-            <SeriesChart
-              data={lossSeries}
-              rawColor="color-mix(in srgb, var(--fg-secondary) 35%, transparent)"
-              smoothColor="var(--accent)"
-              fillColor="var(--accent-soft)"
-              emaAlpha={emaAlpha}
-              yFormat={(v) => v.toFixed(4)}
-              minHeight={60}
-            />
+            <div className="ds-card-body" style={{ paddingTop: 6 }}>
+              <SeriesChart
+                data={lossSeries}
+                rawColor="color-mix(in srgb, var(--fg-secondary) 35%, transparent)"
+                smoothColor="#6e8f42"
+                fillColor="#6e8f42"
+                emaAlpha={emaAlpha}
+                yFormat={(v) => v.toFixed(4)}
+                minHeight={60}
+                appearance="overview"
+              />
+            </div>
           </div>
 
-          <div className="card p-4 flex-1 flex flex-col monitor-chart-card" style={{ minHeight: 140, maxHeight: 300 }}>
-            <div className="flex items-center justify-between mb-2 shrink-0">
-              <span className="text-sm font-semibold">learning rate</span>
-              <SmoothControl alpha={lrAlpha} setAlpha={setLrAlpha} min={0.005} max={1} step={0.005} />
+          <div className="ds-card ds-monitor-chart-card monitor-chart-card" style={{ minHeight: 140, maxHeight: 300 }}>
+            <div className="ds-card-head ds-pad">
+              <div style={{ flex: 1 }}>
+                <div className="ds-card-title">learning rate</div>
+                <div className="ds-card-sub">{t('queueDetail.curvesSub', { total: totalSteps.toLocaleString() })}</div>
+              </div>
+              <div className="ds-card-tools">
+                <span className="ds-legend"><s style={{ background: '#d9c27a' }} />lr</span>
+                <SmoothControl alpha={lrAlpha} setAlpha={setLrAlpha} min={0.005} max={1} step={0.005} />
+              </div>
             </div>
-            <SeriesChart
-              data={lrSeries}
-              rawColor="color-mix(in srgb, var(--warn) 35%, transparent)"
-              smoothColor="var(--warn)"
-              emaAlpha={lrAlpha}
-              yFormat={fmtLr}
-              minHeight={60}
-            />
+            <div className="ds-card-body" style={{ paddingTop: 6 }}>
+              <SeriesChart
+                data={lrSeries}
+                rawColor="color-mix(in srgb, var(--warn) 35%, transparent)"
+                smoothColor="#d9c27a"
+                emaAlpha={lrAlpha}
+                yFormat={fmtLr}
+                minHeight={60}
+                appearance="overview"
+              />
+            </div>
           </div>
 
           {/* d value (Prodigy / D-Adaptation etc.) -- only when the optimizer reports it. */}

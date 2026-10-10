@@ -108,7 +108,7 @@ def _lora_topology(meta: LoRAMeta) -> tuple:
     reg = meta.lora_reg_dims
     reg_key: Any = tuple(sorted(reg.items())) if reg else None
     return (meta.rank, meta.alpha, meta.algo, meta.factor,
-            meta.weight_decompose, meta.rs_lora, reg_key)
+            meta.weight_decompose, meta.rs_lora, reg_key, meta.has_text_encoder)
 
 
 def _load_lora_state_dict(path: str, device: str, dtype: Any) -> dict[str, Any]:
@@ -117,7 +117,7 @@ def _load_lora_state_dict(path: str, device: str, dtype: Any) -> dict[str, Any]:
     sd: dict[str, Any] = {}
     with safe_open(str(path), framework="pt", device="cpu") as f:
         for k in f.keys():
-            sd[k] = f.get_tensor(k).to(device=device, dtype=dtype)
+            sd[k] = f.get_tensor(k)
     return sd
 
 
@@ -146,6 +146,9 @@ def _move_adapter_to_device(adapter: Any, device: str, dtype: Any) -> None:
     if network is None or not hasattr(network, "to"):
         return
     network.to(device=device, dtype=dtype)
+    text_adapter = getattr(adapter, "text_adapter", None)
+    if text_adapter is not None:
+        text_adapter.network.to(device=device, dtype=dtype)
 
 
 class GenerationCanceled(BaseException):
@@ -533,6 +536,7 @@ class ModelCache:
         self.adapters = apply_loras(
             self.model, specs, self.device, self.lora_dtype,
             family_id=self.family_id or "anima",
+            **({"text_stack": self.text_stack} if any(meta.has_text_encoder for meta in current_metas) else {}),
         )
         self.last_lora_specs = specs
         self.last_lora_metas = current_metas
@@ -696,6 +700,9 @@ def _precache_prompts_and_release(
 
 
 def _set_lora_multiplier(adapter: Any, scale: float) -> None:
+    if callable(getattr(adapter, "set_multiplier", None)):
+        adapter.set_multiplier(scale)
+        return
     if adapter.network is None:
         # An fp8 merge handle (network=None): the scale is already baked
         # into the weights, safe to skip setting a per-cell value (fp8's
@@ -993,6 +1000,13 @@ def _run_generate(
     scheduler: str = cfg.get("scheduler", "simple")
     count: int = max(1, int(cfg.get("count", 1)))
     base_seed: int = int(cfg.get("seed", 0))
+    # Edit LoRA source image (cosmos temporal reference); by default the output
+    # takes its aspect ratio at the requested pixel area.
+    ref_kwargs = _reference_kwargs(cfg)
+    if ref_kwargs and cfg.get("reference_match_size", True):
+        from training.families.anima.sampling import reference_size
+
+        width, height = reference_size(ref_kwargs["reference_images"][0], width * height, 16)
     # Distilled inference base model (Krea2 Turbo): studio injects this
     # after detecting it via the catalog variant purpose; the anima family
     # accepts and ignores it
@@ -1076,6 +1090,7 @@ def _run_generate(
                     phase_callback=_phase_cb,
                     seed=seed,
                     vram_policy=str(cfg.get("vram_policy") or "auto"),
+                    **ref_kwargs,
                 )
                 CACHE._move_runtime_to_device()
                 fname = f"gen_{img_idx:04d}_p{pi}_c{ci}_s{seed}.png"
@@ -1100,6 +1115,20 @@ def _run_generate(
 
     if image_done_count == 0 and image_errors:
         raise RuntimeError(f"all generated images failed: {image_errors[-1]}")
+
+
+def _reference_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``reference_images`` for sample_image: the edit input image, then the image prompt."""
+    paths = [str(cfg.get(key) or "") for key in ("reference_image", "reference_image_2")]
+    if not paths[0]:
+        return {}
+    from PIL import Image
+
+    images = []
+    for path in filter(None, paths):
+        with Image.open(path) as image:
+            images.append(image.convert("RGB"))
+    return {"reference_images": images}
 
 
 def _run_xy(
@@ -1129,6 +1158,7 @@ def _run_xy(
     x_values = x_spec["values"]
     y_values = y_spec["values"] if y_spec else [None]
     distilled: bool = bool(cfg.get("distilled", False))
+    ref_kwargs = _reference_kwargs(cfg)
 
     # An fp8 base model's LoRA is merged into the weights (no resident
     # network), so the lora_scale axis can't hot-swap via multiplier --
@@ -1220,6 +1250,7 @@ def _run_xy(
                     dtype=CACHE.dtype,
                     seed=cur_seed,
                     vram_policy=str(cfg.get("vram_policy") or "auto"),
+                    **ref_kwargs,
                 )
                 CACHE._move_runtime_to_device()
                 fname = f"xy_x{xi:02d}_y{yi:02d}_s{cur_seed}.png"

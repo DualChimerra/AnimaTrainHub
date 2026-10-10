@@ -478,6 +478,7 @@ export default function GraphPage() {
       {paramsOpen && <ParamsManager params={params} runs={runs} onClose={() => setParamsOpen(false)} onSave={saveParams} />}
       {importOpen && (
         <ImportTaskDialog tasks={tasks} runs={runs} params={params} taskValues={taskValues} onClose={() => setImportOpen(false)}
+          loading={g.tasksLoading} error={g.tasksError} onRefresh={() => void g.refreshTasks()}
           onPick={(task) => { setImportOpen(false); void adoptTask(task) }} />
       )}
       {samplePick && (() => {

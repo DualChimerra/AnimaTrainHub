@@ -32,9 +32,9 @@ export interface Param {
   archived?: boolean
   /** Shown / compared only while another parameter has one of these options. */
   condition?: { param: string; options: string[] }
-  /** number params: the config key the value is written to / read from.
-   *  `list: true` = the key holds a list (resolution) and the value is its only item. */
-  config?: { key: string; list?: boolean }
+  /** Direct number / text config link. `list` wraps a number in an array;
+   *  `json` preserves structured values in a text parameter. */
+  config?: { key: string; list?: boolean; json?: boolean }
 }
 
 /** list / bool / → option id; number → number; text → string. Absent = not set. */

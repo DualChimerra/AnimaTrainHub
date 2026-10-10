@@ -128,6 +128,13 @@ def run(ctx: TrainingContext) -> None:
     ctx.bucket_mgr = BucketManager(
         base_reso, aspect_ratio_limit=ar_limit, **_bucket_kwargs
     )
+    edit_mode = bool(getattr(args, "edit_mode", False))
+    control_dirs = [
+        str(getattr(args, key, "") or "") for key in ("edit_control_dir", "edit_control_dir_2")
+    ] if edit_mode else []
+    if edit_mode and not control_dirs[0]:
+        raise ValueError("edit_mode needs edit_control_dir (the folder with the input images)")
+    control_dirs = [d for d in control_dirs if d]
     ctx.base_dataset = ImageDataset(
         args.data_dir, base_reso, ctx.bucket_mgr,
         shuffle_caption=args.shuffle_caption,
@@ -138,6 +145,7 @@ def run(ctx: TrainingContext) -> None:
         resolutions=res_list,
         aspect_ratio_limit=ar_limit,
         load_masks=load_masks,
+        control_dir=control_dirs or None,
         **native_kwargs,
     )
     ctx.dataset = ctx.base_dataset
@@ -162,6 +170,10 @@ def run(ctx: TrainingContext) -> None:
     # Regularization dataset (Kohya-style, anti-overfitting)
     reg_data_dir = getattr(args, "reg_data_dir", "") or ""
     ctx.reg_dataset = None
+    if reg_data_dir and edit_mode:
+        # A batch mixes frame counts otherwise (reg images have no source frame).
+        logger.warning("edit training: regularization set ignored (it has no source images): %s", reg_data_dir)
+        reg_data_dir = ""
     if reg_data_dir:
         if not Path(reg_data_dir).exists():
             logger.warning(f"regularization dataset path doesn't exist, skipped: {reg_data_dir}")

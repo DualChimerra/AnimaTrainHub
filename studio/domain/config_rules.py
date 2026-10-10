@@ -38,7 +38,7 @@ _MISSING = object()
 #: Fields where disable_when stays UI-only (soft pins). See the module
 #: docstring for the criterion; before adding a field here, first confirm
 #: that violating it does NOT actually make runtime silently misbehave.
-ADVISORY_DISABLE_FIELDS: frozenset = frozenset({"learning_rate"})
+ADVISORY_DISABLE_FIELDS: frozenset = frozenset({"learning_rate", "text_encoder_lr"})
 
 #: The gate-first set for tolerant fixing: when a violated rule's `when`
 #: expression references a switch in this set, turn that switch off first

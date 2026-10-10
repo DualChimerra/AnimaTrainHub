@@ -138,6 +138,42 @@ class TrainingConfig(BaseModel):
         description="Regularization loss weight relative to the training set; 1.0 = equal weight, lower values weaken the reg set's influence",
         json_schema_extra=_meta("dataset"),
     )
+    # Edit LoRA (image-conditioned): same mechanism as diffusion-pipe's Anima edit
+    # datasets and ComfyUI-Cosmos-Reference -- the clean source latent is appended
+    # as an extra temporal frame, the prediction is cropped back to the target frame.
+    edit_mode: bool = Field(
+        False,
+        description="Edit LoRA training: every image in data_dir is a target paired with a same-named source image in edit_control_dir. "
+                    "The source is appended as a reference frame, so the LoRA learns source + instruction -> target. "
+                    "Use the result with ComfyUI-Cosmos-Reference or Forge Neo's cosmos reference",
+        json_schema_extra=_meta(
+            "dataset", show_when="model_family==anima",
+            disable_when="model_family!=anima",
+            disable_value=False,
+            disable_hint="Edit training is implemented for Anima only",
+        ),
+    )
+    edit_control_dir: Optional[str] = Field(
+        None,
+        description="Source (control) images, with the same names and subfolders as the target images in data_dir",
+        json_schema_extra=_meta("dataset", "path", show_when="edit_mode==true"),
+    )
+    edit_control_dir_2: Optional[str] = Field(
+        None,
+        description="Second input image per example (an image prompt), same names as the targets. "
+                    "Empty = one input image. It becomes the second reference frame",
+        json_schema_extra=_meta("dataset", "path", show_when="edit_mode==true"),
+    )
+    edit_sample_control: Optional[str] = Field(
+        None,
+        description="Input image for training previews (empty = the first example's). Previews take its aspect ratio",
+        json_schema_extra=_meta("sample", "path", show_when="edit_mode==true"),
+    )
+    edit_sample_control_2: Optional[str] = Field(
+        None,
+        description="Second input image for training previews (empty = the first example's, when the dataset has one)",
+        json_schema_extra=_meta("sample", "path", show_when="edit_mode==true"),
+    )
 
     # -------------------------------------------------------------- Caption
     shuffle_caption: bool = Field(
@@ -228,8 +264,8 @@ class TrainingConfig(BaseModel):
             "system",
             advanced=True,
             show_when=cap_gate("navit"),
-            disable_when="leap_enabled==true||infonoise_enabled==true||sra_enabled==true||lora_type==tlora",
-            disable_hint="Mutually exclusive with LeapAlign / InfoNoise / SRA / T-LoRA (navit v1 isn't adapted for them) — disable those first",
+            disable_when="leap_enabled==true||infonoise_enabled==true||sra_enabled==true||lora_type==tlora||edit_mode==true",
+            disable_hint="Mutually exclusive with LeapAlign / InfoNoise / SRA / T-LoRA / Edit training (navit v1 isn't adapted for them) — disable those first",
         ),
     )
     navit_token_budget: int = Field(
@@ -336,6 +372,16 @@ class TrainingConfig(BaseModel):
         description="LoKr matrix-factorization factor: higher = stronger compression, fewer parameters; lower = more parameters. Default of 8 suits most cases",
         json_schema_extra=_meta("lora", show_when="lora_type==lokr"),
     )
+    train_norm: bool = Field(
+        False,
+        description="Also train Anima attention normalization weights. Saves their changes in the LoRA; the exported tensor count is calculated automatically (112 for Anima 2B).",
+        json_schema_extra=_meta(
+            "lora", show_when="model_family==anima",
+            disable_when="model_family!=anima||lora_type==ortho||lora_type==tlora",
+            disable_value=False,
+            disable_hint="Normalization training supports Anima with LoRA, LoKr or LoHa",
+        ),
+    )
     tlora_min_rank: int = Field(
         1, ge=1,
         description="Minimum active rank T-LoRA keeps at high noise levels (matches the ControlGenAI/T-LoRA paper, default 1)",
@@ -433,6 +479,26 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta(
             "training",
             cli_alias="--lr",
+            disable_when="optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree",
+            disable_value=1.0,
+            disable_hint="This optimizer manages its own learning rate",
+        ),
+    )
+    train_text_encoder: bool = Field(
+        False,
+        description="Train an adapter in Anima's Qwen text encoder together with the image model. Uses more memory; both sets of weights are saved in one LoRA.",
+        json_schema_extra=_meta(
+            "training", show_when="model_family==anima",
+            disable_when="model_family!=anima||lora_type==ortho||lora_type==tlora||dop_enabled==true",
+            disable_value=False,
+            disable_hint="Text encoder training supports Anima with LoRA, LoKr or LoHa and DOP disabled",
+        ),
+    )
+    text_encoder_lr: float = Field(
+        1e-5, gt=0.0, allow_inf_nan=False,
+        description="Learning rate for the text encoder adapter. Only used when text encoder training is enabled; saved as ss_text_encoder_lr.",
+        json_schema_extra=_meta(
+            "training", show_when="train_text_encoder==true", cli_alias="--ss-text-encoder-lr",
             disable_when="optimizer_type==prodigy||optimizer_type==prodigy_plus_schedulefree",
             disable_value=1.0,
             disable_hint="This optimizer manages its own learning rate",
@@ -1104,8 +1170,8 @@ class TrainingConfig(BaseModel):
             "loss",
             advanced=True,
             show_when=cap_gate("leap"),
-            disable_when="infonoise_enabled==true||loss_weighting!=none||loss_type==huber||navit_packing==true",
-            disable_hint="Cannot be enabled while a mutually exclusive field (InfoNoise / loss_weighting / loss_type=huber / navit) is non-default (mutually exclusive by schema, forming a symmetric lock with the other side)",
+            disable_when="infonoise_enabled==true||loss_weighting!=none||loss_type==huber||navit_packing==true||edit_mode==true",
+            disable_hint="Cannot be enabled while a mutually exclusive field (InfoNoise / loss_weighting / loss_type=huber / navit / edit training) is non-default (mutually exclusive by schema, forming a symmetric lock with the other side)",
         ),
     )
     leap_ratio: float = Field(
@@ -1156,8 +1222,8 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta(
             "loss",
             advanced=True,
-            disable_when="leap_enabled==true||navit_packing==true",
-            disable_hint="DOP v1 only supports the standard rectified-flow path (Leap has its own objective; "
+            disable_when="leap_enabled==true||navit_packing==true||edit_mode==true",
+            disable_hint="DOP v1 only supports the standard rectified-flow path without an edit reference (Leap has its own objective; "
                          "NaViT's per-image packing would need cross-attention repacking, not adapted in v1)",
         ),
     )
@@ -1181,8 +1247,8 @@ class TrainingConfig(BaseModel):
             # Audit #1 (design doc §10.1): leap steps skip SRA entirely
             # (guarded in loop.py) — at leap_ratio=1.0, SRA has zero effect
             # silently; the navit path is guarded the same way
-            disable_when="leap_enabled==true||navit_packing==true",
-            disable_hint="The Leap / NaViT paths skip SRA computation (per-image t / packed sequences aren't adapted for it) — has no effect even when enabled",
+            disable_when="leap_enabled==true||navit_packing==true||edit_mode==true",
+            disable_hint="The Leap / NaViT / Edit paths skip SRA computation (per-image t / packed sequences aren't adapted for it) — has no effect even when enabled",
         ),
     )
     sra_block: int = Field(
@@ -1294,6 +1360,15 @@ class TrainingConfig(BaseModel):
                 f"(per-family capabilities are listed in studio/domain/common.py FAMILY_CAPABILITIES)"
             )
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _import_text_encoder_lr_metadata(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "ss_text_encoder_lr" in data:
+            data = dict(data)
+            value = data.pop("ss_text_encoder_lr")
+            data.setdefault("text_encoder_lr", value)
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -1649,7 +1724,7 @@ class TrainingConfig(BaseModel):
         False,
         description="After training finishes, generate images from a held-out validation set and compute CLIP-T / CLIP-I / DINO-I metrics. "
                     "The validation set is split off from the training set and never trains — it lives in validation/, alongside train/.",
-        json_schema_extra=_meta("eval_validation"),
+        json_schema_extra=_meta("eval_validation", disable_when="edit_mode==true"),
     )
     eval_validation_split_ratio: float = Field(
         0.0, ge=0.0, le=1.0,

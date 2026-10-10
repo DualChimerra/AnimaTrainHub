@@ -22,6 +22,22 @@ from training.state import load_training_state
 logger = logging.getLogger(__name__)
 
 
+def _edit_preview_examples(ctx: TrainingContext, limit: int = 3) -> list[tuple[str, list]]:
+    """(text, input image paths) of the first ``limit`` distinct edit examples."""
+    base = getattr(ctx, "base_dataset", None)
+    picks: list[tuple[str, list]] = []
+    seen: set[str] = set()
+    for sample in getattr(base, "samples", None) or []:
+        key = str(sample["image"])
+        if key in seen or not sample.get("controls"):
+            continue
+        seen.add(key)
+        picks.append((base.caption_for_sample(sample), list(sample["controls"])))
+        if len(picks) >= limit:
+            break
+    return picks
+
+
 def run(ctx: TrainingContext) -> None:
     """
     - init_progress + optional Rich Live (incl. loss curve panel)
@@ -116,6 +132,14 @@ def run(ctx: TrainingContext) -> None:
     if not ctx.sample_prompts and args.sample_prompt:
         ctx.sample_prompts = [args.sample_prompt]
     ctx.sample_prompt_idx = 0
+    if bool(getattr(args, "edit_mode", False)) and not ctx.sample_prompts:
+        # Edit training without preview prompts: redo the first examples (their
+        # input images + their text), so previews show whether "after" comes out.
+        picks = _edit_preview_examples(ctx, limit=3)
+        ctx.sample_prompts = [caption for caption, _ in picks]
+        ctx.sample_refs = [refs for _, refs in picks]
+        if picks:
+            ctx.emit(f"Edit previews: {len(picks)} training example(s) redone at each sample")
 
     # Step 0 initial sampling (baseline result, tests all prompts)
     # Only runs for a fresh training run (global_step == 0); skipped on resume
@@ -123,6 +147,7 @@ def run(ctx: TrainingContext) -> None:
     if ctx.global_step == 0 and sampling_enabled:
         ctx.emit("Sampling (step 0, baseline)...")
         for i, prompt in enumerate(ctx.sample_prompts[:3]):  # test at most 3
+            ctx.current_sample_refs = ctx.sample_refs[i] if ctx.sample_refs else None
             sample_path = ctx.sample_dir / f"step_0_baseline_{i}.png"
             run_sample(
                 ctx,

@@ -79,6 +79,12 @@ def task_config(task_id: int, config_path: Optional[str] = None) -> Optional[dic
     return parsed
 
 
+def task_config_yaml(task_id: int, config_path: Optional[str] = None) -> Optional[str]:
+    """The same full training config download for the queue and Graph."""
+    cfg = task_config(task_id, config_path)
+    return yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False) if cfg else None
+
+
 def list_train_tasks(keys: list[str]) -> list[dict[str, Any]]:
     """Every training task, newest first, with only the config keys asked for."""
     with db.connection_for() as conn:

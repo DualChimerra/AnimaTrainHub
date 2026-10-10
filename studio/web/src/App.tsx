@@ -8,6 +8,7 @@ import {
   useNavigate,
 } from 'react-router-dom'
 import SettingsDrawer from './components/SettingsDrawer'
+import SampleHoverHost from './components/SampleHoverHost'
 import Sidebar from './components/Sidebar'
 import { useIsMobile } from './lib/useMediaQuery'
 import Topbar from './components/Topbar'
@@ -21,12 +22,14 @@ import {
 } from './context/ProjectContext'
 import { useSettingsDrawer } from './lib/SettingsDrawer'
 import ProjectsPage from './pages/Projects'
+import EditLoraPage from './pages/EditLora'
 import QueuePage from './pages/Queue'
 import QueueDetailPage from './pages/QueueDetail'
 import ProjectLayout from './pages/project/Layout'
 import ProjectOverview from './pages/project/Overview'
 import CurationPage from './pages/project/steps/Curation'
 import DownloadPage from './pages/project/steps/Download'
+import PairsPage from './pages/project/steps/Pairs'
 import PreprocessHub from './pages/project/steps/PreprocessHub'
 import RegularizationPage from './pages/project/steps/Regularization'
 import TagEditPage from './pages/project/steps/TagEdit'
@@ -36,6 +39,7 @@ import MonitorPage from './pages/tools/Monitor'
 import PresetsPage from './pages/tools/Presets'
 import SoupPage from './pages/tools/Soup'
 import GraphPage from './pages/tools/Graph'
+import WikiPage from './pages/wiki/WikiPage' // Wiki (experimental)
 
 /**
  * Compatibility redirect for the old `/tools/settings?section=…` path: jumps to
@@ -64,7 +68,7 @@ function SettingsRedirect() {
  * paths: keeps the URL alive and forwards to the matching tab on the new detail
  * page (the tab is expressed as a hash), so bookmarks / saved links don't break.
  */
-function QueueDetailRedirect({ tab }: { tab: 'log' | 'monitor' }) {
+function QueueDetailRedirect({ tab }: { tab: 'log' | 'overview' }) {
   const path = window.location.pathname
   const id = path.match(/\/queue\/(\d+)/)?.[1]
   if (!id) return <Navigate to="/queue" replace />
@@ -159,10 +163,11 @@ const router = createBrowserRouter(
       element: <RootLayout />,
       children: [
         { path: '/', element: <ProjectsPage /> },
+        { path: '/edit', element: <EditLoraPage /> },
         { path: '/queue', element: <QueuePage /> },
         { path: '/queue/:id', element: <QueueDetailPage /> },
         { path: '/queue/:id/log', element: <QueueDetailRedirect tab="log" /> },
-        { path: '/queue/:id/monitor', element: <QueueDetailRedirect tab="monitor" /> },
+        { path: '/queue/:id/monitor', element: <QueueDetailRedirect tab="overview" /> },
         {
           path: '/projects/:pid',
           element: <ProjectLayout />,
@@ -173,6 +178,7 @@ const router = createBrowserRouter(
               path: 'v/:vid',
               children: [
                 { path: 'curate', element: <CurationPage /> },
+                { path: 'pairs', element: <PairsPage /> },
                 // ADR 0010: preprocess moved from project scope to version scope
                 { path: 'preprocess', element: <PreprocessHub /> },
                 { path: 'edit', element: <TagEditPage /> },
@@ -188,6 +194,7 @@ const router = createBrowserRouter(
         { path: '/tools/generate', element: <GeneratePage /> },
         { path: '/tools/soup', element: <SoupPage /> },
         { path: '/tools/graph', element: <GraphPage /> },
+        { path: '/wiki', element: <WikiPage /> }, // Wiki (experimental)
         { path: '/configs', element: <Navigate to="/tools/presets" replace /> },
         { path: '/monitor', element: <Navigate to="/tools/monitor" replace /> },
         { path: '/datasets', element: <Navigate to="/" replace /> },
@@ -212,6 +219,7 @@ export default function App() {
         <SelectedProjectContext.Provider value={selectedProject}>
           <SelectedProjectSetterContext.Provider value={setSelectedProject}>
             <RouterProvider router={router} />
+            <SampleHoverHost />
           </SelectedProjectSetterContext.Provider>
         </SelectedProjectContext.Provider>
       </ProjectSetterContext.Provider>

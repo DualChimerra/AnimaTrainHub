@@ -42,6 +42,14 @@ class ProjectError(DomainError):
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 
 
+#: 'lora' = the regular pipeline; 'edit' = edit LoRA trained on source/target pairs.
+PROJECT_KINDS = ("lora", "edit")
+
+
+def is_edit_project(p: dict[str, Any]) -> bool:
+    return str(p.get("kind") or "lora") == "edit"
+
+
 def slugify(title: str) -> str:
     """Converts to lowercase ASCII + hyphens. Empty string / all-non-ASCII -> 'project'."""
     s = _NON_SLUG.sub("-", title.lower()).strip("-")
@@ -94,8 +102,14 @@ def create_project(
     title: str,
     slug: Optional[str] = None,
     note: Optional[str] = None,
+    kind: str = "lora",
 ) -> dict[str, Any]:
     title = (title or "").strip()
+    if kind not in PROJECT_KINDS:
+        raise ProjectError(
+            f"Unknown project kind: {kind}", code="project.kind_invalid",
+            details={"kind": kind},
+        )
     if not title:
         raise ProjectError(
             "Project title is required", code="project.title_required",
@@ -108,9 +122,9 @@ def create_project(
     final_slug = _unique_slug(conn, base_slug)
     now = time.time()
     cur = conn.execute(
-        "INSERT INTO projects(slug, title, created_at, updated_at, note) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (final_slug, title, now, now, note),
+        "INSERT INTO projects(slug, title, created_at, updated_at, note, kind) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (final_slug, title, now, now, note, kind),
     )
     conn.commit()
     pid = int(cur.lastrowid)

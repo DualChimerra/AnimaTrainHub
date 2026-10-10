@@ -102,7 +102,7 @@ def test_set_lora_multiplier_updates_network_and_per_lora(gen_module) -> None:
     fake_network = MagicMock()
     fake_network.multiplier = 1.0
     fake_network.loras = [fake_lora_a, fake_lora_b]
-    fake_adapter = MagicMock()
+    fake_adapter = MagicMock(spec=["network"])
     fake_adapter.network = fake_network
 
     gen_module._set_lora_multiplier(fake_adapter, 0.5)
@@ -114,7 +114,7 @@ def test_set_lora_multiplier_updates_network_and_per_lora(gen_module) -> None:
 
 def test_set_lora_multiplier_handles_no_network(gen_module) -> None:
     """No error when adapter.network=None."""
-    fake_adapter = MagicMock()
+    fake_adapter = MagicMock(spec=["network"])
     fake_adapter.network = None
     gen_module._set_lora_multiplier(fake_adapter, 0.5)  # noop
 
@@ -153,7 +153,7 @@ def test_apply_axis_lora_scale_mutates_adapter(gen_module) -> None:
     fake_network = MagicMock()
     fake_network.multiplier = 1.0
     fake_network.loras = []
-    fake_adapter = MagicMock()
+    fake_adapter = MagicMock(spec=["network"])
     fake_adapter.network = fake_network
 
     spec = MagicMock()
@@ -254,7 +254,7 @@ def test_run_xy_matrix_lora_scale_resets_each_cell(gen_module, tmp_path, monkeyp
     fake_network = MagicMock()
     fake_network.loras = []
     fake_network.multiplier = 1.0
-    fake_adapter = MagicMock()
+    fake_adapter = MagicMock(spec=["network"])
     fake_adapter.network = fake_network
 
     multiplier_history: list[float] = []

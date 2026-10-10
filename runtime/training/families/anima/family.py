@@ -100,6 +100,20 @@ class AnimaFamily:
         )
 
     # -- Text conditioning ------------------------------------------------
+    def text_adapter_target(self, text):
+        from training.families.anima.preset import ANIMA_TEXT_PRESET
+
+        return text[0], ANIMA_TEXT_PRESET
+
+    def prepare_text_training(self, text, *, checkpoint: bool = False):
+        model = text[0]
+        if checkpoint:
+            enable = getattr(model, "gradient_checkpointing_enable", None)
+            if callable(enable):
+                enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            elif hasattr(model, "model"):
+                model.model.gradient_checkpointing = True
+
     def prepare_text_cache(self, captions: Iterable[str],
                            extra_prompts: Iterable[str], *, cache_entries=(),
                            cache_root=None, text=None, device=None,
@@ -133,7 +147,8 @@ class AnimaFamily:
 
         qwen_model, qwen_tok, t5_tok = text
         max_len = self.spec.text.max_seq_len
-        with torch.no_grad():
+        train_text = torch.is_grad_enabled() and bool(getattr(qwen_model, "_train_text_encoder", False))
+        with torch.set_grad_enabled(train_text):
             if comfy_encoding:
                 qwen_texts = [str(c) for c in captions]
                 qwen_emb, _ = encode_qwen(qwen_model, qwen_tok, qwen_texts, device)

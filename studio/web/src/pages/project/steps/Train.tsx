@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import {
   api,
+  isEditProject,
   type ApiError,
   type BucketDistribution,
   type ConfigData,
@@ -53,6 +54,24 @@ const GLOBAL_MODEL_FIELDS = [
 const DATASET_PATH_FIELDS = ['data_dir', 'reg_data_dir', 'output_dir', 'output_name']
 // Continue-training fields live on their own tab (Finishing).
 const RESUME_FIELDS = ['resume_lora', 'resume_state']
+/** Edit projects hide what the project sets, what edit training keeps fixed, and
+ *  what doesn't work with it (plus every field whose disable_when names edit_mode).
+ *  Starting values: EDIT_CONFIG_DEFAULTS in studio/services/version_config.py. */
+const EDIT_HIDDEN_FIELDS = [
+  // Anima only; the input folders come from the examples
+  'model_family', 'text_encoder_cache', 'edit_mode', 'edit_control_dir', 'edit_control_dir_2',
+  'reg_caption', 'reg_weight',
+  // buckets follow the resolution on their own
+  'aspect_ratio_limit', 'bucket_min_reso', 'bucket_max_reso', 'bucket_step',
+  // edit texts are kept as written
+  'shuffle_caption', 'keep_tokens', 'tag_dropout', 'prefer_json', 'caption_comfy_encoding',
+  'masked_loss',
+  // previews redo the first examples with their own text and pictures
+  'sample_prompt', 'sample_prompts', 'sample_negative_prompt', 'sample_width', 'sample_height',
+  'edit_sample_control', 'edit_sample_control_2',
+  // a held-out split would separate results from their inputs
+  'eval_validation_split_ratio', 'eval_validation_split_seed',
+]
 
 interface Ctx {
   project: ProjectDetail
@@ -237,7 +256,13 @@ export default function TrainPage() {
   const disabledFields = autoSyncPaths ? GLOBAL_MODEL_FIELDS : []
   // Temporarily hidden: while the paths are synced from Settings they are
   // read-only noise on this page (values still round-trip through the config).
-  const hiddenFields = [...(autoSyncPaths ? GLOBAL_MODEL_FIELDS : []), ...DATASET_PATH_FIELDS]
+  const isEdit = isEditProject(project)
+  const editHidden = useMemo(() => (isEdit
+    ? [...EDIT_HIDDEN_FIELDS, ...Object.entries(schema?.schema.properties ?? {})
+        .filter(([, p]) => String(p.disable_when ?? '').includes('edit_mode==true'))
+        .map(([n]) => n)]
+    : []), [isEdit, schema])
+  const hiddenFields = [...(autoSyncPaths ? GLOBAL_MODEL_FIELDS : []), ...DATASET_PATH_FIELDS, ...editHidden]
   const disabledHints = useMemo(() => {
     const h: Record<string, React.ReactNode> = {}
     if (autoSyncPaths) {
@@ -422,6 +447,21 @@ export default function TrainPage() {
       // parent's activeVersion, so the main form fields sync to show the new preset's content.
       await Promise.all([refreshConfig(), reload()])
       toast(t('train.resetSuccess', { name }), 'success')
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Edit projects: back to the recommended settings (no presets involved). */
+  const onResetEdit = async () => {
+    if (configResp?.has_config && !(await confirm(t('train.editResetConfirm'), { tone: 'warn', okText: t('train.editResetOk') }))) return
+    setBusy(true)
+    try {
+      await api.resetEditConfig(project.id, vid)
+      await Promise.all([refreshConfig(), reload()])
+      toast(t('train.editResetDone'), 'success')
     } catch (e) {
       toast(String(e), 'error')
     } finally {
@@ -672,7 +712,7 @@ export default function TrainPage() {
     <StepShell
       idx={6}
       mobilePageScroll
-      eyebrow={t('steps.eyebrowStep', { n: 5, label: activeVersion.label })}
+      eyebrow={t('steps.eyebrowStep', { n: isEditProject(project) ? 2 : 5, label: activeVersion.label })}
       title={t('steps.train.title')}
       subtitle={subtitle}
       actions={
@@ -718,13 +758,23 @@ export default function TrainPage() {
           <span className="ds-sect-icon" style={{ width: 34, height: 34, borderRadius: 10, background: 'var(--green-soft)', color: 'var(--green-text)' }}>{TrainIcon.sliders}</span>
           <span style={{ flex: 1, minWidth: 0 }}>
             <span className="ds-cfg-name">
-              {configResp?.has_config
-                ? t('train.scopedConfigLabel', { title: project.title, label: activeVersion.label })
-                : t('train.notConfiguredLabel')}
+              {isEdit
+                ? t('train.editCfgName')
+                : configResp?.has_config
+                  ? t('train.scopedConfigLabel', { title: project.title, label: activeVersion.label })
+                  : t('train.notConfiguredLabel')}
             </span>
-            <span className="ds-cfg-sub">{configResp?.has_config ? t('train.cfgSub') : t('train.noConfigHint')}</span>
+            <span className="ds-cfg-sub">
+              {isEdit ? t('train.editCfgSub') : configResp?.has_config ? t('train.cfgSub') : t('train.noConfigHint')}
+            </span>
           </span>
           {saveBadge}
+          {isEdit && (
+            <button type="button" className="ds-ctl" style={{ height: 34 }} onClick={() => void onResetEdit()} disabled={busy}>
+              {TrainIcon.reset}{t('train.editReset')}
+            </button>
+          )}
+          {!isEdit && <>
           <button
             ref={pickerAnchorRef}
             type="button"
@@ -745,6 +795,7 @@ export default function TrainPage() {
               { label: t('train.newPresetAction'), onSelect: () => void startCreatePreset(), disabled: busy },
             ]}
           />
+          </>}
           {pickerOpen && (
             <div
               ref={pickerPopRef}
@@ -831,8 +882,8 @@ export default function TrainPage() {
           </div>
         )}
 
-        <TrainKpis stats={stats} />
-        <StepBudget stats={stats} activeVersion={activeVersion} />
+        <TrainKpis stats={stats} edit={isEdit} />
+        {!isEdit && <StepBudget stats={stats} activeVersion={activeVersion} />}
 
         {configResp === null || !schema ? (
           <ConfigSkeleton label={t('train.loadingConfig')} />
@@ -840,7 +891,9 @@ export default function TrainPage() {
           <div className="ds-empty">
             <span style={{ fontWeight: 500, color: 'var(--ink-2)' }}>{t('train.notConfiguredLabel')}</span>
             <span style={{ fontSize: 11.5 }}>{t('train.noConfigHint')}</span>
-            <button type="button" className="ds-btn-primary" style={{ marginTop: 6 }} onClick={() => setPickerOpen(true)} disabled={busy}>{t('train.pickConfig')}</button>
+            {isEdit
+              ? <button type="button" className="ds-btn-primary" style={{ marginTop: 6 }} onClick={() => void onResetEdit()} disabled={busy}>{t('train.editSetRecommended')}</button>
+              : <button type="button" className="ds-btn-primary" style={{ marginTop: 6 }} onClick={() => setPickerOpen(true)} disabled={busy}>{t('train.pickConfig')}</button>}
           </div>
         ) : (
           <>
@@ -856,7 +909,7 @@ export default function TrainPage() {
                       className={`ds-tab${tab === x.id ? ' ds-is-active' : ''}`}
                       onClick={() => setTab(x.id)}
                     >
-                      {t(`train.tab_${x.id}`)}
+                      {t(isEdit && x.id === 'model' ? 'train.tab_model_edit' : `train.tab_${x.id}`)}
                     </button>
                   ))}
                 </div>
@@ -898,7 +951,7 @@ export default function TrainPage() {
                   </div>
                 </div>
                 {previewTab === 'stats' ? (
-                  <PreviewData stats={stats} projectId={project.id} vid={vid} maskedLoss={config.masked_loss === true} />
+                  <PreviewData stats={stats} projectId={project.id} vid={vid} maskedLoss={config.masked_loss === true} edit={isEdit} />
                 ) : (
                   <div style={{ padding: '2px 17px 16px', display: 'flex', flexDirection: 'column', minHeight: 420, maxHeight: 'calc(100vh - 220px)' }}>
                     <ConfigYamlPanel config={config} fileLabel="config.yaml" className="flex-1 flex flex-col min-h-0" />
@@ -1223,7 +1276,7 @@ function useSystemLoad(): SystemStatsData | null {
   return stats
 }
 
-function TrainKpis({ stats }: { stats: TrainStats }) {
+function TrainKpis({ stats, edit = false }: { stats: TrainStats; edit?: boolean }) {
   const { t, i18n } = useTranslation()
   const sys = useSystemLoad()
   const lang = i18n.language
@@ -1239,11 +1292,11 @@ function TrainKpis({ stats }: { stats: TrainStats }) {
         <div className="ds-kpi-top">
           <span className="ds-kpi-icon">{TrainIcon.samples}</span>
           <span style={{ marginLeft: 'auto' }} className="ds-kpi-meta">
-            {regEffective > 0 ? t('train.kpiSamplesSplit', { train: formatNum(trainEffective, lang), reg: formatNum(regEffective, lang) }) : t('train.kpiSamplesTrainOnly')}
+            {edit ? '' : regEffective > 0 ? t('train.kpiSamplesSplit', { train: formatNum(trainEffective, lang), reg: formatNum(regEffective, lang) }) : t('train.kpiSamplesTrainOnly')}
           </span>
         </div>
         <div className="ds-kpi-val" style={{ marginTop: 16 }}>{shownEffective > 0 ? formatNum(shownEffective, lang) : '—'}</div>
-        <div className="ds-kpi-label">{t('train.kpiSamples')}</div>
+        <div className="ds-kpi-label">{t(edit ? 'train.kpiExamplesEdit' : 'train.kpiSamples')}</div>
         <span className="ds-meter" style={{ marginTop: 9 }}><i style={{ width: `${trainShare}%` }} /></span>
       </div>
 
@@ -1377,7 +1430,7 @@ function StepBudget({ stats, activeVersion }: { stats: TrainStats; activeVersion
 }
 
 /** Right card, "Data" view: epoch composition, step counts, memory, buckets. */
-function PreviewData({ stats, projectId, vid, maskedLoss }: { stats: TrainStats; projectId: number; vid: number; maskedLoss: boolean }) {
+function PreviewData({ stats, projectId, vid, maskedLoss, edit = false }: { stats: TrainStats; projectId: number; vid: number; maskedLoss: boolean; edit?: boolean }) {
   const { t, i18n } = useTranslation()
   const lang = i18n.language
   const segments = [
@@ -1399,7 +1452,7 @@ function PreviewData({ stats, projectId, vid, maskedLoss }: { stats: TrainStats;
 
   return (
     <div style={{ padding: '2px 17px 16px', display: 'flex', flexDirection: 'column', gap: 15 }}>
-      <div>
+      {!edit && <div>
         <div className="ds-cap" style={{ marginBottom: 10 }}>{t('train.compositionTitle', { n: formatNum(stats.shownEffective, lang) })}</div>
         {segments.length === 0 ? (
           <div className="ds-muted" style={{ fontSize: 12 }}>{t('train.noTrainImages')}</div>
@@ -1429,9 +1482,9 @@ function PreviewData({ stats, projectId, vid, maskedLoss }: { stats: TrainStats;
             </div>
           </div>
         )}
-      </div>
+      </div>}
 
-      <div style={{ borderTop: '1px solid var(--line)', paddingTop: 13, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+      <div style={edit ? { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 } : { borderTop: '1px solid var(--line)', paddingTop: 13, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div><div className="ds-cap">{t('train.statStepsEpoch')}</div><div className="ds-stat-v">{stats.stepsPerEpoch != null ? formatNum(stats.stepsPerEpoch, lang) : '—'}</div></div>
         <div><div className="ds-cap">{stats.maxStepsTruncates ? t('train.maxStepsLabel', { n: stats.maxSteps }) : t('train.totalSteps')}</div><div className="ds-stat-v" style={{ color: 'var(--green-text)' }}>{stats.finalTotal != null ? formatNum(stats.finalTotal, lang) : '—'}</div></div>
         <div><div className="ds-cap">{t('train.statEpochs')}</div><div className="ds-stat-v">{stats.epochs || '—'}</div></div>
@@ -1459,9 +1512,9 @@ function PreviewData({ stats, projectId, vid, maskedLoss }: { stats: TrainStats;
         </div>
       )}
 
-      <BucketBars dist={stats.dist} />
+      {!edit && <BucketBars dist={stats.dist} />}
 
-      <MaskedLossHint projectId={projectId} vid={vid} maskedLoss={maskedLoss} />
+      {!edit && <MaskedLossHint projectId={projectId} vid={vid} maskedLoss={maskedLoss} />}
     </div>
   )
 }

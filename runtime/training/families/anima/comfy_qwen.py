@@ -247,7 +247,12 @@ class Qwen3_06BBackbone(nn.Module):
             mask = causal_mask if mask is None else mask + causal_mask
 
         for layer in self.layers:
-            x = layer(x, attention_mask=mask, freqs_cis=freqs_cis)
+            if self.training and getattr(self, "gradient_checkpointing", False) and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+
+                x = checkpoint(layer, x, attention_mask=mask, freqs_cis=freqs_cis, use_reentrant=False)
+            else:
+                x = layer(x, attention_mask=mask, freqs_cis=freqs_cis)
         return self.norm(x)
 
 

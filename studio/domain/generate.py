@@ -78,6 +78,13 @@ class GenerateConfig(BaseModel):
     scheduler: Literal["simple", "sgm_uniform"] = Field("simple")
     count: int = Field(1, ge=1, le=32, description="Number of images to generate per prompt")
     seed: int = Field(0, description="Random seed (0 = random)")
+    # Edit LoRA: source image (absolute path, written by the server) appended as a
+    # cosmos temporal reference frame; Anima only.
+    reference_image: str = Field("", description="Edit source image path (empty = plain text-to-image)")
+    reference_image_2: str = Field("", description="Second edit input (image prompt) path, for two-input edit LoRAs")
+    reference_match_size: bool = Field(
+        True, description="Use the source image's aspect ratio at the requested pixel area",
+    )
 
     # LoRA (multiple LoRAs are injected independently; multiplier=scale controls each one's contribution weight)
     lora_configs: list[LoraEntry] = Field(
@@ -129,6 +136,14 @@ class GenerateConfig(BaseModel):
     def _validate_sampler_family(self) -> "GenerateConfig":
         validate_sampling_for_family(
             self.model_family, self.sampler_name, self.scheduler)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_reference(self) -> "GenerateConfig":
+        if (self.reference_image or self.reference_image_2) and self.model_family != "anima":
+            raise ValueError("A reference (edit source) image is supported for Anima only")
+        if self.reference_image_2 and not self.reference_image:
+            raise ValueError("The second edit input needs the first one")
         return self
 
     @model_validator(mode="after")
