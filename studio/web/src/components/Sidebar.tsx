@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { api, PHASE_ORDER, PHASE_SKIPPABLE, type ProjectSummary, type Task, type Version, type VersionPhase, type VersionStatus } from '../api/client'
+import { api, isEditProject, PHASE_ORDER, PHASE_SKIPPABLE, type ProjectSummary, type Task, type Version, type VersionPhase, type VersionStatus } from '../api/client'
 import { splitOptional } from '../lib/labels'
 import { useEventStream, type StudioEvent } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { useSettingsDrawer } from '../lib/SettingsDrawer'
 import { useToast } from './Toast'
 import Popover, { MenuItems } from './ds/Popover'
+import '../pages/wiki/strings' // Wiki (experimental): registers nav.wiki
 
 /** ADR-0007 SS11.2 / SS11.5: cursor-derived step completion state.
  *
@@ -17,6 +18,7 @@ import Popover, { MenuItems } from './ds/Popover'
  * (ADR 0010 moved preprocess from project scope to version scope, after curate)
  */
 const STEP_KEY_TO_PHASE: Record<string, VersionPhase> = {
+  pairs:      'curating', // edit projects: the pairs step sits in the curating slot
   curate:     'curating',
   preprocess: 'preprocessing',
   edit:       'editing',
@@ -66,6 +68,8 @@ const I = {
   cog:      svg(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   image:    svg(<><rect x="3" y="3" width="16" height="16" rx="2" /><circle cx="9" cy="9" r="1.6" fill="currentColor" /><path d="m21 15-5-5L5 21" /></>),
   soup:     svg(<><path d="M3 11h18a9 9 0 0 1-9 9 9 9 0 0 1-9-9Z" /><path d="M2 21h20" /><path d="M8 7c0-1.2 1-1.8 1-3" /><path d="M12 6c0-1.2 1-1.8 1-3" /><path d="M16 7c0-1.2 1-1.8 1-3" /></>),
+  wiki:     svg(<><path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z" /><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z" /></>), // Wiki (experimental)
+  edit:     svg(<><rect x="3" y="5" width="7" height="14" rx="1.5" /><rect x="14" y="5" width="7" height="14" rx="1.5" /><path d="M10.5 12h3m-1.2-1.6 1.6 1.6-1.6 1.6" /></>),
   graph:    svg(<><circle cx="6" cy="6" r="2.2" /><circle cx="18" cy="8" r="2.2" /><circle cx="9" cy="18" r="2.2" /><circle cx="19" cy="18" r="1.8" /><path d="M8.1 6.5 15.8 7.6M6.9 8.1l1.4 7.7M16.7 9.9l-6.3 6.3M11.2 18h6" /></>),
   overview: svg(<><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></>),
   download: svg(<path d="M12 4v12m0 0-4-4m4 4 4-4M4 20h16" />),
@@ -206,7 +210,8 @@ function ProjectSwitcher({ project }: { project: ProjectCtxValue['project'] }) {
     api.listProjects().then(setItems).catch(() => setItems([]))
   }
 
-  const others = (items ?? []).filter((p) => p.archived_at == null)
+  const edit = isEditProject(project)
+  const others = (items ?? []).filter((p) => p.archived_at == null && isEditProject(p) === edit)
   return (
     <>
       <button
@@ -250,10 +255,10 @@ function ProjectSwitcher({ project }: { project: ProjectCtxValue['project'] }) {
                   onSelect: () => { if (p.id !== project.id) navigate(`/projects/${p.id}`) },
                 })),
                 {
-                  label: t('sidebar.allProjects'),
-                  icon: I.folder,
+                  label: edit ? t('sidebar.allEditProjects') : t('sidebar.allProjects'),
+                  icon: edit ? I.edit : I.folder,
                   divider: true,
-                  onSelect: () => navigate('/'),
+                  onSelect: () => navigate(edit ? '/edit' : '/'),
                 },
               ]}
             />
@@ -303,14 +308,22 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
   const project = view?.project ?? null
   const stats = version?.stats
 
-  // Version-level phase numbering 1-5 (each version has its own pipeline).
-  const STEPS = [
+  const isEdit = isEditProject(project)
+  const trainTail = trainPct != null ? `${trainPct}%` : undefined
+  // Version-level phase numbering (each version has its own pipeline). Edit
+  // projects have two steps: pairs (the curating slot) and train.
+  const STEPS = isEdit ? [
+    { key: 'pairs',      labelKey: 'nav.pairs',      idx: '1', tail: stats?.train_image_count },
+    { key: 'train',      labelKey: 'nav.train',      idx: '2', tail: trainTail },
+  ] : [
     { key: 'curate',     labelKey: 'nav.curate',     idx: '1', tail: stats?.train_image_count },
     { key: 'preprocess', labelKey: 'nav.preprocess', idx: '2', tail: project?.preprocess_image_count },
     { key: 'edit',       labelKey: 'nav.tagEdit',    idx: '3', tail: stats?.tagged_image_count },
     { key: 'reg',        labelKey: 'nav.reg',        idx: '4', tail: stats?.reg_image_count },
-    { key: 'train',      labelKey: 'nav.train',      idx: '5', tail: trainPct != null ? `${trainPct}%` : undefined },
+    { key: 'train',      labelKey: 'nav.train',      idx: '5', tail: trainTail },
   ]
+  // Cursor arithmetic runs over the visible steps, so "next step" is the next row shown.
+  const stepOrder: VersionPhase[] = isEdit ? STEPS.map((s) => STEP_KEY_TO_PHASE[s.key]) : PHASE_ORDER
 
   const overviewActive = inRoute && currentStep === null
   // ADR-0007 SS11.5 cursor-derived: phases before the cursor = done.
@@ -320,6 +333,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
     ? 'curating'
     : version.status === 'preparing' ? version.phase : 'ready'
   const cursorIdx = PHASE_ORDER.indexOf(cursorPhase)
+  const visibleCursor = Math.max(0, stepOrder.indexOf(cursorPhase))
 
   const isStepDone = (key: string): boolean => {
     const phase = STEP_KEY_TO_PHASE[key]
@@ -359,14 +373,16 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
       {!collapsed && project && <ProjectSwitcher project={project} />}
 
       <NavItem to={`/projects/${pid}`} label={t('nav.overview')} icon={I.overview} active={overviewActive} collapsed={collapsed} />
-      <NavItem
-        to={`/projects/${pid}/download`}
-        label={t('nav.download')}
-        icon={I.download}
-        active={currentStep === 'download'}
-        collapsed={collapsed}
-        tail={project?.download_image_count}
-      />
+      {!isEdit && (
+        <NavItem
+          to={`/projects/${pid}/download`}
+          label={t('nav.download')}
+          icon={I.download}
+          active={currentStep === 'download'}
+          collapsed={collapsed}
+          tail={project?.download_image_count}
+        />
+      )}
 
       <VersionBar collapsed={collapsed} />
 
@@ -376,15 +392,15 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
           const { short, optional } = splitOptional(full)
           const isActive = s.key === currentStep
           const phase = STEP_KEY_TO_PHASE[s.key]
-          const phaseIdx = phase != null ? PHASE_ORDER.indexOf(phase) : -1
+          const phaseIdx = phase != null ? stepOrder.indexOf(phase) : -1
           // ADR-0007 SS11.5-A: the sidebar is the primary channel for advancing the cursor.
           // - phase_idx < cursorIdx  → done
           // - phase_idx == cursorIdx -> the current cursor
           // - phase_idx == cursorIdx+1 -> "next step", a button, click triggers advance/skip
           // - phase_idx > cursorIdx+1 → disabled
-          const isCursorCurrent = phaseIdx === cursorIdx
-          const isNextStep = phaseIdx === cursorIdx + 1
-          const isFuturePhase = phaseIdx > cursorIdx + 1
+          const isCursorCurrent = phaseIdx === visibleCursor
+          const isNextStep = phaseIdx === visibleCursor + 1
+          const isFuturePhase = phaseIdx > visibleCursor + 1
           const isDone = isStepDone(s.key)
 
           const href = (isFuturePhase || isNextStep || !activeVid)
@@ -469,6 +485,8 @@ export default function Sidebar({
 
   // Show the project section whenever there's a project (live in-route or a sticky snapshot)
   const inProject = view !== null && pid !== null
+  // Edit LoRA projects render their stepper under the Edit section instead of Projects.
+  const inEditProject = inProject && isEditProject(view?.project)
 
   // Training progress for the active version's step tail.
   const runningForVersion = queue.running && activeVid && String(queue.running.version_id ?? '') === activeVid
@@ -498,6 +516,18 @@ export default function Sidebar({
     if (path === '/') return location.pathname === '/'
     return location.pathname.startsWith(path)
   }
+
+  const stepper = pid ? (
+    <ProjectStepperNav
+      pid={pid}
+      activeVid={activeVid}
+      currentStep={currentStep}
+      version={view?.activeVersion ?? null}
+      collapsed={collapsed}
+      inRoute={inRoute}
+      trainPct={trainPct}
+    />
+  ) : null
 
   // On a phone the rail is always full width and slides in over the content.
   const asideClass = mobile
@@ -553,17 +583,11 @@ export default function Sidebar({
       <nav className={`ds-sidenav overflow-y-auto overflow-x-hidden ${collapsed ? '!px-2' : ''}`} style={{ scrollbarGutter: 'auto' }}>
         <NavItem to="/" label={t('nav.projects')} icon={I.folder} active={!inProject && location.pathname === '/'} collapsed={collapsed} />
 
-        {inProject && pid && (
-          <ProjectStepperNav
-            pid={pid}
-            activeVid={activeVid}
-            currentStep={currentStep}
-            version={view?.activeVersion ?? null}
-            collapsed={collapsed}
-            inRoute={inRoute}
-            trainPct={trainPct}
-          />
-        )}
+        {inProject && !inEditProject && pid && stepper}
+
+        <NavItem to="/edit" label={t('nav.editLora')} icon={I.edit} active={!inProject && isMain('/edit')} collapsed={collapsed} />
+
+        {inEditProject && pid && stepper}
 
         <NavItem to="/queue" label={t('nav.queue')} icon={I.queue} active={isMain('/queue')} collapsed={collapsed} tail={queue.pending > 0 ? queue.pending : undefined} />
         <NavItem to="/tools/generate" label={t('nav.generate')} icon={I.image} active={isMain('/tools/generate')} collapsed={collapsed} />
@@ -572,6 +596,7 @@ export default function Sidebar({
       </nav>
 
       <div className={`ds-sidefoot ${collapsed ? '!px-2' : ''}`}>
+        <NavItem to="/wiki" label={t('nav.wiki')} icon={I.wiki} active={isMain('/wiki')} collapsed={collapsed} /> {/* Wiki (experimental) */}
         <NavItem to="/tools/presets" label={t('nav.presets')} icon={I.preset} active={isMain('/tools/presets')} collapsed={collapsed} />
         <NavItem to="/tools/monitor" label={t('nav.monitor')} icon={I.monitor} active={isMain('/tools/monitor')} collapsed={collapsed} />
         <NavButton

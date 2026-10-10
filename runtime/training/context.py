@@ -118,6 +118,10 @@ class TrainingContext:
     live: Any = None
     sample_prompts: list = field(default_factory=list)
     sample_prompt_idx: int = 0
+    # Edit training: input image paths aligned with sample_prompts (one list per
+    # prompt), and the ones for the preview being drawn right now.
+    sample_refs: list = field(default_factory=list)
+    current_sample_refs: Optional[list] = None
     interrupted: bool = False
 
     # --- loop.py epoch backup (ADR 0006 Addendum 1, option Delta) ---
@@ -188,7 +192,10 @@ class TrainingContext:
         sample_prompts is empty)."""
         if not self.sample_prompts:
             return "1girl, masterpiece"
-        prompt = self.sample_prompts[self.sample_prompt_idx % len(self.sample_prompts)]
+        index = self.sample_prompt_idx % len(self.sample_prompts)
+        prompt = self.sample_prompts[index]
+        if self.sample_refs:
+            self.current_sample_refs = self.sample_refs[index]
         self.sample_prompt_idx += 1
         return prompt
 

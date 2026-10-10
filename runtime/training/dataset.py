@@ -278,8 +278,18 @@ class ImageDataset(Dataset):
                  resolutions=None, aspect_ratio_limit=2.0,
                  native_resolution=False, native_token_budget=0,
                  native_over_budget="downscale", native_max_side_tokens=0,
-                 native_align=_ANIMA_LATENT.align_px, load_masks=False):
+                 native_align=_ANIMA_LATENT.align_px, load_masks=False,
+                 control_dir=None):
         self.data_dir = Path(data_dir)
+        # Edit training: each target image has a same-named input image in every
+        # control dir (mirrored subfolders, or flat) -- one dir per reference frame,
+        # in frame order (diffusion-pipe control_paths / ai-toolkit control_path list).
+        # Inputs go through the target's exact resize/crop/flip so latents stay aligned.
+        if isinstance(control_dir, (list, tuple)):
+            self.control_dirs = [Path(d) for d in control_dir if d]
+        else:
+            self.control_dirs = [Path(control_dir)] if control_dir else []
+        self.control_dir = self.control_dirs[0] if self.control_dirs else None
         self.resolution = resolution
         # Multi-resolution: bucket_mgr is the manager for the base resolution
         # (backward compatible -- the single-ARB path still uses it, including
@@ -358,6 +368,8 @@ class ImageDataset(Dataset):
                 logger.warning(f"failed to load caption_utils: {e}, falling back to TXT mode")
 
         self.samples = self._scan()
+        if self.control_dir is not None:
+            self._attach_controls()
         json_count = sum(1 for s in self.samples if s.get("json_path"))
         txt_count = len(self.samples) - json_count
         unique_count = len(set(id(s) for s in self.samples))
@@ -584,6 +596,53 @@ class ImageDataset(Dataset):
 
         return samples
 
+    def control_path_for(self, img_path, index: int = 0) -> Path | None:
+        """Input image ``index`` for a target: <control dir>/<same subfolders>/<stem>.*, then <control dir>/<stem>.*."""
+        if index >= len(self.control_dirs):
+            return None
+        root = self.control_dirs[index]
+        img_path = Path(img_path)
+        try:
+            rel_parent = img_path.parent.relative_to(self.data_dir)
+        except ValueError:
+            rel_parent = Path()
+        for folder in dict.fromkeys((root / rel_parent, root)):
+            for ext in sorted(self.EXTS):
+                for candidate in (folder / f"{img_path.stem}{ext}", folder / f"{img_path.stem}{ext.upper()}"):
+                    if candidate.is_file():
+                        return candidate
+        return None
+
+    def _attach_controls(self) -> None:
+        for root in self.control_dirs:
+            if not root.is_dir():
+                raise ValueError(f"edit control folder does not exist: {root}")
+        resolved: dict[str, list[Path]] = {}
+        for index, root in enumerate(self.control_dirs):
+            missing = []
+            for sample in self.samples:
+                key = str(sample["image"])
+                found = resolved.setdefault(key, [])
+                if len(found) > index:
+                    continue
+                control = self.control_path_for(sample["image"], index)
+                if control is None:
+                    missing.append(Path(key).name)
+                    continue
+                found.append(control)
+            if missing:
+                shown = ", ".join(sorted(set(missing))[:5])
+                raise ValueError(
+                    f"Edit training: {len(set(missing))} target image(s) have no input image in "
+                    f"{root} (same file name required): {shown}"
+                )
+        for sample in self.samples:
+            controls = resolved[str(sample["image"])]
+            sample["controls"] = controls
+            sample["control"] = controls[0]
+        logger.info("edit dataset: %d examples, %d input image(s) each (%s)",
+                    len(resolved), len(self.control_dirs), ", ".join(map(str, self.control_dirs)))
+
     def _preflight_json_captions(self):
         """Pre-check all JSON captions before training starts; reject training
         outright on any build failure (fail-fast).
@@ -649,6 +708,10 @@ class ImageDataset(Dataset):
         """
         if not caption:
             return ""
+        if self.control_dirs and not self.shuffle_caption and self.tag_dropout <= 0:
+            # Edit instructions are sentences: keep them verbatim (the tag path
+            # below would turn "Make it red." into "Make, it, red.").
+            return caption
         if "," in caption:
             tags = [t.strip() for t in caption.split(",")]
         else:
@@ -816,6 +879,22 @@ class ImageDataset(Dataset):
         if flip:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
 
+        control_tensor = None
+        if sample.get("controls"):
+            frames = []
+            for path in sample["controls"]:
+                control = Image.open(path).convert("RGB")
+                c_scale = max(tw / control.width, th / control.height)
+                cw, ch = max(tw, round(control.width * c_scale)), max(th, round(control.height * c_scale))
+                control = control.resize((cw, ch), Image.LANCZOS)
+                c_left, c_top = (cw - tw) // 2, (ch - th) // 2
+                control = control.crop((c_left, c_top, c_left + tw, c_top + th))
+                if flip:
+                    control = control.transpose(Image.FLIP_LEFT_RIGHT)
+                c_arr = np.array(control).astype(np.float32) / 127.5 - 1.0
+                frames.append(torch.from_numpy(c_arr).permute(2, 0, 1))
+            control_tensor = torch.stack(frames)  # [N, 3, H, W], N = reference frames
+
         mask_tensor = None
         if mask_img is not None:
             m = mask_img.resize((nw, nh), Image.NEAREST)
@@ -833,7 +912,10 @@ class ImageDataset(Dataset):
         arr = np.array(img).astype(np.float32) / 127.5 - 1.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1)
 
-        return {"pixel_values": tensor, "caption": caption, "mask": mask_tensor}
+        item = {"pixel_values": tensor, "caption": caption, "mask": mask_tensor}
+        if control_tensor is not None:
+            item["control_pixel_values"] = control_tensor
+        return item
 
 
 class RepeatDataset(Dataset):
@@ -1055,6 +1137,10 @@ class CachedLatentDataset(Dataset):
         self.load_masks = bool(
             getattr(self.base_image_dataset, "load_masks", False)
         )
+        # Edit training: input latents live in the same npz (control_latent[_K] /
+        # ..._flipped, K = 2.. for extra inputs), keeping one cache entry per example.
+        self.n_controls = len(getattr(self.base_image_dataset, "control_dirs", None) or [])
+        self.has_control = self.n_controls > 0
         # cache_encode_tiled (opt-in): oversized images switch to tiled
         # encode + latent feather-blend; peak VRAM proportional to a single
         # tile's pixel count. Images within the threshold keep the old path
@@ -1186,6 +1272,17 @@ class CachedLatentDataset(Dataset):
                     if "bucket_w" not in data.files or "bucket_h" not in data.files:
                         return False
                     if (int(data["bucket_w"]), int(data["bucket_h"])) != expected_bucket:
+                        return False
+                for index in range(getattr(self, "n_controls", 0)):
+                    control_path = self.base_image_dataset.control_path_for(img_path, index)
+                    key = _control_key(index)
+                    if control_path is None or key not in data.files:
+                        return False
+                    if npz_path.stat().st_mtime < control_path.stat().st_mtime:
+                        return False
+                    if getattr(self, "flip_augment", False) and f"{key}_flipped" not in data.files:
+                        return False
+                    if tuple(data[key].shape) != tuple(data["latent"].shape):
                         return False
                 if mask_path is not None:
                     has_mask_file = mask_path.is_file()
@@ -1343,6 +1440,13 @@ class CachedLatentDataset(Dataset):
                     npz_kwargs = {"latent": lat.numpy()}
                     if lat_f is not None:
                         npz_kwargs["latent_flipped"] = lat_f.numpy()
+                    if entry.get("control") is not None:
+                        for index in range(entry["control"].shape[0]):
+                            key = _control_key(index)
+                            npz_kwargs[key] = _encode_tiled_single(entry["control"][index]).numpy()
+                            if want_flip:
+                                npz_kwargs[f"{key}_flipped"] = _encode_tiled_single(
+                                    entry["control_flipped"][index]).numpy()
                     npz_kwargs.update(_mask_kwargs(entry))
                     _entry_sample = self.samples[entry["index"]]
                     npz_path = self._get_npz_path(
@@ -1365,11 +1469,20 @@ class CachedLatentDataset(Dataset):
                 latents_flipped = _encode_pixels([entry["pixels_flipped"] for entry in batch])
             else:
                 latents_flipped = [None] * len(batch)
+            n_controls = batch[0]["control"].shape[0] if batch[0].get("control") is not None else 0
+            controls = [_encode_pixels([entry["control"][k] for entry in batch]) for k in range(n_controls)]
+            controls_flipped = [
+                _encode_pixels([entry["control_flipped"][k] for entry in batch]) for k in range(n_controls)
+            ] if want_flip else []
 
             for n, entry in enumerate(batch):
                 npz_kwargs = {"latent": latents[n].numpy()}
                 if want_flip:
                     npz_kwargs["latent_flipped"] = latents_flipped[n].numpy()
+                for k in range(n_controls):
+                    npz_kwargs[_control_key(k)] = controls[k][n].numpy()
+                    if want_flip:
+                        npz_kwargs[f"{_control_key(k)}_flipped"] = controls_flipped[k][n].numpy()
                 npz_kwargs.update(_mask_kwargs(entry))
 
                 _entry_sample = self.samples[entry["index"]]
@@ -1400,10 +1513,12 @@ class CachedLatentDataset(Dataset):
 
             pixels_flipped = None
             mask_flipped = None
+            control_flipped = None
             if want_flip:
                 item_f = base_img.get_with_flip(i, flip=True)
                 pixels_flipped = item_f["pixel_values"]
                 mask_flipped = item_f.get("mask")
+                control_flipped = item_f.get("control_pixel_values")
 
             bucket_key = (bucket_h, bucket_w)
             pending.setdefault(bucket_key, []).append({
@@ -1412,6 +1527,8 @@ class CachedLatentDataset(Dataset):
                 "pixels_flipped": pixels_flipped,
                 "mask": item.get("mask"),
                 "mask_flipped": mask_flipped,
+                "control": item.get("control_pixel_values"),
+                "control_flipped": control_flipped,
                 "bucket_w": bucket_w,
                 "bucket_h": bucket_h,
             })
@@ -1475,13 +1592,26 @@ class CachedLatentDataset(Dataset):
             if caption is None:
                 caption = ""
 
-        return {
+        item = {
             "latent": latent,
             "caption": caption,
             "mask": mask,
             # navit collate needs the per-image image path
             "image": str(sample["image"]),
         }
+        if getattr(self, "has_control", False):
+            # Same flip choice as the target, or the pair would be mirrored against each other.
+            # Frames are joined on the temporal axis: [C, N, h, w].
+            suffix = "_flipped" if use_flip else ""
+            item["control_latent"] = torch.cat([
+                torch.from_numpy(data[_control_key(k) + suffix]) for k in range(self.n_controls)
+            ], dim=1)
+        return item
+
+
+def _control_key(index: int) -> str:
+    """npz key of edit input ``index`` (0 keeps the original single-input name)."""
+    return "control_latent" if index == 0 else f"control_latent_{index + 1}"
 
 
 def _stack_masks(batch, h, w):
@@ -1504,6 +1634,8 @@ def collate_fn(batch):
     pixels = torch.stack([b["pixel_values"] for b in batch])
     captions = [b["caption"] for b in batch]
     result = {"pixel_values": pixels, "captions": captions}
+    if "control_pixel_values" in batch[0]:
+        result["control_pixel_values"] = torch.stack([b["control_pixel_values"] for b in batch])
     masks = _stack_masks(
         batch,
         pixels.shape[-2] // _ANIMA_LATENT.spatial_stride,
@@ -1522,6 +1654,8 @@ def collate_fn_cached(batch):
     latents = torch.stack([b["latent"] for b in batch])
     captions = [b["caption"] for b in batch]
     result = {"latents": latents, "captions": captions}
+    if "control_latent" in batch[0]:
+        result["control_latents"] = torch.stack([b["control_latent"] for b in batch])
     masks = _stack_masks(batch, latents.shape[-2], latents.shape[-1])
     if masks is not None:
         result["masks"] = masks

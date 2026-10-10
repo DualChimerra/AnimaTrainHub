@@ -399,6 +399,18 @@ def run(ctx: TrainingContext) -> None:
                     latents = ctx.vae.model.encode(pixels_5d, ctx.vae.scale)
                 bs = latents.shape[0]
 
+            # Edit training: clean source latents, appended as an extra frame below.
+            control_latents = None
+            if "control_latents" in batch:
+                control_latents = batch["control_latents"].to(ctx.device, dtype=ctx.dtype)
+            elif "control_pixel_values" in batch:
+                # [B, N, 3, H, W] -> encode each input -> [B, C, N, h, w]
+                control_pixels = batch["control_pixel_values"].to(ctx.device, dtype=ctx.dtype)
+                n_in = control_pixels.shape[1]
+                with torch.no_grad():
+                    encoded = ctx.vae.model.encode(control_pixels.flatten(0, 1).unsqueeze(2), ctx.vae.scale)
+                control_latents = encoded.squeeze(2).unflatten(0, (-1, n_in)).permute(0, 2, 1, 3, 4)
+
             # ARB bucket switch -> return the previous bucket's allocator
             # cache (doesn't apply to the navit path, see the class docstring)
             if navit_latents is None:
@@ -629,10 +641,17 @@ def run(ctx: TrainingContext) -> None:
                     # -- Standard rectified flow path (zero behavior change) --
                     noisy = (1 - t_exp) * latents + t_exp * noise
                     target = noise - latents
+                    # Edit training (diffusion-pipe Anima edit / Cosmos reference): the
+                    # source sits in the next temporal slot with the same timestep; the
+                    # 3D RoPE tells the frames apart. Only the target frame is supervised.
+                    model_in = noisy if control_latents is None else torch.cat(
+                        [noisy, control_latents.to(noisy.dtype)], dim=2)
                     pred = ctx.family.forward_train(
-                        ctx.model, noisy, t, cross,
+                        ctx.model, model_in, t, cross,
                         use_checkpoint=args.grad_checkpoint,
                     )
+                    if control_latents is not None:
+                        pred = pred[:, :, :noisy.shape[2]]
                     # masked loss (B2): the dataset has already downsampled
                     # the mask to latent resolution, (B,h,w) -> (B,1,1,h,w)
                     # broadcasting to the loss's (B,C,T,H,W).

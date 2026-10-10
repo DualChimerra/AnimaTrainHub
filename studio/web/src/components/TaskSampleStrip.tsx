@@ -21,8 +21,8 @@ import { useTranslation } from 'react-i18next'
 import { api, type TaskSample } from '../api/client'
 import { useEventStream } from '../lib/useEventStream'
 import ImagePreviewModal from './ImagePreviewModal'
+import SampleThumbnail from './SampleThumbnail'
 
-const THUMB_PX = 84
 /** Requested thumbnail width: 2x the display size, so it doesn't look blurry on HiDPI screens. */
 const THUMB_REQ = 192
 
@@ -30,13 +30,6 @@ function marks(s: TaskSample): string {
   const parts: string[] = []
   if (s.epoch != null) parts.push(`ep ${s.epoch.toLocaleString()}`)
   if (s.step != null) parts.push(`step ${s.step.toLocaleString()}`)
-  return parts.join(', ')
-}
-
-function shortMarks(s: TaskSample): string {
-  const parts: string[] = []
-  if (s.epoch != null) parts.push(`ep ${s.epoch}`)
-  if (s.step != null) parts.push(s.step.toLocaleString())
   return parts.join(', ')
 }
 
@@ -66,7 +59,7 @@ function TaskSampleStrip({ taskId, live = false }: {
       setItems([...r.items].sort((x, y) =>
         (x.epoch ?? -1) - (y.epoch ?? -1) || (x.step ?? -1) - (y.step ?? -1)))
     } catch {
-      setItems([])  // Network error / task gone -> treat as no images, don't pop an error on the queue page
+      setItems((previous) => previous ?? []) // Keep existing thumbnails through a temporary network failure.
     }
   }, [taskId])
 
@@ -134,7 +127,7 @@ function TaskSampleStrip({ taskId, live = false }: {
       {items === null ? (
         <div className="ds-samples-row">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="ds-sample-thumb ds-skel" style={{ width: THUMB_PX, height: THUMB_PX }} />
+            <div key={i} className="ds-thumb ds-skel" />
           ))}
         </div>
       ) : (
@@ -149,25 +142,14 @@ function TaskSampleStrip({ taskId, live = false }: {
           data-testid={`sample-strip-${taskId}`}
         >
           {items.map((s, i) => {
-            const caption = shortMarks(s)
+            const caption = s.epoch != null ? t('queueDetail.epochN', { n: s.epoch })
+              : s.step != null ? t('queue.stepN', { n: s.step }) : s.filename
             return (
-              <button
-                key={s.filename}
-                type="button"
-                onClick={() => setZoomIdx(i)}
+              <SampleThumbnail key={s.filename} src={api.sampleImageUrl(s.filename, taskId, THUMB_REQ)}
+                previewSrc={api.sampleImageUrl(s.filename, taskId, 720)} caption={caption}
                 title={marks(s) || s.filename}
-                className="ds-sample"
-              >
-                <span className="ds-sample-thumb" style={{ width: THUMB_PX, height: THUMB_PX }}>
-                  <img
-                    src={api.sampleImageUrl(s.filename, taskId, THUMB_REQ)}
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </span>
-                {caption && <span className="ds-sample-cap">{caption}</span>}
-              </button>
+                latest={s.epoch != null ? s.epoch === items[items.length - 1]?.epoch : i === items.length - 1}
+                onClick={() => setZoomIdx(i)} />
             )
           })}
         </div>

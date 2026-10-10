@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
@@ -11,6 +11,7 @@ import {
 } from '../api/client'
 import { PauseProgressModal } from '../components/PauseProgressModal'
 import ImagePreviewModal from '../components/ImagePreviewModal'
+import SampleThumbnail from '../components/SampleThumbnail'
 import { useDialog } from '../components/Dialog'
 import { useToast } from '../components/Toast'
 import KebabMenu, { type KebabItem } from '../components/ds/KebabMenu'
@@ -19,15 +20,15 @@ import YamlLines from '../components/ds/YamlLines'
 import { useEventStream } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { useQueueFormat, type QueueFormat } from '../lib/queueFormat'
-import MonitorDashboard, {
+import {
   CORE_METRIC_KEYS, EVAL_METRIC_KEYS, checkpointLabel, checkpointSortValue, metricState, metricValue,
   type EvalMetricKey,
 } from '../components/MonitorDashboard'
 import { fmtParamValue, jobJumpPath, paramLabel } from './queue/jobUtils'
 import HelpTip from '../components/ds/HelpTip'
 
-type Tab = 'overview' | 'log' | 'monitor' | 'eval' | 'outputs' | 'snapshot'
-const ALL_TABS: readonly Tab[] = ['overview', 'log', 'monitor', 'eval', 'outputs', 'snapshot']
+type Tab = 'overview' | 'log' | 'eval' | 'outputs' | 'snapshot'
+const ALL_TABS: readonly Tab[] = ['overview', 'log', 'eval', 'outputs', 'snapshot']
 const TERMINAL = new Set(['done', 'failed', 'canceled'])
 
 /** Tabs a task type has: training gets everything; test renders, reg AI and
@@ -266,7 +267,6 @@ export default function QueueDetailPage() {
   const tabLabel: Record<Tab, string> = {
     overview: t('queueDetail.tabOverview'),
     log: t('queueDetail.tabLogs'),
-    monitor: t('queueDetail.tabMonitor'),
     eval: t('queueDetail.tabEval'),
     outputs: t('queueDetail.tabOutputs'),
     snapshot: t('queueDetail.tabSnapshot'),
@@ -326,8 +326,6 @@ export default function QueueDetailPage() {
           />
         ) : activeTab === 'log' ? (
           <LogTab taskId={taskId} />
-        ) : activeTab === 'monitor' ? (
-          <div className="ds-card" style={{ overflow: 'hidden' }}><MonitorDashboard taskId={taskId} /></div>
         ) : activeTab === 'eval' ? (
           <EvalTab task={task} />
         ) : activeTab === 'outputs' ? (
@@ -371,16 +369,38 @@ function TaskStats({ task, monitor, fmt }: { task: Task; monitor: MonitorState |
   const { t } = useTranslation()
   const now = Date.now() / 1000
   const s = task.status
+  const isTrain = (task.task_type ?? 'train') === 'train'
+  const [snapshotScheduler, setSnapshotScheduler] = useState<{ taskId: number; name: string } | null>(null)
+  useEffect(() => {
+    if (!isTrain) return
+    let cancelled = false
+    api.getTaskSnapshotConfig(task.id).then(({ config }) => {
+      if (!cancelled) setSnapshotScheduler({ taskId: task.id, name: String(config.lr_scheduler ?? 'none') })
+    }).catch(() => { if (!cancelled) setSnapshotScheduler(null) })
+    return () => { cancelled = true }
+  }, [task.id, task.started_at, isTrain])
+  const scheduler = monitor?.config?.lr_scheduler
+    ?? (snapshotScheduler?.taskId === task.id ? snapshotScheduler.name : null)
+  const schedulerLabel = scheduler != null ? `scheduler: ${scheduler}` : undefined
+  const lrHistory = monitor?.lr_history ?? []
+  const optimizerHistory = monitor?.optimizer_metrics_history ?? []
+  const lastLr = lrHistory[lrHistory.length - 1]
+  const optimizer = optimizerHistory[optimizerHistory.length - 1]
+  const lr = optimizer && (!lastLr || optimizer.step > lastLr.step)
+    ? optimizer.actual_lr ?? optimizer.lr ?? lastLr?.lr
+    : lastLr?.lr ?? optimizer?.actual_lr ?? optimizer?.lr
+  const lrValue = lr != null && Number.isFinite(lr) ? lr.toExponential(2) : '—'
 
   if (!monitor || !monitor.total_steps) {
     // Non-training tasks (and training ones without a monitor file yet).
     const statusLabel = t(`status.${s === 'pending' ? 'queued' : s}`)
     return (
-      <div className="ds-statgrid" style={{ gridTemplateColumns: 'repeat(4,minmax(0,1fr))' }}>
+      <div className="ds-statgrid ds-qd-stats" style={{ gridTemplateColumns: `repeat(${isTrain ? 5 : 4},minmax(0,1fr))` }}>
         <StatCell label={t('common.status')} value={statusLabel} accent={s === 'running'} />
         <StatCell label={t('queueDetail.duration')} value={task.started_at ? fmt.dur((task.finished_at ?? now) - task.started_at) : '—'} />
         <StatCell label={t('queueDetail.startedAt')} value={task.started_at ? fmt.clock(task.started_at) : '—'} sub={t('queueDetail.queuedAtShort', { time: fmt.clock(task.created_at) })} />
         <StatCell label={t('queueDetail.exitCode')} value={task.exit_code ?? '—'} sub={task.pid ? `PID ${task.pid}` : undefined} />
+        {isTrain && <StatCell label="LR" value={lrValue} sub={schedulerLabel} />}
       </div>
     )
   }
@@ -401,7 +421,7 @@ function TaskStats({ task, monitor, fmt }: { task: Task; monitor: MonitorState |
   const remaining = s === 'running' && monitor.speed && monitor.speed > 0 ? (total - step) / monitor.speed : null
 
   return (
-    <div className="ds-statgrid" style={{ gridTemplateColumns: 'repeat(4,minmax(0,1fr))' }}>
+    <div className="ds-statgrid ds-qd-stats" style={{ gridTemplateColumns: 'repeat(5,minmax(0,1fr))' }}>
       <StatCell label={t('queueDetail.progress')} value={step.toLocaleString()} unit={`/ ${total.toLocaleString()}`}>
         <span className="ds-meter" style={{ marginTop: 9 }}><i style={{ width: `${pct}%` }} /></span>
       </StatCell>
@@ -417,6 +437,7 @@ function TaskStats({ task, monitor, fmt }: { task: Task; monitor: MonitorState |
         accent
         sub={delta != null ? t('queueDetail.lossDelta', { pct: `${delta > 0 ? '+' : '−'}${Math.abs(delta).toFixed(0)}` }) : undefined}
       />
+      <StatCell label="LR" value={lrValue} sub={schedulerLabel} />
       {remaining != null ? (
         <StatCell label={t('queueDetail.remaining')} value={`~${fmt.dur(remaining)}`} sub={t('queueDetail.finishAt', { time: fmt.clock(now + remaining) })} />
       ) : (
@@ -443,14 +464,14 @@ function OverviewTab({ task, monitor, outputs, fmt, onSaved, onRender, onOpenLog
 }) {
   const isTrain = (task.task_type ?? 'train') === 'train'
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 380px', gap: 14, alignItems: 'start' }} className="ds-qd-grid">
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 380px', gap: 14, alignItems: 'stretch' }} className="ds-qd-grid">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
-        {isTrain && <CurvesCard task={task} monitor={monitor} />}
+        {isTrain && <SamplesCard taskId={task.id} live={task.status === 'running'} onRender={onRender} canRender={!!outputs?.files.some((f) => f.is_lora)} />}
         {!isTrain && task.params_decoded && Object.keys(task.params_decoded).length > 0 && <ParamsCard params={task.params_decoded} />}
         <LogCard taskId={task.id} onOpenLog={onOpenLog} />
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
-        {isTrain && <SamplesCard taskId={task.id} live={task.status === 'running'} onRender={onRender} canRender={!!outputs?.files.some((f) => f.is_lora)} />}
+        {isTrain && <CurvesCard task={task} monitor={monitor} />}
         <PropsCard task={task} fmt={fmt} onSaved={onSaved} />
         {isTrain && outputs && <OutputsCard taskId={task.id} outputs={outputs} fmt={fmt} />}
       </div>
@@ -503,7 +524,7 @@ function CurvesCard({ task, monitor }: { task: Task; monitor: MonitorState | nul
   ]
 
   return (
-    <div className="ds-card">
+    <div className="ds-card ds-qd-preview-card">
       <div className="ds-card-head ds-pad">
         <div style={{ flex: 1 }}>
           <div className="ds-card-title">{t('queueDetail.curvesTitle')}</div>
@@ -599,7 +620,7 @@ function LogCard({ taskId, onOpenLog }: { taskId: number; onOpenLog: () => void 
     catch { toast(t('queueDetail.copyFailed'), 'error') }
   }
   return (
-    <div className="ds-card">
+    <div className="ds-card ds-qd-log-card">
       <div className="ds-card-head ds-pad">
         <div style={{ flex: 1 }}>
           <div className="ds-card-title">{t('queueDetail.tabLogs')}</div>
@@ -622,7 +643,7 @@ function LogCard({ taskId, onOpenLog }: { taskId: number; onOpenLog: () => void 
       </div>
       <div className="ds-card-body" style={{ paddingTop: 2 }}>
         {error && <div className="ds-note ds-warn font-mono" style={{ marginBottom: 8 }}>{error}</div>}
-        <div ref={boxRef} className="ds-console" style={{ maxHeight: 220, overflowY: 'auto' }}>
+        <div ref={boxRef} className="ds-console" style={{ overflowY: 'auto' }}>
           {content ? <ConsoleLines text={content} limit={200} /> : <span className="ds-t">{t('queueDetail.noLogs')}</span>}
         </div>
       </div>
@@ -634,10 +655,12 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
   const { t } = useTranslation()
   const [items, setItems] = useState<TaskSample[] | null>(null)
   const [zoom, setZoom] = useState<number | null>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const [availableWidth, setAvailableWidth] = useState(0)
   const load = useCallback(() => {
     api.listTaskSamples(taskId)
       .then((r) => setItems([...r.items].sort((x, y) => (x.epoch ?? -1) - (y.epoch ?? -1) || (x.step ?? -1) - (y.step ?? -1))))
-      .catch(() => setItems([]))
+      .catch(() => setItems((previous) => previous ?? []))
   }, [taskId])
   useEffect(() => { load() }, [load])
   // New samples land every few epochs while training runs.
@@ -646,10 +669,29 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
     const id = window.setInterval(load, 30_000)
     return () => window.clearInterval(id)
   }, [live, load])
-  const shown = (items ?? []).slice(-6)
+  const shown = items ?? []
+  useLayoutEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    // Width determines the layout; observing its own height caused resize feedback.
+    const measure = () => setAvailableWidth(el.clientWidth - 12)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [shown.length])
+  const rows = shown.length > 13 ? 2 : 1
+  const columns = rows === 1 ? Math.max(1, shown.length) : Math.max(13, Math.ceil(shown.length / rows))
+  const visibleColumns = Math.min(columns, 13, availableWidth > 0 ? Math.max(1, Math.floor((availableWidth + 8) / 52)) : 13)
+  const maxWidth = rows === 2 ? 76 : 84
+  const thumbWidth = availableWidth > 0
+    ? Math.floor(Math.max(1, Math.min(maxWidth, (availableWidth - (visibleColumns - 1) * 8) / visibleColumns)) * 4) / 4
+    : maxWidth
+  const thumbHeight = thumbWidth * 4 / 3
+  const viewportHeight = rows * thumbHeight + (rows - 1) * 8 + 28
   const mark = (s: TaskSample) => (s.epoch != null ? t('queueDetail.epochN', { n: s.epoch }) : s.step != null ? t('queue.stepN', { n: s.step }) : s.filename)
   return (
-    <div className="ds-card">
+    <div className={`ds-card ds-qd-preview-card ds-qd-samples-card${rows === 1 ? ' ds-qd-single-row' : ''}`}>
       <div className="ds-card-head ds-pad">
         <div style={{ flex: 1 }}>
           <div className="ds-card-title">{t('queue.samples')}</div>
@@ -663,13 +705,19 @@ function SamplesCard({ taskId, live, onRender, canRender }: { taskId: number; li
         {shown.length === 0 ? (
           <div className="ds-empty">{items == null ? t('common.loading') : t('queueDetail.noSamples')}</div>
         ) : (
-          <div className="ds-grid-thumbs" style={{ gridTemplateColumns: 'repeat(3,minmax(0,1fr))' }}>
+          <div ref={viewportRef} className="ds-qd-samples-viewport" style={{ height: viewportHeight }}>
+            <div className="ds-grid-thumbs ds-qd-sample-grid" style={{
+              gridTemplateColumns: `repeat(${columns}, ${thumbWidth}px)`,
+              gridTemplateRows: `repeat(${rows}, ${thumbHeight}px)`,
+            }}>
             {shown.map((s, i) => (
-              <button key={s.filename} type="button" className="ds-thumb" style={{ aspectRatio: '1' }} onClick={() => setZoom((items?.length ?? 0) - shown.length + i)}>
-                <img src={api.sampleImageUrl(s.filename, taskId, 240)} alt="" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', inset: 0 }} />
-                <span className="ds-cap">{mark(s)}</span>
-              </button>
+              <SampleThumbnail key={s.filename} src={api.sampleImageUrl(s.filename, taskId, 240)}
+                previewSrc={api.sampleImageUrl(s.filename, taskId, 720)} caption={mark(s)}
+                style={{ width: thumbWidth, height: thumbHeight }}
+                latest={s.epoch != null ? s.epoch === shown[shown.length - 1]?.epoch : i === shown.length - 1}
+                onClick={() => setZoom(i)} />
             ))}
+            </div>
           </div>
         )}
       </div>
@@ -1239,12 +1287,6 @@ export function OutputsTab({ taskId, onChanged }: { taskId: number; onChanged?: 
     }
   }
 
-  const copyPath = async () => {
-    if (!data?.output_dir) return
-    try { await navigator.clipboard.writeText(data.output_dir); toast(t('queueDetail.pathCopied'), 'success') }
-    catch { toast(t('queueDetail.copyFailed'), 'error') }
-  }
-
   const handleDelete = async () => {
     if (deleting) return
     const files = Array.from(selected)
@@ -1342,7 +1384,7 @@ export function OutputsTab({ taskId, onChanged }: { taskId: number; onChanged?: 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div className="ds-card">
-        <div className="ds-card-head ds-pad">
+        <div className="ds-card-head ds-pad" style={{ flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="ds-card-title">{t('queueDetail.tabOutputs')}</div>
             <div className="ds-card-sub ds-mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={data?.output_dir ?? undefined}>
@@ -1352,23 +1394,13 @@ export function OutputsTab({ taskId, onChanged }: { taskId: number; onChanged?: 
           </div>
           {data?.output_dir && (
             <div className="ds-card-tools" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <button type="button" className="ds-ctl" onClick={copyPath}>{t('queueDetail.copyPath')}</button>
               {data.supports_open_folder ? (
-                <button type="button" className="ds-ctl" onClick={openFolder} disabled={busy || !data.exists}>{t('queueDetail.openFolder')}</button>
+                <button type="button" className="ds-ctl ds-ghost" onClick={openFolder} disabled={busy || !data.exists}>{t('queueDetail.openFolder')}</button>
               ) : (
                 <span className="ds-badge ds-mute">{t('common.remote')}</span>
               )}
-              <button type="button" className="ds-ctl" onClick={refresh}>{t('common.refresh')}</button>
               {hasFiles && (
                 <>
-                  <button type="button" className={`ds-ctl${selectMode ? ' ds-is-on' : ''}`} onClick={toggleSelectMode}>
-                    {selectMode ? t('queueDetail.exitBatchMode') : t('queueDetail.batchMode')}
-                  </button>
-                  {selectMode && (
-                    <button type="button" className="ds-btn-danger" onClick={handleDelete} disabled={deleting || noneSelected}>
-                      {t('queueDetail.deleteSelected', { n: selected.size })}
-                    </button>
-                  )}
                   <button
                     type="button"
                     className="ds-btn-primary"
@@ -1388,6 +1420,14 @@ export function OutputsTab({ taskId, onChanged }: { taskId: number; onChanged?: 
             </div>
           )}
         </div>
+        {hasFiles && <div className="ds-output-actions">
+          <button type="button" className={`ds-ctl${selectMode ? ' ds-is-on' : ''}`} onClick={toggleSelectMode}>
+            {selectMode ? t('queueDetail.exitBatchMode') : t('queueDetail.batchMode')}
+          </button>
+          {selectMode && <button type="button" className="ds-btn-danger" onClick={handleDelete} disabled={deleting || noneSelected}>
+            {t('queueDetail.deleteSelected', { n: selected.size })}
+          </button>}
+        </div>}
         {error ? (
           <div className="ds-note ds-warn ds-mono" style={{ margin: '0 17px 16px' }}>{error}</div>
         ) : !data ? null : !data.output_dir ? null : !data.exists ? (
@@ -1482,18 +1522,12 @@ function OutputsDownloadDialog({
 
 // ── Snapshot config tab (ADR-0007 §11.7) ────────────────────────────────────
 
-/** The training config frozen when the task started, read-only, plus
- *  "apply this config": PUT it into the version and open the train step, where
- *  starting training creates a new task. */
+/** Read-only training config snapshot with the same YAML download as the Graph. */
 export function SnapshotConfigTab({ task }: { task: Task | null }) {
   const { t } = useTranslation()
-  const navigate = useNavigate()
-  const { toast } = useToast()
   const [data, setData] = useState<{ yaml: string; config: Record<string, unknown> } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [applying, setApplying] = useState(false)
-  const [confirmApply, setConfirmApply] = useState(false)
 
   // The parent re-clones the task every 2 s for the elapsed timer; the snapshot
   // is immutable, so fetch it only when the id changes or the task starts
@@ -1504,33 +1538,13 @@ export function SnapshotConfigTab({ task }: { task: Task | null }) {
     if (taskId == null) { setLoading(false); return }
     let cancelled = false
     setLoading(true)
+    setData(null)
     void api.getTaskSnapshotConfig(taskId)
       .then((r) => { if (!cancelled) { setData(r); setError(null) } })
       .catch((e) => { if (!cancelled) setError(String(e)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [taskId, startedAt])
-
-  const apply = async () => {
-    if (!task || !data) return
-    const pid = task.project_id, vid = task.version_id
-    if (!pid || !vid) {
-      toast(t('snapshot.noVersionLink'), 'error')
-      return
-    }
-    setApplying(true)
-    try {
-      await api.putVersionConfig(pid, vid, data.config as Parameters<typeof api.putVersionConfig>[2])
-      setConfirmApply(false)
-      navigate(`/projects/${pid}/v/${vid}/train`)
-    } catch (e) {
-      toast(String(e), 'error')
-    } finally {
-      setApplying(false)
-    }
-  }
-
-  const canApply = !!(task?.project_id && task?.version_id)
 
   return (
     <div className="ds-card">
@@ -1539,35 +1553,20 @@ export function SnapshotConfigTab({ task }: { task: Task | null }) {
           <div className="ds-card-title">{t('snapshot.title')}</div>
           <div className="ds-card-sub">{t('snapshot.subtitle')}</div>
         </div>
-        {data && (
+        {data && taskId != null && !loading && !error && (
           <div className="ds-card-tools">
-            <button
-              type="button"
+            <a
               className="ds-btn-primary"
-              onClick={() => setConfirmApply(true)}
-              disabled={!canApply || applying || confirmApply}
-              title={canApply ? undefined : t('snapshot.noVersionLink')}
+              href={api.taskConfigDownloadUrl(taskId)}
+              download={`task_${taskId}.yaml`}
             >
-              {t('snapshot.applyBtn')}
-            </button>
+              {t('snapshot.downloadBtn')}
+            </a>
           </div>
         )}
       </div>
 
-      {confirmApply && (
-        <div className="ds-note ds-warn" style={{ margin: '0 17px 14px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <b>{t('snapshot.applyConfirmTitle')}</b>
-            <div>{t('snapshot.applyConfirmDesc')}</div>
-          </div>
-          <button type="button" className="ds-ctl" onClick={() => setConfirmApply(false)} disabled={applying}>{t('common.cancel')}</button>
-          <button type="button" className="ds-btn-primary" onClick={() => void apply()} disabled={applying}>
-            {applying ? '…' : t('snapshot.applyBtn')}
-          </button>
-        </div>
-      )}
-
-      <div style={{ borderTop: '1px solid var(--line)' }}>
+      <div className="ds-empty-inset" style={{ borderTop: '1px solid var(--line)' }}>
         {loading ? (
           <div className="ds-empty">{t('common.loading')}</div>
         ) : error ? (

@@ -935,6 +935,13 @@ def enqueue_version_training(
             "Training configuration is not set for this version",
             code="version.config_missing", http_status=400,
         )
+    if projects.is_edit_project(project):
+        # Examples can change after the pairs step (e.g. switching the tool type).
+        from ....services.projects.phase import check_edit_pairs
+
+        pairs_ok = check_edit_pairs(project, ver)
+        if not pairs_ok.ok:
+            raise ValidationError(pairs_ok.reason, code="edit.examples_incomplete", http_status=400)
     cfg_path = version_config.version_config_path(project, ver)
     # auto_sync_paths=ON: syncs the global model paths to disk at enqueue time -- the trainer
     # subprocess reads the yaml directly (without going through studio's read-side overlay),
@@ -1022,7 +1029,7 @@ def version_thumb(
     name: str = "",
     size: int = 256,
 ) -> FileResponse:
-    if bucket not in {"train", "reg", "samples", "validation"}:
+    if bucket not in {"train", "reg", "samples", "validation", "control", "control2"}:
         raise InvalidPathError("Invalid path", code="path.invalid")
     with db.connection_for() as conn:
         v = versions.get_version(conn, vid)
@@ -1032,7 +1039,9 @@ def version_thumb(
             "Version not found", code="version.not_found", details={"id": vid},
         )
     vdir = versions.version_dir(p["id"], p["slug"], v["label"]) / bucket
-    if bucket in {"train", "reg", "validation"}:
+    if bucket in {"control", "control2"} and not folder:
+        f = _safe_join_or_400(vdir, name)  # flat control/ layout
+    elif bucket in {"train", "reg", "validation", "control", "control2"}:
         if not folder:
             raise InvalidPathError("Invalid path", code="path.invalid")
         f = _safe_join_or_400(vdir, folder, name)

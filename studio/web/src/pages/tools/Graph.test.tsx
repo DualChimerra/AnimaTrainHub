@@ -34,6 +34,7 @@ const RUNS = [
 ]
 
 const fetchMock = vi.fn()
+let boardParams = PARAMS
 function json(body: unknown) {
   return Promise.resolve({
     ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body),
@@ -45,12 +46,13 @@ beforeEach(() => {
   localStorage.clear()
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
+  boardParams = PARAMS
   fetchMock.mockImplementation((url: string) => {
     if (url.endsWith('/api/graph/boards')) {
       return json({ items: [{ id: 1, name: 'Style', note: '', run_count: 2, image_count: 0, created_at: 1, updated_at: 1 }] })
     }
     if (url.endsWith('/api/graph/boards/1')) {
-      return json({ board: { id: 1, name: 'Style', note: '', params: PARAMS, views: [], created_at: 1, updated_at: 1 }, runs: RUNS })
+      return json({ board: { id: 1, name: 'Style', note: '', params: boardParams, views: [], created_at: 1, updated_at: 1 }, runs: RUNS })
     }
     if (url.includes('/api/graph/tasks')) {
       return json({ items: [{
@@ -76,6 +78,40 @@ function renderPage() {
 }
 
 describe('GraphPage', () => {
+  it.each([
+    { name: 'empty board', params: [] as Param[] },
+    { name: 'custom parameters', params: [{ id: 'note', name: 'Notes', type: 'text', options: [] }] as Param[] },
+  ])(
+    'loads queue trainings for $name', async ({ params }) => {
+      boardParams = params
+      const user = userEvent.setup()
+      renderPage()
+      await screen.findByText('run 1')
+      await user.click(screen.getByRole('button', { name: 'Add training' }))
+      await user.click(screen.getByRole('menuitem', { name: /From queue/ }))
+      expect(await screen.findByText('#77')).toBeInTheDocument()
+      expect(fetchMock.mock.calls.some(([url]) => url === '/api/graph/tasks?keys=')).toBe(true)
+    },
+  )
+
+  it('shows a queue loading error and allows retrying', async () => {
+    const fetchNormally = fetchMock.getMockImplementation()!
+    let fail = true
+    fetchMock.mockImplementation((url: string) => url.includes('/api/graph/tasks') && fail
+      ? Promise.reject(new Error('offline')) : fetchNormally(url))
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('run 1')
+    await user.click(screen.getByRole('button', { name: 'Add training' }))
+    await user.click(screen.getByRole('menuitem', { name: /From queue/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load the training queue.')
+    expect(screen.queryByText('No training tasks found.')).not.toBeInTheDocument()
+    fail = false
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('#77')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('shows the board and its cards', async () => {
     renderPage()
     expect(await screen.findByText('run 1')).toBeInTheDocument()

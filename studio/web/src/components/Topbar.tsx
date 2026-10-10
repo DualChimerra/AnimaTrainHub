@@ -3,7 +3,7 @@ import { playSound } from '../lib/sound'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useProjectCtx } from '../context/ProjectContext'
-import { api, type Task } from '../api/client'
+import { api, isEditProject, type Task } from '../api/client'
 import { useEventStream, type StudioEvent } from '../lib/useEventStream'
 import { useMonitorProgress } from '../lib/useMonitorProgress'
 import { useRuntimeModeOptional } from '../lib/RuntimeMode'
@@ -89,6 +89,10 @@ function useBreadcrumbs(): Crumb[] {
     return [{ label: t('breadcrumb.queue'), to: '/queue' }, { label: `#${parts[1]}`, mono: true }]
   }
 
+  if (parts[0] === 'edit') return [{ label: t('nav.editLora'), to: '/edit' }]
+
+  if (parts[0] === 'wiki') return [{ label: t('nav.wiki', { defaultValue: 'Wiki' }), to: '/wiki' }] // Wiki (experimental)
+
   if (parts[0] === 'tools') {
     const labels: Record<string, string> = {
       presets: t('breadcrumb.presets'),
@@ -102,7 +106,10 @@ function useBreadcrumbs(): Crumb[] {
   }
 
   if (parts[0] === 'projects') {
-    const crumbs: Crumb[] = [{ label: t('breadcrumb.projects'), to: '/' }]
+    // Edit LoRA tools live in their own section.
+    const crumbs: Crumb[] = isEditProject(ctx?.project)
+      ? [{ label: t('nav.editLora'), to: '/edit' }]
+      : [{ label: t('breadcrumb.projects'), to: '/' }]
 
     const projectLabel = ctx?.project?.title ?? (parts[1] ? `#${parts[1]}` : null)
     const projectId = parts[1]
@@ -116,6 +123,7 @@ function useBreadcrumbs(): Crumb[] {
       // Step crumbs read exactly like the sidebar steps (short form).
       const stepLabels: Record<string, string> = {
         curate: splitOptional(t('nav.curate')).short,
+        pairs: t('nav.pairs'),
         preprocess: splitOptional(t('nav.preprocess')).short,
         edit: splitOptional(t('nav.tagEdit')).short,
         reg: splitOptional(t('nav.reg')).short,

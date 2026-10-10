@@ -522,13 +522,13 @@ def create_version(
     if fork_from_version_id is not None:
         src = _must_get(conn, fork_from_version_id)
         src_vdir = version_dir(project_id, p["slug"], src["label"])
-        # train / reg: recursively copy the directory (only if it exists)
-        for sub in ("train", "reg"):
+        # train / reg / control (edit sources): recursively copy the directory (only if it exists)
+        for sub in ("train", "reg", "control", "control2"):
             src_sub = src_vdir / sub
             if src_sub.exists():
                 _copytree(src_sub, vdir / sub)
         # config.yaml + .unlocked.json: single-file copy
-        for fname in ("config.yaml", ".unlocked.json"):
+        for fname in ("config.yaml", ".unlocked.json", "edit.json"):
             src_file = src_vdir / fname
             if src_file.exists():
                 shutil.copy2(src_file, vdir / fname)

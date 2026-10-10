@@ -43,6 +43,7 @@ import {
 import PreviewXYGrid from './generate/PreviewXYGrid'
 import PromptList from './generate/PromptList'
 import NegPromptInput from './generate/NegPromptInput'
+import ReferenceImageInput, { type GenerateReference } from './generate/ReferenceImageInput'
 import SampleGallery from './generate/SampleGallery'
 import SidebarLoras from './generate/SidebarLoras'
 import SidebarXYAxes from './generate/SidebarXYAxes'
@@ -199,6 +200,10 @@ export default function GeneratePage() {
   // value -- it doesn't go into prefs, isn't persisted, and isn't backfilled when
   // clicking a history item (if the user sets 2, it stays 2); refreshing the page resets it to 1.
   const [batchSize, setBatchSize] = useState(1)
+  // Edit LoRA source image (Anima only); not persisted across reloads.
+  const [reference, setReference] = useState<GenerateReference | null>(null)
+  const [reference2, setReference2] = useState<GenerateReference | null>(null)
+  const [refMatchSize, setRefMatchSize] = useState(true)
 
   // LoRA prefill via URL query (?lora=<path>&projectId=N&versionId=N)
   // When arriving here via the Overview StatusBanner's "Load in test" CTA, the URL
@@ -764,6 +769,9 @@ export default function GeneratePage() {
           // attention_backend omitted: the server applies the Comfy-style runtime and reads the generate backend itself.
           xy_matrix,
           params_snapshot: snap as unknown as Record<string, unknown>,
+          ...(reference && modelFamily === 'anima'
+            ? { reference_id: reference.id, reference_id_2: reference2?.id ?? null, reference_match_size: refMatchSize }
+            : {}),
         }
         const task = await api.enqueueGenerate(body)
         // #1 + P-I: each task's frozen run state is stored in the Map (xDraft/yDraft
@@ -985,6 +993,22 @@ export default function GeneratePage() {
                 <div className="ds-cap" style={{ marginBottom: 7 }}>{t('generate.negative')}</div>
                 <NegPromptInput value={negPrompt} onChange={setNegPrompt} modelFamily={modelFamily} />
               </div>
+
+              {modelFamily === 'anima' && (
+                <div>
+                  <div className="ds-cap" style={{ marginBottom: 7 }}>
+                    <FieldLabel label={t('generate.reference')} tip={t('generate.refTip')} />
+                  </div>
+                  <ReferenceImageInput value={reference} onChange={(r) => { setReference(r); if (!r) setReference2(null) }}
+                    matchSize={refMatchSize} onMatchSize={setRefMatchSize} />
+                  {reference && (
+                    <div style={{ marginTop: 10 }}>
+                      <div className="ds-cap" style={{ marginBottom: 7 }}>{t('generate.reference2')}</div>
+                      <ReferenceImageInput value={reference2} onChange={setReference2} hint={t('generate.ref2Hint')} />
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* single → LoRA slots; xy → axes (LoRA picking is part of the axes) */}
               <div>

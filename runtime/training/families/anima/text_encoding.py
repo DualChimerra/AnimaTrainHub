@@ -60,7 +60,8 @@ def encode_qwen(model, tokenizer, texts, device, max_length=512, preserve_empty_
         inputs["attention_mask"] = torch.full((bs, 1), mask_value, dtype=torch.long)
     inputs = inputs.to(device)
 
-    with torch.inference_mode():
+    train_text = torch.is_grad_enabled() and bool(getattr(model, "_train_text_encoder", False))
+    with torch.set_grad_enabled(train_text):
         outputs = model(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],

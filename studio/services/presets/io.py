@@ -151,7 +151,7 @@ def list_presets(base: Path | None = None) -> list[dict[str, Any]]:
 
 def _tolerant_validate(raw: dict[str, Any]) -> tuple[TrainingConfig, list[str], list[str]]:
     known = set(TrainingConfig.model_fields)
-    data = dict(raw)
+    data = TrainingConfig._import_text_encoder_lr_metadata(dict(raw))
 
     if "attention_backend" not in data:
         if data.get("flash_attn") is True:

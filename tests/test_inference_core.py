@@ -202,8 +202,8 @@ def test_apply_loras_each_lora_injects_separately(tmp_path: Path) -> None:
     assert created[0].init_kwargs["alpha"] == 8.0
     assert created[1].init_kwargs["rank"] == 8
     assert created[1].init_kwargs["alpha"] == 4.0
-    assert created[0].network.multiplier == 1.0
-    assert created[1].network.multiplier == 0.5
+    created[0].set_multiplier.assert_called_once_with(1.0)
+    created[1].set_multiplier.assert_called_once_with(0.5)
     created[0].network.to.assert_called_with(device="cpu", dtype=torch.float32)
     created[1].network.to.assert_called_with(device="cpu", dtype=torch.float32)
 
@@ -312,7 +312,7 @@ def test_model_cache_hot_reloads_same_topology_lora_ckpt(tmp_path: Path) -> None
     created[0].detach.assert_not_called()
     assert created[0].inject.call_count == 1
     assert created[0].load_state_dict.call_count == 2
-    assert created[0].network.multiplier == 0.5
+    created[0].set_multiplier.assert_called_with(0.5)
     assert cache.last_lora_specs == [LoRASpec(path=str(p2), scale=0.5)]
     assert loaded_dtypes
     assert all(dtype == torch.float32 for dtype in loaded_dtypes)

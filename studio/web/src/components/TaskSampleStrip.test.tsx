@@ -29,13 +29,17 @@ afterEach(() => {
 
 it('renders one thumbnail per sample', async () => {
   vi.spyOn(api, 'listTaskSamples').mockResolvedValue({
-    items: [sample(), sample({ filename: 'epoch_2_a.png', epoch: 2, mtime: 2 })],
-    total: 2,
+    items: [sample(), sample({ filename: 'epoch_2_a.png', epoch: 2, mtime: 2 }), sample({ filename: 'epoch_2_b.png', epoch: 2, mtime: 2 })],
+    total: 3,
   })
   render(<TaskSampleStrip taskId={7} />)
 
   const strip = await screen.findByTestId('sample-strip-7')
-  await waitFor(() => expect(strip.querySelectorAll('img')).toHaveLength(2))
+  await waitFor(() => expect(strip.querySelectorAll('img')).toHaveLength(3))
+  expect(strip.querySelectorAll('.ds-latest')).toHaveLength(2)
+  expect(strip.querySelectorAll('.ds-sample-label')).toHaveLength(3)
+  expect(strip.querySelector('.ds-sample-cap')).toBeNull()
+  expect(strip.querySelector('button')).toHaveClass('ds-training-sample')
   // Thumbnails go through the /samples/{file}?task_id=&w= proxy (with task_id,
   // otherwise it falls back to the global default directory)
   expect(strip.querySelector('img')!.getAttribute('src'))

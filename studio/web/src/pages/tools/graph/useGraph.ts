@@ -32,6 +32,8 @@ export function useGraph() {
   const [runs, setRuns] = useState<Run[]>([])
   const [loading, setLoading] = useState(true)
   const [tasks, setTasks] = useState<GraphTask[]>([])
+  const [tasksLoading, setTasksLoading] = useState(false)
+  const [tasksError, setTasksError] = useState(false)
   const [view, setViewState] = useState<ViewState | null>(null)
 
   const fail = useCallback((e: unknown, fallback: string) => {
@@ -99,21 +101,22 @@ export function useGraph() {
   // ── queue tasks (read-only, polled while the page is visible) ─────────────
   const keys = useMemo(() => (board ? configKeys(board.params) : []), [board])
   const keysSig = keys.join(',')
-  const tasksSig = useRef('')
+  const hasBoard = board !== null
   const refreshTasks = useCallback(async () => {
-    if (!keysSig) { setTasks([]); return }
+    if (!hasBoard) { setTasks([]); return }
+    setTasksLoading(true)
     try {
-      const next = await graphApi.listTasks(keysSig.split(','))
+      const next = await graphApi.listTasks(keysSig ? keysSig.split(',') : [])
       // The poll usually returns the same list; keep the old array so nothing re-renders.
       const sig = JSON.stringify(next)
-      if (sig !== tasksSig.current) {
-        tasksSig.current = sig
-        setTasks(next)
-      }
+      setTasks((prev) => JSON.stringify(prev) === sig ? prev : next)
+      setTasksError(false)
     } catch {
-      /* the queue bridge is optional; the board works without it */
+      setTasksError(true)
+    } finally {
+      setTasksLoading(false)
     }
-  }, [keysSig])
+  }, [hasBoard, keysSig])
   useEffect(() => {
     void refreshTasks()
     const id = window.setInterval(() => {
@@ -240,7 +243,7 @@ export function useGraph() {
 
   return {
     boards, boardId, setBoardId, refreshBoards, board, setBoard, runs, setRuns, loading, loadBoard,
-    tasks, refreshTasks, view, setView,
+    tasks, tasksLoading, tasksError, refreshTasks, view, setView,
     createRun, updateRun, duplicateRun, deleteRun,
     uploadImages, importSamples, updateImage, deleteImage,
     saveParams, saveBoardMeta,

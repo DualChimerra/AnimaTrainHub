@@ -270,6 +270,37 @@ def _prepare_comfy_ksampler_txt2img_latent(
 # sample_image dispatches to them via build_inference_sampler.
 
 
+def fit_reference_image(image, width: int, height: int):
+    """Scale-to-cover + center crop, the same fit the edit dataset applies to sources."""
+    from PIL import Image
+
+    image = image.convert("RGB")
+    scale = max(width / image.width, height / image.height)
+    w, h = max(width, round(image.width * scale)), max(height, round(image.height * scale))
+    image = image.resize((w, h), Image.LANCZOS)
+    left, top = (w - width) // 2, (h - height) // 2
+    return image.crop((left, top, left + width, top + height))
+
+
+def reference_size(image, area: int, align: int) -> tuple[int, int]:
+    """Output size with the reference's aspect ratio and about ``area`` pixels."""
+    ratio = image.width / max(1, image.height)
+    width = (area * ratio) ** 0.5
+    height = width / ratio
+    return (max(align, int(round(width / align)) * align),
+            max(align, int(round(height / align)) * align))
+
+
+@torch.no_grad()
+def encode_reference_latent(vae, image, width, height, device, dtype):
+    import numpy as np
+
+    fitted = fit_reference_image(image, width, height)
+    arr = np.asarray(fitted).astype(np.float32) / 127.5 - 1.0
+    pixels = torch.from_numpy(arr).permute(2, 0, 1)[None, :, None].to(device=device, dtype=dtype)
+    return vae.encode(pixels).to(device=device, dtype=dtype)
+
+
 @torch.no_grad()
 def sample_image(
     model, vae, qwen_model, qwen_tokenizer, t5_tokenizer,
@@ -282,8 +313,15 @@ def sample_image(
     step_callback=None,
     phase_callback=None,
     seed: int | None = None,
+    reference_image=None,
+    reference_images=None,
 ):
     """Sample-generate an image (Comfy-style, the only path) -- shared by training preview / Generate / RegAI.
+
+    reference_image (PIL, optional): edit-LoRA source image. It is fitted to the
+    output size, VAE-encoded and appended as an extra temporal frame on both CFG
+    branches, then the prediction is cropped back -- the ComfyUI-Cosmos-Reference
+    node's behavior.
 
     Matches ComfyUI KSampler: raw prompt goes into Qwen, SDTokenizer-style T5
     weights, CFG batched into one forward, CPU-seeded initial noise. Exact
@@ -379,6 +417,19 @@ def sample_image(
 
     pad_mask = torch.zeros(1, 1, lat_h, lat_w, device=device, dtype=dtype)
     device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    # One or more edit inputs, each appended as a frame in order (frame 1, 2, ...).
+    refs = list(reference_images or []) + ([reference_image] if reference_image is not None else [])
+    reference_latent = None
+    if refs:
+        reference_latent = torch.cat(
+            [encode_reference_latent(vae, ref, width, height, device, dtype) for ref in refs], dim=2)
+
+    def _model(x_model, sigma, cross, pad):
+        if reference_latent is None:
+            return model(x_model, sigma, cross, padding_mask=pad)
+        ref = reference_latent.to(dtype=x_model.dtype).expand(x_model.shape[0], -1, -1, -1, -1)
+        out = model(torch.cat([x_model, ref], dim=2), sigma, cross, padding_mask=pad)
+        return out[:, :, :x_model.shape[2]]
 
     # If NaN retry turned xformers off, it must be restored once sampling
     # finishes -- otherwise a single NaN would leave the whole rest of the
@@ -401,21 +452,21 @@ def sample_image(
                 x_model = x_in.to(device=x_in.device, dtype=dtype)
                 sigma_1d = sigma_in.reshape(1).to(device=x_in.device, dtype=torch.float32)
                 if float(cfg_scale) == 1.0:
-                    return model(
+                    return _model(
                         x_model,
                         sigma_1d.expand(x_model.shape[0]),
                         cross_cond,
-                        padding_mask=pad_mask.expand(x_model.shape[0], -1, -1, -1).contiguous(),
+                        pad_mask.expand(x_model.shape[0], -1, -1, -1).contiguous(),
                     )
                 x_batch = torch.cat([x_model, x_model], dim=0)
                 cross_batch = torch.cat([cross_uncond, cross_cond], dim=0)
                 pad_batch = pad_mask.expand(x_batch.shape[0], -1, -1, -1).contiguous()
                 sigma_batch = sigma_1d.expand(x_batch.shape[0])
-                v_uncond, v_cond = model(
+                v_uncond, v_cond = _model(
                     x_batch,
                     sigma_batch,
                     cross_batch,
-                    padding_mask=pad_batch,
+                    pad_batch,
                 ).chunk(2)
                 return v_uncond + cfg_scale * (v_cond - v_uncond)
 

@@ -186,7 +186,15 @@ def _inject_adapter(ctx: TrainingContext) -> None:
 
     ctx.injector = build_adapter(args, preset=ctx.family.lora_preset())
     ctx.injector.metadata_extra = ctx.family.lora_metadata()
+    if getattr(args, "edit_mode", False):
+        # Tells generation tools this LoRA expects a source image (cosmos temporal reference).
+        ctx.injector.metadata_extra["edit_reference"] = "cosmos_temporal"
     ctx.injector.inject(ctx.model)
+
+    if getattr(args, "train_text_encoder", False):
+        text_model, text_preset = ctx.family.text_adapter_target(ctx.text_stack)
+        ctx.injector.inject_text(text_model, preset=text_preset, training=True)
+        ctx.family.prepare_text_training(ctx.text_stack, checkpoint=bool(args.grad_checkpoint))
 
     if getattr(args, "resume_lora", "") and Path(args.resume_lora).exists():
         lora_family = _read_lora_family(args.resume_lora)

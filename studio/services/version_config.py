@@ -48,7 +48,49 @@ PROJECT_SPECIFIC_FIELDS: frozenset[str] = frozenset({
     "resume_lora",
     "resume_state",
     "trigger_word",
+    # Edit LoRA: on for edit projects, off elsewhere; the source folder is derived.
+    "edit_mode",
+    "edit_control_dir",
+    "edit_control_dir_2",
 })
+
+#: Starting values for an edit project's config (applied when its config is first
+#: made, from a preset or automatically; the user can change them afterwards).
+#: - Edit texts are sentences: tag shuffling / dropout would scramble them, and a
+#:   horizontal flip mirrors any text in the images.
+#: - Training values follow the published Anima control/edit LoRA recipe
+#:   (levzzz5154/diffusion-pipe anima_canny_lora.toml): rank 32, AdamW 2e-5,
+#:   grad accum 4, 100 warmup steps; 1024 px.
+#: - Empty sample prompts: previews redo the first examples with their own text.
+#: - No held-out validation split: it moves results away from their inputs.
+EDIT_CONFIG_DEFAULTS: dict[str, Any] = {
+    "shuffle_caption": False,
+    "keep_tokens": 0,
+    "tag_dropout": 0.0,
+    "flip_augment": False,
+    "lora_type": "lora",
+    "lora_rank": 32,
+    "lora_alpha": 32.0,
+    "optimizer_type": "adamw",
+    "learning_rate": 2e-5,
+    "lr_scheduler": "cosine_with_warmup",
+    "lr_scheduler_warmup_steps": 100,
+    "epochs": 12,
+    "batch_size": 1,
+    "grad_accum": 4,
+    "resolution": [1024],
+    "train_text_encoder": False,
+    "train_norm": False,
+    "sample_prompt": "",
+    "sample_prompts": [],
+    "eval_validation_enabled": False,
+    # Not supported with a reference frame (their switches are hidden for edit projects).
+    "navit_packing": False,
+    "leap_enabled": False,
+    "dop_enabled": False,
+    "sra_enabled": False,
+    "masked_loss": False,
+}
 
 # Resume fields. Different from the rest of PROJECT_SPECIFIC_FIELDS: those are **derived** (uniquely determined by
 # project + version, always recomputing to the same value), while these two are **explicitly set by the user**, and recomputing
@@ -91,6 +133,18 @@ def project_specific_overrides(
         overrides["reg_data_dir"] = str(vdir / "reg")
     else:
         overrides["reg_data_dir"] = None
+    edit = _projects.is_edit_project(project)
+    overrides["edit_mode"] = edit
+    overrides["edit_control_dir"] = str(vdir / "control") if edit else None
+    overrides["edit_control_dir_2"] = None
+    if edit:
+        from .dataset import edit_pairs
+
+        # Second reference frame only for "image + image prompt" tools.
+        if edit_pairs.read_recipe(edit_pairs.pair_dirs(vdir)) == "image":
+            overrides["edit_control_dir_2"] = str(vdir / "control2")
+    if edit:
+        overrides["reg_data_dir"] = None  # reg images have no source frame
     if not reset_resume:
         for f in RESUME_FIELDS:
             overrides.pop(f, None)

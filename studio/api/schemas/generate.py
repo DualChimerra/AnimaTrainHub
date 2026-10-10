@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ...domain import AttentionBackend, LoraEntry, XYMatrixSpec
 
@@ -45,3 +45,7 @@ class GenerateRequest(BaseModel):
     # save_test_images=true disk-write path also uses this same snapshot when writing PNG
     # anima_params metadata.
     params_snapshot: Optional[dict[str, Any]] = None
+    # Edit LoRA source image: id returned by POST /api/generate/reference.
+    reference_id: Optional[str] = Field(None, pattern=r"^[0-9a-f]{40}$")
+    reference_id_2: Optional[str] = Field(None, pattern=r"^[0-9a-f]{40}$")
+    reference_match_size: bool = True

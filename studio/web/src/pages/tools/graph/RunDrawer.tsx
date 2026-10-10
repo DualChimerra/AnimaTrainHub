@@ -9,7 +9,9 @@ import {
 } from './model'
 import type { GImage, GraphTask, Param, Run, RunStatus, RunValue, Values } from './types'
 import { RUN_STATUSES } from './types'
-import { Ico, Stars, Thumb, useValueLabel } from './ui'
+import { Ico, Stars, THUMB_PX, useValueLabel } from './ui'
+import SampleThumbnail from '../../../components/SampleThumbnail'
+import { graphApi } from './api'
 
 export default function RunDrawer({
   run, runs, params, tasks, taskValues, onClose, onUpdate, onUpload, onOpenImage, onImportSamples,
@@ -190,12 +192,13 @@ export default function RunDrawer({
           {run.images.length > 0 && (
             <div className="gr-samples">
               {byStep.flatMap(([, imgs]) => imgs).map((img) => (
-                <button key={img.id} type="button" className={`gr-sample${img.step != null && run.best_step === img.step ? ' gr-best' : ''}`}
+                <SampleThumbnail key={img.id} className={`gr-sample${img.step != null && run.best_step === img.step ? ' gr-best' : ''}`}
+                  src={graphApi.imageUrl(img.id, THUMB_PX)} previewSrc={graphApi.imageUrl(img.id, 720)}
+                  caption={img.step != null ? t('graph.stepN', { n: img.step }) : t('graph.noStep')}
+                  latest={img.step != null && img.step === Math.max(...run.images.map((image) => image.step ?? -1))}
                   onClick={() => onOpenImage(img)} title={[img.prompt, img.comment].filter(Boolean).join('\n')}>
-                  <Thumb id={img.id} />
-                  <span className="gr-step">{img.step != null ? t('graph.stepN', { n: img.step }) : t('graph.noStep')}</span>
                   {img.rating ? <span className="gr-sample-r">{'★'.repeat(img.rating)}</span> : null}
-                </button>
+                </SampleThumbnail>
               ))}
             </div>
           )}

@@ -77,7 +77,7 @@ def list_projects_endpoint() -> dict[str, Any]:
 def create_project_endpoint(body: ProjectCreate) -> dict[str, Any]:
     with db.connection_for() as conn:
         p = projects.create_project(
-            conn, title=body.title, slug=body.slug, note=body.note
+            conn, title=body.title, slug=body.slug, note=body.note, kind=body.kind,
         )
         if body.initial_version_label:
             # Project is already created; if version creation fails, VersionError

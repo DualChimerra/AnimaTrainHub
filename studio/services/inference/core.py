@@ -88,6 +88,7 @@ class LoRAMeta:
     #: applies to explicitly tagged files, and untagged files fall back to the
     #: key-matching check done during injection/merge.
     family_explicit: bool = False
+    has_text_encoder: bool = False
 
 
 def read_lora_meta(path: str) -> LoRAMeta:
@@ -105,6 +106,7 @@ def read_lora_meta(path: str) -> LoRAMeta:
     try:
         with safe_open(str(path), framework="pt", device="cpu") as f:
             meta = f.metadata() or {}
+            has_text_encoder = any(key.startswith("lora_te_") for key in f.keys())
     except Exception as e:
         logger.warning(f"Failed to read LoRA metadata {path}: {e}; using default parameters")
         return LoRAMeta(_DEFAULT_RANK, _DEFAULT_ALPHA, _DEFAULT_ALGO, _DEFAULT_FACTOR)
@@ -167,6 +169,7 @@ def read_lora_meta(path: str) -> LoRAMeta:
         lora_reg_dims=lora_reg_dims,
         model_family=str(ss_args.get("model_family") or "anima"),
         family_explicit=bool(ss_args.get("model_family")),
+        has_text_encoder=has_text_encoder,
     )
 
 
@@ -245,6 +248,7 @@ def apply_loras(
     device: str,
     dtype: Any,
     family_id: str = "anima",
+    *, text_stack: Any = None,
 ) -> list[Any]:
     """Inject a separate AnimaLycorisAdapter for each LoRA; forward-time hooks
     accumulate the deltas.
@@ -349,30 +353,43 @@ def apply_loras(
             rs_lora=meta.rs_lora,
             lora_reg_dims=reg_dims,
         )
-        adapter.inject(model)
-        if adapter.network is not None:
-            adapter.network.to(device=device, dtype=dtype)
+        try:
+            adapter.inject(model)
+            if meta.has_text_encoder:
+                family = get_family(family_id)
+                target = getattr(family, "text_adapter_target", None)
+                if text_stack is None or not callable(target):
+                    raise ValueError("This LoRA contains text encoder weights; a compatible text encoder must be loaded")
+                text_model, text_preset = target(text_stack)
+                adapter.inject_text(text_model, preset=text_preset)
+                adapter.text_adapter.network.to(device=device, dtype=dtype)
+            if adapter.network is not None:
+                adapter.network.to(device=device, dtype=dtype)
 
-        if adapter.network is not None:
-            adapter.network.multiplier = float(spec.scale)
-            for lora in getattr(adapter.network, "loras", []):
-                if hasattr(lora, "multiplier"):
-                    lora.multiplier = float(spec.scale)
+            if adapter.network is not None:
+                adapter.set_multiplier(float(spec.scale))
 
-        sd = {k: v.to(device=device, dtype=dtype) for k, v in sd_raw.items()}
+            # load_state_dict copies into the destination precision. Keep tiny norm
+            # differences in their file precision until they reach the FP32 master.
+            sd = sd_raw
 
-        result = adapter.load_state_dict(sd, strict=False)
-        missing = len(getattr(result, "missing_keys", []) or [])
-        unexpected = len(getattr(result, "unexpected_keys", []) or [])
-        if sd and unexpected >= len(sd):
-            # None of the keys were consumed by the LoRA network = a different-
-            # family file or a key format this path doesn't support (this is the
-            # content-matching fallback for untagged files, so it doesn't
-            # silently produce an image with no LoRA effect)
-            raise ValueError(
-                f"This LoRA does not match the current base model: none of the keys in {Path(path).name} line up"
-                f" (it may belong to another model family, or use a key format this path does not support yet)."
-            )
+            result = adapter.load_state_dict(sd, strict=False)
+            missing = len(getattr(result, "missing_keys", []) or [])
+            unexpected = len(getattr(result, "unexpected_keys", []) or [])
+            if sd and unexpected >= len(sd):
+                # None of the keys were consumed by the LoRA network = a different-
+                # family file or a key format this path doesn't support (this is the
+                # content-matching fallback for untagged files, so it doesn't
+                # silently produce an image with no LoRA effect)
+                raise ValueError(
+                    f"This LoRA does not match the current base model: none of the keys in {Path(path).name} line up"
+                    f" (it may belong to another model family, or use a key format this path does not support yet)."
+                )
+        except Exception:
+            adapter.detach()
+            for previous in reversed(adapters):
+                previous.detach()
+            raise
         logger.info(
             f"Loaded LoRA: {Path(path).name} "
             f"(algo={algo}, rank={rank}, alpha={alpha}, "

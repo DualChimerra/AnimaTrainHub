@@ -14,7 +14,9 @@ import { useTranslation } from 'react-i18next'
 import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import {
   api,
+  isEditProject,
   PHASE_ORDER,
+  type EditPairsListing,
   type LoraCkpt,
   type ProjectDetail,
   type Task,
@@ -31,6 +33,7 @@ import { useProjectCtx } from '../../context/ProjectContext'
 import { splitOptional } from '../../lib/labels'
 import { useEventStream } from '../../lib/useEventStream'
 import { useMonitorProgress } from '../../lib/useMonitorProgress'
+import { EditIcon, pairCover } from '../edit/shared'
 
 interface Ctx {
   project: ProjectDetail
@@ -56,6 +59,14 @@ const PHASE_STEP: Record<VersionPhase, { key: string; n: number; labelKey: strin
 }
 
 const phaseIndex = (phase: VersionPhase) => PHASE_ORDER.indexOf(phase)
+
+/** Edit projects show two steps: pairs (curating slot) and train. */
+const EDIT_PHASE_STEP: Partial<Record<VersionPhase, { key: string; n: number; labelKey: string }>> = {
+  curating: { key: 'pairs', n: 1, labelKey: 'nav.pairs' },
+  ready:    { key: 'train', n: 2, labelKey: 'nav.train' },
+}
+const phaseStep = (project: { kind?: string }, phase: VersionPhase) =>
+  (isEditProject(project) ? EDIT_PHASE_STEP[phase] : undefined) ?? PHASE_STEP[phase]
 
 /** While a version is being prepared only the cursor phase and the ones
  *  before it are reachable (advancing goes through each step's own
@@ -239,8 +250,19 @@ export default function ProjectOverview() {
   const [tagCounts, setTagCounts] = useState<Array<{ tag: string; n: number }> | null>(null)
   // Train images: resolution buckets.
   const [sizes, setSizes] = useState<Array<{ w: number; h: number }> | null>(null)
+  // Edit projects: their examples instead of captions and buckets.
+  const isEdit = isEditProject(project)
+  const [pairs, setPairs] = useState<EditPairsListing | null>(null)
   useEffect(() => {
-    if (vid == null) { setTagCounts(null); setSizes(null); return }
+    if (!isEdit || vid == null) { setPairs(null); return }
+    let cancelled = false
+    void api.listEditPairs(project.id, vid)
+      .then((r) => { if (!cancelled) setPairs(r) })
+      .catch(() => { if (!cancelled) setPairs(null) })
+    return () => { cancelled = true }
+  }, [isEdit, project.id, vid, version?.stats?.train_image_count, version?.phase])
+  useEffect(() => {
+    if (vid == null || isEdit) { setTagCounts(null); setSizes(null); return }
     let cancelled = false
     void api.listCaptionsFull(project.id, vid)
       .then((res) => {
@@ -258,13 +280,13 @@ export default function ProjectOverview() {
       })
       .catch(() => { if (!cancelled) setSizes(null) })
     return () => { cancelled = true }
-  }, [project.id, vid, version?.stats?.train_image_count, version?.stats?.tagged_image_count])
+  }, [project.id, vid, isEdit, version?.stats?.train_image_count, version?.stats?.tagged_image_count])
 
   const [tab, setTab] = useState<OverviewTab>('tasks')
   const [editing, setEditing] = useState(false)
 
-  const stepLabel = (phase: VersionPhase) => splitOptional(t(PHASE_STEP[phase].labelKey)).short
-  const stepRoute = (v: Version, phase: VersionPhase) => `/projects/${project.id}/v/${v.id}/${PHASE_STEP[phase].key}`
+  const stepLabel = (phase: VersionPhase) => splitOptional(t(phaseStep(project, phase).labelKey)).short
+  const stepRoute = (v: Version, phase: VersionPhase) => `/projects/${project.id}/v/${v.id}/${phaseStep(project, phase).key}`
   const cursorPhase = (v: Version): VersionPhase => (v.status === 'preparing' ? v.phase : 'ready')
 
   const generateUrl = (v: Version, loraPath: string) => {
@@ -294,7 +316,9 @@ export default function ProjectOverview() {
 
   const subtitle = (
     <>
-      {t('overview.downloads', { count: project.download_image_count ?? 0 })}
+      {isEdit
+        ? t('editLora.pairsCount', { count: pairs?.count ?? version?.stats?.train_image_count ?? 0 })
+        : t('overview.downloads', { count: project.download_image_count ?? 0 })}
       {', '}{t('projects.versions', { count: project.versions.length })}
       {', '}{t('overview.createdOn', { date: fmtDate(project.created_at, i18n.language, true) })}
       {activeVersion && <>{', '}{t('overview.activeLabel')} <code>{activeVersion.label}</code></>}
@@ -329,6 +353,7 @@ export default function ProjectOverview() {
           version={version}
           uniqueTags={tagCounts?.length ?? null}
           loraRows={loraRows}
+          pairs={isEdit ? pairs : undefined}
         />
 
         <div className="ds-ov-main">
@@ -384,8 +409,14 @@ export default function ProjectOverview() {
                 navigate(stepRoute(v, cursorPhase(v)))
               }}
             />
-            <CompositionCard version={version} sizes={sizes} />
-            <TopTagsCard version={version} tagCounts={tagCounts} train={train} tagged={tagged} reg={reg} />
+            {isEdit ? (
+              <ExamplesCard project={project} version={version} pairs={pairs} />
+            ) : (
+              <>
+                <CompositionCard version={version} sizes={sizes} />
+                <TopTagsCard version={version} tagCounts={tagCounts} train={train} tagged={tagged} reg={reg} />
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -452,7 +483,7 @@ function PipelineCard({ project, version, latestTrain, trainProgress }: {
     }
   }
 
-  const steps: Array<{
+  const allSteps: Array<{
     key: string; label: string; badge: string; state: State; pct: number
     cell: string; cellTitle?: string; live?: boolean; to: string | null
   }> = [
@@ -501,7 +532,19 @@ function PipelineCard({ project, version, latestTrain, trainProgress }: {
     },
   ]
 
-  const cursorN = version ? PHASE_STEP[preparing ? version.phase : 'ready'].n : null
+  const isEdit = isEditProject(project)
+  const steps = isEdit
+    ? [
+        {
+          key: 'pairs', label: t('nav.pairs'), badge: '1', state: phaseState('curating'),
+          pct: phaseState('curating') === 'done' ? 100 : 0,
+          cell: version ? t('editLora.pairsCount', { count: train }) : '—',
+          to: version && canGoPhase(version, 'curating') ? `/projects/${project.id}/v/${version.id}/pairs` : null,
+        },
+        { ...allSteps[allSteps.length - 1], badge: '2' },
+      ]
+    : allSteps
+  const cursorN = version ? phaseStep(project, preparing ? version.phase : 'ready').n : null
 
   return (
     <div className="ds-card">
@@ -514,7 +557,7 @@ function PipelineCard({ project, version, latestTrain, trainProgress }: {
         </div>
       </div>
       <div className="ds-card-body" style={{ paddingTop: 4, overflowX: 'auto' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,minmax(0,1fr))', gap: 10, minWidth: 620 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${steps.length},minmax(0,1fr))`, gap: 10, minWidth: isEdit ? 0 : 620 }}>
           {steps.map((s) => {
             const body = (
               <>
@@ -552,11 +595,13 @@ function ckptLabel(t: (k: string, o?: Record<string, unknown>) => string, name: 
   return label
 }
 
-function Kpis({ project, version, uniqueTags, loraRows }: {
+function Kpis({ project, version, uniqueTags, loraRows, pairs }: {
   project: ProjectDetail
   version: Version | null
   uniqueTags: number | null
   loraRows: LoraRow[]
+  /** Edit projects: their examples (null while loading); undefined for LoRA projects. */
+  pairs?: EditPairsListing | null
 }) {
   const { t } = useTranslation()
   const stats = version?.stats
@@ -577,12 +622,41 @@ function Kpis({ project, version, uniqueTags, loraRows }: {
   const isActive = version != null && version.id === project.active_version_id
   const state = version
     ? version.status === 'preparing'
-      ? t('overview.kpiPhase', { phase: splitOptional(t(PHASE_STEP[version.phase].labelKey)).short })
+      ? t('overview.kpiPhase', { phase: splitOptional(t(phaseStep(project, version.phase).labelKey)).short })
       : t(`versionStatus.${version.status}`)
     : ''
 
+  const editTotal = pairs?.count ?? 0
+  const editDone = pairs?.complete ?? 0
+  const editCards = pairs !== undefined && (
+    <>
+      <div className="ds-card ds-kpi">
+        <div className="ds-kpi-top">
+          <span className="ds-kpi-icon">{Icon.image}</span>
+          {pairs && editTotal > 0 && (
+            <span style={{ marginLeft: 'auto' }}>
+              <span className="ds-kpi-meta">
+                {editDone >= editTotal ? t('overview.editAllFilled') : t('overview.editToFill', { count: editTotal - editDone })}
+              </span>
+            </span>
+          )}
+        </div>
+        <div className="ds-kpi-val">{pairs ? editDone : '—'}{pairs && <small>/ {editTotal}</small>}</div>
+        <div className="ds-kpi-label">{t('overview.editExamples')}</div>
+      </div>
+      <div className="ds-card ds-kpi">
+        <div className="ds-kpi-top">
+          <span className="ds-kpi-icon">{Icon.branch}</span>
+        </div>
+        <div className="ds-kpi-val" style={{ fontSize: 19, letterSpacing: '-.03em' }}>{pairs ? t(`editLora.recipe_${pairs.recipe}`) : '—'}</div>
+        <div className="ds-kpi-label">{t('overview.editType')}</div>
+      </div>
+    </>
+  )
+
   return (
     <div className="ds-kpis ds-ov-kpis">
+      {editCards || (<>
       <div className="ds-card ds-kpi">
         <div className="ds-kpi-top">
           <span className="ds-kpi-icon">{Icon.image}</span>
@@ -614,6 +688,7 @@ function Kpis({ project, version, uniqueTags, loraRows }: {
           {uniqueTags != null ? t('overview.kpiCaptionedUnique', { n: uniqueTags.toLocaleString() }) : t('overview.kpiCaptioned')}
         </div>
       </div>
+      </>)}
 
       <div className="ds-card ds-kpi">
         <div className="ds-kpi-top">
@@ -637,6 +712,47 @@ function Kpis({ project, version, uniqueTags, loraRows }: {
         </div>
         <div className="ds-kpi-val">{loraRows.length}</div>
         <div className="ds-kpi-label">{t('overview.kpiCkpts')}</div>
+      </div>
+    </div>
+  )
+}
+
+// ── Examples (edit projects) ─────────────────────────────────────────────
+
+/** A few examples of an edit tool, as "before -> after", with a link to all of them. */
+function ExamplesCard({ project, version, pairs }: {
+  project: ProjectDetail
+  version: Version | null
+  pairs: EditPairsListing | null
+}) {
+  const { t } = useTranslation()
+  const to = version ? `/projects/${project.id}/v/${version.id}/pairs` : null
+  const shown = (pairs?.items ?? [])
+    .slice()
+    .sort((a, b) => a.missing.length - b.missing.length)
+    .slice(0, 8)
+  return (
+    <div className="ds-card">
+      <div className="ds-card-head ds-pad">
+        <div>
+          <div className="ds-card-title">{t('overview.editExamplesTitle')}</div>
+          <div className="ds-card-sub">
+            {pairs ? t('overview.editExamplesSub', { done: pairs.complete, total: pairs.count }) : '…'}
+          </div>
+        </div>
+        {to && (
+          <div className="ds-card-tools">
+            <Link className="ds-ctl" to={to}>{t('overview.editExamplesAll')}{EditIcon.arrow(12)}</Link>
+          </div>
+        )}
+      </div>
+      <div className="ds-ov-examples">
+        {pairs && version && shown.length > 0
+          ? shown.map((p) => {
+              const src = pairCover(project.id, version.id, p, 192)
+              return <span key={`${p.folder}/${p.stem}`} className="ds-thumb ds-ov-ex">{src && <img src={src} alt="" loading="lazy" />}</span>
+            })
+          : <span className="ds-kpi-meta">{t('overview.editExamplesEmpty')}</span>}
       </div>
     </div>
   )
@@ -958,7 +1074,10 @@ function VersionsCard({ project, selectedVid, tasks, onOpen, onCreate, onActivat
         {versions.map((v) => {
           const s = v.stats
           const meta: string[] = []
-          if (s) {
+          if (s && isEditProject(project)) {
+            meta.push(t('editLora.pairsCount', { count: s.train_image_count }))
+            if (s.has_output) meta.push(t('overview.verCkpt'))
+          } else if (s) {
             meta.push(t('overview.verTrain', { n: s.train_image_count.toLocaleString() }))
             meta.push(s.reg_image_count > 0 ? t('overview.verReg', { n: s.reg_image_count.toLocaleString() }) : t('overview.verNoReg'))
             if (s.has_output) meta.push(t('overview.verCkpt'))

@@ -47,7 +47,7 @@ const SUBGROUPS: Record<string, Subgroup[]> = {
   lora: [
     { key: 'loraMain', fields: ['lora_type', 'lora_rank', 'lora_alpha', 'lokr_factor', 'tlora_min_rank', 'tlora_alpha_rank_scale', 'tlora_use_ortho'], rest: true },
     { key: 'loraDropout', fields: ['lora_dropout', 'lora_rank_dropout', 'lora_module_dropout'] },
-    { key: 'loraExtra', fields: ['lora_dora', 'lora_rs'] },
+    { key: 'loraExtra', fields: ['lora_dora', 'lora_rs', 'train_norm'] },
     { key: 'loraBlocks', fields: ['lora_reg_dims'] },
   ],
   dataset: [
@@ -57,6 +57,7 @@ const SUBGROUPS: Record<string, Subgroup[]> = {
   training: [
     { key: 'trainMain', fields: ['epochs', 'max_steps', 'batch_size', 'grad_accum', 'grad_checkpoint'] },
     { key: 'trainLr', fields: ['learning_rate', 'lr_scheduler', 'lr_scheduler_eta_min', 'optimizer_type'], rest: true },
+    { key: 'trainTextEncoder', fields: ['train_text_encoder', 'text_encoder_lr'], switchesFirst: true },
     { key: 'trainEma', fields: ['ema_enabled', 'ema_decay', 'ema_start_ratio'], switchesFirst: true },
   ],
   loss: [

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_from": "studio.server.app",
-  "count": 213,
+  "count": 241,
   "routes": [
     {
       "path": "/",
@@ -194,6 +194,22 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/generate/reference",
+      "methods": [
+        "POST"
+      ],
+      "name": "upload_generate_reference",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/generate/reference/{ref_id}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_generate_reference",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/generate/save",
       "methods": [
         "POST"
@@ -239,6 +255,150 @@
         "GET"
       ],
       "name": "get_generate_sample",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/boards",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_boards",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/boards",
+      "methods": [
+        "POST"
+      ],
+      "name": "create_board",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/boards/{bid}",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "delete_board",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/boards/{bid}",
+      "methods": [
+        "GET"
+      ],
+      "name": "get_board",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/boards/{bid}",
+      "methods": [
+        "PATCH"
+      ],
+      "name": "update_board",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/boards/{bid}/remap",
+      "methods": [
+        "POST"
+      ],
+      "name": "remap",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/boards/{bid}/runs",
+      "methods": [
+        "POST"
+      ],
+      "name": "create_run",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/images/{iid}",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "delete_image",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/images/{iid}",
+      "methods": [
+        "PATCH"
+      ],
+      "name": "update_image",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/images/{iid}/file",
+      "methods": [
+        "GET"
+      ],
+      "name": "image_file",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/runs/{rid}",
+      "methods": [
+        "DELETE"
+      ],
+      "name": "delete_run",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/runs/{rid}",
+      "methods": [
+        "PATCH"
+      ],
+      "name": "update_run",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/runs/{rid}/config",
+      "methods": [
+        "GET"
+      ],
+      "name": "run_config",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/runs/{rid}/duplicate",
+      "methods": [
+        "POST"
+      ],
+      "name": "duplicate_run",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/runs/{rid}/images",
+      "methods": [
+        "POST"
+      ],
+      "name": "upload_images",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/runs/{rid}/import-samples",
+      "methods": [
+        "POST"
+      ],
+      "name": "import_samples",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/tasks",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_tasks",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/graph/tasks/{tid}/samples",
+      "methods": [
+        "GET"
+      ],
+      "name": "task_samples",
       "type": "APIRoute"
     },
     {
@@ -930,6 +1090,62 @@
       "type": "APIRoute"
     },
     {
+      "path": "/api/projects/{pid}/versions/{vid}/pairs",
+      "methods": [
+        "GET"
+      ],
+      "name": "list_pairs_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/pairs/delete",
+      "methods": [
+        "POST"
+      ],
+      "name": "delete_pairs_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/pairs/instruction",
+      "methods": [
+        "POST"
+      ],
+      "name": "batch_instruction_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/pairs/recipe",
+      "methods": [
+        "PUT"
+      ],
+      "name": "put_recipe_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/pairs/recommended-config",
+      "methods": [
+        "POST"
+      ],
+      "name": "recommended_config_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/pairs/upload",
+      "methods": [
+        "POST"
+      ],
+      "name": "upload_pairs_endpoint",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/projects/{pid}/versions/{vid}/pairs/{folder}/{stem}/caption",
+      "methods": [
+        "PUT"
+      ],
+      "name": "put_pair_caption_endpoint",
+      "type": "APIRoute"
+    },
+    {
       "path": "/api/projects/{pid}/versions/{vid}/preprocess/crop",
       "methods": [
         "POST"
@@ -1343,6 +1559,14 @@
         "GET"
       ],
       "name": "get_task_snapshot_config",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/queue/{task_id}/snapshot/config/file",
+      "methods": [
+        "GET"
+      ],
+      "name": "download_task_config",
       "type": "APIRoute"
     },
     {

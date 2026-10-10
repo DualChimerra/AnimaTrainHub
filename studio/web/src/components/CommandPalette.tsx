@@ -321,7 +321,7 @@ export default function CommandPalette({ open, onClose }: Props) {
           {q && <span className="ds-badge ds-mute">{t('commandPalette.matches', { count: flatItems.length })}</span>}
         </div>
 
-        <div ref={listRef} style={{ maxHeight: 'min(56vh, 460px)', overflowY: 'auto', paddingBottom: 6 }}>
+        <div ref={listRef} className="ds-empty-inset" style={{ maxHeight: 'min(56vh, 460px)', overflowY: 'auto', paddingBottom: 6 }}>
           {filtered.length === 0 ? (
             <div className="ds-empty">{t('commandPalette.noResults')}</div>
           ) : (

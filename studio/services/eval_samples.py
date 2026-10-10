@@ -640,6 +640,7 @@ def _default_generator(
     adapters = apply_loras(
         model, [LoRASpec(path=str(checkpoint), scale=lora_scale)], device, dtype,
         family_id=family.spec.family_id,
+        text_stack=text_stack,
     )
     _ = adapters  # keep adapter references alive for forward hooks
     model.eval()

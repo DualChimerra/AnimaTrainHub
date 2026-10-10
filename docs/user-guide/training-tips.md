@@ -1,5 +1,38 @@
 # Anima LoRA Training Tips
 
+## Normalization and text encoder training
+
+Both options are off by default and support Anima with LoRA, LoKr or LoHa.
+
+- **Train normalization** (`train_norm`, in the extra network options) also trains
+  the attention normalization weights. Saving writes their differences as ComfyUI
+  `.diff` tensors, with `ss_train_norm_export_format=comfyui_diff` and an automatic
+  `ss_train_norm_exported_count`. Anima 2B has 112 such tensors; larger variants
+  can have a different count. The count is output information, not an input setting.
+- **Train text encoder** (`train_text_encoder`, in its own training card) trains
+  an adapter in Qwen's attention and feed-forward layers. The frozen base encoder
+  stays intact. `text_encoder_lr` sets this adapter's separate initial learning
+  rate (default `0.00001`); the image adapter still uses `learning_rate`. The usual
+  scheduler and optimizer settings apply to both. This needs additional memory.
+  DOP must be off because its reference branch assumes frozen text conditioning.
+  Both the HF and Comfy Qwen backends support training and gradient checkpointing.
+
+Text encoder weights are saved in the same file under ComfyUI-compatible
+`lora_te_layers_*` keys, with `ss_text_encoder_lr` in the metadata. YAML import
+also accepts `ss_text_encoder_lr` as an alias; the normal config key is
+`text_encoder_lr`. An imported learning rate alone does not enable training.
+Generation loads these weights into the encoder automatically. Changing LoRA
+strength, unloading, previews, EMA and training checkpoints include the new weights.
+
+For the supplied `alllisso_anima_style-000024` example, enable `train_norm` and
+leave `train_text_encoder` off: its file contains 112 normalization differences
+and no text encoder adapter weights. A recorded `ss_text_encoder_lr` does not
+prove that the text encoder was trained. Matching these options reproduces that
+part of the setup; the original dataset and the full training recipe are unknown.
+
+The normalization export follows
+[lora-rescripts' Anima implementation](https://github.com/WhitecrowAurora/lora-rescripts/blob/0e3afaed12408978c6383306b51bcb1fd2916aca/scripts/stable/networks/lora_anima.py).
+
 ## Data preparation
 
 ### Dataset size recommendations

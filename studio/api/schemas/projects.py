@@ -1,7 +1,7 @@
 """/api/projects + versions CRUD request BaseModels (extracted from server.py in PR-6.5 commit 1)."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -11,6 +11,7 @@ class ProjectCreate(BaseModel):
     slug: Optional[str] = None
     note: Optional[str] = None
     initial_version_label: Optional[str] = "v1"
+    kind: Literal["lora", "edit"] = "lora"
 
 
 class ProjectUpdate(BaseModel):

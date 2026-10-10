@@ -19,6 +19,7 @@ import {
 import { useToast } from '../../components/Toast'
 import { evalProgressFromResults } from '../../lib/useEvalProgress'
 import HelpTip from '../../components/ds/HelpTip'
+import SampleThumbnail from '../../components/SampleThumbnail'
 
 const METRIC_CODE: Record<EvalMetricKey, string> = {
   clip_t: 'CLIP-T', clip_i: 'CLIP-I', dino_i: 'DINO-I', ccip_i: 'CCIP-I', tag_recall: 'TAG RECALL',
@@ -172,7 +173,7 @@ export default function MonitorPage() {
               trigger="icon"
               label={t('monitor.moreActions')}
               items={[
-                { label: t('monitor.openLive'), onSelect: () => taskId && navigate(`/queue/${taskId}#monitor`), disabled: !taskId },
+                { label: t('monitor.openLive'), onSelect: () => taskId && navigate(`/queue/${taskId}#overview`), disabled: !taskId },
                 { label: t('common.refresh'), onSelect: () => void load(), disabled: !pid },
               ]}
             />
@@ -448,10 +449,10 @@ function BestSamples({ task, result }: { task: Task; result: EvalMetricResult })
         ) : (
           <div className="ds-grid-thumbs" style={{ gridTemplateColumns: 'repeat(3,minmax(0,1fr))' }}>
             {picked.map((s) => (
-              <span key={s.filename} className="ds-thumb" style={{ aspectRatio: '1' }}>
-                <img src={api.sampleImageUrl(s.filename, task.id, 240)} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
-                <span className="ds-cap">{s.step != null ? `step ${s.step}` : s.filename}</span>
-              </span>
+              <SampleThumbnail key={s.filename} src={api.sampleImageUrl(s.filename, task.id, 240)}
+                previewSrc={api.sampleImageUrl(s.filename, task.id, 720)}
+                caption={s.epoch != null ? t('queueDetail.epochN', { n: s.epoch }) : s.step != null ? t('queue.stepN', { n: s.step }) : s.filename}
+                latest={s.epoch != null && s.epoch === Math.max(...(samples ?? []).map((item) => item.epoch ?? -1))} />
             ))}
           </div>
         )}

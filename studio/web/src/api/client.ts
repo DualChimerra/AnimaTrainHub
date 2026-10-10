@@ -992,7 +992,45 @@ export interface ProjectSummary {
   note: string | null
   download_image_count?: number
   preprocess_image_count?: number
+  /** v21: 'edit' = edit LoRA project (source/target pairs, Edit section); absent on old servers = 'lora'. */
+  kind?: ProjectKind
 }
+
+export type ProjectKind = 'lora' | 'edit'
+
+/** What an edit tool takes: image + text instruction, or image + image prompt. */
+export type EditRecipe = 'text' | 'image'
+export type EditSlot = 'target' | 'source' | 'source2'
+
+/** One edit example: input image(s) + optional text -> result. Files share folder + stem. */
+export interface EditPair {
+  folder: string
+  stem: string
+  target: string | null
+  source: string | null
+  /** '' = the flat control/ folder. */
+  source_folder: string | null
+  source2: string | null
+  source2_folder: string | null
+  caption: string
+  mtime: number
+  target_size?: [number, number] | null
+  source_size?: [number, number] | null
+  source2_size?: [number, number] | null
+  /** Slots the recipe still needs: target / source / source2 / caption. */
+  missing: Array<EditSlot | 'caption'>
+}
+
+export interface EditPairsListing {
+  recipe: EditRecipe
+  items: EditPair[]
+  folders: string[]
+  count: number
+  complete: number
+  incomplete: number
+}
+
+export const isEditProject = (p: { kind?: string | null } | null | undefined): boolean => p?.kind === 'edit'
 
 export interface ProjectDetail extends ProjectSummary {
   versions: Version[]
@@ -1560,6 +1598,12 @@ export interface GenerateRequest {
    *  structure, passes it through to the daemon -> stuffed into the encrypted cache payload header
    *  on image_done. Returned by /api/generate/cache/index for backfilling as CacheEntry.params. */
   params_snapshot?: Record<string, unknown> | null
+  /** Edit LoRA source image id from uploadGenerateReference (Anima only). */
+  reference_id?: string | null
+  /** Second edit input (image prompt), for two-input edit LoRAs. */
+  reference_id_2?: string | null
+  /** Use the source image's aspect ratio at the requested pixel area (default true). */
+  reference_match_size?: boolean
 }
 
 /** GET /api/generate/cache/index -- index of the current session's encrypted on-disk cache.
@@ -2393,6 +2437,7 @@ export const api = {
     slug?: string
     note?: string
     initial_version_label?: string
+    kind?: ProjectKind
   }) =>
     req<ProjectDetail>('/api/projects', {
       method: 'POST',
@@ -2482,6 +2527,7 @@ export const api = {
     req<{ yaml: string; config: Record<string, unknown> }>(
       `/api/queue/${taskId}/snapshot/config`
     ),
+  taskConfigDownloadUrl: (taskId: number) => `/api/queue/${taskId}/snapshot/config/file`,
 
   // Download / jobs (PP2) ------------------------------------------------
   estimateDownload: (
@@ -2886,6 +2932,13 @@ export const api = {
       .then((r) => r.groups),
 
   /** PR-9 -- start a test-generation task. As of Phase 2: images go through the server's in-memory cache and are lost on page close. */
+  /** Store an edit source image for generation; returns its content id. */
+  uploadGenerateReference: (file: File) => {
+    const fd = new FormData()
+    fd.append('image', file, file.name)
+    return xhrUpload<{ id: string; width: number; height: number }>('/api/generate/reference', fd)
+  },
+  generateReferenceUrl: (id: string, size = 256) => `/api/generate/reference/${id}?size=${size}`,
   enqueueGenerate: (body: GenerateRequest) =>
     req<Task>('/api/generate', { method: 'POST', body: JSON.stringify(body) }),
   /** On-disk history: scans studio_data/test/&lt;date&gt;/{single,xy}/image_N.json sidecars,
@@ -3036,10 +3089,47 @@ export const api = {
       `/api/projects/${pid}/versions/${vid}/preprocess/duplicates/apply`,
       { method: 'POST', body: JSON.stringify(body) }
     ),
+  // Edit LoRA pairs (edit projects) ---------------------------------------
+  listEditPairs: (pid: number, vid: number) =>
+    req<EditPairsListing>(`/api/projects/${pid}/versions/${vid}/pairs`),
+  uploadEditFiles: (
+    pid: number, vid: number, role: EditSlot, files: File[],
+    folder = '1_data', onProgress?: (e: UploadProgressEvent) => void,
+  ) => {
+    const fd = new FormData()
+    fd.append('role', role)
+    fd.append('folder', folder)
+    for (const f of files) fd.append('files', f, f.name)
+    return xhrUpload<{ saved: Array<{ kind: string; name: string }>; errors: string[] }>(
+      `/api/projects/${pid}/versions/${vid}/pairs/upload`, fd, onProgress)
+  },
+  setEditCaption: (pid: number, vid: number, folder: string, stem: string, caption: string) =>
+    req<{ caption: string }>(
+      `/api/projects/${pid}/versions/${vid}/pairs/${encodeURIComponent(folder)}/${encodeURIComponent(stem)}/caption`,
+      { method: 'PUT', body: JSON.stringify({ caption }) }),
+  setEditInstruction: (pid: number, vid: number, instruction: string, mode: 'replace' | 'prepend' | 'append') =>
+    req<{ updated: number }>(`/api/projects/${pid}/versions/${vid}/pairs/instruction`, {
+      method: 'POST', body: JSON.stringify({ instruction, mode }),
+    }),
+  deleteEditPairs: (
+    pid: number, vid: number,
+    body: { items?: Array<{ folder: string; stem: string }>; slots?: Array<{ role: EditSlot; folder: string; stem: string }> },
+  ) =>
+    req<{ deleted: number }>(`/api/projects/${pid}/versions/${vid}/pairs/delete`, {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+  setEditRecipe: (pid: number, vid: number, recipe: EditRecipe) =>
+    req<{ recipe: EditRecipe }>(`/api/projects/${pid}/versions/${vid}/pairs/recipe`, {
+      method: 'PUT', body: JSON.stringify({ recipe }),
+    }),
+  /** Rewrite the version's config with the recommended edit settings. */
+  resetEditConfig: (pid: number, vid: number) =>
+    req<{ config: ConfigData }>(`/api/projects/${pid}/versions/${vid}/pairs/recommended-config`, { method: 'POST' }),
+
   versionThumbUrl: (
     pid: number,
     vid: number,
-    bucket: 'train' | 'reg' | 'samples' | 'validation',
+    bucket: 'train' | 'reg' | 'samples' | 'validation' | 'control' | 'control2',
     name: string,
     folder?: string,
     size: number = 256

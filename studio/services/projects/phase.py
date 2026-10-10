@@ -90,6 +90,15 @@ def check_preprocessing(
     return CheckResult(True)
 
 
+def check_edit_pairs(project: dict[str, Any], version: dict[str, Any]) -> CheckResult:
+    """Edit projects: at least one pair, every target with a source and an instruction."""
+    from ..dataset import edit_pairs
+
+    vdir = _versions.version_dir(int(project["id"]), str(project["slug"]), str(version["label"]))
+    ok, reason = edit_pairs.check_ready(edit_pairs.pair_dirs(vdir))
+    return CheckResult(ok, reason)
+
+
 def check_ready(
     project: dict[str, Any], version: dict[str, Any]
 ) -> CheckResult:
@@ -160,6 +169,23 @@ def advance_phase(
         result = check_phase(conn, version_id, current_phase)
         # even at ready, run a validation pass so the caller can decide whether to move into training
         return False, result, None
+
+    # Edit projects have two steps: pairs (the curating slot) -> train (ready).
+    p = _projects.get_project(conn, int(v["project_id"]))
+    if p and _projects.is_edit_project(p) and current_phase == _versions.VersionPhase.CURATING:
+        result = check_edit_pairs(p, v)
+        if not result.ok:
+            return False, result, None
+        if not _version_config.has_version_config(p, v):
+            # Land on the training step with the recommended edit settings already filled in.
+            from ..presets import create_edit_version_config
+
+            try:
+                create_edit_version_config(p, v)
+            except Exception:  # noqa: BLE001 -- a preset can still be picked on the train page
+                pass
+        _versions.update_version(conn, version_id, phase=_versions.VersionPhase.READY)
+        return True, CheckResult(True), _versions.VersionPhase.READY
 
     # run validation
     result = check_phase(conn, version_id, current_phase)

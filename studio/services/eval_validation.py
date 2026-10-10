@@ -116,6 +116,8 @@ def split_for_task(conn, task: dict[str, Any], cfg_path: Path) -> dict[str, Any]
         return None
     if not isinstance(cfg, dict) or not cfg.get("eval_validation_enabled"):
         return None
+    if cfg.get("edit_mode"):
+        return None  # edit examples are image pairs; moving a result would orphan its inputs
     try:
         ratio = float(cfg.get("eval_validation_split_ratio") or 0.0)
     except (TypeError, ValueError):

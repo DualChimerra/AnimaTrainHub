@@ -88,6 +88,28 @@ const schema: SchemaResponse = {
   },
 }
 
+it('keeps text encoder learning rate separate and reveals it only when enabled', () => {
+  const trainingSchema: SchemaResponse = {
+    groups: [{ key: 'training', label: 'Training' }, { key: 'lora', label: 'LoRA' }],
+    schema: { properties: {
+      learning_rate: { type: 'number', default: 0.0001, group: 'training' },
+      train_norm: { type: 'boolean', default: false, group: 'lora' },
+      train_text_encoder: { type: 'boolean', default: false, group: 'training' },
+      text_encoder_lr: { type: 'number', default: 0.00001, group: 'training', show_when: 'train_text_encoder==true' },
+    } },
+  }
+  const onChange = vi.fn()
+  const values = { learning_rate: 0.0001, train_norm: false, train_text_encoder: false, text_encoder_lr: 0.00001 }
+  const { rerender } = render(<SchemaForm schema={trainingSchema} values={values} onChange={onChange} />)
+  expect(screen.queryByRole('textbox', { name: 'Text Encoder Lr' })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Train Text Encoder' }))
+  expect(onChange).toHaveBeenLastCalledWith({ ...values, train_text_encoder: true })
+  rerender(<SchemaForm schema={trainingSchema} values={{ ...values, train_text_encoder: true }} onChange={onChange} />)
+  expect(screen.getByRole('textbox', { name: 'Text Encoder Lr' })).toBeEnabled()
+  expect(screen.getByRole('textbox', { name: 'Learning Rate' })).toHaveValue('0.0001')
+  expect(screen.getByRole('checkbox', { name: 'Train Norm' }).closest('.ds-switchrow')).not.toBeNull()
+})
+
 describe('SchemaForm takeover behavior', () => {
   it('resets and disables fields taken over by disable_when', async () => {
     const onChange = vi.fn()
@@ -119,7 +141,7 @@ describe('SchemaForm takeover behavior', () => {
     expect(learningRateInput).toBeDisabled()
     expect(learningRateInput.value).toBe('0.0001')
     expect(screen.getByText('Prodigy controls the learning rate')).toBeInTheDocument()
-    const schedulerSelect = screen.getAllByRole('combobox')[1] as HTMLSelectElement
+    const schedulerSelect = screen.getByRole('combobox', { name: 'Lr Scheduler' }) as HTMLSelectElement
     expect(schedulerSelect).toBeDisabled()
     expect(schedulerSelect.value).toBe('cosine')
     expect(screen.getByText('Schedule-Free has its own scheduler')).toBeInTheDocument()

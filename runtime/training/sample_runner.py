@@ -25,6 +25,34 @@ from utils.optimizer_utils import optimizer_eval_mode
 logger = logging.getLogger(__name__)
 
 
+def _edit_references(ctx: TrainingContext) -> list:
+    """Preview inputs: the example tied to this preview prompt, else
+    edit_sample_control[_2], else the first example's input images."""
+    from PIL import Image
+
+    tied = getattr(ctx, "current_sample_refs", None)
+    if tied:
+        out = []
+        for path in tied:
+            with Image.open(path) as image:
+                out.append(image.convert("RGB"))
+        return out
+    samples = getattr(getattr(ctx, "base_dataset", None), "samples", None) or []
+    first = next((s.get("controls") for s in samples if s.get("controls")), None) or []
+    out = []
+    for index, key in enumerate(("edit_sample_control", "edit_sample_control_2")):
+        if index >= max(1, len(first)):
+            break
+        path = str(getattr(ctx.args, key, "") or "") or (str(first[index]) if index < len(first) else "")
+        if not path or not Path(path).is_file():
+            logger.warning("edit preview: input image %d not found (%s), previews run without references",
+                           index + 1, path or "none")
+            return []
+        with Image.open(path) as image:
+            out.append(image.convert("RGB"))
+    return out
+
+
 def run_sample(
     ctx: TrainingContext,
     *,
@@ -58,6 +86,12 @@ def run_sample(
     _align = spec.latent.align_px
     s_w = max(_align, (s_w // _align) * _align)
     s_h = max(_align, (s_h // _align) * _align)
+    # Edit training: previews edit a source image, at its aspect ratio and the configured area.
+    references = _edit_references(ctx) if bool(getattr(args, "edit_mode", False)) else []
+    if references:
+        from training.families.anima.sampling import reference_size
+
+        s_w, s_h = reference_size(references[0], s_w * s_h, _align)
     s_cfg_value = getattr(args, "sample_cfg_scale", spec.sampling.default_cfg)
     s_cfg = float(spec.sampling.default_cfg if s_cfg_value is None else s_cfg_value)
     s_neg = str(getattr(args, "sample_negative_prompt", "") or "")
@@ -115,6 +149,7 @@ def run_sample(
                 scheduler=s_sched,
                 device=ctx.device, dtype=ctx.dtype,
                 seed=(s_seed + seed_offset) if s_seed else None,
+                **({"reference_images": references} if references else {}),
             )
             img.save(sample_path)
             ctx.emit(f"Sample saved: {sample_path.name}")

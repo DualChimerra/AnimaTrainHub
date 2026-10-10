@@ -826,8 +826,7 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
             ), "For video batch, batch size should be 1 for non-uniform fps. For image batch, T should be 1"
 
             # apply sequence scaling in temporal dimension
-            if fps is None:  # image case
-                assert T == 1, "T should be 1 for image batch."
+            if fps is None:  # image case; T > 1 = edit reference frames (ComfyUI has no T == 1 assert)
                 half_emb_t = torch.outer(self.seq[:T], temporal_freqs)
             else:
                 half_emb_t = torch.outer(self.seq[:T] / fps[:1] * self.base_fps, temporal_freqs)

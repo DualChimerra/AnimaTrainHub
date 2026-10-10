@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, Response
 
 from ..deps import _resolve_model_paths
 from ..errors import _validate_component_or_400
+from ..responses import _thumb_response
 from ..schemas.generate import GenerateRequest
 from ... import db, secrets
 from ...domain import GenerateConfig
@@ -174,6 +175,42 @@ def _cleanup_xy_tmp_folders() -> None:
 _cleanup_xy_tmp_folders()
 
 
+REFERENCE_DIR = STUDIO_DATA / "generate_refs"
+
+
+def _reference_path(ref_id: str) -> Path:
+    path = REFERENCE_DIR / f"{ref_id}.png"
+    if not path.is_file():
+        raise HTTPException(404, "Reference image not found; upload it again")
+    return path
+
+
+@router.post("/api/generate/reference")
+async def upload_generate_reference(image: UploadFile = File(...)) -> dict[str, Any]:
+    """Store an edit source image (as PNG, content-addressed) for /api/generate."""
+    from PIL import Image, UnidentifiedImageError
+
+    data = await image.read()
+    try:
+        with Image.open(io.BytesIO(data)) as opened:
+            rgb = opened.convert("RGB")
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(400, f"Not an image: {image.filename}") from exc
+    ref_id = hashlib.sha1(data).hexdigest()
+    REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    path = REFERENCE_DIR / f"{ref_id}.png"
+    if not path.exists():
+        rgb.save(path)
+    return {"id": ref_id, "width": rgb.width, "height": rgb.height}
+
+
+@router.get("/api/generate/reference/{ref_id}")
+def get_generate_reference(ref_id: str, size: int = 256) -> FileResponse:
+    if not re.fullmatch(r"[0-9a-f]{40}", ref_id):
+        raise HTTPException(400, "Invalid reference id")
+    return _thumb_response(_reference_path(ref_id), size)
+
+
 @router.post("/api/generate")
 def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
     """Start a test generate task."""
@@ -261,6 +298,9 @@ def enqueue_generate(body: GenerateRequest) -> dict[str, Any]:
             vram_policy=vram_policy,
             ram_guard=ram_guard,
             xy_matrix=body.xy_matrix.model_dump() if body.xy_matrix else None,
+            reference_image=str(_reference_path(body.reference_id)) if body.reference_id else "",
+            reference_image_2=str(_reference_path(body.reference_id_2)) if body.reference_id_2 else "",
+            reference_match_size=body.reference_match_size,
         )
 
         # commit 14: inject the preview throttling parameter used on the daemon side

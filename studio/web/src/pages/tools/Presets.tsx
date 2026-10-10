@@ -579,7 +579,7 @@ export default function PresetsPage() {
                 </span>
               </div>
             </div>
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            <div className="ds-empty-inset" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
               {presets.length === 0 ? (
                 <div className="ds-empty">{t('presets.empty')}</div>
               ) : shownPresets.length === 0 ? (

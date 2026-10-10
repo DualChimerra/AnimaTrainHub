@@ -126,9 +126,7 @@ def run_config(rid: int) -> Response:
     if run.get("task_id"):
         row = graph_tasks.task_row(int(run["task_id"]))
         if row:
-            cfg = graph_tasks.task_config(int(run["task_id"]), row["config_path"])
-            if cfg:
-                text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+            text = graph_tasks.task_config_yaml(int(run["task_id"]), row["config_path"])
     if text is None and run.get("project_id") and run.get("version_id"):
         from ...services import version_config
         from ...services.projects import projects, versions

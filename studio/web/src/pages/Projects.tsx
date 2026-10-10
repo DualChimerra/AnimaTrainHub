@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   api, PHASE_ORDER,
-  type BundleImportResult, type LoraCkpt, type ProjectSummary, type Task, type VersionPhase,
+  type BundleImportResult, type LoraCkpt, type ProjectKind, type ProjectSummary, type Task, type VersionPhase,
 } from '../api/client'
 import KebabMenu from '../components/ds/KebabMenu'
 import PageHead from '../components/ds/PageHead'
@@ -41,6 +41,8 @@ const PHASE_STEP: Record<VersionPhase, { key: string; labelKey: string }> = {
   ready:         { key: 'train',      labelKey: 'nav.train' },
 }
 
+const projectKind = (p: { kind?: ProjectKind }): ProjectKind => p.kind ?? 'lora'
+
 const isTrain = (task: Task) => (task.task_type ?? 'train') === 'train'
 
 /** Seconds a training task spent on the GPU inside [from, now]. */
@@ -66,7 +68,9 @@ interface QueueInfo { order: number; finishesAt: number | null; startsAt: number
 
 export default function ProjectsPage() {
   const { t } = useTranslation()
-  const [items, setItems] = useState<ProjectSummary[]>([])
+  const [allItems, setItems] = useState<ProjectSummary[]>([])
+  // Edit LoRA projects live in their own section (pages/EditLora.tsx).
+  const items = useMemo(() => allItems.filter((p) => projectKind(p) === 'lora'), [allItems])
   const [tasks, setTasks] = useState<Task[]>([])
   const [extras, setExtras] = useState<Record<number, ProjectExtras>>({})
   const [sort, setSort] = useState<ProjectSort>('queue')
@@ -474,6 +478,7 @@ export default function ProjectsPage() {
 
       {creating && (
         <NewProjectDialog
+          title={t('projects.newProject')}
           busy={busy}
           onCancel={() => setCreating(false)}
           onSubmit={handleCreate}
@@ -657,29 +662,33 @@ function ProjectCard({ project: p, extras, queueInfo, progress, finishedAt, onAr
 }) {
   const { t } = useTranslation()
   const status = p.active_version_status
+  const steps = PHASE_ORDER
+  const stepOf = (ph: VersionPhase) => PHASE_STEP[ph]
+  const nSteps = steps.length
   // The phase cursor only means something while the version is being
-  // prepared; once it trains (or trained) it sits on step 5.
+  // prepared; once it trains (or trained) it sits on the last step.
   const phase: VersionPhase = status === 'preparing' || status == null ? (p.active_version_phase ?? 'curating') : 'ready'
-  const phaseIdx = Math.max(0, PHASE_ORDER.indexOf(phase))
+  const phaseIdx = Math.max(0, steps.indexOf(phase))
   const running = queueInfo?.status === 'running'
   const queued = queueInfo != null && !running
   const trainingNow = running || status === 'training'
-  const stepLabel = (ph: VersionPhase) => splitOptional(t(PHASE_STEP[ph].labelKey)).short.toLowerCase()
+  const stepLabel = (ph: VersionPhase) => splitOptional(t(stepOf(ph).labelKey)).short.toLowerCase()
 
-  // 5 segments: finished phases full, the training step follows live progress.
-  const segments = [0, 1, 2, 3, 4].map((i) => {
+  // One segment per step: finished phases full, the training step follows live progress.
+  const last = nSteps - 1
+  const segments = steps.map((_, i) => {
     if (status === 'completed') return 100
-    if (trainingNow || queued) return i < 4 ? 100 : (i === 4 && progress ? progress.pct : 0)
-    return i < phaseIdx ? 100 : 0 // preparing: finished phases; after preparing: 4 of 5
+    if (trainingNow || queued) return i < last ? 100 : (i === last && progress ? progress.pct : 0)
+    return i < phaseIdx ? 100 : 0 // preparing: finished phases; after preparing: all but the last
   })
 
   let caption = ''
   let captionRight = ''
   if (running) {
-    caption = t('projects.stepOf', { n: 5, step: stepLabel('ready') })
+    caption = t('projects.stepOf', { n: nSteps, step: stepLabel('ready') })
     captionRight = progress ? `${progress.step.toLocaleString()} / ${progress.total.toLocaleString()}` : ''
   } else if (queued) {
-    caption = t('projects.stepOf', { n: 5, step: t('projects.waitingSlot') })
+    caption = t('projects.stepOf', { n: nSteps, step: t('projects.waitingSlot') })
     captionRight = queueInfo?.startsAt ? t('projects.startAt', { time: formatClock(queueInfo.startsAt) }) : ''
   } else if (status === 'completed') {
     caption = finishedAt ? t('projects.doneAt', { when: formatProjectTime(finishedAt) }) : t('versionStatus.completed')
@@ -708,7 +717,7 @@ function ProjectCard({ project: p, extras, queueInfo, progress, finishedAt, onAr
       : status === 'completed'
         ? { to: '/tools/generate', label: t('projects.viewResult') }
         : vid != null
-          ? { to: `/projects/${p.id}/v/${vid}/${PHASE_STEP[phase].key}`, label: t('projects.continueStep', { step: stepLabel(phase) }) }
+          ? { to: `/projects/${p.id}/v/${vid}/${stepOf(phase).key}`, label: t('projects.continueStep', { step: stepLabel(phase) }) }
           : { to: `/projects/${p.id}`, label: t('projects.openProject') }
 
   const tileStyle: React.CSSProperties = { width: 34, height: 34, borderRadius: 10 }
@@ -765,10 +774,12 @@ interface NewProjectForm {
 }
 
 function NewProjectDialog({
+  title,
   busy,
   onCancel,
   onSubmit,
 }: {
+  title: string
   busy: boolean
   onCancel: () => void
   onSubmit: (form: NewProjectForm) => void
@@ -797,7 +808,7 @@ function NewProjectDialog({
         className="bg-elevated border border-subtle rounded-2xl p-6 flex flex-col gap-4 shadow-xl"
         style={{ width: '90%', maxWidth: 440 }}
       >
-        <h2 className="m-0 text-lg font-semibold">{t('projects.newProject')}</h2>
+        <h2 className="m-0 text-lg font-semibold">{title}</h2>
 
         <FieldLabel label={t('projects.newProjectTitle')} hint="title">
           <input

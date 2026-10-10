@@ -552,6 +552,12 @@ def export_bundle(
                 http_status=400,
             )
         payload.extend(tp)
+        # Edit projects: the source half of each pair travels with the targets.
+        if projects.is_edit_project(p):
+            payload.extend(_collect_control(vdir / "control"))
+            payload.extend(_collect_control(vdir / "control2", CONTROL2_PREFIX))
+            if (vdir / "edit.json").is_file():
+                in_memory.append(((vdir / "edit.json").read_text(encoding="utf-8"), "edit.json"))
 
     # --- reg section ---
     reg_stats: dict[str, Any] = {}
@@ -597,6 +603,7 @@ def export_bundle(
             "version_label": v["label"],
             "slug": p["slug"],
             "preset_name": v.get("config_name"),
+            "kind": str(p.get("kind") or "lora"),
         },
         "includes": {
             "train": opts.train,
@@ -635,10 +642,26 @@ def export_bundle(
     return {"manifest": manifest, "size_bytes": dest.stat().st_size}
 
 
+#: Edit projects: input images, mirrored like train/ (control[2]/{folder}/{file}).
+CONTROL_PREFIX = "control/"
+CONTROL2_PREFIX = "control2/"
+
+
+def _collect_control(control_dir: Path, prefix: str = CONTROL_PREFIX) -> list[tuple[Path, str]]:
+    out: list[tuple[Path, str]] = []
+    if not control_dir.is_dir():
+        return out
+    for folder in sorted(d for d in control_dir.iterdir() if d.is_dir()):
+        for f in sorted(folder.iterdir()):
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
+                out.append((f, f"{prefix}{folder.name}/{f.name}"))
+    return out
+
+
 def _safe_arc_bundle(name: str) -> Optional[tuple[str, str]]:
     """Zip-slip protection for bundles.
 
-    Returns (section, inner); section is "train" | "reg" | "preset".
+    Returns (section, inner); section is "train" | "reg" | "preset" | "control".
     Returns None if invalid.
     """
     if not name or name.endswith("/"):
@@ -664,6 +687,14 @@ def _safe_arc_bundle(name: str) -> Optional[tuple[str, str]]:
         if len(parts) != 2 or not parts[0] or not parts[1]:
             return None
         return ("reg", inner)
+
+    for prefix, section in ((CONTROL_PREFIX, "control"), (CONTROL2_PREFIX, "control2")):
+        if norm.startswith(prefix):
+            inner = norm[len(prefix):]
+            parts = inner.split("/")
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                return None
+            return (section, inner)
 
     if norm.startswith(PRESETS_PREFIX):
         inner = norm[len(PRESETS_PREFIX):]
@@ -807,9 +838,14 @@ def import_bundle(
             train_entries: list[tuple[zipfile.ZipInfo, str]] = []
             reg_entries: list[tuple[zipfile.ZipInfo, str]] = []
             preset_entries: list[tuple[zipfile.ZipInfo, str]] = []
+            control_entries: list[tuple[zipfile.ZipInfo, str]] = []
+            edit_recipe_raw: bytes | None = None
 
             for info in zf.infolist():
                 if info.is_dir() or info.filename == MANIFEST_NAME:
+                    continue
+                if info.filename == "edit.json":
+                    edit_recipe_raw = zf.read(info)
                     continue
                 result = _safe_arc_bundle(info.filename)
                 if result is None:
@@ -824,6 +860,8 @@ def import_bundle(
                     reg_entries.append((info, inner))
                 elif section == "preset":
                     preset_entries.append((info, inner))
+                elif section in ("control", "control2"):
+                    control_entries.append((info, f"{section}/{inner}"))
 
             if not train_entries and not reg_entries and not preset_entries:
                 raise TrainIOError(
@@ -832,10 +870,33 @@ def import_bundle(
                 )
 
             slug = _resolve_slug_conflict(conn, base_slug)
+            kind = str(source.get("kind") or "lora")
+            if kind not in projects.PROJECT_KINDS:
+                kind = "lora"
             p = projects.create_project(conn, title=title, slug=slug,
-                                         note=f"imported from {title!r}")
+                                         note=f"imported from {title!r}", kind=kind)
             v = versions.create_version(conn, project_id=p["id"], label=version_label)
             vdir = versions.version_dir(p["id"], p["slug"], v["label"])
+
+            # --- write out edit sources ---
+            for info, inner in control_entries:
+                section, folder, filename = inner.split("/", 2)
+                if filename.startswith(".") or Path(filename).suffix.lower() not in IMAGE_EXTS:
+                    raise TrainIOError(
+                        "Import file contains an invalid filename",
+                        code="dataset.import_invalid", http_status=400,
+                    )
+                target = safe_join(vdir / section, folder, filename)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, target.open("wb") as dst:
+                    _copy_chunks(src, dst)
+            if edit_recipe_raw is not None and kind == "edit":
+                try:
+                    recipe = json.loads(edit_recipe_raw).get("recipe")
+                except (ValueError, AttributeError):
+                    recipe = None
+                if recipe in ("text", "image"):
+                    (vdir / "edit.json").write_text(json.dumps({"recipe": recipe}), encoding="utf-8")
 
             # --- write out train ---
             seen_train: set[str] = set()
