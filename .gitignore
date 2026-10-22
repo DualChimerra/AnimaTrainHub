@@ -66,8 +66,8 @@ models/wd14/
 models/taeflux/
 models/cltagger/
 
-# Dataset (training images)
-dataset/
+# Root dataset (training images; keep source packages named dataset tracked)
+/dataset/
 
 # Misc
 nul

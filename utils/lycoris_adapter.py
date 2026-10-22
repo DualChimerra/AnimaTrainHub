@@ -265,6 +265,7 @@ class LycorisAdapter:
             _apply_reg_dims_(self.network, self.lora_reg_dims)
         if self.use_timestep_mask:
             self._install_tlora_masks()
+        self._install_bypass_autocast()
 
         # lycoris creates modules on CPU by default; the model is likely already on CUDA --
         # device/dtype must be synced explicitly, otherwise the first forward pass raises
@@ -363,6 +364,36 @@ class LycorisAdapter:
             self.network.set_multiplier(float(scale))
         if self.text_adapter is not None:
             self.text_adapter.set_multiplier(scale)
+
+    def _install_bypass_autocast(self) -> None:
+        """Keep fused LoRA projections in the same AMP dtype as their base Linear."""
+        from lycoris.modules.locon import LoConModule
+
+        if self.network is None:
+            return
+        for lora in self.network.loras:
+            if (
+                not isinstance(lora, LoConModule)
+                or not lora.bypass_mode
+                or lora.module_type != "linear"
+                or getattr(lora, "_anima_bypass_autocast_patched", False)
+            ):
+                continue
+            original_diff = lora.bypass_forward_diff
+
+            def _autocast_diff(x, scale=1, *, _original=original_diff):
+                # CUDA LayerNorm intentionally produces FP32 under AMP. LyCORIS 4's
+                # fused bypass ignores AMP and otherwise keeps that FP32 dtype,
+                # promoting the base projection and disabling FlashAttention.
+                # Cast only the low-rank branch; keep normalization in FP32 and
+                # leave full-precision execution outside autocast unchanged.
+                if x.is_cuda and x.dtype == torch.float32 and torch.is_autocast_enabled():
+                    x = x.to(dtype=torch.get_autocast_dtype("cuda"))
+                return _original(x, scale=scale)
+
+            # Wrap the final diff method, including T-LoRA's timestep mask.
+            lora.bypass_forward_diff = _autocast_diff
+            lora._anima_bypass_autocast_patched = True
 
     def _install_tlora_masks(self) -> None:
         if self.network is None:
