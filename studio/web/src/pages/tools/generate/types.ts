@@ -16,21 +16,24 @@ export const DEFAULT_NEG =
 
 /** Sampler / scheduler options, kept in sync with the backend GenerateRequest Literal
  *  (first item = family default); out-of-family values get a 422 from the backend. */
-export type GenerateFamily = 'anima' | 'krea2'
+export type GenerateFamily = 'anima' | 'krea2' | 'moss_image'
 
 export const SAMPLER_OPTIONS_BY_FAMILY = {
   anima: ['er_sde', 'dpmpp_3m_sde'],
   krea2: ['euler'],
+  moss_image: ['euler'],
 } as const satisfies Record<GenerateFamily, readonly string[]>
 
 export const SCHEDULER_OPTIONS_BY_FAMILY = {
   anima: ['simple', 'sgm_uniform'],
   krea2: ['simple'],
+  moss_image: ['simple'],
 } as const satisfies Record<GenerateFamily, readonly string[]>
 
 export const FAMILY_GENERATE_DEFAULTS = {
   anima: { steps: 25, cfgScale: 4.0 },
   krea2: { steps: 28, cfgScale: 4.5 },
+  moss_image: { steps: 50, cfgScale: 3.0 },
 } as const satisfies Record<GenerateFamily, { steps: number; cfgScale: number }>
 
 export const DISTILLED_GENERATE_DEFAULTS = { steps: 8, cfgScale: 0.0 } as const

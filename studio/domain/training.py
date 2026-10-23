@@ -54,7 +54,7 @@ class TrainingConfig(BaseModel):
     # frontend intercepts changes to this field as a "switch action": paths
     # are recalculated via /api/models/family-switch + family-specific fields
     # reset + only written after confirmation.
-    model_family: Literal["anima", "krea2"] = Field(
+    model_family: Literal["anima", "krea2", "moss_image"] = Field(
         "anima",
         description="Model family. Determines which model implementation training uses; other fields show/hide automatically based on family capabilities. Switching recalculates model paths and resets family-specific defaults",
         json_schema_extra=_meta("model"),
@@ -71,7 +71,7 @@ class TrainingConfig(BaseModel):
     )
     text_encoder_path: str = Field(
         "models/text_encoders",
-        description="Qwen text encoder directory",
+        description="Text encoder directory (MOSS also accepts a single ConvRot safetensors file)",
         json_schema_extra=_meta("model", "path", cli_alias="--qwen"),
     )
     t5_tokenizer_path: str = Field(
@@ -82,13 +82,50 @@ class TrainingConfig(BaseModel):
     )
     text_encoder_cache: bool = Field(
         True,
-        description="Precompute and cache text conditioning, then free the text encoder (recommended, saves roughly 9GB VRAM); when off, text sidecars aren't read or written and Qwen3-VL stays resident, encoding per batch — suited to high-VRAM but disk-constrained cloud setups",
+        description="Precompute caption features, then release the text encoder before loading the transformer. Recommended on small GPUs. When disabled, captions are encoded during training without disk caches, requiring more memory.",
         json_schema_extra=_meta(
             "model", show_when=cap_gate("text_cache"), advanced=True,
         ),
     )
 
     # ----------------------------------------------------------------- Dataset
+    transformer_quantization: Literal["none", "convrot_int8"] = Field(
+        "none", description="Checkpoint weight quantization, independent of Training Precision. ConvRot INT8 reduces frozen MOSS weights in memory; pre-quantized ConvRot checkpoints are detected automatically.",
+        json_schema_extra=_meta("model", show_when="model_family==moss_image"),
+    )
+    text_encoder_quantization: Literal["none", "convrot_int8"] = Field(
+        "none", description="Qwen3.5 weight quantization. ConvRot INT8 reduces text-encoder memory; computation remains BF16. Pre-quantized ConvRot files are detected automatically.",
+        json_schema_extra=_meta("model", show_when="model_family==moss_image"),
+    )
+    text_encoder_layers_to_offload: int = Field(
+        0, ge=0, le=32, description="Text Encoder Layer Offloading: number of frozen Qwen3.5 layers kept in RAM and loaded only when needed (0=off, 32=all). Saves memory while caching captions; independent of Transformer Layer Offloading.",
+        json_schema_extra=_meta("system", show_when="model_family==moss_image"),
+    )
+    moss_max_token_length: int = Field(
+        4096, ge=64, le=4096, description="Maximum MOSS caption length including its prompt template. A shorter limit saves encoding time and attention memory but truncates long captions.",
+        json_schema_extra=_meta("model", show_when="model_family==moss_image", advanced=True),
+    )
+    moss_tokenizer_path: str = Field(
+        "", description="Optional local MOSS tokenizer folder. Empty uses tokenizer files beside the text encoder, or downloads the official tokenizer.",
+        json_schema_extra=_meta("model", "path", show_when="model_family==moss_image", advanced=True),
+    )
+    moss_sample_shift: float = Field(
+        5.0, gt=0, allow_inf_nan=False, description="MOSS generation schedule shift. This affects sample images, independently of the training timestep distribution.",
+        json_schema_extra=_meta("sample", show_when="model_family==moss_image", advanced=True),
+    )
+    moss_uncond_skip_layers: list[int] = Field(
+        default_factory=lambda: [22], description="MOSS layers skipped in the negative CFG branch. Official default: 22 (zero-based). Empty list disables skipping.",
+        json_schema_extra=_meta("sample", show_when="model_family==moss_image", advanced=True),
+    )
+    moss_timestep_mean: float = Field(
+        -1.09, allow_inf_nan=False, description="Mean of the MOSS training logit-normal distribution.",
+        json_schema_extra=_meta("timestep_sampling", show_when="timestep_sampling==moss_logit_normal", advanced=True),
+    )
+    moss_timestep_std: float = Field(
+        0.95, gt=0, allow_inf_nan=False, description="Standard deviation of the MOSS training logit-normal distribution.",
+        json_schema_extra=_meta("timestep_sampling", show_when="timestep_sampling==moss_logit_normal", advanced=True),
+    )
+
     data_dir: str = Field(
         "./dataset",
         description="Dataset directory (supports Kohya-style N_xxx subfolders for setting repeats)",
@@ -208,7 +245,7 @@ class TrainingConfig(BaseModel):
                     "sampling previews; recommended to keep on); turning it off falls back to the "
                     "old per-tag encoding, useful for A/B comparisons between old and new encoding, "
                     "or to continue training from a checkpoint saved under the old encoding",
-        json_schema_extra=_meta("caption", advanced=True),
+        json_schema_extra=_meta("caption", show_when="model_family==anima", advanced=True),
     )
     cache_latents: bool = Field(
         True,
@@ -231,7 +268,7 @@ class TrainingConfig(BaseModel):
     # like vae_tiling / cache_latents)
     blocks_to_swap: int = Field(
         0, ge=0,
-        description="Block swapping: number of DiT layers swapped out to system RAM (0=off; Anima accepts 0-28, about 0.13GB per layer; "
+        description="Transformer Layer Offloading: number of DiT layers kept in system RAM (0=off; MOSS has 42 layers; Anima accepts 0-28, about 0.13GB per layer; "
                     "Krea 2 accepts 0-28, about 0.4GB per layer for the fp8 base model / 0.8GB for bf16). "
                     "Higher values use less VRAM and more RAM",
         json_schema_extra=_meta(
@@ -247,7 +284,7 @@ class TrainingConfig(BaseModel):
                     "instead of OOMing after the dataset and cache have already finished. Turn this off if the estimate produces false rejections",
         json_schema_extra=_meta(
             "system",
-            show_when=cap_gate("block_swap"),
+            show_when="model_family==anima||model_family==krea2",
             advanced=True,
         ),
     )
@@ -353,7 +390,7 @@ class TrainingConfig(BaseModel):
             # Option-level forbid (R2 v2): navit is a B=1 packed sequence with
             # per-image t; T-LoRA's rank mask matches timestep along the
             # batch dimension, so the dimensions don't line up
-            option_disable_when={"tlora": "navit_packing==true"},
+            option_disable_when={"tlora": "navit_packing==true", "ortho": "model_family==moss_image&&transformer_quantization==convrot_int8"},
             disable_hint="T-LoRA's rank mask matches timestep along the batch dimension, which is incompatible with NaViT packing (B=1, per-image t)",
         ),
     )
@@ -404,7 +441,7 @@ class TrainingConfig(BaseModel):
     lora_dora: bool = Field(
         False,
         description="DoRA: decomposes weights into direction + magnitude trained independently; usually converges more steadily, at a slight VRAM cost",
-        json_schema_extra=_meta("lora", advanced=True),
+        json_schema_extra=_meta("lora", advanced=True, disable_when="model_family==moss_image&&transformer_quantization==convrot_int8", disable_hint="ConvRot INT8 cannot use DoRA magnitude decomposition"),
     )
     lora_rs: bool = Field(
         False,
@@ -860,7 +897,7 @@ class TrainingConfig(BaseModel):
     kv_trim: bool = Field(
         False,
         description="Cross-attention KV trim: trims to the nearest bucket (64/128/256/512) by actual token count, reducing padding compute",
-        json_schema_extra=_meta("system", advanced=True),
+        json_schema_extra=_meta("system", show_when="model_family!=moss_image", advanced=True),
     )
     vae_tiling: Literal["auto", "on", "off"] = Field(
         "auto",
@@ -895,6 +932,7 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta("noise_augmentation", show_when="noise_enhancement_type==pyramid", advanced=True),
     )
     timestep_sampling: Literal[
+        "moss_logit_normal",
         "logit_normal",
         "uniform",
         "logit_normal_low",
@@ -926,7 +964,7 @@ class TrainingConfig(BaseModel):
             "timestep_sampling",
             # style_friendly's shift is fully determined by style_snr_mean;
             # stacking both would double-shift
-            show_when="timestep_sampling!=uniform&&timestep_sampling!=style_friendly&&timestep_sampling!=dual_peak",
+            show_when="timestep_sampling!=uniform&&timestep_sampling!=style_friendly&&timestep_sampling!=dual_peak&&timestep_sampling!=moss_logit_normal",
             alt_description="When InfoNoise is on, acts as the warmup-phase baseline shift — the adaptive CDF takes over for the main phase; when Leap is enabled, the leap path always uses U(0,1), and this field only applies to the (1-leap_ratio) fraction of standard steps",
             alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
@@ -937,7 +975,7 @@ class TrainingConfig(BaseModel):
         description="Fraction of samples routed to the biased end under mixed_* modes: 0 = fully uniform; typical range 0.15-0.30",
         json_schema_extra=_meta(
             "timestep_sampling",
-            show_when="timestep_sampling!=uniform&&timestep_sampling!=dual_peak",
+            show_when="timestep_sampling!=uniform&&timestep_sampling!=dual_peak&&timestep_sampling!=moss_logit_normal",
             alt_description="With InfoNoise on + a mixed_* baseline, this is the warmup-phase mix ratio — the adaptive CDF takes over for the main phase; when Leap is enabled, the leap path always uses U(0,1), and this field only applies to the (1-leap_ratio) fraction of standard steps",
             alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
@@ -1071,6 +1109,7 @@ class TrainingConfig(BaseModel):
                 "||timestep_schedule_shift!=1"
                 "||leap_enabled==true"
                 "||navit_packing==true"
+                "||timestep_sampling==moss_logit_normal"
             ),
             disable_hint="Cannot be enabled while a mutually exclusive field (noise_enhancement / loss_weighting / loss_type / schedule_shift / leap / navit) is non-default (mutually exclusive by schema)",
         ),
@@ -1302,7 +1341,8 @@ class TrainingConfig(BaseModel):
     mixed_precision: Literal["bf16", "fp16", "no"] = Field(
         "bf16",
         description="Training precision. bf16 recommended (same dynamic range as fp32, stable); fp16 uses the same VRAM but has a smaller dynamic range and gradients overflow more easily; no uses fp32, most stable but doubles VRAM use",
-        json_schema_extra=_meta("system"),
+        json_schema_extra=_meta("system", option_disable_when={"fp16": "model_family==moss_image"},
+                                disable_hint="MOSS Base requires BF16 or FP32; original weights can overflow in FP16"),
     )
 
     attention_backend: AttentionBackend = Field(
@@ -1346,6 +1386,24 @@ class TrainingConfig(BaseModel):
                 seen.add(n)
                 out.append(n)
         return out or [1024]
+
+    @model_validator(mode="after")
+    def _validate_moss_settings(self):
+        if self.model_family != "moss_image":
+            return self
+        if any(i < 0 or i >= 42 for i in self.moss_uncond_skip_layers):
+            raise ValueError("MOSS negative-branch layer indices must be between 0 and 41")
+        if self.blocks_to_swap > 42:
+            raise ValueError("MOSS has 42 transformer layers")
+        if self.blocks_to_swap and not self.grad_checkpoint:
+            raise ValueError("MOSS Transformer Layer Offloading requires gradient checkpointing")
+        if self.bucket_step and self.bucket_step % 16:
+            raise ValueError("MOSS bucket_step must be a multiple of 16")
+        if self.cache_encode_tiled and (self.cache_encode_tile_px % 16 or self.cache_encode_tile_overlap % 16):
+            raise ValueError("MOSS VAE tiles and overlap must be multiples of 16 pixels")
+        if self.transformer_quantization == "convrot_int8" and (self.lora_dora or self.lora_type == "ortho"):
+            raise ValueError("MOSS ConvRot INT8 supports LoRA, LoKr, LoHa and T-LoRA without DoRA")
+        return self
 
     @model_validator(mode="after")
     def _validate_family_capabilities(self):
@@ -1724,7 +1782,8 @@ class TrainingConfig(BaseModel):
         False,
         description="After training finishes, generate images from a held-out validation set and compute CLIP-T / CLIP-I / DINO-I metrics. "
                     "The validation set is split off from the training set and never trains — it lives in validation/, alongside train/.",
-        json_schema_extra=_meta("eval_validation", disable_when="edit_mode==true"),
+        json_schema_extra=_meta("eval_validation", disable_when="edit_mode==true",
+                                disable_hint="Validation generation does not support edit reference images"),
     )
     eval_validation_split_ratio: float = Field(
         0.0, ge=0.0, le=1.0,

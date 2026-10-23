@@ -63,7 +63,10 @@
     "local": "Local",
     "filename": "Filename",
     "rename": "Rename",
-    "reset": "Reset"
+    "reset": "Reset",
+    "browse": "Browse",
+    "add": "Add",
+    "remove": "Remove"
   },
   "status": {
     "created": "Created",
@@ -330,7 +333,8 @@
     "was": "was: {{value}}",
     "familyDesc": {
       "anima": "Anima Base 2B · Qwen3-0.6B encoder · Danbooru tags with natural language",
-      "krea2": "Krea 2 MMDiT · Qwen3-VL-4B encoder · natural-language captions"
+      "krea2": "Krea 2 MMDiT · Qwen3-VL-4B encoder · natural-language captions",
+      "moss_image": "MOSS Base 5B · Qwen3.5-9B encoder · FLUX.2 VAE"
     }
   },
   "schema": {
@@ -338,7 +342,17 @@
     "labels": {
       "train_norm": "Train normalization",
       "train_text_encoder": "Train text encoder",
-      "text_encoder_lr": "Text encoder learning rate"
+      "text_encoder_lr": "Text encoder learning rate",
+      "transformer_quantization": "Transformer Quantization",
+      "text_encoder_quantization": "Text Encoder Quantization",
+      "text_encoder_layers_to_offload": "Text Encoder Layer Offloading",
+      "blocks_to_swap": "Transformer Layer Offloading",
+      "moss_max_token_length": "Maximum Caption Length",
+      "moss_tokenizer_path": "Tokenizer Folder",
+      "moss_sample_shift": "MOSS Sampling Shift",
+      "moss_uncond_skip_layers": "Unconditional Skip Layers",
+      "moss_timestep_mean": "MOSS Timestep Mean",
+      "moss_timestep_std": "MOSS Timestep Standard Deviation"
     },
     "subgroups": {
       "loraMain": "Network parameters",
@@ -449,6 +463,20 @@
       "modelFamily": {
         "anima": "Anima",
         "krea2": "Krea 2"
+      },
+      "model_family": {
+        "moss_image": "MOSS-Image Base"
+      },
+      "timestep_sampling": {
+        "moss_logit_normal": "MOSS Logit Normal"
+      },
+      "transformer_quantization": {
+        "none": "None",
+        "convrot_int8": "ConvRot INT8"
+      },
+      "text_encoder_quantization": {
+        "none": "None",
+        "convrot_int8": "ConvRot INT8"
       }
     },
     "disableHints": {
@@ -628,7 +656,7 @@
       "bucket_min_reso": "Smallest bucket side. Empty = derived from resolution and aspect_ratio_limit.",
       "bucket_max_reso": "Largest bucket side. Empty = derived from resolution and aspect_ratio_limit.",
       "bucket_step": "Bucket size step in pixels. Empty = 64.",
-      "blocks_to_swap": "Block swap: how many DiT layers live in RAM instead of VRAM. Higher = less VRAM, more RAM and a slower step.",
+      "blocks_to_swap": "Transformer layers kept in RAM. Saves VRAM at the cost of transfer time. MOSS: up to 42 layers; 0 disables offloading.",
       "block_swap_preflight": "Check before training whether the chosen blocks_to_swap actually fits, instead of failing with OOM after the dataset is cached.",
       "navit_packing": "NaViT / Patch-n-Pack: pack several differently sized images into one training sequence by token budget instead of fixed ARB buckets. Needs cached latents and xformers.",
       "navit_token_budget": "Token budget per pack. Also the per-image ceiling: anything above it is downscaled. Pick by VRAM.",
@@ -737,7 +765,6 @@
       "navit_packing": "optional; its payoff is fine texture, which a style LoRA usually does not want",
       "navit_token_budget": "8192 on a 12 GB card, 16384 on 16 GB",
       "navit_native_resolution": "off for style — it pulls training toward fine detail",
-      "blocks_to_swap": "26 on a 12 GB card",
       "block_swap_preflight": "on",
       "grad_checkpoint": "on",
       "cache_latents": "on",
@@ -1925,7 +1952,10 @@
     "sounds": "Interface sounds",
     "soundsDesc": "Soft clicks on toggles and tabs, a chime when something finishes, a low tone on errors.",
     "tokenLabel": "Token",
-    "endpointLabel": "Download endpoint"
+    "endpointLabel": "Download endpoint",
+    "weightLibraryHelp": "Choose folders to list their weights. Compatibility is detected from file contents. Defaults are remembered per family; existing configs stay unchanged.",
+    "weightFolder": "Folder containing model weights",
+    "weightUnknown": "Unrecognized format"
   },
   "monitor": {
     "taskLabel": "Task",

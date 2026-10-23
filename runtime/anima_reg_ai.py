@@ -511,6 +511,7 @@ def main() -> None:
         t5_tokenizer_path=t5_tokenizer_path or None,
         purpose="generate",
         cache_enabled=False,
+        **(family.load_options(cfg).get("text", {}) if hasattr(family, "load_options") else {}),
     )
 
     # TE-first + batched pre-encoding (krea2): reg prompts are a different
@@ -564,6 +565,7 @@ def main() -> None:
         transformer_path, device, dtype,
         attention_backend=("flash_attn" if use_flash else "none"), repo_root=repo_root,
         purpose="generate",
+        **(family.load_options(cfg).get("dit", {}) if hasattr(family, "load_options") else {}),
     )
     if use_xformers:
         _T.enable_xformers(model)

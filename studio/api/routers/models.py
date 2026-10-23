@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from ..schemas.models import (
     FamilySwitchRequest,
@@ -30,6 +31,21 @@ from ...domain.family_switch import switch_family
 from ...services import models as model_downloader
 
 router = APIRouter()
+
+
+class WeightSelection(BaseModel):
+    category: str
+    path: str
+
+
+@router.post("/api/models/select-weight")
+def select_weight(body: WeightSelection):
+    from ...services.models.weight_library import select_weight as select
+    try:
+        select(body.category, body.path, model_downloader.build_catalog())
+    except ValueError as exc:
+        raise ValidationError(str(exc), code="model.invalid", http_status=400) from exc
+    return model_downloader.build_catalog()
 
 
 @router.get("/api/models/catalog")

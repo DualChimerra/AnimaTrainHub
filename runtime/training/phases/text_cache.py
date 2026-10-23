@@ -102,6 +102,10 @@ def run(ctx: TrainingContext) -> None:
     entries = _collect_entries(ctx)
     captions = [entry.caption for entry in entries]
     extras = _extra_prompts(ctx.args)
+    if bool(getattr(ctx.args, "dop_enabled", False)):
+        from training.dop import preservation_captions
+        extras.extend(preservation_captions(captions, str(getattr(ctx.args, "trigger_word", "") or "")))
+        extras = list(dict.fromkeys(extras))
     # The aggregated prompt cache belongs to the task archive (tasks/<id>/.text-cache/), not the
     # dataset's train/ dir: putting it there would get mistaken for a concept folder during
     # dataset scanning. Plain CLI runs (no task archive) fall back to output_dir, which is also

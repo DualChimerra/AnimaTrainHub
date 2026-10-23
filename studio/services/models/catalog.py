@@ -597,7 +597,10 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
             ))
         model_source_rows[te_domain] = te_rows
 
+    from .weight_library import build_library
+    library = build_library(r, models_cfg, family_sections, model_source_rows)
     return {
+        "weight_library": library,
         "models_root": str(r),
         **family_sections,
         "wd14": {

@@ -37,6 +37,7 @@ def default_params() -> list[dict[str, Any]]:
             "options": [
                 _opt("anima", "Anima", {"model_family": "anima"}),
                 _opt("krea2", "Krea2", {"model_family": "krea2"}),
+                _opt("moss_image", "MOSS-Image Base", {"model_family": "moss_image"}),
             ],
         },
         {

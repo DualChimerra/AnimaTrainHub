@@ -53,7 +53,7 @@ class GenerateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Model family (filled server-side from the request; the daemon dispatches loading and the sampling stack based on this)
-    model_family: Literal["anima", "krea2"] = Field("anima")
+    model_family: Literal["anima", "krea2", "moss_image"] = Field("anima")
     # Distilled inference base model (Krea2 Turbo: 8 steps / guidance 0 / mu fixed at 1.15).
     # Injected server-side after detecting the official Turbo path via the catalog variant purpose
     distilled: bool = Field(False)

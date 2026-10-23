@@ -752,6 +752,15 @@ def delete_asset(model_id: str, variant: Optional[str] = None) -> None:
         ) from exc
 
 
+def download_moss_asset(root: Path, model_id: str, *, on_log: Callable[[str], None] = print) -> bool:
+    """Download one official MOSS component, shared by Settings and the CLI."""
+    from .families.moss_image import REPO, asset_files
+    for remote, target in asset_files(root, model_id):
+        if not _sources.download_flat(REPO, remote, target, on_log=on_log):
+            return False
+    return True
+
+
 def trigger(model_id: str, variant: Optional[str] = None) -> str:
     """Convenience entry point for endpoints: picks the matching download_*
     function based on model_id + starts it asynchronously.
@@ -760,6 +769,12 @@ def trigger(model_id: str, variant: Optional[str] = None) -> str:
     about).
     """
     root = models_root()
+    if model_id in {"moss_image_main", "moss_image_vae", "moss_image_text_encoder"}:
+        if model_id == "moss_image_main" and variant not in (None, "latest", "bf16"):
+            raise ValueError(f"Unknown MOSS variant: {variant}")
+        key = f"{model_id}:bf16" if model_id == "moss_image_main" else model_id
+        start_download_async(key, lambda log: download_moss_asset(root, model_id, on_log=log))
+        return key
     if model_id == "anima_main":
         v = variant or "latest"
         if v == "latest":

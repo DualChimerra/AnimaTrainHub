@@ -24,7 +24,7 @@ class GenerateRequest(BaseModel):
     # Model family the base model belongs to (multi-model P4-4): determines path resolution /
     # daemon loading and the sampling stack; sampler is validated against a per-family whitelist
     # (GenerateConfig validator, cross-family -> 422)
-    model_family: Literal["anima", "krea2"] = "anima"
+    model_family: Literal["anima", "krea2", "moss_image"] = "anima"
     # Base model to use for this generation (official variant key or a registered local custom
     # path); None -> use the family's "selected" from Settings. Only swaps the transformer weights.
     base_model: Optional[str] = None

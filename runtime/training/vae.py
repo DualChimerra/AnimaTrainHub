@@ -84,6 +84,7 @@ class VAEWrapper:
         # + fp32 VAE with a caller passing fp16 latent/pixel doesn't get a
         # dtype mismatch.
         self.dtype = mean.dtype
+        self.latent_channels = mean.numel()
         # Tiling mode:
         #   auto (default) = estimated from free VRAM, proactively tiles
         #                     when the full-image peak approaches available VRAM;
@@ -311,7 +312,7 @@ class VAEWrapper:
         overlap_lat = (tile_px - stride_px) // up
 
         # encode output channels = z_dim(16). Reading the real channel count from the first tile would be more robust, but WAN VAE fixes it at 16.
-        acc = torch.zeros(b, 16, t, lat_h, lat_w, dtype=torch.float32, device=pixels.device)
+        acc = torch.zeros(b, self.latent_channels, t, lat_h, lat_w, dtype=torch.float32, device=pixels.device)
         wsum = torch.zeros(1, 1, 1, lat_h, lat_w, dtype=torch.float32, device=pixels.device)
 
         mask = _cosine_blend_mask(tile_lh, tile_lw, fade=overlap_lat, device=pixels.device)

@@ -12,7 +12,7 @@ export interface BaseModelOption {
 }
 
 /** Model families that support base-model selection. Catalog section key = `${family}_main`. */
-export type BaseModelFamily = 'anima' | 'krea2'
+export type BaseModelFamily = 'anima' | 'krea2' | 'moss_image'
 
 interface FamilyMainSection {
   variants: Array<{
@@ -29,7 +29,7 @@ function mainSection(
   catalog: ModelsCatalog | null, family: BaseModelFamily,
 ): FamilyMainSection | null {
   if (!catalog) return null
-  const section = family === 'krea2' ? catalog.krea2_main : catalog.anima_main
+  const section = catalog[`${family}_main`]
   return (section as FamilyMainSection | undefined) ?? null
 }
 

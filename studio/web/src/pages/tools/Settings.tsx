@@ -19,10 +19,7 @@ import {
   type TunnelState,
 } from '../../api/client'
 import { useDialog } from '../../components/Dialog'
-import {
-  AddLocalModelButton,
-  LocalModelRows,
-} from '../../components/LocalModelSources'
+import PathPicker from '../../components/PathPicker'
 import FieldLabel from '../../components/ds/FieldLabel'
 import { useToast } from '../../components/Toast'
 import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
@@ -242,26 +239,6 @@ function withSecretsDefaults(value: Secrets): Secrets {
 }
 
 const textInputClass = 'ds-inp'
-
-const MODEL_DESCRIPTION_KEYS: Record<string, string> = {
-  anima_main: 'settings.modelDescriptions.animaMain',
-  anima_vae: 'settings.modelDescriptions.animaVae',
-  qwen3: 'settings.modelDescriptions.qwen3',
-  t5_tokenizer: 'settings.modelDescriptions.t5Tokenizer',
-  wd14: 'settings.modelDescriptions.wd14',
-  cltagger: 'settings.modelDescriptions.cltagger',
-}
-
-// The backend sends English catalog names; localize the main models on the frontend.
-const MODEL_NAME_KEYS: Record<string, string> = {
-  anima_main: 'settings.modelNames.animaMain',
-  krea2_main: 'settings.modelNames.krea2Main',
-}
-
-function translatedCatalogText(keys: Record<string, string>, id: string, fallback: string | undefined, t: TFunction): string {
-  const key = keys[id]
-  return key ? t(key, { defaultValue: fallback ?? '' }) : (fallback ?? '')
-}
 
 export default function SettingsPage() {
   const { t } = useTranslation()
@@ -1179,29 +1156,14 @@ function buildPatch(draft: Secrets, server: Secrets): SecretsPatch {
 
 // ── Models Section ─────────────────────────────────────────────────────────
 
-// A local base model's "working mode" = which model family it's attached to: the
-// family determines the training config's defaults (sampler / timestep / caption
-// capability bits, see the capability matrix in domain/common.py) and which VAE /
-// text encoder it resolves against. The domain name matches the keys in catalog.model_sources.
-const FAMILY_DOMAIN_OPTIONS = [
-  { value: 'anima', label: 'Anima' },
-  { value: 'krea2', label: 'Krea 2' },
-]
-
-/** Absolute path -> last path segment (file/dir name), for showing "which weights got selected" in a toast. */
-function basename(p: string): string {
-  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
-  return i >= 0 ? p.slice(i + 1) : p
-}
-
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`
+  return `${(n / 1024 ** 3).toFixed(2)} GB`
 }
 
-function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }: {
+export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }: {
   catalog: ModelsCatalog | null
   busy: Set<string>
   start: (model_id: string, variant?: string) => Promise<void>
@@ -1213,14 +1175,8 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
   const [rootDraft, setRootDraft] = useState<string>('')
   const [serverRoot, setServerRoot] = useState<string | null>(null)
   const [savingRoot, setSavingRoot] = useState(false)
-  const [selectedAnima, setSelectedAnima] = useState<string>('1.0')
-  const [selectedKrea2, setSelectedKrea2] = useState<string>('raw')
-  const [selectedKrea2Te, setSelectedKrea2Te] = useState<string>('bf16')
-  // VAE is a shared asset independent of family -> a single selected value (''=the
-  // official location); Anima's text encoder has only one official directory, so its
-  // selected value is likewise '' (official) or a local directory's absolute path.
-  const [selectedVae, setSelectedVae] = useState<string>('')
-  const [selectedAnimaTe, setSelectedAnimaTe] = useState<string>('')
+  const [folderPicker, setFolderPicker] = useState<string | null>(null)
+  const [folderDrafts, setFolderDrafts] = useState<Record<string, string>>({})
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
   const [savingAutoSync, setSavingAutoSync] = useState(false)
   const [secretsLoaded, setSecretsLoaded] = useState(false)
@@ -1231,11 +1187,6 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
   useEffect(() => {
     void api.getSecrets().then((sec) => {
       setServerRoot(sec.models?.root ?? null)
-      setSelectedAnima(sec.models?.selected?.anima ?? sec.models?.selected_anima ?? '1.0')
-      setSelectedKrea2(sec.models?.selected?.krea2 ?? 'raw')
-      setSelectedKrea2Te(sec.models?.selected_te?.krea2 ?? 'bf16')
-      setSelectedVae(sec.models?.selected_vae ?? '')
-      setSelectedAnimaTe(sec.models?.selected_te?.anima ?? '')
       setAutoSyncPaths(sec.models?.auto_sync_paths ?? true)
       setSecretsLoaded(true)
     }).catch(() => { setSecretsLoaded(true) })
@@ -1249,107 +1200,22 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
     setRootDraft((prev) => (prev !== '' ? prev : (serverRoot ?? catalog.models_root ?? '')))
   }, [secretsLoaded, catalog, serverRoot])
 
-  const pickAnima = async (variant: string) => {
-    if (variant === selectedAnima) return
-    setSelectedAnima(variant)
+  const saveFolders = async (category: string, folders: string[]) => {
     try {
-      await api.updateSecrets({ models: { selected_anima: variant, selected: { anima: variant } } })
-      toast(t('settings.mainModelSelected', { name: variant }), 'success')
+      await api.updateSecrets({ models: { weight_folders: { [category]: folders } } })
       await reloadCatalog()
-    } catch (e) {
-      toast(String(e), 'error')
-      void reloadCatalog()
-    }
+    } catch (e) { toast(String(e), 'error') }
   }
-
-  const pickKrea2 = async (variant: string) => {
-    if (variant === selectedKrea2) return
-    setSelectedKrea2(variant)
+  const addFolder = async (category: string, path: string) => {
+    if (!path.trim()) return
+    await saveFolders(category, [...new Set([...(catalog?.weight_library?.[category]?.folders.slice(1) ?? []), path.trim()])])
+    setFolderDrafts((prev) => ({ ...prev, [category]: '' }))
+  }
+  const selectWeight = async (category: string, path: string) => {
     try {
-      await api.updateSecrets({ models: { selected: { krea2: variant } } })
-      toast(t('settings.mainModelSelected', { name: variant }), 'success')
+      await api.selectWeight(category, path)
       await reloadCatalog()
-    } catch (e) {
-      toast(String(e), 'error')
-      void reloadCatalog()
-    }
-  }
-
-  const pickKrea2Te = async (variant: string) => {
-    if (variant === selectedKrea2Te) return
-    setSelectedKrea2Te(variant)
-    try {
-      await api.updateSecrets({ models: { selected_te: { krea2: variant } } })
-      toast(t('settings.teSelected', { name: variant }), 'success')
-      await reloadCatalog()
-    } catch (e) {
-      toast(String(e), 'error')
-      void reloadCatalog()
-    }
-  }
-
-  // Writing back the VAE / text encoder selection: same shape as pickAnima /
-  // pickKrea2Te (optimistic update + rollback on failure = refetch catalog + secrets).
-  const pickVae = async (value: string) => {
-    if (value === selectedVae) return
-    const prev = selectedVae
-    setSelectedVae(value)
-    try {
-      await api.updateSecrets({ models: { selected_vae: value } })
-      toast(t('settings.vaeSelected', {
-        name: value ? basename(value) : t('settings.officialWeights'),
-      }), 'success')
-      await reloadCatalog()
-    } catch (e) {
-      setSelectedVae(prev)
-      toast(String(e), 'error')
-      void reloadCatalog()
-    }
-  }
-
-  const pickAnimaTe = async (value: string) => {
-    if (value === selectedAnimaTe) return
-    const prev = selectedAnimaTe
-    setSelectedAnimaTe(value)
-    try {
-      await api.updateSecrets({ models: { selected_te: { anima: value } } })
-      toast(t('settings.teSelected', {
-        name: value ? basename(value) : t('settings.officialWeights'),
-      }), 'success')
-      await reloadCatalog()
-    } catch (e) {
-      setSelectedAnimaTe(prev)
-      toast(String(e), 'error')
-      void reloadCatalog()
-    }
-  }
-
-  // After registering/unregistering a local candidate or changing its mode: both
-  // catalog and secrets may change (the server falls back an invalidated selection to
-  // the default), so both need refetching together, or the UI would look stale.
-  const reloadSources = async () => {
-    await reloadCatalog()
-    try {
-      const sec = await api.getSecrets()
-      setSelectedAnima(sec.models?.selected?.anima ?? sec.models?.selected_anima ?? '1.0')
-      setSelectedKrea2(sec.models?.selected?.krea2 ?? 'raw')
-      setSelectedKrea2Te(sec.models?.selected_te?.krea2 ?? 'bf16')
-      setSelectedVae(sec.models?.selected_vae ?? '')
-      setSelectedAnimaTe(sec.models?.selected_te?.anima ?? '')
-    } catch {
-      // A failed secrets read shouldn't make a just-succeeded registration look like
-      // a failure: the catalog has already refreshed, and it'll reconcile again next time the page loads.
-    }
-  }
-
-  const sourceRows = (domain: string) => catalog?.model_sources?.[domain] ?? []
-
-  // After changing a local base model's "working mode", reselect it in the new
-  // family (LocalModelRows only knows about domain; the entry point that writes back
-  // the selection dispatches per family).
-  const selectMainInDomain = async (domain: string, value: string) => {
-    if (domain === 'krea2') await pickKrea2(value)
-    else await pickAnima(value)
+    } catch (e) { toast(String(e), 'error') }
   }
 
   const saveRoot = async () => {
@@ -1427,205 +1293,56 @@ function ModelsSection({ catalog, busy, start, reloadCatalog, catalogError, t }:
         <div className="ds-set-empty">{t('settings.loadingModelCatalog')}</div>
       ) : (
         <>
-          {/* Anima base model */}
-          <ModelGroupCard
-            title={translatedCatalogText(MODEL_NAME_KEYS, 'anima_main', catalog.anima_main.name, t)}
-            helpTooltip={
-              <>
-                <p><Trans i18nKey="settings.repoHelp" values={{ desc: translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_main', catalog.anima_main.description, t), repo: catalog.anima_main.repo }} components={{ code: <code /> }} /></p>
-                <p><Trans i18nKey="settings.defaultTransformerHelp" components={{ strong: <strong /> }} /></p>
-              </>
-            }
-            add={<AddLocalModelButton domain="anima" shape="file" initialPath={catalog.models_root} onChanged={reloadSources} />}
-          >
-            {catalog.anima_main.variants.map((v) => {
-              const key = `anima_main:${v.variant}`
-              const dl = catalog.downloads[key]
-              const isSel = v.variant === selectedAnima
-              const canSelect = v.exists && dl?.status !== 'running'
-              return (
-                <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
-                  <input type="radio" name="anima_variant" checked={isSel} disabled={!canSelect}
-                    onChange={() => void pickAnima(v.variant)}
-                    title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
-                  />
-                  <code className="ds-model-name" title={v.variant}>{v.variant}</code>
-                  <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
-                  {v.kind === 'custom'
-                    ? <span className="ds-badge ds-mute" title={v.target_path}>{t('settings.localBaseModel')}</span>
-                    : <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('anima_main', v.variant)} />}
-                </li>
-              )
-            })}
-            {/* Own weights: a local .safetensors, in the same radio group as the official variants */}
-            <LocalModelRows
-              domain="anima"
-              rows={sourceRows('anima')}
-              radioName="anima_variant"
-              onSelect={(value) => void pickAnima(value)}
-              onChanged={reloadSources}
-              familyOptions={FAMILY_DOMAIN_OPTIONS}
-              selectInDomain={selectMainInDomain}
-            />
-          </ModelGroupCard>
-
-          {/* VAE (shared by both families, can be swapped for your own local weights) */}
-          <ModelGroupCard
-            title={catalog.anima_vae.name}
-            helpTooltip={<>
-              <p>{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'anima_vae', catalog.anima_vae.description, t)}</p>
-              <p>{t('settings.vaeHelp')}</p>
-            </>}
-            add={<AddLocalModelButton domain="vae" shape="file" initialPath={catalog.models_root} onChanged={reloadSources} />}
-          >
-            <li className={`model-row ds-model-row${selectedVae === '' ? ' ds-is-on' : ''}`}>
-              <input type="radio" name="vae_source" checked={selectedVae === ''}
-                onChange={() => void pickVae('')}
-                title={t('settings.selectDefaultVae')}
-              />
-              <code className="ds-model-name" title={catalog.anima_vae.repo}>{catalog.anima_vae.repo}</code>
-              <ModelStatusBadge exists={catalog.anima_vae.exists} size={catalog.anima_vae.size} status={catalog.downloads.anima_vae?.status} />
-              <DownloadButton exists={catalog.anima_vae.exists} status={catalog.downloads.anima_vae?.status} busy={busy.has('anima_vae')} onClick={() => void start('anima_vae')} />
-            </li>
-            <LocalModelRows
-              domain="vae"
-              rows={sourceRows('vae')}
-              radioName="vae_source"
-              onSelect={(value) => void pickVae(value)}
-              onChanged={reloadSources}
-            />
-          </ModelGroupCard>
-
-          {/* Anima text encoder: the official Qwen3 directory + a user-registered local encoder (radio) */}
-          <ModelGroupCard
-            title={catalog.qwen3.name}
-            helpTooltip={<>
-              <p>{translatedCatalogText(MODEL_DESCRIPTION_KEYS, 'qwen3', catalog.qwen3.description, t)}</p>
-              <p>{t('settings.animaTeHelp')}</p>
-            </>}
-            add={<AddLocalModelButton domain="anima_te" shape="dir" initialPath={catalog.qwen3.target_dir} onChanged={reloadSources} />}
-          >
-            {(() => {
-              const m = catalog.qwen3
-              const dl = catalog.downloads.qwen3
-              const allExist = m.files.every((f) => f.exists)
-              const totalSize = m.files.reduce((sum, f) => sum + f.size, 0)
-              return (
-                <li className={`model-row ds-model-row${selectedAnimaTe === '' ? ' ds-is-on' : ''}`}>
-                  <input type="radio" name="anima_te" checked={selectedAnimaTe === ''}
-                    onChange={() => void pickAnimaTe('')}
-                    title={t('settings.selectDefaultTe')}
-                  />
-                  <code className="ds-model-name" title={m.repo}>{m.repo}</code>
-                  <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
-                  <DownloadButton exists={allExist} status={dl?.status} busy={busy.has('qwen3')} onClick={() => void start('qwen3')} />
-                </li>
-              )
-            })()}
-            <LocalModelRows
-              domain="anima_te"
-              rows={sourceRows('anima_te')}
-              radioName="anima_te"
-              onSelect={(value) => void pickAnimaTe(value)}
-              onChanged={reloadSources}
-            />
-          </ModelGroupCard>
-
-          {/* T5 tokenizer (Anima-specific, no custom entry point -- it's just a tokenizer file) */}
-          {(['t5_tokenizer'] as const).map((id) => {
-            const m = catalog[id]
-            const dl = catalog.downloads[id]
-            const allExist = m.files.every((f) => f.exists)
-            const totalSize = m.files.reduce((s, f) => s + f.size, 0)
+          {(['checkpoints', 'vae', 'text_encoders'] as const).map((category) => {
+            const library = catalog.weight_library?.[category]
+            if (!library) return null
             return (
-              <ModelGroupCard key={id} title={m.name} helpTooltip={translatedCatalogText(MODEL_DESCRIPTION_KEYS, id, m.description, t)}>
-                <li className="ds-model-row">
-                  <code className="ds-model-name" title={m.repo}>{m.repo}</code>
-                  <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
-                  <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(id)} onClick={() => void start(id)} />
-                </li>
+              <ModelGroupCard key={category} title={{ checkpoints: 'Checkpoints', vae: 'VAE', text_encoders: 'Text Encoders' }[category]}
+                helpTooltip={t('settings.weightLibraryHelp')}
+                add={<div className="ds-after">
+                  {library.folders.map((folder, index) => <div className="ds-set-inline" key={folder}>
+                    <code className="ds-model-name" title={folder}>{folder}</code>
+                    {index > 0 && <button className="ds-iconbtn" aria-label={t('common.remove')} onClick={() => void saveFolders(category, library.folders.slice(1).filter((p) => p !== folder))}>×</button>}
+                  </div>)}
+                  <div className="ds-set-inline ds-after">
+                    <input className={`${textInputClass} ds-mono`} value={folderDrafts[category] ?? ''}
+                      placeholder={t('settings.weightFolder')} aria-label={t('settings.weightFolder')}
+                      onChange={(e) => setFolderDrafts((prev) => ({ ...prev, [category]: e.target.value }))} />
+                    <button className="ds-ctl" onClick={() => setFolderPicker(category)}>{t('common.browse')}</button>
+                    <button className="ds-ctl" disabled={!folderDrafts[category]?.trim()} onClick={() => void addFolder(category, folderDrafts[category])}>{t('common.add')}</button>
+                    <button className="ds-ctl" onClick={() => void reloadCatalog()}>{t('common.refresh')}</button>
+                  </div>
+                  {library.errors.map((error) => <p className="ds-note ds-err" key={error}>{error}</p>)}
+                </div>}>
+                {library.rows.map((row) => {
+                  const key = row.status_key ?? row.path
+                  const dl = catalog.downloads[key]
+                  return <li key={row.path} className={`ds-model-row${row.is_current ? ' ds-is-on' : ''}`}>
+                    <input type="radio" name={`${category}-${row.families.join('-')}`} checked={row.is_current}
+                      aria-label={row.label} disabled={!row.exists || !row.families.length || dl?.status === 'running'}
+                      onChange={() => void selectWeight(category, row.path)} />
+                    <code className="ds-model-name" title={row.path}>{row.label}</code>
+                    {row.purpose && <span className="ds-badge ds-mute">{row.purpose === 'inference' ? t('settings.purposeInference') : t('settings.purposeTraining')}</span>}
+                    {!row.families.length && <span className="ds-badge ds-mute">{t('settings.weightUnknown')}</span>}
+                    <ModelStatusBadge exists={row.exists} size={row.size} status={dl?.status} />
+                    {row.download_id && <DownloadButton exists={row.exists} status={dl?.status} busy={busy.has(key)}
+                      onClick={() => void start(row.download_id!, row.download_variant ?? undefined)} />}
+                    {row.candidate && row.domain && <button className="ds-ctl ds-ghost ds-sm"
+                      title={t('settings.localModelRemoveHint')}
+                      onClick={() => { void api.removeModelSource(row.domain!, row.candidate!).then(reloadCatalog).catch((e) => toast(String(e), 'error')) }}>
+                      {t('settings.localModelRemove')}
+                    </button>}
+                  </li>
+                })}
+                {category === 'text_encoders' && <li className="ds-model-row">
+                  <code className="ds-model-name">{catalog.t5_tokenizer.name}</code>
+                  <ModelStatusBadge exists={catalog.t5_tokenizer.files.every((f) => f.exists)} size={catalog.t5_tokenizer.files.reduce((s, f) => s + f.size, 0)} status={catalog.downloads.t5_tokenizer?.status} />
+                  <DownloadButton exists={catalog.t5_tokenizer.files.every((f) => f.exists)} status={catalog.downloads.t5_tokenizer?.status} busy={busy.has('t5_tokenizer')} onClick={() => void start('t5_tokenizer')} />
+                </li>}
               </ModelGroupCard>
             )
           })}
-
-          {/* Krea 2 base model (the second model family; shares qwen_image_vae with Anima for VAE) */}
-          {catalog.krea2_main && (
-            <ModelGroupCard
-              title={translatedCatalogText(MODEL_NAME_KEYS, 'krea2_main', catalog.krea2_main.name, t)}
-              helpTooltip={t('settings.krea2MainHelp')}
-              add={<AddLocalModelButton domain="krea2" shape="file" initialPath={catalog.models_root} onChanged={reloadSources} />}
-            >
-              {catalog.krea2_main.variants.map((v) => {
-                const key = `krea2_main:${v.variant}`
-                const dl = catalog.downloads[key]
-                const isSel = v.variant === selectedKrea2
-                const canSelect = v.exists && dl?.status !== 'running'
-                return (
-                  <li key={v.variant} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
-                    <input type="radio" name="krea2_variant" checked={isSel} disabled={!canSelect}
-                      onChange={() => void pickKrea2(v.variant)}
-                      title={canSelect ? t('settings.selectDefaultMainModel') : v.exists ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
-                    />
-                    <code className="ds-model-name" title={v.variant}>{v.variant}</code>
-                    {v.purpose && (
-                      <span className="ds-badge ds-mute">
-                        {v.purpose === 'training' ? t('settings.purposeTraining') : t('settings.purposeInference')}
-                      </span>
-                    )}
-                    <ModelStatusBadge exists={v.exists} size={v.size} status={dl?.status} />
-                    <DownloadButton exists={v.exists} status={dl?.status} busy={busy.has(key)} onClick={() => void start('krea2_main', v.variant)} />
-                  </li>
-                )
-              })}
-              <LocalModelRows
-                domain="krea2"
-                rows={sourceRows('krea2')}
-                radioName="krea2_variant"
-                onSelect={(value) => void pickKrea2(value)}
-                onChanged={reloadSources}
-                familyOptions={FAMILY_DOMAIN_OPTIONS}
-                selectInDomain={selectMainInDomain}
-              />
-            </ModelGroupCard>
-          )}
-
-          {/* Krea 2 text encoder Qwen3-VL: bf16 directory version + the official fp8 single-file version (radio) */}
-          {catalog.krea2_text_encoder && (
-            <ModelGroupCard
-              title={catalog.krea2_text_encoder.name}
-              helpTooltip={t('settings.krea2TeHelp')}
-              add={<AddLocalModelButton domain="krea2_te" shape="dir" initialPath={catalog.krea2_text_encoder?.target_dir ?? catalog.models_root} onChanged={reloadSources} />}
-            >
-              {([['bf16', catalog.krea2_text_encoder], ['fp8', catalog.krea2_text_encoder_fp8]] as const).map(([teKey, m]) => {
-                if (!m) return null
-                const dlKey = teKey === 'bf16' ? 'krea2_text_encoder' : 'krea2_text_encoder_fp8'
-                const dl = catalog.downloads[dlKey]
-                const allExist = m.files.every((f) => f.exists)
-                const totalSize = m.files.reduce((s, f) => s + f.size, 0)
-                const isSel = teKey === selectedKrea2Te
-                const canSelect = allExist && dl?.status !== 'running'
-                return (
-                  <li key={teKey} className={`model-row ds-model-row${isSel ? ' ds-is-on' : ''}`}>
-                    <input type="radio" name="krea2_te" checked={isSel} disabled={!canSelect}
-                      onChange={() => void pickKrea2Te(teKey)}
-                      title={canSelect ? t('settings.selectDefaultTe') : allExist ? t('settings.downloadInProgress') : t('settings.downloadRequiredFirst')}
-                    />
-                    <code className="ds-model-name">{teKey}</code>
-                    <ModelStatusBadge exists={allExist} size={totalSize} status={dl?.status} fileCount={m.files.length} existsCount={m.files.filter((f) => f.exists).length} />
-                    <DownloadButton exists={allExist} status={dl?.status} busy={busy.has(dlKey)} onClick={() => void start(dlKey)} />
-                  </li>
-                )
-              })}
-              {/* Custom text encoder: a local transformers directory (containing config.json) */}
-              <LocalModelRows
-                domain="krea2_te"
-                rows={sourceRows('krea2_te')}
-                radioName="krea2_te"
-                onSelect={(value) => void pickKrea2Te(value)}
-                onChanged={reloadSources}
-              />
-            </ModelGroupCard>
-          )}
+          {folderPicker && <PathPicker dirOnly initialPath={catalog.models_root} onClose={() => setFolderPicker(null)} onPick={(path) => { void addFolder(folderPicker, path); setFolderPicker(null) }} />}
 
           {/* Download log */}
           {Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length > 0 && (

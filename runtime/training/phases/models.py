@@ -84,6 +84,8 @@ def _load_dit(ctx: TrainingContext) -> None:
         )
     logger.info("Loading Transformer...")
     extra = {}
+    if hasattr(ctx.family, "load_options"):
+        extra.update(ctx.family.load_options(args).get("dit", {}))
     blocks_to_swap = int(getattr(args, "blocks_to_swap", 0) or 0)
     if blocks_to_swap > 0:
         # The capability bit is already gated by cap_gate on the schema side; a bare CLI /
@@ -145,6 +147,7 @@ def _load_text(ctx: TrainingContext) -> None:
         ctx.dtype,
         t5_tokenizer_path=args.t5_tokenizer_path,
         cache_enabled=bool(getattr(args, "text_encoder_cache", True)),
+        **(ctx.family.load_options(args).get("text", {}) if hasattr(ctx.family, "load_options") else {}),
     )
 
 
@@ -184,6 +187,8 @@ def _inject_adapter(ctx: TrainingContext) -> None:
     logger.info("Injecting %s...", args.lora_type.upper())
     from training.adapters import build_adapter
 
+    if getattr(ctx.model, "is_convrot_int8", False) and (args.lora_type == "ortho" or getattr(args, "lora_dora", False)):
+        raise ValueError("ConvRot INT8 checkpoints require LoRA, LoKr, LoHa or T-LoRA without DoRA")
     ctx.injector = build_adapter(args, preset=ctx.family.lora_preset())
     ctx.injector.metadata_extra = ctx.family.lora_metadata()
     if getattr(args, "edit_mode", False):
@@ -298,7 +303,7 @@ def run(ctx: TrainingContext) -> None:
 
     if _defer_dit_for_text_cache(ctx):
         logger.info(
-            "text cache enabled: loading VAE/Qwen3-VL first, will load the Transformer after caching and releasing the TE"
+            "text cache enabled: loading VAE/text encoder first, will load the Transformer after caching and releasing the TE"
         )
         # Segmented budget: this segment only loads VAE + TE (the DiT gets its own budget in the finish segment).
         # The switch comes from Settings -> Training -> Training Params (injected by the supervisor via env, default on).

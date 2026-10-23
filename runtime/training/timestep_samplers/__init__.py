@@ -15,6 +15,7 @@ To add a new sampler:
 from __future__ import annotations
 
 from training.timestep_samplers import baseline, infonoise, krea2_shift
+from training.timestep_samplers import moss
 from training.timestep_samplers.protocol import TimestepSamplerProtocol
 
 __all__ = [
@@ -31,6 +32,7 @@ BUILDERS: dict[str, callable] = {
     "baseline": baseline.build,
     "infonoise": infonoise.build,
     "krea2_shift": krea2_shift.build,
+    "moss_logit_normal": moss.build,
 }
 
 
@@ -42,6 +44,10 @@ def build_timestep_sampler(args, total_steps) -> TimestepSamplerProtocol:
     so they cannot both be enabled at once.
     """
     mode = str(getattr(args, "timestep_sampling", "logit_normal") or "logit_normal").lower()
+    if mode == "moss_logit_normal":
+        if getattr(args, "infonoise_enabled", False):
+            raise ValueError("moss_logit_normal and infonoise_enabled cannot both define the timestep distribution")
+        return BUILDERS["moss_logit_normal"](args, total_steps)
     if mode == "krea2_shift":
         if getattr(args, "infonoise_enabled", False):
             raise ValueError("krea2_shift and infonoise_enabled cannot both be enabled")

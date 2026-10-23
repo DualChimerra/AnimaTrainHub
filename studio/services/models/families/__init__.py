@@ -21,10 +21,12 @@ from typing import Optional
 
 from . import anima as _anima
 from . import krea2 as _krea2
+from . import moss_image as _moss_image
 
 FAMILY_ASSETS = {
     "anima": _anima.ASSETS,
     "krea2": _krea2.ASSETS,
+    "moss_image": _moss_image.ASSETS,
 }
 
 

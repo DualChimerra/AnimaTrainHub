@@ -1,5 +1,13 @@
 # Third-Party Notices
 
+## MOSS-Image integration
+
+- `modeling/moss_image/` adapts the MOSS transformer, FLUX.2 VAE and ConvRot INT8 implementation from [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts/tree/11d8cedd0c67b93a10f8b2d75f43554f6f12c794), pinned at `11d8cedd0c67b93a10f8b2d75f43554f6f12c794`, Apache-2.0. The sampling schedule is adapted in `runtime/training/families/moss_image/sampling.py`.
+- Original MOSS architecture: [OpenMOSS-Team/MOSS-Image-Base](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base), Apache-2.0. Original VAE code: [black-forest-labs/flux](https://github.com/black-forest-labs/flux), Apache-2.0, through kohya's Musubi/sd-scripts port. Weight licenses are separate from this code attribution.
+- ConvRot kernels retain the upstream NVIDIA CORPORATION & AFFILIATES and Comfy Org copyright notices and Apache-2.0 license header.
+- The FLUX.2 preview RGB coefficients in `runtime/training/families/latent_spaces.py` come from [ComfyUI's latent formats](https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/latent_formats.py), GPL-3.0.
+- Local adaptations replace upstream attention/offloading integration with Studio's runtime, add strict streaming loaders, persistent-buffer handling, quantized boundary casts, and family/config/catalog integration. No KohakuMossTrainer runtime code is incorporated.
+
 This repository includes, adapts, or derives from third-party code and implementation
 snippets, as well as several algorithm ports based on public papers/engineering
 implementations. Please comply with the relevant licenses and retain the required

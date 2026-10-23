@@ -340,12 +340,18 @@ const emptyModelsCatalog = {
       },
     ],
   },
+  weight_library: {
+    checkpoints: { folders: ['/tmp/anima/diffusion_models'], errors: [], rows: [{ path: '/tmp/models/my-krea2.safetensors', value: '/tmp/models/my-krea2.safetensors', label: 'my-krea2.safetensors', exists: true, families: ['krea2'], is_current: false, size: 1024, download_id: null, download_variant: null, status_key: null }] },
+    vae: { folders: ['/tmp/anima/vae'], errors: [], rows: [] },
+    text_encoders: { folders: ['/tmp/anima/text_encoders'], errors: [], rows: [] },
+  },
   downloads: {},
 }
 
 const fetchMock = vi.fn()
 
 beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn()
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -504,51 +510,22 @@ describe('SettingsPage (PP0)', () => {
     })
   })
 
-  it('splits Anima and Krea2 into separate model sections', async () => {
-    const user = userEvent.setup()
+  it('shows generic weight categories', async () => {
     renderPage()
-
-    await user.click(await screen.findByRole('link', { name: 'Training' }))
-    expect(await screen.findByRole('heading', { name: 'Anima models' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Krea2 models' })).toBeInTheDocument()
-    expect(await screen.findByRole('heading', { name: 'Krea 2 main model' })).toBeInTheDocument()
-    expect(screen.getByText('Krea 2 \u00b7 Qwen3-VL text encoder')).toBeInTheDocument()
-    expect(screen.getByText('bf16')).toBeInTheDocument()
-    expect(screen.getByText('fp8')).toBeInTheDocument()
-    expect(screen.getByText('raw')).toBeInTheDocument()
-    expect(screen.getByText('turbo')).toBeInTheDocument()
-    expect(screen.getByText('my-krea2.safetensors')).toBeInTheDocument()
-    const customRow = screen.getByText('my-krea2.safetensors').closest('li')
-    expect(customRow).not.toBeNull()
-    expect(within(customRow!).getByText('local')).toBeInTheDocument()
-    expect(customRow!.querySelector('.bg-ok-soft')).not.toBeNull()
-    expect(within(customRow!).getByTitle('Remove from list (keeps files)')).toBeInTheDocument()
-    expect(within(customRow!).queryByText(/🗑/)).not.toBeInTheDocument()
-    expect(screen.getAllByRole('radio')).toHaveLength(5)
-    expect(screen.queryByText(/Recommended workflow/)).not.toBeInTheDocument()
-    const rawRow = screen.getByText('raw').closest('li')!
-    const turboRow = screen.getByText('turbo').closest('li')!
-    expect(within(rawRow).getByText('training')).toBeInTheDocument()
-    expect(within(turboRow).getByText('inference')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Checkpoints' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'VAE' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Text Encoders' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Krea 2 main model' })).not.toBeInTheDocument()
   })
 
-  it('picking a variant writes new-style selected.{family} (multi-model P4-5)', async () => {
+  it('selects local weights through the compatibility endpoint', async () => {
     const user = userEvent.setup()
     renderPage()
-    await user.click(await screen.findByRole('link', { name: 'Models' }))
-    await screen.findByRole('heading', { name: 'Krea 2 main model' })
-    const customRow = screen.getByText('my-krea2.safetensors').closest('li')!
-    await user.click(within(customRow).getByRole('radio'))
-
+    await user.click(await screen.findByRole('radio', { name: 'my-krea2.safetensors' }))
     await waitFor(() => {
-      const putCall = fetchMock.mock.calls.find(
-        ([url, init]) => String(url).includes('/api/secrets') && init?.method === 'PUT'
-      )
-      expect(putCall).toBeDefined()
-      const body = JSON.parse(String(putCall![1].body))
-      expect(body).toEqual({
-        models: { selected: { krea2: '/tmp/models/my-krea2.safetensors' } },
-      })
+      const call = fetchMock.mock.calls.find(([url, init]) => String(url).includes('/api/models/select-weight') && init?.method === 'POST')
+      expect(call).toBeDefined()
+      expect(JSON.parse(String(call![1].body))).toEqual({ category: 'checkpoints', path: '/tmp/models/my-krea2.safetensors' })
     })
   })
 

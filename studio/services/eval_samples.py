@@ -608,6 +608,7 @@ def _default_generator(
         t5_tokenizer_path=t5_tokenizer_path or None,
         purpose="generate",
         cache_enabled=False,
+        **(family.load_options(cfg).get("text", {}) if hasattr(family, "load_options") else {}),
     )
     # TE-first orchestration (krea2, same as daemon/CLI): items' prompt set is
     # closed -- pre-encode all of them and fully release the TE before loading the
@@ -632,6 +633,7 @@ def _default_generator(
         transformer_path, device, dtype,
         attention_backend=("flash_attn" if use_flash else "none"), repo_root=diffusion_root,
         purpose="generate",
+        **(family.load_options(cfg).get("dit", {}) if hasattr(family, "load_options") else {}),
     )
     if use_xformers:
         _T.enable_xformers(model)
