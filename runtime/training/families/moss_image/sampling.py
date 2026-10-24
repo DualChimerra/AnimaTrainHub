@@ -1,6 +1,6 @@
-"""Official MOSS Euler schedule, standard CFG and unconditional layer skipping.
+"""MOSS Euler sampling with simple / SGM uniform schedules and standard CFG.
 
-Schedule from kohya-ss/sd-scripts 11d8cedd0c67b93a10f8b2d75f43554f6f12c794 (Apache-2.0).
+Simple schedule and CFG order adapted from ComfyUI via WalkingMeatAxolotl/AnimaLoraStudio #616; see THIRD_PARTY_NOTICES.md.
 """
 import torch
 from modeling.moss_image.vae import unpatchify_latents
@@ -12,22 +12,31 @@ def _sigma_grid(count: int, shift: float, total: int) -> torch.Tensor:
 
 
 def get_sampling_sigmas(
-    num_inference_steps: int, shift: float = 5.0, training_shift: float = 1.0, num_train_timesteps: int = 1000
+    num_inference_steps: int, shift: float = 5.0, training_shift: float = 1.0, num_train_timesteps: int = 1000,
+    *, scheduler: str = "simple",
 ) -> torch.Tensor:
     """Return the sampling sigmas [steps + 1] (descending, the last value is 0) on the CPU in float32.
 
-    The number of effective steps can be smaller than `num_inference_steps` because the shifted grid is snapped to the
-    training grid and duplicates are removed (same as the official scheduler).
+    Simple samples the shifted discrete table by index, matching ComfyUI.
+    SGM uniform keeps continuous sigmas and exactly `num_inference_steps` steps.
     """
     if num_inference_steps < 1 or shift <= 0 or training_shift <= 0:
         raise ValueError("Steps and shifts must be positive.")
+    if scheduler not in ("simple", "sgm_uniform"):
+        raise ValueError(f"Unsupported MOSS scheduler: {scheduler}")
     total = num_train_timesteps
-    sigmas = _sigma_grid(num_inference_steps, shift, total)
-    training = _sigma_grid(total, training_shift, total).flip(0)  # ascending
-    upper = torch.searchsorted(training, sigmas).clamp(max=total - 1)
-    lower = (upper - 1).clamp(min=0)
-    nearest = torch.where((sigmas - training[lower]).abs() <= (training[upper] - sigmas).abs(), lower, upper)
-    sigmas = torch.unique_consecutive(training[nearest])
+    if scheduler == "sgm_uniform":
+        # ComfyUI normal_scheduler(sgm=True) with ModelSamplingDiscreteFlow:
+        # space steps + 1 timesteps uniformly, drop the last, shift, then append 0.
+        # _sigma_grid includes the already-shifted lower endpoint used by that model.
+        sigmas = _sigma_grid(num_inference_steps + 1, shift, total)[:-1]
+        return torch.cat([sigmas, sigmas.new_zeros(1)])
+    # ComfyUI simple_scheduler samples the shifted training table by index.
+    # Rounding a separate linspace to the table uses a different schedule.
+    times = torch.arange(1, total + 1, dtype=torch.float32) / total
+    table = shift * times / (1 + (shift - 1) * times)
+    stride = total / num_inference_steps
+    sigmas = torch.stack([table[-(1 + int(i * stride))] for i in range(num_inference_steps)])
     return torch.cat([sigmas, sigmas.new_zeros(1)])
 
 
@@ -44,8 +53,8 @@ def sample_image(model, vae, text, prompt, *, height=1024, width=1024, steps=Non
                  distilled=False, device="cuda", dtype=None, step_callback=None,
                  phase_callback=None, seed=None, vram_policy=None):
     from PIL import Image
-    if sampler_name not in (None, "euler") or scheduler not in (None, "simple"):
-        raise ValueError("MOSS sampling supports Euler / simple")
+    if sampler_name not in (None, "euler") or scheduler not in (None, "simple", "sgm_uniform"):
+        raise ValueError("MOSS sampling supports Euler with simple or sgm_uniform")
     if height % 16 or width % 16 or min(height, width) < 16:
         raise ValueError("MOSS image dimensions must be positive multiples of 16")
     if distilled:
@@ -75,22 +84,33 @@ def sample_image(model, vae, text, prompt, *, height=1024, width=1024, steps=Non
     else:
         generator.manual_seed(int(torch.randint(0, 2**31 - 1, (1,)).item()))
     latent = torch.randn((1, 128, height // 16, width // 16), generator=generator).to(device)
-    sigmas = get_sampling_sigmas(steps, getattr(model, "sample_flow_shift", 5.0)).to(device)
+    sigmas = get_sampling_sigmas(
+        steps, getattr(model, "sample_flow_shift", 5.0), scheduler=scheduler or "simple",
+    ).to(device)
     skipped = getattr(model, "sample_uncond_skip_layers", (22,))
     training = model.training
     model.eval()
+    def velocity(sigma, row, skip=()):
+        context = conditions.context[row:row+1]
+        mask = conditions.attention_mask[row:row+1]
+        if getattr(model, "moss_comfy_forward", False):
+            from .comfy_forward import comfy_forward
+            return comfy_forward(model, latent.to(dtype), sigma.reshape(1),
+                context[:, mask[0].bool()], skip_layers=skip).float()
+        return model(latent.to(dtype), (sigma * 1000).reshape(1), context, mask, skip_layers=skip).float()
     try:
         if phase_callback:
             phase_callback("sample")
         with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
             for index in range(len(sigmas) - 1):
-                timestep = (sigmas[index] * 1000).reshape(1)
-                pred = model(latent.to(dtype), timestep, conditions.context[:1], conditions.attention_mask[:1]).float()
+                sigma = sigmas[index]
+                denoised = latent - sigma * velocity(sigma, 0)
                 if cfg != 1:
-                    uncond = model(latent.to(dtype), timestep, conditions.context[1:], conditions.attention_mask[1:], skip_layers=skipped).float()
-                    pred = uncond + cfg * (pred - uncond)
+                    uncond = latent - sigma * velocity(sigma, 1, skipped)
+                    denoised = uncond + (denoised - uncond) * cfg
                 if step_callback:
-                    step_callback(index, len(sigmas) - 1, unpatchify_latents(latent - sigmas[index] * pred).unsqueeze(2))
+                    step_callback(index, len(sigmas) - 1, unpatchify_latents(denoised).unsqueeze(2))
+                pred = (latent - denoised) / sigma
                 latent = euler_step(latent, pred, sigmas, index)
         if phase_callback:
             phase_callback("decode")

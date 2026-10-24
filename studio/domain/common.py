@@ -26,8 +26,8 @@ FAMILY_CAPABILITIES: dict[str, frozenset] = {
         "navit", "sra", "leap", "compile_blocks",
         "caption_tag_ops", "online_text", "masked_loss", "block_swap",
     }),
-    "krea2": frozenset({"masked_loss", "text_cache", "block_swap"}),
-    "moss_image": frozenset({"masked_loss", "text_cache", "block_swap"}),
+    "krea2": frozenset({"masked_loss", "text_cache", "block_swap", "navit"}),
+    "moss_image": frozenset({"masked_loss", "text_cache", "block_swap", "navit"}),
 }
 
 # Single source of truth for family default overlays (ModelSpec.config_defaults
@@ -39,7 +39,7 @@ FAMILY_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
     "moss_image": {
         "shuffle_caption": False, "keep_tokens": 0, "tag_dropout": 0.0,
         "text_encoder_cache": True, "attention_backend": "none",
-        "timestep_sampling": "moss_logit_normal", "timestep_shift_resolution_aware": False,
+        "timestep_sampling": "logit_normal", "timestep_shift": 3.5, "timestep_shift_resolution_aware": False,
         "sample_sampler_name": "euler", "sample_scheduler": "simple",
         "sample_infer_steps": 50, "sample_cfg_scale": 3.0,
         "mixed_precision": "bf16",
@@ -74,7 +74,7 @@ MODEL_FAMILIES: tuple[str, ...] = tuple(FAMILY_CAPABILITIES)
 # in families/anima/sampling.py; krea2: same in families/krea2/sampling.py),
 # so a cross-family value errors out at the config layer (fail-fast).
 FAMILY_SAMPLING: dict[str, dict[str, tuple[str, ...]]] = {
-    "moss_image": {"samplers": ("euler",), "schedulers": ("simple",)},
+    "moss_image": {"samplers": ("euler",), "schedulers": ("simple", "sgm_uniform")},
     "anima": {
         "samplers": ("er_sde", "dpmpp_3m_sde"),
         "schedulers": ("simple", "sgm_uniform"),
@@ -202,7 +202,7 @@ AttentionBackend = Literal["none", "xformers", "flash_attn"]
 # the frontend start it collapsed. The read-only model path group shows an
 # "Auto - Global Settings" badge and is never collapsed.
 GROUP_ORDER: list[tuple[str, str, bool]] = [
-    ("model", "Model Path", False),
+    ("model", "Model", False),
     ("dataset", "Dataset", False),
     ("caption", "Caption Processing", False),
     ("lora", "Network Settings", False),

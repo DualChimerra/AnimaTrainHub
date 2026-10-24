@@ -347,12 +347,17 @@
       "text_encoder_quantization": "Text Encoder Quantization",
       "text_encoder_layers_to_offload": "Text Encoder Layer Offloading",
       "blocks_to_swap": "Transformer Layer Offloading",
-      "moss_max_token_length": "Maximum Caption Length",
-      "moss_tokenizer_path": "Tokenizer Folder",
       "moss_sample_shift": "MOSS Sampling Shift",
       "moss_uncond_skip_layers": "Unconditional Skip Layers",
       "moss_timestep_mean": "MOSS Timestep Mean",
-      "moss_timestep_std": "MOSS Timestep Standard Deviation"
+      "moss_timestep_std": "MOSS Timestep Standard Deviation",
+      "muon_momentum": "Muon momentum",
+      "muon_ns_steps": "Muon adjustment iterations",
+      "muon_adjust_lr": "Muon learning-rate scaling",
+      "riemannion_momentum": "Riemannion momentum",
+      "caption_dropout": "Caption Dropout",
+      "low_vram": "Low VRAM",
+      "use_riemannian": "Use Riemannian"
     },
     "subgroups": {
       "loraMain": "Network parameters",
@@ -370,10 +375,12 @@
       "sysMain": "Main parameters",
       "sysOpt": "Optimization",
       "outMain": "Output and saving",
-      "outResume": "Continue training"
+      "outResume": "Continue training",
+      "modelMain": "Model",
+      "modelQuantization": "Quantization"
     },
     "groups": {
-      "model": "Model paths",
+      "model": "Model",
       "dataset": "Dataset",
       "caption": "Caption processing",
       "lora": "Network settings",
@@ -393,7 +400,8 @@
         "lokr": "LoKr",
         "loha": "LoHa",
         "ortho": "OrthoLoRA",
-        "tlora": "T-LoRA"
+        "tlora": "T-LoRA",
+        "riemann": "Riemann LoRA (experimental)"
       },
       "lrScheduler": {
         "none": "Constant",
@@ -414,7 +422,9 @@
         "lion": "Lion",
         "prodigy": "Prodigy",
         "prodigyPlusSchedulefree": "Prodigy + Schedule-Free",
-        "simplifiedAdemamix": "Simplified AdEMAMix"
+        "simplifiedAdemamix": "Simplified AdEMAMix",
+        "muon": "Muon",
+        "riemannion": "Riemannion (for Riemann LoRA)"
       },
       "timestepSampling": {
         "logitNormal": "Logit Normal",
@@ -472,11 +482,17 @@
       },
       "transformer_quantization": {
         "none": "None",
-        "convrot_int8": "ConvRot INT8"
+        "convrot_int8": "ConvRot INT8",
+        "qfloat8": "qfloat8 (FP8 E4M3)"
       },
       "text_encoder_quantization": {
         "none": "None",
-        "convrot_int8": "ConvRot INT8"
+        "convrot_int8": "ConvRot INT8",
+        "qfloat8": "qfloat8 (FP8 E4M3)"
+      },
+      "muonAdjustLr": {
+        "matchRmsAdamw": "AdamW-like learning-rate scale",
+        "original": "Original Muon — tune learning rate separately"
       }
     },
     "disableHints": {
@@ -492,7 +508,10 @@
       "loss_type": "Disabled while InfoNoise or Leap is enabled (schema mutex, only `mse` compatible)",
       "masked_loss": "Not supported with Leap (per-sample loss has no spatial dims) or NaViT packing (schema mutex)",
       "timestep_schedule_shift": "Disabled while InfoNoise is enabled (schema mutex, only `1.0` compatible)",
-      "infonoise_enabled": "Reset noise_enhancement / loss_weighting / loss_type / schedule_shift to defaults to enable (schema mutex)"
+      "infonoise_enabled": "InfoNoise is unavailable for MOSS; for other models, reset conflicting noise and loss settings.",
+      "optimizer_type": "Riemann LoRA requires Riemannion. Other adapter types require another optimizer.",
+      "ema_enabled": "Weight EMA does not yet support Riemann LoRA; normal checkpoints remain available.",
+      "lora_dora": "DoRA requires unquantized base weights and a compatible adapter; Riemannian and OrthoLoRA are incompatible."
     },
     "descriptions": {
       "train_norm": "Also adjust attention normalization to the dataset. Saves the changes with the LoRA. The count is calculated automatically: 112 weights for Anima 2B. Off by default.",
@@ -527,14 +546,13 @@
       "caption_comfy_encoding": "Encode captions the ComfyUI way (same pipeline as test generation; recommended)",
       "cache_latents": "Cache VAE latents to speed up training",
       "vae_cache_batch_size": "VAE latent cache encoding batch size; 0 = follow training batch size, set to 1 if VRAM is tight",
-      "lora_type": "Adapter algorithm. lora: classic low-rank, general purpose (default); lokr: Kronecker factorization, smallest parameter count; loha: Hadamard product, higher expressiveness but more parameters; ortho: orthogonal parameterization, very few trainable parameters, resists overfitting, suited to small-dataset character/subject training; tlora: rank shrinks as noise increases, built to prevent overfitting in single-/few-image subject personalization",
       "lora_rank": "Rank: larger = more capacity but higher parameter/VRAM cost and overfit risk; smaller = leaner but underfits more easily. Common 8/16/32/64",
       "lora_alpha": "Alpha: LoRA scaling factor; larger = stronger LoRA effect. Usually equal to rank; when rs_lora is enabled, often set to √rank",
       "lokr_factor": "LoKr factorization factor: larger = stronger compression, fewer parameters; smaller = more parameters. Default 8 suits most cases",
       "tlora_min_rank": "T-LoRA minimum active rank at high-noise timesteps",
       "tlora_alpha_rank_scale": "T-LoRA power scale from timestep to active rank; larger = high rank opens later toward low-noise timesteps",
       "tlora_use_ortho": "T-LoRA only: stack OrthoLoRA orthogonal parameterization (full recipe from the paper, enabled by default); disable to keep plain T-LoRA",
-      "lora_dora": "DoRA: trains weight direction and magnitude separately; usually more stable convergence at slight VRAM cost",
+      "lora_dora": "DoRA requires unquantized base weights and Riemannian mode disabled. Incompatible with OrthoLoRA.",
       "lora_rs": "rs-LoRA: scale=α/√r instead of α/r, more stable at high rank (>32)",
       "lora_dropout": "Dropout on LoRA input features: larger = stronger regularization but slower convergence; 0 = disabled",
       "lora_rank_dropout": "Dropout on LoRA's rank dimensions (a subset of rank dims is randomly active each step): larger = stronger regularization; 0 = disabled",
@@ -561,7 +579,6 @@
       "lr_scheduler_cycle_min_lrs": "Optional minimum LR for each peak, comma-separated. The value count must match the peak count.",
       "lr_scheduler_decay_start_ratio": "Training fraction after which the final cosine decay starts. 0.6667 means the last third.",
       "lr_scheduler_decay_min_lr": "Learning rate at the end of the final cosine decay.",
-      "optimizer_type": "Optimizer. adamw is the baseline; automagic adapts per-parameter lr (recommend lr=1e-6); came uses confidence-guided factored second moments (less state VRAM than AdamW, lr at AdamW scale); lion uses ~half the state of AdamW (recommend lr = AdamW lr / 3); prodigy / prodigy_plus_schedulefree self-estimate lr (fill 1.0); simplified_ademamix keeps one long momentum of raw gradients mixed with the current gradient (same VRAM as AdamW; lr = AdamW lr × (1 − β1), e.g. 1e-6)",
       "prodigy_d_coef": "Overall scaling coefficient on Prodigy's estimated d; larger = larger effective lr. Raise (2.0+) when underfitting; lower (0.5) when overfitting or on small datasets",
       "prodigy_safeguard_warmup": "Prevent d from being inflated by early high gradients during Prodigy warmup; default on for stability",
       "came_beta1": "CAME β1 (update momentum EMA decay)",
@@ -659,7 +676,7 @@
       "blocks_to_swap": "Transformer layers kept in RAM. Saves VRAM at the cost of transfer time. MOSS: up to 42 layers; 0 disables offloading.",
       "block_swap_preflight": "Check before training whether the chosen blocks_to_swap actually fits, instead of failing with OOM after the dataset is cached.",
       "navit_packing": "NaViT / Patch-n-Pack: pack several differently sized images into one training sequence by token budget instead of fixed ARB buckets. Needs cached latents and xformers.",
-      "navit_token_budget": "Token budget per pack. Also the per-image ceiling: anything above it is downscaled. Pick by VRAM.",
+      "navit_token_budget": "Pack token limit: MOSS counts images and captions; Anima counts images.",
       "navit_max_images_per_pack": "Hard cap on images per pack. 0 = no cap (only the token budget applies).",
       "navit_text_trim_padding": "Trim caption padding in cross-attention to each image's real token count.",
       "navit_pack_strategy": "Packing strategy: next_fit is a simple greedy pass in order; ffd fills packs fuller inside a window.",
@@ -705,7 +722,16 @@
       "eval_validation_split_seed": "Seed that decides which images are held out, so the split is reproducible.",
       "loss_curve_steps": "How many recent steps the loss curve keeps on screen.",
       "no_progress": "Hide the per-step progress bar in the log (useful when the log is being piped somewhere).",
-      "log_every": "Log a line every N steps."
+      "log_every": "Log a line every N steps.",
+      "muon_momentum": "How much Muon carries previous updates into the next one. Default: 0.95.",
+      "muon_ns_steps": "Internal matrix adjustment iterations per Muon step. More costs time. Default: 5.",
+      "muon_adjust_lr": "The default allows an AdamW-like starting learning rate. Original Muon requires separate tuning.",
+      "riemannion_momentum": "How much Riemannion carries previous updates into the next one. Default: 0.9.",
+      "transformer_quantization": "Weight storage: none, ConvRot INT8 or qfloat8. On-load quantization requires BF16 source weights; compute precision is unchanged.",
+      "text_encoder_quantization": "Weight storage: none, ConvRot INT8 or qfloat8. On-load quantization requires BF16 source weights; compute precision is unchanged.",
+      "caption_dropout": "Probability of training an image with an empty caption. Works with cached text; regularization captions are preserved. 0 = off.",
+      "low_vram": "Save GPU memory with caching, gradient checkpointing, tiled VAE and automatic half-model block swapping when no swap count is set. Uses more RAM and can be slower.",
+      "use_riemannian": "Riemannian Muon with a fixed-rank adapter, exporting ordinary LoRA. Incompatible with DoRA, EMA and text encoder training."
     },
     "altDescriptions": {
       "timestep_sampling": "[Timestep sampling] Distribution; when InfoNoise is enabled this is the warmup baseline, then adaptive CDF takes over",
@@ -1953,7 +1979,7 @@
     "soundsDesc": "Soft clicks on toggles and tabs, a chime when something finishes, a low tone on errors.",
     "tokenLabel": "Token",
     "endpointLabel": "Download endpoint",
-    "weightLibraryHelp": "Choose folders to list their weights. Compatibility is detected from file contents. Defaults are remembered per family; existing configs stay unchanged.",
+    "weightLibraryHelp": "Models are scanned under the global root above. Select one model per category. Split weights appear as one model; compatibility is detected from file contents.",
     "weightFolder": "Folder containing model weights",
     "weightUnknown": "Unrecognized format"
   },

@@ -380,6 +380,15 @@ def run(ctx: TrainingContext) -> None:
                 step_start_time = time.perf_counter()
 
             captions = batch["captions"]
+            caption_dropout = float(getattr(args, "caption_dropout", 0.0))
+            if caption_dropout > 0:
+                # Keep cache preparation deterministic; the empty prompt is
+                # pre-cached by cached-text families. Preserve prior captions.
+                is_reg = batch.get("is_reg", [False] * len(captions))
+                captions = [
+                    "" if not is_reg[i] and random.random() < caption_dropout else caption
+                    for i, caption in enumerate(captions)
+                ]
 
             # Get latents (cached mode or real-time encoding)
             navit_latents = None
@@ -424,14 +433,9 @@ def run(ctx: TrainingContext) -> None:
                 kv_trim=bool(getattr(args, "kv_trim", False)),
             )
             if navit_latents is not None:
-                # NaViT packing needs a per-image attention mask for
-                # cross-attn padding truncation; navit is an Anima
-                # capability bit (capability check fail-fast), so this
-                # family-private kwarg doesn't go into the protocol.
-                cross, t5_attn = ctx.family.encode_text_for_batch(
-                    ctx.text_stack, ctx.model, captions,
-                    ctx.device, ctx.dtype,
-                    return_t5_attn=True, **_enc_kwargs,
+                cross = ctx.family.navit_encode_text(
+                    ctx.text_stack, ctx.model, captions, ctx.device, ctx.dtype,
+                    trim_padding=bool(getattr(args, "navit_text_trim_padding", False)), **_enc_kwargs,
                 )
             else:
                 cross = ctx.family.encode_text_for_batch(
@@ -539,15 +543,6 @@ def run(ctx: TrainingContext) -> None:
                     # in that list: navit's per-image t maps exactly onto the
                     # per-sample SNR-weight semantics, hooked up per-image
                     # (see per_image_weights below).
-                    from training.families.anima.navit import (  # noqa: PLC0415  capability gate (D5), lazy import
-                        navit_packed_forward_and_loss,
-                        pack_cross_embeddings,
-                    )
-
-                    cross_packed, text_seqlens = pack_cross_embeddings(
-                        cross, t5_attn,
-                        bool(getattr(args, "navit_text_trim_padding", False)),
-                    )
                     # per-image weight: regularization-set loss_weight x
                     # timestep-dependent loss_weighting. Symmetric with the
                     # standard path -- navit's per-image t corresponds to
@@ -562,8 +557,8 @@ def run(ctx: TrainingContext) -> None:
                     if _lw is not None:
                         _piw = _lw if _piw is None else _piw * _lw
                     _no, _pi, _pd = noise_params_from_args(args)
-                    loss, pred, _navit_info = navit_packed_forward_and_loss(
-                        ctx.model, navit_latents, t, cross_packed, text_seqlens,
+                    loss, pred, _navit_info = ctx.family.navit_forward_and_loss(
+                        ctx.model, navit_latents, t, cross,
                         ctx.loss_fn,
                         noise_offset=_no,
                         pyramid_iters=_pi,

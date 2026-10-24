@@ -70,6 +70,7 @@ if HAS_TRITON:
 _HADAMARD_CACHE = {}
 
 
+@torch.inference_mode(False)
 def _build_hadamard(
     size: int,
     device: str | torch.device = "cpu",

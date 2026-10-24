@@ -27,7 +27,7 @@ export const SAMPLER_OPTIONS_BY_FAMILY = {
 export const SCHEDULER_OPTIONS_BY_FAMILY = {
   anima: ['simple', 'sgm_uniform'],
   krea2: ['simple'],
-  moss_image: ['simple'],
+  moss_image: ['simple', 'sgm_uniform'],
 } as const satisfies Record<GenerateFamily, readonly string[]>
 
 export const FAMILY_GENERATE_DEFAULTS = {

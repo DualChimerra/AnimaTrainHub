@@ -572,6 +572,7 @@ class ModelsConfig(BaseModel):
     # can carry both keys — the inbound selected_anima takes priority, overriding the old selected
     # merged in).
     selected: dict[str, str] = Field(default_factory=lambda: {"anima": "1.0"})
+    active_family: str = "anima"
     # Per-family selected text encoder: an official variant key (krea2: "bf16"|"fp8", missing=bf16)
     # **or** an absolute path to a user-registered local text-encoder directory (custom CLIP /
     # Qwen encoder). Determines the text_encoder_path default when a new training version is

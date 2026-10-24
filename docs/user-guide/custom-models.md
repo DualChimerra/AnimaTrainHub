@@ -2,10 +2,10 @@
 
 Settings → **Models** has three shared lists: **Checkpoints**, **VAE**, and **Text Encoders**. Official downloads and local files appear together, using the existing controls.
 
-1. Enter a folder path under the appropriate list, or click **Browse**.
-2. Click **Add**. The folder and its subfolders are scanned without loading tensor data.
-3. Select a recognized, available model. Defaults are stored separately for compatible families.
-4. Click **Refresh** after adding or moving files. Remove an additional folder with ×; this does not delete files.
+1. Set the global models root above the lists.
+2. Place weights in its `diffusion_models`, `vae`, or `text_encoders` subfolder. These folders are scanned recursively without loading tensor data.
+3. Select one recognized, available model per category. Split checkpoints appear once under a model name, with their combined size.
+4. Reopen Settings after adding or moving files. Compatible family defaults remain remembered when switching the active model family.
 
 | Weight | Supported local forms |
 |---|---|

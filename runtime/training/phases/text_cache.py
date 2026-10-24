@@ -75,6 +75,8 @@ def _extra_prompts(args) -> list[str]:
         out.append("1girl, masterpiece")
     # The CFG unconditional branch also needs encoding; an empty string is a valid, meaningful prompt.
     out.append(str(getattr(args, "sample_negative_prompt", "") or ""))
+    if float(getattr(args, "caption_dropout", 0.0)) > 0:
+        out.append("")
     return list(dict.fromkeys(out))
 
 

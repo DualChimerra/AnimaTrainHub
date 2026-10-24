@@ -205,9 +205,9 @@ class LycorisAdapter:
 
         # extra kwargs: only pass the corresponding field when the algorithm supports it
         extra: dict[str, Any] = {}
-        if getattr(model, "is_convrot_int8", False):
+        if getattr(model, "is_convrot_int8", False) or getattr(model, "is_qfloat8", False):
             if self.weight_decompose:
-                raise ValueError("DoRA requires floating-point base weights; disable it for ConvRot INT8")
+                raise ValueError("DoRA requires unquantized base weights; disable it for ConvRot INT8 / qfloat8")
             extra["bypass_mode"] = True
         if self.algo == "lokr":
             extra["factor"] = self.factor

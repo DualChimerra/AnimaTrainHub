@@ -15,6 +15,14 @@ def shard_files(path):
     return [path.with_name(f'{match[1]}-{i:05d}-of-{match[3]}.safetensors') for i in range(1, int(match[3]) + 1)]
 
 
+def weight_label(path):
+    match = re.match(r'^(.*)-\d{5}-of-\d{5}\.safetensors$', path.name)
+    if match:
+        prefix = match[1]
+        return path.parent.name if prefix in ("model", "diffusion_pytorch_model") else prefix
+    return path.name
+
+
 @lru_cache(maxsize=512)
 def _header(filename, size, mtime):
     with open(filename, "rb") as stream:
@@ -29,8 +37,11 @@ def _header(filename, size, mtime):
 
 def identify(path, category):
     """Conservative structural hints; the runtime still validates every weight."""
-    st = path.stat()
-    header = _header(str(path), st.st_size, st.st_mtime_ns)
+    header = {}
+    for shard in shard_files(path):
+        if shard.is_file():
+            st = shard.stat()
+            header.update(_header(str(shard), st.st_size, st.st_mtime_ns))
     keys = list(header)
     has = lambda fragment: any(fragment in k for k in keys)
     if category == "checkpoints":
@@ -70,8 +81,13 @@ def build_library(root, cfg, sections, sources):
     from .families import FAMILY_ASSETS
     from .families.moss_image import asset_files
     result = {}
+    active_family = cfg.active_family
+    for section in sections.values():
+        if isinstance(section, dict):
+            for custom in section.get("custom", []):
+                custom["name"] = weight_label(Path(custom["path"]))
     for category, subdir in CATEGORIES.items():
-        folders = list(dict.fromkeys([str(root / subdir), *cfg.weight_folders.get(category, [])]))
+        folders = [str(root / subdir)]
         rows, errors, seen = [], [], set()
 
         def add(path, families, *, source=None, value=None, exists=None):
@@ -85,10 +101,11 @@ def build_library(root, cfg, sections, sources):
             selected = (cfg.selected if category == "checkpoints" else cfg.selected_te)
             current = (any(selected.get(f, "") == value for f in families) if category != "vae" else
                        (cfg.selected_vae_by_family.get("moss_image", "") == value if families == ["moss_image"] else cfg.selected_vae == value))
-            rows.append({"path": str(p), "label": p.name, "families": families,
+            files = shard_files(p) if p.is_file() else list(p.glob("*.safetensors")) if p.is_dir() else []
+            rows.append({"path": str(p), "label": weight_label(p), "families": families,
                 "value": value if value is not None else str(p), "exists": bool(exists),
-                "is_current": bool(source.get("is_current", current) if source else current),
-                "size": source.get("size", p.stat().st_size if p.is_file() else 0) if source else (p.stat().st_size if p.is_file() else 0),
+                "is_current": active_family in families and bool(source.get("is_current", current) if source else current),
+                "size": sum(f.stat().st_size for f in files if f.is_file()),
                 "purpose": source.get("extra", {}).get("purpose", "") if source else "",
                 "download_id": source.get("download_id") if source else None,
                 "download_variant": source.get("download_variant") if source else None,
@@ -144,9 +161,15 @@ def build_library(root, cfg, sections, sources):
                         if category == "checkpoints" and families:
                             customs = sections[f"{families[0]}_main"]["custom"]
                             if not any(c["path"] == str(p) for c in customs):
-                                customs.append({"path": str(p), "name": p.name, "exists": complete})
+                                customs.append({"path": str(p), "name": weight_label(p), "exists": complete})
                     except (OSError, ValueError, TypeError, IndexError) as exc:
                         errors.append(f"{p.name}: {exc}")
+        # A shared VAE or a preset and its discovered alias must not produce
+        # several checked radio buttons in the same category.
+        current_seen = False
+        for row in rows:
+            row["is_current"] = row["is_current"] and not current_seen
+            current_seen = current_seen or row["is_current"]
         result[category] = {"folders": folders, "rows": rows, "errors": errors}
     return result
 
@@ -164,4 +187,6 @@ def select_weight(category, path, catalog):
     else:
         patch = ({"selected_vae_by_family": {"moss_image": value}}
                  if row["families"] == ["moss_image"] else {"selected_vae": value})
+    active = secrets.load().models.active_family
+    patch["active_family"] = active if active in row["families"] else row["families"][0]
     secrets.update({"models": patch})

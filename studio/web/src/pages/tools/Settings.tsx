@@ -19,7 +19,6 @@ import {
   type TunnelState,
 } from '../../api/client'
 import { useDialog } from '../../components/Dialog'
-import PathPicker from '../../components/PathPicker'
 import FieldLabel from '../../components/ds/FieldLabel'
 import { useToast } from '../../components/Toast'
 import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
@@ -1175,8 +1174,6 @@ export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogErro
   const [rootDraft, setRootDraft] = useState<string>('')
   const [serverRoot, setServerRoot] = useState<string | null>(null)
   const [savingRoot, setSavingRoot] = useState(false)
-  const [folderPicker, setFolderPicker] = useState<string | null>(null)
-  const [folderDrafts, setFolderDrafts] = useState<Record<string, string>>({})
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
   const [savingAutoSync, setSavingAutoSync] = useState(false)
   const [secretsLoaded, setSecretsLoaded] = useState(false)
@@ -1200,17 +1197,6 @@ export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogErro
     setRootDraft((prev) => (prev !== '' ? prev : (serverRoot ?? catalog.models_root ?? '')))
   }, [secretsLoaded, catalog, serverRoot])
 
-  const saveFolders = async (category: string, folders: string[]) => {
-    try {
-      await api.updateSecrets({ models: { weight_folders: { [category]: folders } } })
-      await reloadCatalog()
-    } catch (e) { toast(String(e), 'error') }
-  }
-  const addFolder = async (category: string, path: string) => {
-    if (!path.trim()) return
-    await saveFolders(category, [...new Set([...(catalog?.weight_library?.[category]?.folders.slice(1) ?? []), path.trim()])])
-    setFolderDrafts((prev) => ({ ...prev, [category]: '' }))
-  }
   const selectWeight = async (category: string, path: string) => {
     try {
       await api.selectWeight(category, path)
@@ -1299,26 +1285,12 @@ export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogErro
             return (
               <ModelGroupCard key={category} title={{ checkpoints: 'Checkpoints', vae: 'VAE', text_encoders: 'Text Encoders' }[category]}
                 helpTooltip={t('settings.weightLibraryHelp')}
-                add={<div className="ds-after">
-                  {library.folders.map((folder, index) => <div className="ds-set-inline" key={folder}>
-                    <code className="ds-model-name" title={folder}>{folder}</code>
-                    {index > 0 && <button className="ds-iconbtn" aria-label={t('common.remove')} onClick={() => void saveFolders(category, library.folders.slice(1).filter((p) => p !== folder))}>×</button>}
-                  </div>)}
-                  <div className="ds-set-inline ds-after">
-                    <input className={`${textInputClass} ds-mono`} value={folderDrafts[category] ?? ''}
-                      placeholder={t('settings.weightFolder')} aria-label={t('settings.weightFolder')}
-                      onChange={(e) => setFolderDrafts((prev) => ({ ...prev, [category]: e.target.value }))} />
-                    <button className="ds-ctl" onClick={() => setFolderPicker(category)}>{t('common.browse')}</button>
-                    <button className="ds-ctl" disabled={!folderDrafts[category]?.trim()} onClick={() => void addFolder(category, folderDrafts[category])}>{t('common.add')}</button>
-                    <button className="ds-ctl" onClick={() => void reloadCatalog()}>{t('common.refresh')}</button>
-                  </div>
-                  {library.errors.map((error) => <p className="ds-note ds-err" key={error}>{error}</p>)}
-                </div>}>
+                add={library.errors.map((error) => <p className="ds-note ds-err" key={error}>{error}</p>)}>
                 {library.rows.map((row) => {
                   const key = row.status_key ?? row.path
                   const dl = catalog.downloads[key]
                   return <li key={row.path} className={`ds-model-row${row.is_current ? ' ds-is-on' : ''}`}>
-                    <input type="radio" name={`${category}-${row.families.join('-')}`} checked={row.is_current}
+                    <input type="radio" name={category} checked={row.is_current}
                       aria-label={row.label} disabled={!row.exists || !row.families.length || dl?.status === 'running'}
                       onChange={() => void selectWeight(category, row.path)} />
                     <code className="ds-model-name" title={row.path}>{row.label}</code>
@@ -1342,7 +1314,6 @@ export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogErro
               </ModelGroupCard>
             )
           })}
-          {folderPicker && <PathPicker dirOnly initialPath={catalog.models_root} onClose={() => setFolderPicker(null)} onPick={(path) => { void addFolder(folderPicker, path); setFolderPicker(null) }} />}
 
           {/* Download log */}
           {Object.values(catalog.downloads).filter((d) => d.status === 'running' || d.status === 'failed').length > 0 && (

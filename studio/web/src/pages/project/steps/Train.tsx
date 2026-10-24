@@ -691,7 +691,7 @@ export default function TrainPage() {
       })
     : t('steps.train.subtitle')
 
-  const triggerRow = config ? (
+  const triggerRow = config?.dop_enabled ? (
     <TriggerWordCard
       projectId={project.id}
       version={activeVersion}

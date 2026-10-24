@@ -768,6 +768,7 @@ def get_bucket_distribution_endpoint(pid: int, vid: int) -> dict[str, Any]:
             drop_last=bool(cfg.get("navit_drop_last", False)),
             over_budget=str(cfg.get("navit_native_over_budget", "downscale") or "downscale"),
             seed=int(cfg.get("seed", 42) or 42),
+            training_config=cfg,
         )
     # Authoritative source for the effective sample count. The frontend used to scan folders
     # and count images itself, but the trainer only accepts images **with a caption**

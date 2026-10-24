@@ -44,9 +44,13 @@ interface Props {
 interface Subgroup { key: string; fields: string[]; rest?: boolean; switchesFirst?: boolean }
 const rank = (list: string[], f: string) => { const i = list.indexOf(f); return i < 0 ? list.length : i }
 const SUBGROUPS: Record<string, Subgroup[]> = {
+  model: [
+    { key: 'modelMain', fields: [], rest: true },
+    { key: 'modelQuantization', fields: ['transformer_quantization', 'text_encoder_quantization'] },
+  ],
   lora: [
     { key: 'loraMain', fields: ['lora_type', 'lora_rank', 'lora_alpha', 'lokr_factor', 'tlora_min_rank', 'tlora_alpha_rank_scale', 'tlora_use_ortho'], rest: true },
-    { key: 'loraDropout', fields: ['lora_dropout', 'lora_rank_dropout', 'lora_module_dropout'] },
+    { key: 'loraDropout', fields: ['caption_dropout', 'lora_dropout', 'lora_rank_dropout', 'lora_module_dropout'] },
     { key: 'loraExtra', fields: ['lora_dora', 'lora_rs', 'train_norm'] },
     { key: 'loraBlocks', fields: ['lora_reg_dims'] },
   ],
@@ -65,7 +69,7 @@ const SUBGROUPS: Record<string, Subgroup[]> = {
     { key: 'lossDop', fields: ['dop_enabled', 'dop_weight', 'dop_ratio'], switchesFirst: true },
   ],
   system: [
-    { key: 'sysMain', fields: ['mixed_precision', 'attention_backend', 'num_workers', 'cache_latents', 'block_swap_preflight', 'cache_encode_tiled', 'cache_encode_tile_px', 'cache_encode_tile_overlap', 'cache_encode_max_pixels'] },
+    { key: 'sysMain', fields: ['mixed_precision', 'attention_backend', 'num_workers', 'low_vram', 'cache_latents', 'text_encoder_cache', 'block_swap_preflight', 'cache_encode_tiled', 'cache_encode_tile_px', 'cache_encode_tile_overlap', 'cache_encode_max_pixels'] },
     { key: 'sysOpt', fields: ['vae_cache_batch_size', 'blocks_to_swap', 'vae_tiling', 'navit_packing', 'kv_trim'], rest: true },
   ],
   output: [
@@ -113,6 +117,16 @@ export default function SchemaForm({
     !!prop.disable_when && evalShowWhen(prop.disable_when, values)
   const takeoverValueForField = (prop: typeof props[string]) =>
     prop.disable_value ?? prop.default
+  // Reset a now-forbidden selection when its controlling field changes,
+  // e.g. Riemannion -> AdamW when leaving Riemann LoRA.
+  const forbiddenValueTakeover = (
+    name: string, prop: typeof props[string], vals: ConfigData,
+  ): unknown => {
+    const gates = prop.option_disable_when
+    const current = String(vals[name] ?? '')
+    if (!gates || !(current in gates) || !evalShowWhen(gates[current], vals)) return undefined
+    return prop.default !== vals[name] ? prop.default : undefined
+  }
 
   /** Pending change for the R6 confirmation dialog (renders RuleImpactDialog when non-null). */
   const [pendingImpact, setPendingImpact] = useState<{
@@ -131,8 +145,11 @@ export default function SchemaForm({
   ): RuleImpactChange[] => {
     const writes: RuleImpactChange[] = []
     for (const [name, prop] of Object.entries(props)) {
-      if (!prop.disable_when || !evalShowWhen(prop.disable_when, next)) continue
-      const target = takeoverValueForField(prop)
+      const pinned = prop.disable_when && evalShowWhen(prop.disable_when, next)
+      if (!pinned && name === triggerField) continue
+      const target = pinned
+        ? takeoverValueForField(prop)
+        : forbiddenValueTakeover(name, prop, next)
       if (target !== undefined && next[name] !== target) {
         writes.push({
           field: name, from: next[name], to: target,
@@ -189,8 +206,9 @@ export default function SchemaForm({
     let nextValues = values
     let changed = false
     for (const [name, prop] of Object.entries(props)) {
-      if (!shouldDisableField(prop)) continue
-      const takeoverValue = takeoverValueForField(prop)
+      const takeoverValue = shouldDisableField(prop)
+        ? takeoverValueForField(prop)
+        : forbiddenValueTakeover(name, prop, values)
       if (takeoverValue !== undefined && values[name] !== takeoverValue) {
         nextValues = { ...nextValues, [name]: takeoverValue }
         changed = true
@@ -258,7 +276,7 @@ export default function SchemaForm({
   function renderGrid(fields: string[], switchesFirst = false) {
     const isBool = (n: string) => controlKind(props[n]) === 'bool'
     const inputs = fields.filter((n) => !isBool(n))
-    const bools = fields.filter(isBool)
+    const bools = fields.filter(isBool).sort((a, b) => Number(a === 'use_riemannian') - Number(b === 'use_riemannian'))
     const attached = bools.filter((n) => afterField?.[n])
     const hasGrid = inputs.length > 0 || attached.length > 0
     const grid = hasGrid && (

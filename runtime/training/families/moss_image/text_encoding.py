@@ -11,7 +11,7 @@ from modeling.moss_image.weights import checkpoint_files
 from .loader import load_text_model
 
 logger = logging.getLogger(__name__)
-TEXT_FINGERPRINT = 'moss-qwen35-9b-last4096-v1'
+TEXT_FINGERPRINT = 'moss-qwen35-9b-last4096-dequant-v2'
 
 
 @dataclass
@@ -31,20 +31,22 @@ class MossTextStack:
         self.cache_enabled = cache_enabled
         self._model = None
         self._loader = model_loader or load_text_model
+        root = self.path if self.path.is_dir() else self.path.parent
+        candidates = [root, root / 'tokenizer', root.parent / 'tokenizer']
+        token_dir = Path(tokenizer_path) if tokenizer_path else next(
+            (p for p in candidates if (p / 'tokenizer_config.json').is_file()), root)
         if tokenizer is None:
             from transformers import AutoTokenizer
-            local = Path(tokenizer_path) if tokenizer_path else (self.path if self.path.is_dir() else self.path.parent)
-            if tokenizer_path and not (local / 'tokenizer_config.json').is_file():
-                raise FileNotFoundError(f'MOSS tokenizer folder has no tokenizer_config.json: {local}')
-            if (local / 'tokenizer_config.json').is_file():
-                tokenizer = AutoTokenizer.from_pretrained(str(local), local_files_only=True)
+            if tokenizer_path and not (token_dir / 'tokenizer_config.json').is_file():
+                raise FileNotFoundError(f'MOSS tokenizer folder has no tokenizer_config.json: {token_dir}')
+            if (token_dir / 'tokenizer_config.json').is_file():
+                tokenizer = AutoTokenizer.from_pretrained(str(token_dir), local_files_only=True)
             else:
                 tokenizer = AutoTokenizer.from_pretrained('OpenMOSS-Team/MOSS-Image-Base', subfolder='tokenizer')
         self.tokenizer = tokenizer
         # Checkpoint identity and encoding policy invalidate both caption and sample caches.
         identity = '|'.join(f'{p.resolve()}:{p.stat().st_size}:{p.stat().st_mtime_ns}' for p in checkpoint_files(path))
         tokenizer_identity = getattr(tokenizer, 'name_or_path', tokenizer_path)
-        token_dir = Path(tokenizer_path) if tokenizer_path else (self.path if self.path.is_dir() else self.path.parent)
         for name in ('tokenizer.json', 'tokenizer_config.json', 'chat_template.jinja'):
             token_file = token_dir / name
             if token_file.is_file():
@@ -80,10 +82,16 @@ class MossTextStack:
 
     offload_model = release_model
 
+    def tokenize(self, caption):
+        prompt = f'<|im_start|>user\n{caption}<|im_end|>\n<|im_start|>assistant\n<think>\n'
+        return self.tokenizer(prompt, return_tensors='pt', truncation=True, max_length=self.max_length)['input_ids']
+
+    def token_count(self, caption):
+        return int(self.tokenize(caption).shape[1])
+
     @torch.no_grad()
     def _encode(self, caption):
-        prompt = f'<|im_start|>user\n{caption}<|im_end|>\n<|im_start|>assistant\n<think>\n'
-        ids = self.tokenizer(prompt, return_tensors='pt', truncation=True, max_length=self.max_length)['input_ids'].to(self.device)
+        ids = self.tokenize(caption).to(self.device)
         model = self.ensure_model()
         with torch.autocast(self.device.type, enabled=False):
             context = model(input_ids=ids, use_cache=False, return_dict=True).last_hidden_state[0]

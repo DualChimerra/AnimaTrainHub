@@ -168,6 +168,13 @@ class MossImageBlockProj(nn.Module):
         self.ffn_down = nn.Linear(ffn_dim, dim, bias=False)
 
 
+
+def _per_sample(values, lengths=None):
+    if lengths is None:
+        return values[:, None]
+    counts = torch.as_tensor(lengths, device=values.device)
+    return torch.repeat_interleave(values, counts, dim=0, output_size=sum(lengths)).unsqueeze(0)
+
 class MossImageBlock(nn.Module):
     """Main single-stream transformer block with shared (per-timestep) modulation."""
 
@@ -204,8 +211,8 @@ class MossImageBlock(nn.Module):
             modulation: [B, 6, D]
             attn_params: attention parameters built from the text mask (img_len = N)
         """
-        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = modulation.unbind(1)
-        y = self.norm1(x) * (1 + scale_a[:, None]) + shift_a[:, None]
+        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = (_per_sample(m, attn_params.seqlens) for m in modulation.unbind(1))
+        y = self.norm1(x) * (1 + scale_a) + shift_a
         # compute dtype of the block: the norm weight is always floating point (the projections may be ConvRot INT8)
         dtype = self.norm1.weight.dtype
         y = y.to(dtype)
@@ -213,11 +220,11 @@ class MossImageBlock(nn.Module):
         k = self.k_norm(self.proj.k(y).unflatten(-1, (self.heads, -1)))
         v = self.proj.v(y).unflatten(-1, (self.heads, -1))
         del y
-        x = x + self.proj.o(moss_attention(q, k, v, rope, attn_params)) * gate_a[:, None]
-        y = self.norm2(x) * (1 + scale_f[:, None]) + shift_f[:, None]
+        x = x + self.proj.o(moss_attention(q, k, v, rope, attn_params)) * gate_a
+        y = self.norm2(x) * (1 + scale_f) + shift_f
         hidden, gate = self.proj.ffn_up_gate(y.to(dtype)).chunk(2, -1)
         del y
-        return x + self.proj.ffn_down(situ_glu(hidden, gate)) * gate_f[:, None]
+        return x + self.proj.ffn_down(situ_glu(hidden, gate)) * gate_f
 
     def forward(
         self, x: torch.Tensor, rope: torch.Tensor, modulation: torch.Tensor, attn_params: AttentionParams
@@ -432,6 +439,82 @@ class MossImage(nn.Module):
         hidden = hidden * (1 + head[:, 1, None]) + head[:, 0, None]
         hidden = self.final_linear_video(hidden.to(_linear_dtype(self.final_linear_video)))
         return hidden.transpose(1, 2).reshape(batch, -1, height, width)
+
+    def forward_packed(self, latents, timesteps: torch.Tensor, contexts, *,
+                       use_checkpoint: bool = False) -> list[torch.Tensor]:
+        """NaViT 打包前向：G 张尺寸各异的图（各带自己的文本）拼成一条序列一次算完。
+
+        每个样本段 = [图像 token, 文本 token]，RoPE 与 ``forward`` 的单样本序列相同；
+        联合注意力与 text refiner 按段块对角，调制按段展开到 token，Linear 在整条序列
+        上一次算。与逐样本 ``forward`` 数学等价，且每层只调用一次（block swap 每层每步
+        只搬一次权重）。
+
+        ``latents``: G 个 ``[32, H, W]`` / ``[1, 32, H, W]`` / ``[1, 32, 1, H, W]``，H/W 可各不相同；
+        ``timesteps``: ``[G]``，σ∈[0,1]；``contexts``: G 个 ``[L, text_dim]`` 或
+        ``[1, L, text_dim]``（只含有效 token）。返回 G 个与对应输入同形的速度预测。
+        """
+        from .vae import patchify_latents as patchify, unpatchify_latents as unpatchify
+        if use_checkpoint and not self.layers[0].gradient_checkpointing:
+            self.enable_gradient_checkpointing()
+        elif not use_checkpoint and self.layers[0].gradient_checkpointing:
+            self.disable_gradient_checkpointing()
+        count = len(latents)
+        if count == 0 or len(contexts) != count:
+            raise ValueError("MOSS forward_packed 需要非空且一一对应的 latents / contexts")
+        timesteps = torch.as_tensor(timesteps).reshape(-1)
+        if timesteps.numel() != count:
+            raise ValueError(f"MOSS forward_packed 需要 {count} 个 timestep，实际 {timesteps.numel()}")
+        device = latents[0].device
+
+        shapes, grids, videos, texts, ropes = [], [], [], [], []
+        for latent, context in zip(latents, contexts):
+            shapes.append(latent.shape)
+            z = latent.reshape(1, *latent.shape[-3:]) if latent.ndim == 3 else latent
+            if z.ndim == 5:
+                if z.shape[2] != 1:
+                    raise ValueError("MOSS 只支持 T==1 的 5D latent")
+                z = z.squeeze(2)
+            if z.ndim != 4 or z.shape[:2] != (1, (self.latent_channels // 4)):
+                raise ValueError(f"MOSS 打包 latent 应为单样本 [1, {(self.latent_channels // 4)}, H, W]，实际 {tuple(latent.shape)}")
+            if z.shape[-2] % 2 or z.shape[-1] % 2:
+                raise ValueError("MOSS latent 高宽须为 2 的倍数（像素须为 16 的倍数）")
+            context = context.reshape(1, -1, context.shape[-1])
+            if context.shape[1] == 0:
+                raise ValueError("MOSS 每个样本至少需要 1 个有效文本 token")
+            hidden = patchify(z)
+            height, width = hidden.shape[-2:]
+            grids.append((height, width))
+            videos.append(hidden.flatten(2).transpose(1, 2))
+            texts.append(context)
+            ropes.append(self.rope(height, width, context.shape[1], torch.tensor([context.shape[1]], device=device)))
+
+        image_lens = [h * w for h, w in grids]
+        text_lens = [t.shape[1] for t in texts]
+        video = self.video_embedder(torch.cat(videos, 1).to(_linear_dtype(self.video_embedder)).contiguous())
+        rope = torch.cat(ropes, 1).to(video.dtype)
+        text_rope = torch.cat([r[:, n:] for r, n in zip(ropes, image_lens)], 1).to(video.dtype)
+        text = self.text_embedder(torch.cat(texts, 1), text_rope, AttentionParams(self.attn_mode, seqlens=tuple(text_lens)))
+        h = torch.cat([
+            part
+            for pair in zip(video.split(image_lens, 1), text.split(text_lens, 1))
+            for part in pair
+        ], 1)
+        seqlens = tuple(n + t for n, t in zip(image_lens, text_lens))
+
+        mod, head = self.get_time_modulation(timesteps.float() * 1000, count)
+        params = AttentionParams(self.attn_mode, seqlens=seqlens)
+        for layer in self.layers:
+            h = layer(h, rope, mod, params)
+
+        image = torch.cat([seg[:, :n] for seg, n in zip(h.split(seqlens, 1), image_lens)], 1)
+        image = self.final_norm_video(image.to(self.final_norm_video.weight.dtype))
+        image = image * (1 + _per_sample(head[:, 1], image_lens)) + _per_sample(head[:, 0], image_lens)
+        image = self.final_linear_video(image.to(self.final_norm_video.weight.dtype))
+        outputs = []
+        for tokens, (height, width), shape in zip(image.split(image_lens, 1), grids, shapes):
+            out = unpatchify(tokens.transpose(1, 2).reshape(1, -1, height, width))
+            outputs.append(out.reshape(shape))
+        return outputs
 
 
 # endregion

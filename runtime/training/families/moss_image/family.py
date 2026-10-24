@@ -6,6 +6,10 @@ from .preset import MOSS_PRESET
 class MossFamily:
     spec = MOSS_SPEC
 
+    def swappable_blocks(self, *, checkpoint_path=""):
+        from modeling.moss_image.model import MOSS_IMAGE_CONFIG
+        return MOSS_IMAGE_CONFIG["num_layers"]
+
     def load_options(self, args):
         get = args.get if isinstance(args, dict) else lambda k, d: getattr(args, k, d)
         return {
@@ -13,9 +17,7 @@ class MossFamily:
                     "sample_flow_shift": get("moss_sample_shift", 5.0),
                     "sample_uncond_skip_layers": get("moss_uncond_skip_layers", [22])},
             "text": {"quantization": get("text_encoder_quantization", "none"),
-                     "offload_layers": get("text_encoder_layers_to_offload", 0),
-                     "max_length": get("moss_max_token_length", 4096),
-                     "tokenizer_path": get("moss_tokenizer_path", "")},
+                     "offload_layers": get("text_encoder_layers_to_offload", 0)},
         }
 
     def load_dit(self, path, device, dtype, *, attention_backend="none", repo_root=None,
@@ -26,6 +28,13 @@ class MossFamily:
                          blocks_to_swap=blocks_to_swap, attention_backend=attention_backend)
         model.sample_flow_shift = sample_flow_shift
         model.sample_uncond_skip_layers = tuple(sample_uncond_skip_layers)
+        model.moss_comfy_forward = purpose == "generate"
+        if model.moss_comfy_forward and model.is_convrot_int8:
+            import torch
+            from .quant_int8 import patch_int8_linear
+            for module in model.modules():
+                if isinstance(module, torch.nn.Linear) and module.weight.dtype == torch.int8:
+                    patch_int8_linear(module, module.scale_weight, module._convrot_groupsize, forward="w8a8")
         return model
 
     def load_vae(self, path, device, dtype, *, tiling="auto"):
@@ -48,6 +57,10 @@ class MossFamily:
         return text.encode_text_for_batch(captions, device=device, dtype=dtype)
 
     def forward_train(self, dit, noisy, t, cond, *, use_checkpoint=False):
+        if noisy.shape[0] > 1:
+            import torch
+            contexts = [ctx[mask.bool()] for ctx, mask in zip(cond.context, cond.attention_mask)]
+            return torch.cat(dit.forward_packed(list(noisy.split(1)), t, contexts, use_checkpoint=use_checkpoint))
         from modeling.moss_image.vae import patchify_latents, unpatchify_latents
         if use_checkpoint:
             # Set once (logging on every step would obscure the training progress).
@@ -59,6 +72,17 @@ class MossFamily:
         packed = patchify_latents(noisy[:, :, 0])
         pred = dit(packed, t.float() * 1000, cond.context, cond.attention_mask)
         return unpatchify_latents(pred).unsqueeze(2)
+
+    def navit_encode_text(self, text, dit, captions, device, dtype, *, trim_padding=False, **kwargs):
+        cond = self.encode_text_for_batch(text, dit, captions, device, dtype, **kwargs)
+        return [ctx[mask.bool()] for ctx, mask in zip(cond.context, cond.attention_mask)]
+
+    def navit_forward_and_loss(self, model, latents, t, contexts, loss_fn, **kwargs):
+        from .navit import navit_packed_forward_and_loss
+        return navit_packed_forward_and_loss(model, latents, t, contexts, loss_fn, **kwargs)
+
+    def navit_text_token_count(self, text, caption):
+        return text.token_count(caption)
 
     def sample_image(self, *args, **kwargs):
         from .sampling import sample_image

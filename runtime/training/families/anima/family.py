@@ -18,6 +18,16 @@ from training.families.anima.preset import ANIMA_PRESET
 class AnimaFamily:
     spec = ANIMA_SPEC
 
+    def navit_encode_text(self, text, dit, captions, device, dtype, *, trim_padding=False, **kwargs):
+        from .navit import pack_cross_embeddings
+        cross, mask = self.encode_text_for_batch(text, dit, captions, device, dtype, return_t5_attn=True, **kwargs)
+        return pack_cross_embeddings(cross, mask, trim_padding)
+
+    def navit_forward_and_loss(self, model, latents, t, condition, loss_fn, **kwargs):
+        from .navit import navit_packed_forward_and_loss
+        cross, lengths = condition
+        return navit_packed_forward_and_loss(model, latents, t, cross, lengths, loss_fn, **kwargs)
+
     # -- Loading --------------------------------------------------------
     def load_dit(self, path, device, dtype, *,
                  attention_backend: str = "flash_attn", repo_root=None,

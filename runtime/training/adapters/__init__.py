@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from training.adapters import lycoris, ortho, tlora
+from training.adapters import lycoris, ortho, riemann, tlora
 from training.adapters.protocol import AdapterProtocol, StepContext
 
 __all__ = ["AdapterProtocol", "StepContext", "BUILDERS", "build_adapter",
@@ -32,6 +32,8 @@ BUILDERS: dict[str, Callable[..., AdapterProtocol]] = {
 
 def build_adapter(args, *, preset: dict[str, Any]) -> AdapterProtocol:
     """Dispatch by args.lora_type, explicitly injecting the current model family's target preset."""
+    if getattr(args, "use_riemannian", False):
+        return riemann.build(args, preset=preset)
     lora_type = args.lora_type
     if lora_type not in BUILDERS:
         raise ValueError(

@@ -247,6 +247,21 @@ def create_optimizer(
             **kwargs,
         )
 
+    elif optimizer_type == "muon":
+        from utils.muon_optimizer import MuonWithAuxAdam
+
+        optimizer = MuonWithAuxAdam(
+            params, lr=learning_rate, weight_decay=weight_decay,
+            adam_betas=betas, adam_eps=eps, **kwargs,
+        )
+        logger.info(
+            "Created Muon: lr=%s weight_decay=%s matrix_tensors=%d aux_adamw_tensors=%d",
+            learning_rate, weight_decay,
+            sum(len(g["params"]) for g in optimizer.param_groups if g["use_muon"]),
+            sum(len(g["params"]) for g in optimizer.param_groups if not g["use_muon"]),
+        )
+        return optimizer
+
     elif optimizer_type == "simplified_ademamix":
         return create_simplified_ademamix(
             params=params,
@@ -260,7 +275,7 @@ def create_optimizer(
     else:
         raise ValueError(
             f"Unknown optimizer type: {optimizer_type}. "
-            f"Choose from: adamw, automagic, automagic_v2, came, lion, prodigy, "
+            f"Choose from: adamw, automagic, automagic_v2, came, lion, muon, prodigy, "
             f"prodigy_plus_schedulefree, simplified_ademamix, soap, soap_sf"
         )
 

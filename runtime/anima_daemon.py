@@ -1171,7 +1171,7 @@ def _run_xy(
     if CACHE.model is not None:
         from training.families.krea2.quant_fp8 import model_has_fp8_layers
 
-        fp8_model = model_has_fp8_layers(CACHE.model)
+        fp8_model = (model_has_fp8_layers(CACHE.model) and not getattr(CACHE.model, "is_qfloat8", False)) or bool(getattr(CACHE.model, "is_convrot_int8", False))
 
     if base_seed == 0:
         base_seed = random.randint(0, 2**31 - 1)

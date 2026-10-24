@@ -49,22 +49,25 @@ def split_fused_qkv(key: str, tensor: Optional[torch.Tensor], dim: int = moss_im
 def load_dit(path, device, dtype, *, quantization="none", blocks_to_swap=0, attention_backend="none", config=None):
     if dtype not in (torch.bfloat16, torch.float32):
         raise ValueError("MOSS Base requires BF16 or FP32 compute")
-    if quantization not in ("none", "convrot_int8"):
-        raise ValueError("MOSS checkpoint quantization must be none or convrot_int8")
+    if quantization not in ("none", "convrot_int8", "qfloat8"):
+        raise ValueError("MOSS checkpoint quantization must be none, convrot_int8 or qfloat8")
     with init_empty_weights():
         model = moss_image_models.MossImage(**(config or moss_image_models.MOSS_IMAGE_CONFIG),
             attn_mode={"none": "torch", "flash_attn": "flash", "xformers": "xformers"}[attention_backend])
+    model.moss_fused_qkv = False
     def split(key, tensor):
+        if ".proj.qkv." in key:
+            model.moss_fused_qkv = True
         keys, tensors = split_fused_qkv(key, tensor, model.dim)
         return list(zip(keys, tensors)) if keys else [(key, tensor)]
     return load_frozen_weights(model, path, rename=_strip_dit_prefix, split=split,
         quantize=quantization == "convrot_int8", quant_target=lambda k: k.startswith("layers.") and ".proj." in k,
-        device=device, offload_layers=blocks_to_swap, dtype=dtype)
+        device=device, offload_layers=blocks_to_swap, dtype=dtype, qfloat8=quantization == "qfloat8")
 
 
 def load_text_model(path, device, *, quantization="none", offload_layers=0):
-    if quantization not in ("none", "convrot_int8"):
-        raise ValueError("MOSS text encoder quantization must be none or convrot_int8")
+    if quantization not in ("none", "convrot_int8", "qfloat8"):
+        raise ValueError("MOSS text encoder quantization must be none, convrot_int8 or qfloat8")
     try:
         from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
     except ImportError as exc:
@@ -85,7 +88,12 @@ def load_text_model(path, device, *, quantization="none", offload_layers=0):
                "linear_attn.out_proj", "mlp.", "embed_tokens.")
     model = load_frozen_weights(model, path, rename=rename, device=device,
         offload_layers=offload_layers, quantize=quantization == "convrot_int8",
-        quant_target=lambda key: any(part in key for part in targets))
+        quant_target=lambda key: any(part in key for part in targets), qfloat8=quantization == "qfloat8")
+    if getattr(model, 'is_convrot_int8', False):
+        from .quant_int8 import patch_int8_linear
+        for module in model.modules():
+            if isinstance(module, torch.nn.Linear) and module.weight.dtype == torch.int8:
+                patch_int8_linear(module, module.scale_weight, module._convrot_groupsize, forward="dequant")
     if offload_layers:
         from ...layer_offload import FrozenLayerOffload
         model._layer_offload = FrozenLayerOffload(model.layers, offload_layers, device)

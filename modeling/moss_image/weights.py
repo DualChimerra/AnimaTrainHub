@@ -45,7 +45,7 @@ def load_split_weights(path, device='cpu', disable_mmap=False):
 
 def load_frozen_weights(model, path, *, rename, split=None, quantize=False,
                         quant_target=lambda key: False, device='cpu', layer_prefix='layers.',
-                        offload_layers=0, dtype=torch.bfloat16):
+                        offload_layers=0, dtype=torch.bfloat16, qfloat8=False):
     """Assign one tensor at a time; quantization never materializes the full bf16 model."""
     from .convrot import quantize_weight_convrot, parse_comfy_quant_spec
     from .convrot import _patch_convrot_int8_linear, _patch_convrot_int8_embedding
@@ -57,6 +57,7 @@ def load_frozen_weights(model, path, *, rename, split=None, quantize=False,
     layers = getattr(model, 'layers', ())
     first_offloaded = len(layers) - min(int(offload_layers), len(layers))
     quantized = set()
+    fp8_scales = {}
     for file in checkpoint_files(path):
         with safe_open(str(file), framework='pt', device='cpu') as reader:
             for raw_key in reader.keys():
@@ -90,11 +91,17 @@ def load_frozen_weights(model, path, *, rename, split=None, quantize=False,
                         if index >= first_offloaded:
                             destination = torch.device('cpu')
                     if tensor.dtype == torch.int8:
+                        if qfloat8:
+                            raise ValueError('qfloat8 requires BF16/FP32 source weights; select none for an existing ConvRot INT8 checkpoint')
                         quantized.add(owner)
                     elif not tensor.is_floating_point():
                         raise ValueError(f'Unsupported weight format: {key} ({tensor.dtype})')
                     elif tensor.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-                        raise ValueError('MOSS FP8 checkpoints are not supported; select BF16 or ConvRot INT8')
+                        raise ValueError('Pre-quantized MOSS FP8 checkpoints are not supported; select BF16 weights and qfloat8 to quantize on load')
+                    elif qfloat8 and attr == 'weight' and quant_target(key) and isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
+                        from .quant_fp8 import quantize_weight
+                        tensor, scale = quantize_weight(tensor.to(device))
+                        fp8_scales[owner] = scale
                     elif quantize and key.endswith('.weight') and quant_target(key):
                         converted = quantize_weight_convrot(key, tensor.to(device), (256, 64))
                         if converted is not None:
@@ -102,7 +109,7 @@ def load_frozen_weights(model, path, *, rename, split=None, quantize=False,
                             scales[owner] = scale.to(device)
                             specs[owner] = {'convrot_groupsize': group}
                             quantized.add(owner)
-                    if tensor.is_floating_point():
+                    if tensor.is_floating_point() and tensor.dtype != torch.float8_e4m3fn:
                         tensor = tensor.to(dtype)
                     module._parameters[attr] = torch.nn.Parameter(tensor.to(destination), requires_grad=False)
                     seen.add(key)
@@ -126,10 +133,15 @@ def load_frozen_weights(model, path, *, rename, split=None, quantize=False,
             _patch_convrot_int8_linear(module, group, 'bf16')
         else:
             raise ValueError(f'Unsupported ConvRot layer: {name}')
+    if fp8_scales:
+        from .quant_fp8 import patch_module
+        for name, scale in fp8_scales.items():
+            patch_module(modules[name], scale, dtype)
     # Rotary buffers are not checkpoint weights and retain their original float32 precision.
     for module in modules.values():
         for key, value in module._buffers.items():
             if value is not None:
                 module._buffers[key] = value.to(device)
     model.is_convrot_int8 = bool(quantized)
+    model.is_qfloat8 = bool(fp8_scales)
     return model.eval()
