@@ -357,7 +357,8 @@
       "riemannion_momentum": "Riemannion momentum",
       "caption_dropout": "Caption Dropout",
       "low_vram": "Low VRAM",
-      "use_riemannian": "Use Riemannian"
+      "use_riemannian": "Use Riemannian",
+      "optimizer_args": "name=value, one per line"
     },
     "subgroups": {
       "loraMain": "Network parameters",
@@ -384,6 +385,7 @@
       "dataset": "Dataset",
       "caption": "Caption processing",
       "lora": "Network settings",
+      "optimizerArgs": "Optimizer arguments",
       "training": "Training parameters",
       "noiseAugmentation": "Noise augmentation",
       "timestepSampling": "Timestep sampling",
@@ -496,6 +498,11 @@
       }
     },
     "disableHints": {
+      "text_encoder_cache": "Low VRAM keeps caption caching on",
+      "cache_latents": "NaViT packing and Low VRAM require cached latents",
+      "vae_cache_batch_size": "Low VRAM encodes latents one image at a time",
+      "grad_checkpoint": "Low VRAM keeps gradient checkpointing on",
+      "vae_tiling": "Low VRAM keeps VAE tiling on",
       "train_norm": "Available for Anima with LoRA, LoKr or LoHa",
       "train_text_encoder": "Available for Anima with LoRA, LoKr or LoHa and DOP disabled",
       "text_encoder_lr": "This optimizer manages its own learning rate",
@@ -514,6 +521,8 @@
       "lora_dora": "DoRA requires unquantized base weights and a compatible adapter; Riemannian and OrthoLoRA are incompatible."
     },
     "descriptions": {
+      "lora_type": "Adapter algorithm. lora: classic low-rank, general purpose (default); lokr: Kronecker factorization, smallest parameter count; loha: Hadamard product, higher expressiveness but more parameters; ortho: orthogonal parameterization, very few trainable parameters, resists overfitting, suited to small-dataset character/subject training; tlora: rank shrinks as noise increases, built to prevent overfitting in single-/few-image subject personalization",
+      "optimizer_type": "Optimizer. adamw is the baseline; adamw8bit keeps AdamW state in 8 bits (about a quarter of the memory, same hyperparameters); automagic adapts per-parameter lr (recommend lr=1e-6); came uses confidence-guided factored second moments (less state VRAM than AdamW, lr at AdamW scale); lion uses ~half the state of AdamW (recommend lr = AdamW lr / 3); muon orthogonalizes matrix updates and uses AdamW for vectors (lr at AdamW scale with the default scaling; also offers Use Riemannian); prodigy / prodigy_plus_schedulefree self-estimate lr (fill 1.0); simplified_ademamix keeps one long momentum of raw gradients mixed with the current gradient (same VRAM as AdamW; lr = AdamW lr × (1 − β1), e.g. 1e-6); soap / soap_sf precondition Adam in the Shampoo eigenbasis (fits faster, lr at AdamW scale; soap_sf requires lr_scheduler none)",
       "train_norm": "Also adjust attention normalization to the dataset. Saves the changes with the LoRA. The count is calculated automatically: 112 weights for Anima 2B. Off by default.",
       "train_text_encoder": "Train how Qwen interprets captions, using an adapter saved in the same LoRA. Requires more memory. Off by default.",
       "text_encoder_lr": "Separate learning rate for the text encoder. Only applies while its training is enabled. Saved as ss_text_encoder_lr.",
@@ -731,7 +740,8 @@
       "text_encoder_quantization": "Weight storage: none, ConvRot INT8 or qfloat8. On-load quantization requires BF16 source weights; compute precision is unchanged.",
       "caption_dropout": "Probability of training an image with an empty caption. Works with cached text; regularization captions are preserved. 0 = off.",
       "low_vram": "Save GPU memory with caching, gradient checkpointing, tiled VAE and automatic half-model block swapping when no swap count is set. Uses more RAM and can be slower.",
-      "use_riemannian": "Riemannian Muon with a fixed-rank adapter, exporting ordinary LoRA. Incompatible with DoRA, EMA and text encoder training."
+      "use_riemannian": "Riemannian Muon with a fixed-rank adapter, exporting ordinary LoRA. Incompatible with DoRA, EMA and text encoder training.",
+      "optimizer_args": "Extra arguments for the selected optimizer, one name=value per line, e.g. betas=(0.9, 0.99) or eps=1e-6. Values override the optimizer fields on the Training tab. Learning rate and weight decay use their own fields; unknown names stop training at startup."
     },
     "altDescriptions": {
       "timestep_sampling": "[Timestep sampling] Distribution; when InfoNoise is enabled this is the warmup baseline, then adaptive CDF takes over",

@@ -10,6 +10,19 @@ Newton-Schulz orthogonalization, and truncated-SVD retraction.
 This implementation uses decoupled weight decay and caches momentum before
 orthogonalization. It is an experimental adaptation, not official paper code.
 Calculations are batched by shape in fp32; auxiliary parameters use AdamW.
+
+Notation (one layer, W is out×in = m×n, rank r):
+    X = A_L · Bᵀ             the weight delta; A_L has orthonormal columns (m×r), B is n×r
+    B_R                      orthonormal basis of col(B) (n×r)
+    ξ = Ȧ · B_Rᵀ + A_L · Ḃᵀ   a tangent vector (Ȧ ⊥ A_L)
+
+Each step works on a 2r×2r core in the bases [A_L, Q_a] × [B_R, Q_b], where
+Q_a / Q_b come from QR of Ȧ and of the part of Ḃ orthogonal to B_R:
+ξ = [A_L, Q_a]·K·[B_R, Q_b]ᵀ with K = [[Ḃ_Rᵀ, R_bᵀ], [R_a, 0]]. Newton-Schulz
+on K orthogonalizes ξ, zeroing the lower-right block projects it back to the
+tangent space, and a truncated SVD of X(1−ηγ) − η·ξ retracts to rank r.
+Layers too narrow for 2r orthonormal columns use reduced QR of the combined
+bases instead.
 """
 
 from __future__ import annotations
@@ -24,7 +37,7 @@ __all__ = [
     "RiemannionWithAuxAdam", "project_lr", "riemannian_grad", "riemannion_update",
 ]
 
-NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)  # 与 Muon 相同（Keller Jordan, 2024）
+NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)  # same as Muon (Keller Jordan, 2024)
 NS_STEPS = 5
 
 
@@ -39,7 +52,7 @@ def _cholesky_qr(x: Tensor) -> tuple[Tensor, Tensor] | None:
 
 
 def _qr(x: Tensor) -> tuple[Tensor, Tensor]:
-    """瘦高矩阵（[..., m, k]，k≪m）的 reduced QR：CholeskyQR2，失败回退 Householder。"""
+    """Reduced QR of tall matrices ([..., m, k], k≪m): CholeskyQR2, falling back to Householder."""
     first = _cholesky_qr(x)
     if first is not None:
         second = _cholesky_qr(first[0])
@@ -49,14 +62,14 @@ def _qr(x: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def _qr_perp(x: Tensor, basis: Tensor) -> tuple[Tensor, Tensor]:
-    """x 已（解析上）⊥ basis；QR 后再投影一次去掉数值泄漏，保证 [basis, Q] 列正交。"""
+    """x is analytically ⊥ basis; project again after QR to remove numerical leakage, so [basis, Q] is orthonormal."""
     q, r = _qr(x - basis @ (basis.mT @ x))
     q2, r2 = _qr(q - basis @ (basis.mT @ q))
     return q2, r2 @ r
 
 
 def _polar_newton_schulz(core: Tensor) -> Tensor:
-    """方阵 batch 的极分解因子近似（奇异值推到 ~1，零奇异值保持 0），fp32。"""
+    """Approximate polar factor of a batch of cores (singular values to ~1, zeros stay 0), fp32."""
     a, b, c = NS_COEFFICIENTS
     x = core / core.norm(dim=(-2, -1), keepdim=True).clamp(min=1e-12)
     for _ in range(NS_STEPS):
@@ -70,21 +83,22 @@ def _svd(core: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         try:
             return torch.linalg.svd(core, driver="gesvda")
         except torch.linalg.LinAlgError:
-            # 核有大量近零 / 重复奇异值时 gesvda 不收敛（如从有效秩远低于 r 的普通
-            # LoRA 热启动）；回退 CPU 标准 SVD，只在出错的这一步付出代价
+            # gesvda fails to converge on many near-zero / repeated singular values
+            # (e.g. warm start from a LoRA of effective rank well below r); fall back
+            # to CPU SVD, paying the cost only on the failing step
             u, s, vh = torch.linalg.svd(core.cpu())
             return u.to(core.device), s.to(core.device), vh.to(core.device)
     return torch.linalg.svd(core)
 
 
 def riemannian_grad(a_l: Tensor, grad_z1: Tensor, grad_b: Tensor) -> tuple[Tensor, Tensor]:
-    """由 adapter 的两路梯度得切向量 (Ȧ, Ḃ)：Ȧ = (I−A_L A_Lᵀ)·∇Z1，Ḃ = ∇B。"""
+    """Tangent vector (Ȧ, Ḃ) from the adapter's two gradients: Ȧ = (I−A_L A_Lᵀ)·∇Z1, Ḃ = ∇B."""
     a_dot = grad_z1 - a_l @ (a_l.mT @ grad_z1)
     return a_dot, grad_b
 
 
 def project_lr(a: Tensor, b: Tensor, a_l: Tensor, b_r: Tensor) -> tuple[Tensor, Tensor]:
-    """ProjectLR（Algorithm 2）：把 Z = A·Bᵀ 投影到 (A_L, B_R) 处的切空间。
+    """ProjectLR (Algorithm 2): project Z = A·Bᵀ onto the tangent space at (A_L, B_R).
 
     P(Z) = A_L A_Lᵀ Z + (I − A_L A_Lᵀ) Z B_R B_Rᵀ
          = (I−A_L A_Lᵀ)·A·(Bᵀ B_R) · B_Rᵀ  +  A_L · (B·(Aᵀ A_L))ᵀ
@@ -98,10 +112,10 @@ def riemannion_update(
     a_l: Tensor, b: Tensor, b_r: Tensor, a_dot: Tensor, b_dot: Tensor,
     lr: float, weight_decay: float,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """OrthoLR → 切空间投影 → RetractionLR，返回新的 (A_L, B, B_R)。
+    """OrthoLR -> tangent projection -> RetractionLR; returns the new (A_L, B, B_R).
 
-    输入切向量 ξ = Ȧ·B_Rᵀ + A_L·Ḃᵀ（Ȧ ⊥ A_L）。全部运算落在
-    [A_L, Q_a] × [B_R, Q_b] 基底下的 2r×2r 核上（见模块 docstring）。
+    Input tangent vector ξ = Ȧ·B_Rᵀ + A_L·Ḃᵀ (Ȧ ⊥ A_L). All work happens on the
+    2r×2r core in the [A_L, Q_a] × [B_R, Q_b] bases (see the module docstring).
     """
     rank = a_l.shape[-1]
     if 2 * rank > min(a_l.shape[-2], b_r.shape[-2]):
@@ -129,7 +143,7 @@ def riemannion_update(
         torch.cat([r_a, zeros], dim=-1),
     ], dim=-2)
     step = _polar_newton_schulz(core)
-    step[..., rank:, rank:] = 0                    # 投影回切空间：去掉 (I−P_A)·O·(I−P_B)
+    step[..., rank:, rank:] = 0                    # back to the tangent space: drop (I−P_A)·O·(I−P_B)
     x_core = torch.zeros_like(core)
     x_core[..., :rank, :rank] = (1.0 - lr * weight_decay) * (b_r.mT @ b).mT  # X = A_L·Cᵀ·B_Rᵀ
     u, s, vh = _svd(x_core - lr * step)
@@ -139,11 +153,12 @@ def riemannion_update(
 
 
 class RiemannionWithAuxAdam(Optimizer):
-    """Riemannion（adapter 标记的 B / Z1 参数）+ 辅助 AdamW（其余参数）。
+    """Riemannion for the adapter's marked B / Z1 parameters, auxiliary AdamW for the rest.
 
-    adapter 需在参数上挂 ``_riemann_role``（"b" / "z1"）与 ``_riemann_layer``
-    （返回所属层的可调用 weakref）；层上有 ``a_l`` / ``b_r`` buffer 与 ``lora_b`` /
-    ``lora_z1`` 参数。动量存在 ``self.state[lora_b]``，随 optimizer.state_dict 进 resume。
+    The adapter tags parameters with ``_riemann_role`` ("b" / "z1") and ``_riemann_layer``
+    (a weakref returning the owning layer); the layer has ``a_l`` / ``b_r`` buffers and
+    ``lora_b`` / ``lora_z1`` parameters. Momentum lives in ``self.state[lora_b]`` and is
+    saved with optimizer.state_dict for resume.
     """
 
     def __init__(
@@ -233,20 +248,21 @@ class RiemannionWithAuxAdam(Optimizer):
                 a_prev, b_prev = project_lr(a_hb, b_hb, a_l, b_r)
                 a_dot = beta * a_prev + a_dot
                 b_dot = beta * b_prev + b_dot
-            # 缓存动量 ξ = [Ȧ, A_L]·[B_R, Ḃ]ᵀ（下一步再投影到新切空间）
+            # Cache momentum ξ = [Ȧ, A_L]·[B_R, Ḃ]ᵀ (projected to the new tangent space next step)
             a_hb_new = torch.cat([a_dot, a_l], dim=-1)
             b_hb_new = torch.cat([b_r, b_dot], dim=-1)
 
             new_a_l, new_b, new_b_r = riemannion_update(a_l, b, b_r, a_dot, b_dot, lr, wd)
-            # 全零梯度的层（本步未参与）切空间退化：保持原值。用 batch 掩码而非逐层
-            # .any()，避免每层一次 GPU 同步（280 层时 optimizer.step 30ms → 100ms）
+            # Layers with an all-zero gradient (unused this step) keep their values. A batch
+            # mask instead of per-layer .any() avoids one GPU sync per layer
+            # (280 layers: optimizer.step 30 ms -> 100 ms)
             active = ((g_z1.abs().amax(dim=(-2, -1)) > 0) | (g_b.abs().amax(dim=(-2, -1)) > 0))
             active = active[:, None, None]
             new_a_l = torch.where(active, new_a_l, a_l)
             new_b = torch.where(active, new_b, b)
             new_b_r = torch.where(active, new_b_r, b_r)
 
-            # 批量写回：逐层 copy_ 是 3×层数 次 kernel launch
+            # Batched write-back: per-layer copy_ would be 3 × layers kernel launches
             torch._foreach_copy_(
                 [ly.a_l for ly in layers] + [ly.b_r for ly in layers] + [ly.lora_b for ly in layers],
                 [*new_a_l.unbind(0), *new_b_r.unbind(0), *new_b.unbind(0)],

@@ -1,24 +1,25 @@
-"""MOSS-Image DiT 的 ComfyUI 口径推理前向（出图 parity，MOSS 设计稿 §5.9 / M9）。
+"""ComfyUI-style inference forward for the MOSS-Image DiT (generation parity, MOSS design §5.9 / M9).
 
-``modeling.moss`` 的前向按官方上游实现（训练用：调制量在 fp32、RoPE 转成 bf16 后
-旋转、手写 RMSNorm），与 ComfyUI 的推理前向数学相同但舍入路径不同。本模块复用同一
-套权重，按 ComfyUI 0.41.0 ``comfy/ldm/moss_image/model.py`` 的推理分支与
-comfy-kitchen 0.2.38 eager 后端逐算子排列：
+The ``modeling.moss`` forward follows the official upstream implementation (for training:
+modulation in fp32, RoPE cast to bf16 before rotation, hand-written RMSNorm). It is
+mathematically identical to ComfyUI's inference forward but rounds differently. This module
+reuses the same weights and follows the inference branch of ComfyUI 0.41.0
+``comfy/ldm/moss_image/model.py`` and the comfy-kitchen 0.2.38 eager backend op by op:
 
-- 调制归一化 ``rms_adaln(x, w·(1+scale)−1, shift)``：``w·(1+scale)−1`` 在 bf16 里算，
-  再 ``rms_norm(x) · (1+scale') + shift``
-- q/k ``rms_rope_split_half``：``rms_norm(x, weight)`` 后与 fp32 频率做 split-half 旋转
-  （乘积提升到 fp32），结果转回 bf16
-- RoPE 频率：flux ``rope``（fp64 计算、fp32 存）；时间嵌入：flux ``timestep_embedding``
-- 门控残差：原地 ``addcmul_``（一次舍入）
-- 线性层：调用模型自己的 Linear（int8 层已按 ``w8a8`` 挂 comfy-kitchen eager 前向）
+- modulated norm ``rms_adaln(x, w·(1+scale)−1, shift)``: ``w·(1+scale)−1`` is computed in bf16,
+  then ``rms_norm(x) · (1+scale') + shift``
+- q/k ``rms_rope_split_half``: ``rms_norm(x, weight)``, then split-half rotation with fp32
+  frequencies (product promoted to fp32), result cast back to bf16
+- RoPE frequencies: flux ``rope`` (computed in fp64, stored in fp32); time embedding: flux ``timestep_embedding``
+- gated residual: in-place ``addcmul_`` (one rounding)
+- linear layers: the model's own Linear (int8 layers already use the comfy-kitchen eager ``w8a8`` forward)
 
-**不在逐位范围内**：DiT 注意力。ComfyUI 对 Comfy-Org 的 MOSS 文件用 comfy-kitchen
-自带的 INT8 SageAttention CUDA 内核（闭源二进制），这里按模型的 ``attention_backend``
-走 flash-attn 包 / xformers，``none`` 时用 PyTorch SDPA（照搬 Comfy 的后端优先级）；
-文本精炼块在 ComfyUI 里走 xformers。
+**Not bit-exact**: DiT attention. For Comfy-Org's MOSS files ComfyUI uses comfy-kitchen's
+bundled INT8 SageAttention CUDA kernel (closed-source binary); here attention follows the
+model's ``attention_backend`` through the flash-attn package / xformers, and PyTorch SDPA for
+``none`` (copying Comfy's backend priority). ComfyUI runs the text refiner blocks through xformers.
 
-派生署名见 THIRD_PARTY_NOTICES（ComfyUI GPL-3.0 + comfy_kitchen Apache-2.0）。
+Attribution in THIRD_PARTY_NOTICES (ComfyUI GPL-3.0 + comfy_kitchen Apache-2.0).
 """
 
 from __future__ import annotations
@@ -41,20 +42,20 @@ _ROPE_THETA = 10000
 
 
 def _rms_norm(x: Tensor, weight: Tensor | None) -> Tensor:
-    """comfy ``ops.RMSNorm``（权重转成输入 dtype 的 ``F.rms_norm``）。"""
+    """comfy ``ops.RMSNorm`` (``F.rms_norm`` with the weight cast to the input dtype)."""
     if weight is None:
         return F.rms_norm(x, (x.shape[-1],), eps=_EPS)
     return F.rms_norm(x, weight.shape, weight=weight.to(x.dtype), eps=_EPS)
 
 
 def _rms_adaln(x: Tensor, norm_weight: Tensor, scale: Tensor, shift: Tensor) -> Tensor:
-    """ComfyUI ``modulated_rms_norm`` → comfy-kitchen eager ``rms_adaln``。"""
+    """ComfyUI ``modulated_rms_norm`` -> comfy-kitchen eager ``rms_adaln``."""
     folded = norm_weight.to(x.dtype) * (1 + scale) - 1
     return F.rms_norm(x, x.shape[-1:], eps=_EPS) * (1 + folded) + shift
 
 
 def _apply_rope_split_half(x: Tensor, freqs_cis: Tensor) -> Tensor:
-    """comfy-kitchen eager ``apply_rope_split_half1``（逐句照搬）。"""
+    """comfy-kitchen eager ``apply_rope_split_half1`` (copied line by line)."""
     t = x
     if torch.promote_types(x.dtype, freqs_cis.dtype) != freqs_cis.dtype:
         t = x.to(freqs_cis.dtype)
@@ -69,13 +70,13 @@ def _apply_rope_split_half(x: Tensor, freqs_cis: Tensor) -> Tensor:
 
 
 def _rms_rope_split_half(x: Tensor, pe: Tensor, weight: Tensor) -> Tensor:
-    """comfy-kitchen eager ``_rms_rope1(split_half=True)``。"""
+    """comfy-kitchen eager ``_rms_rope1(split_half=True)``."""
     x_norm = F.rms_norm(x, (x.shape[-1],), weight=weight.to(x.dtype), eps=_EPS)
     return _apply_rope_split_half(x_norm, pe)
 
 
 def _flux_rope(pos: Tensor, dim: int) -> Tensor:
-    """ComfyUI ``ldm/flux/math.rope``：fp64 计算频率与相位，输出 fp32 的 2×2 旋转矩阵。"""
+    """ComfyUI ``ldm/flux/math.rope``: frequencies and phases in fp64, fp32 2×2 rotation matrices out."""
     scale = torch.linspace(0, (dim - 2) / dim, steps=dim // 2, dtype=torch.float64, device=pos.device)
     omega = 1.0 / (_ROPE_THETA ** scale)
     out = torch.einsum("...n,d->...nd", pos.to(dtype=torch.float32).double(), omega)
@@ -85,8 +86,8 @@ def _flux_rope(pos: Tensor, dim: int) -> Tensor:
 
 
 def _rope(head_dim: int, h: int, w: int, text_len: int, device) -> Tensor:
-    """ComfyUI ``MOSSImage.rope`` + flux ``EmbedND``：图像在前（f = 文本长度，行列居中），
-    文本在后；返回 ``[1, N, 1, head_dim/2, 2, 2]``。"""
+    """ComfyUI ``MOSSImage.rope`` + flux ``EmbedND``: image first (f = text length, rows and
+    columns centered), text after; returns ``[1, N, 1, head_dim/2, 2, 2]``."""
     ids = torch.zeros(h * w + text_len, 4, device=device, dtype=torch.float32)
     ids[:h * w, 1] = text_len
     ids[:h * w, 2] = (torch.arange(h, device=device, dtype=torch.float32) - (h - 1) / 2).repeat_interleave(w)
@@ -99,7 +100,7 @@ def _rope(head_dim: int, h: int, w: int, text_len: int, device) -> Tensor:
 
 
 def _timestep_embedding(t: Tensor, dim: int = 256, max_period: int = 10000) -> Tensor:
-    """flux ``timestep_embedding``（``time_factor=1000``，fp32）。"""
+    """flux ``timestep_embedding`` (``time_factor=1000``, fp32)."""
     t = 1000.0 * t
     half = dim // 2
     freqs = torch.exp(
@@ -112,7 +113,7 @@ def _timestep_embedding(t: Tensor, dim: int = 256, max_period: int = 10000) -> T
 
 def _attention(q: Tensor, k: Tensor, v: Tensor, q_norm_w: Tensor, k_norm_w: Tensor,
                pe: Tensor, heads: int, backend: str = SDPA) -> Tensor:
-    """ComfyUI ``moss_image.attention`` 推理分支；注意力内核见模块 docstring。"""
+    """ComfyUI ``moss_image.attention`` inference branch; kernels are described in the module docstring."""
     b, n, _ = q.shape
     q = _rms_rope_split_half(q.view(b, n, heads, -1), pe, q_norm_w)
     k = _rms_rope_split_half(k.view(b, n, heads, -1), pe, k_norm_w)
@@ -120,15 +121,15 @@ def _attention(q: Tensor, k: Tensor, v: Tensor, q_norm_w: Tensor, k_norm_w: Tens
         return attention_bshd(q, k, v.view(b, n, heads, -1), backend, stage="moss_comfy").flatten(2)
     q, k = q.flatten(2), k.flatten(2)
     dim_head = q.shape[-1] // heads
-    # comfy attention_pytorch：reshape 到 heads 后 transpose 成 (b, heads, n, d)
+    # comfy attention_pytorch: reshape to heads, then transpose to (b, heads, n, d)
     q, k, v = (t.unsqueeze(3).reshape(b, -1, heads, dim_head).transpose(1, 2) for t in (q, k, v))
     return _sdpa(q, k, v).transpose(1, 2).reshape(b, -1, heads * dim_head)
 
 
 def _sdpa(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-    """comfy ``ops.scaled_dot_product_attention``：输入不小于 128K 元素时按
-    FLASH → CUDNN → EFFICIENT → MATH 的优先级选 SDPA 后端（torch 默认顺序里 cuDNN
-    排在 efficient 之后，两者数值不同）；小输入直接调用。"""
+    """comfy ``ops.scaled_dot_product_attention``: for inputs of at least 128K elements, pick the
+    SDPA backend in the order FLASH -> CUDNN -> EFFICIENT -> MATH (torch's default order puts cuDNN
+    after efficient, and the two differ numerically); small inputs call it directly."""
     if q.nelement() < 1024 * 128 or not q.is_cuda or _SDPA_PRIORITY is None:
         return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
     from torch.nn.attention import sdpa_kernel
@@ -179,12 +180,12 @@ def _dit_block(block, x: Tensor, mod: tuple[Tensor, ...], pe: Tensor, backend: s
 @torch.no_grad()
 def comfy_forward(model, x: Tensor, timestep: Tensor, context: Tensor, *,
                   skip_layers=()) -> Tensor:
-    """ComfyUI ``MOSSImage._forward``。
+    """ComfyUI ``MOSSImage._forward``.
 
-    ``x``：``[B, 128, H/16, W/16]``（ComfyUI 的 patchify 后 latent 排布，已转 compute
-    dtype）；``timestep``：σ（fp32 ``[B]``）；``context``：``[B, S, text_dim]``。
-    ``skip_layers``：SkipLayerGuidanceDiTSimple 跳过的层（该层原样传递）。返回同 dtype
-    的速度预测 ``[B, 128, H/16, W/16]``。
+    ``x``: ``[B, 128, H/16, W/16]`` (ComfyUI's patchified latent layout, already in the compute
+    dtype); ``timestep``: σ (fp32 ``[B]``); ``context``: ``[B, S, text_dim]``.
+    ``skip_layers``: layers skipped by SkipLayerGuidanceDiTSimple (passed through unchanged).
+    Returns the velocity prediction ``[B, 128, H/16, W/16]`` in the same dtype.
     """
     b, _, h, w = x.shape
     dtype, device = x.dtype, x.device

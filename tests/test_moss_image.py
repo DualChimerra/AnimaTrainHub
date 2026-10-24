@@ -97,7 +97,7 @@ def test_convrot_adapter_can_train_and_save_on_cpu(tmp_path, algo):
 
 def test_family_defaults_and_switch_preserve_optimizer():
     cfg = TrainingConfig(model_family='moss_image')
-    assert cfg.timestep_sampling == 'moss_logit_normal'
+    assert (cfg.timestep_sampling, cfg.timestep_shift) == ('logit_normal', 3.5)
     assert cfg.sample_sampler_name == 'euler'
     assert not cfg.shuffle_caption
     old = TrainingConfig(optimizer_type='adamw', learning_rate=0.0002).model_dump()
@@ -108,7 +108,7 @@ def test_family_defaults_and_switch_preserve_optimizer():
 
 @pytest.mark.parametrize('options', [
     {'mixed_precision': 'fp16'}, {'train_norm': True}, {'train_text_encoder': True},
-    {'edit_mode': True}, {'navit_packing': True}, {'shuffle_caption': True},
+    {'edit_mode': True}, {'shuffle_caption': True},
     {'infonoise_enabled': True}, {'moss_uncond_skip_layers': [42]},
     {'bucket_step': 24}, {'blocks_to_swap': 43},
     {'transformer_quantization': 'convrot_int8', 'lora_dora': True},
@@ -205,11 +205,12 @@ def test_weight_selection_isolated_from_other_families(tmp_path, monkeypatch):
     from studio.services.models.families import FAMILY_ASSETS
     from studio.infrastructure.secrets import ModelsConfig
     from studio import secrets
-    folder = tmp_path / 'external'
+    # Only the models root is scanned; external weight folders were retired.
+    folder = tmp_path / 'diffusion_models'
     folder.mkdir()
     file = folder / 'moss.safetensors'
     save_file(tiny_model().state_dict(), str(file))
-    cfg = ModelsConfig(weight_folders={'checkpoints': [str(folder)]})
+    cfg = ModelsConfig()
     sections = {}
     for assets in FAMILY_ASSETS.values():
         sections.update(assets.catalog_sections(tmp_path, cfg))
@@ -218,8 +219,9 @@ def test_weight_selection_isolated_from_other_families(tmp_path, monkeypatch):
     assert found['families'] == ['moss_image'] and found['exists']
     writes = []
     monkeypatch.setattr(secrets, 'update', writes.append)
+    monkeypatch.setattr(secrets, 'load', lambda: secrets.Secrets(models=cfg))
     weight_library.select_weight('checkpoints', str(file), {'weight_library': library})
-    assert writes == [{'models': {'selected': {'moss_image': str(file)}}}]
+    assert writes == [{'models': {'selected': {'moss_image': str(file)}, 'active_family': 'moss_image'}}]
     with pytest.raises(ValueError):
         weight_library.select_weight('vae', str(file), {'weight_library': library})
 

@@ -93,6 +93,8 @@ def test_ensure_text_ready_builds_and_reuses(monkeypatch):
     built = []
 
     class _Family:
+        spec = SimpleNamespace(text=SimpleNamespace(strategy="cached_varlen"))
+
         def load_text(self, path, device, dtype, **kw):
             built.append(str(path))
             return _Stack()

@@ -874,10 +874,17 @@ def compute_navit_pack_estimate(
         from runtime.training.families.moss_image.text_encoding import MossTextStack
         from runtime.training.dataset import BucketManager
         cfg = training_config
-        text = MossTextStack(cfg["text_encoder_path"], "cpu")
-        empty_count = text.token_count("")
+        try:
+            text = MossTextStack(cfg.get("text_encoder_path") or "", "cpu")
+            empty_count = text.token_count("")
+        except Exception as exc:  # noqa: BLE001  encoder/tokenizer not downloaded yet
+            import logging
+            logging.getLogger(__name__).warning("MOSS pack estimate without caption tokens: %s", exc)
+            text = None
         counts = {}
         def count_tokens(caption):
+            if text is None:
+                return 0
             if caption not in counts:
                 counts[caption] = max(empty_count, text.token_count(caption))
             return counts[caption]

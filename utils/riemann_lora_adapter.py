@@ -38,7 +38,7 @@ def _random_orthonormal(rows: int, cols: int, generator: torch.Generator) -> tor
 
 
 class RiemannLoRALinear(nn.Module):
-    """nn.Linear 包装：ΔW = A_L·Bᵀ，可训练参数为 lora_b（B）与 lora_z1（恒 0）。"""
+    """nn.Linear wrapper: ΔW = A_L·Bᵀ; trainable lora_b (B) and lora_z1 (always 0)."""
 
     def __init__(
         self,
@@ -60,15 +60,15 @@ class RiemannLoRALinear(nn.Module):
 
         out_dim, in_dim = org_module.weight.shape
         self.lora_dim = max(1, min(int(rank), int(out_dim), int(in_dim)))
-        # block swap 下被换出块的底模权重此时在 CPU（pinned），adapter 参数与正交基
-        # 必须建在训练设备上（block swap 只搬冻结底模权重，不管它们）
+        # Under block swap the offloaded base weights sit on the CPU (pinned); adapter
+        # parameters and bases must live on the training device (swap moves frozen weights only)
         device = device if device is not None else org_module.weight.device
         r = self.lora_dim
         self.register_buffer("a_l", _random_orthonormal(out_dim, r, generator).to(device))
         self.register_buffer("b_r", _random_orthonormal(in_dim, r, generator).to(device))
         self.lora_b = nn.Parameter(torch.zeros(in_dim, r, device=device))
         self.lora_z1 = nn.Parameter(torch.zeros(out_dim, r, device=device))
-        # optimizer 靠这两个标记找回所属层（weakref 避免参数↔模块循环引用）
+        # The optimizer finds the owning layer through these tags (weakref avoids a param <-> module cycle)
         self.lora_b._riemann_role = "b"
         self.lora_z1._riemann_role = "z1"
         self.lora_b._riemann_layer = weakref.ref(self)
@@ -102,7 +102,7 @@ class RiemannLoRALinear(nn.Module):
 
     @torch.no_grad()
     def distilled_lora_state(self, dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
-        """ΔW = A_L·Bᵀ = A_L·Rᵀ·Qᵀ（B=QR）；Rᵀ=U S Vᵀ → up=A_L U √S，down=√S Vᵀ Qᵀ。"""
+        """ΔW = A_L·Bᵀ = A_L·Rᵀ·Qᵀ (B=QR); Rᵀ=U S Vᵀ -> up=A_L U √S, down=√S Vᵀ Qᵀ."""
         q, r = torch.linalg.qr(self.lora_b.float(), mode="reduced")
         u, s, vh = torch.linalg.svd(r.mT)
         root = s.sqrt()
@@ -116,7 +116,7 @@ class RiemannLoRALinear(nn.Module):
 
     @torch.no_grad()
     def load_plain_lora_(self, lora_down: torch.Tensor, lora_up: torch.Tensor, scale: float) -> None:
-        """从标准 LoRA 精确还原：ΔW = s·up·down，up=QR → A_L=Q，B=(s·R·down)ᵀ。"""
+        """Exact restore from a standard LoRA: ΔW = s·up·down, up=QR -> A_L=Q, B=(s·R·down)ᵀ."""
         expected_up = tuple(self.a_l.shape)
         expected_down = (self.lora_dim, self.lora_b.shape[0])
         if tuple(lora_up.shape) != expected_up or tuple(lora_down.shape) != expected_down:
@@ -135,7 +135,7 @@ class RiemannLoRALinear(nn.Module):
 
 
 class RiemannLoRAAdapter:
-    """AdapterProtocol 实现：固定秩 LoRA，仅与 optimizer_type=riemannion 搭配。"""
+    """AdapterProtocol for fixed-rank LoRA; used only by Muon with Use Riemannian."""
 
     def __init__(self, *, rank: int = 32, preset: dict | None = None, seed: int = 0) -> None:
         self.rank = int(rank)
@@ -158,8 +158,8 @@ class RiemannLoRAAdapter:
 
     def inject(self, model: nn.Module) -> dict[str, nn.Module]:
         generator = torch.Generator().manual_seed(self._seed)
-        # 与 LycorisAdapter 同口径：按模型首个参数推断训练设备（block swap 换出的尾部
-        # 块在 CPU，不能逐层跟随底模权重的设备）
+        # Same as LycorisAdapter: take the training device from the model's first parameter
+        # (block swap leaves the tail blocks on the CPU, so per-layer devices are wrong)
         device = next(model.parameters()).device
         preset = self._preset or {}
         # MOSS selects block classes; Anima/Krea select layer names.
@@ -252,9 +252,9 @@ class RiemannLoRAAdapter:
         logger.info("Saved Riemann LoRA as standard LoRA: %s", path)
 
     def load(self, path: str | Path) -> None:
-        """热启动（resume_lora）：接受本 adapter 的续训键或标准 LoRA 键（lora_up/down）。
+        """Warm start (resume_lora): accepts this adapter's snapshot keys or standard LoRA keys (lora_up/down).
 
-        一层都没对上（如 LoKr / LoHa 文件）时报错，而不是静默从零开始训练。
+        Raises when no layer matches (e.g. a LoKr / LoHa file) instead of silently training from zero.
         """
         with safe_open(str(path), framework="pt", device="cpu") as f:
             sd = {k: f.get_tensor(k) for k in f.keys()}

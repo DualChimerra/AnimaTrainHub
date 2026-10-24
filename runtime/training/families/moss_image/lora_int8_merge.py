@@ -1,22 +1,24 @@
-"""MOSS int8 convrot 底模的 LoRA merge 回写（ComfyUI 逐位 parity，MOSS 设计稿 §5.9 / M9）。
+"""LoRA merge and write-back for the MOSS int8 convrot base (bit-exact ComfyUI parity, MOSS design §5.9 / M9).
 
-ComfyUI 给 int8 底模挂 LoRA 不在推理时旁路计算，而是加载时 merge 进权重再重新量化
-（经典 ModelPatcher 路径 ``patch_weight_to_device``，作者本地 ComfyUI 实际走这条：
-highvram / torch<2.8 不启用 dynamic VRAM）。本模块逐位复刻（oracle = 作者本地
-ComfyUI 0.41.0 + comfy_kitchen 0.2.38 eager 后端）：
+ComfyUI does not run LoRA on an int8 base as a bypass at inference: it merges LoRA into the
+weights at load time and re-quantizes them (the classic ModelPatcher path
+``patch_weight_to_device``, which the author's local ComfyUI actually takes: highvram /
+torch<2.8 do not enable dynamic VRAM). This module reproduces it bit for bit (oracle = the
+author's local ComfyUI 0.41.0 + comfy_kitchen 0.2.38 eager backend):
 
-    W16  = dequant(q, s).to(fp16)                       # fp32 里乘 scale、按组乘 Hᵀ
-    W16 += ((strength * alpha/dim) * ΔW_fp32).to(fp16)  # 逐 LoRA，comfy calculate_weight
-    q', s' = requantize_convrot(W16, seed)              # fp16 里旋转、逐行 amax/127、随机舍入
+    W16  = dequant(q, s).to(fp16)                       # scale multiplied in fp32, Hᵀ per group
+    W16 += ((strength * alpha/dim) * ΔW_fp32).to(fp16)  # per LoRA, comfy calculate_weight
+    q', s' = requantize_convrot(W16, seed)              # rotate in fp16, row-wise amax/127, stochastic rounding
 
-- fp16 = comfy ``lora_compute_dtype``（现代卡 should_use_fp16）。
-- 种子 = ``string_to_seed("diffusion_model.{comfy 键}.weight")``。Comfy-Org 的 MOSS
-  文件 qkv 融合存储，Comfy 的键是 ``layers.N.proj.qkv``：q/k/v 三个 LoRA 落在融合
-  权重的行切片上（``narrow(0, i*dim, dim)``），随机舍入的随机数按融合形状一次生成。
-  所以这里把 q/k/v 拼回整块再 merge、重新量化，最后拆回本项目的 q/k/v 三个 Linear。
-- CUDA 与 CPU 的随机数序列不同，逐位 parity 只在 GPU 上成立（与 Krea2 fp8 相同）。
+- fp16 = comfy ``lora_compute_dtype`` (should_use_fp16 on modern GPUs).
+- seed = ``string_to_seed("diffusion_model.{comfy key}.weight")``. Comfy-Org's MOSS files
+  store qkv fused, and Comfy's key is ``layers.N.proj.qkv``: the q/k/v LoRAs land on row
+  slices of the fused weight (``narrow(0, i*dim, dim)``), and the stochastic-rounding random
+  numbers are drawn once for the fused shape. So q/k/v are concatenated back, merged and
+  re-quantized as one block, then split into this project's three q/k/v Linear layers.
+- CUDA and CPU random sequences differ, so bit-exact parity holds only on the GPU (as for Krea2 fp8).
 
-仅推理路径使用（训练走 W8A16 + LoRA 旁路，见 quant_int8）。派生署名见 THIRD_PARTY_NOTICES。
+Used only for inference (training uses W8A16 + LoRA bypass, see quant_int8). Attribution in THIRD_PARTY_NOTICES.
 """
 
 from __future__ import annotations
@@ -38,13 +40,13 @@ from training.families.moss_image.quant_int8 import dequantize, requantize_convr
 
 logger = logging.getLogger(__name__)
 
-#: ComfyUI lora_compute_dtype（现代 NVIDIA 卡）
+#: ComfyUI lora_compute_dtype (modern NVIDIA GPUs)
 _MERGE_DTYPE = torch.float16
 _QKV_RE = re.compile(r"^(layers\.\d+\.proj)\.([qkv])$")
 
 
 def _comfy_units(model: torch.nn.Module, layer_names: set[str]) -> dict[str, list[str]]:
-    """被 LoRA 命中的 Linear → ComfyUI 的权重键（merge / 种子单位）及其成员（按行序）。"""
+    """LoRA-targeted Linear -> ComfyUI weight key (unit of merge / seed) and its members (in row order)."""
     fused = bool(getattr(model, "moss_fused_qkv", False))
     units: dict[str, list[str]] = {}
     for name in sorted(layer_names):
@@ -64,14 +66,15 @@ def merge_loras_into_int8_model(
     chunk_rows: int | None = None,
     keep_backup: bool = True,
 ) -> QuantizedMergeAdapter:
-    """把多份 LoRA 按 ComfyUI 语义 merge 进 MOSS int8 底模并重新量化回写。
+    """Merge several LoRAs into the MOSS int8 base with ComfyUI semantics and write the re-quantized weights back.
 
-    ``sources``：[(state_dict, strength, 来源名), ...]，顺序 = 挂载顺序 = comfy patches
-    顺序。``compute_dtype``：ΔW 的计算精度，fp32 = ComfyUI 默认（``lora_merge_precision``
-    设置项可选 bf16 降低峰值）。返回持有原始 int8 权重与 scale 的 CPU 备份的还原句柄。
+    ``sources``: [(state_dict, strength, source name), ...], order = mount order = comfy patch
+    order. ``compute_dtype``: precision of ΔW, fp32 = ComfyUI default (the ``lora_merge_precision``
+    setting can choose bf16 to lower the peak). Returns a restore handle holding CPU backups of
+    the original int8 weights and scales.
     """
     if compute_dtype not in (torch.float32, torch.bfloat16):
-        raise ValueError(f"LoRA merge compute_dtype 仅支持 fp32/bf16，收到：{compute_dtype}")
+        raise ValueError(f"LoRA merge compute_dtype supports only fp32/bf16, got: {compute_dtype}")
     module_index = {
         name.replace(".", "_"): (name, module)
         for name, module in model.named_modules()
@@ -83,7 +86,7 @@ def merge_loras_into_int8_model(
     for sd, strength, source in sources:
         grouped = group_lora_layers(sd)
         if not grouped:
-            raise ValueError(f"LoRA 文件没有任何 {LORA_PREFIX}* 层：{source}")
+            raise ValueError(f"LoRA file has no {LORA_PREFIX}* layers: {source}")
         for layer_key, tensors in grouped.items():
             entry = module_index.get(layer_key)
             if entry is None:
@@ -92,13 +95,13 @@ def merge_loras_into_int8_model(
             name, module = entry
             if module.weight.dtype != torch.int8:
                 raise ValueError(
-                    f"int8 底模 merge 遇到非量化层 {name}（{module.weight.dtype}）：MOSS 的 LoRA "
-                    f"目标层应全部是 int8，请确认底模文件完整"
+                    f"int8 base merge found a non-quantized layer {name} ({module.weight.dtype}): all MOSS LoRA "
+                    f"target layers should be int8; check that the base model file is complete"
                 )
             per_layer.setdefault(name, []).append((tensors, strength, source))
 
     if missing and not per_layer:
-        raise ValueError(f"LoRA 全部层都无法对应到当前模型：{missing[:5]} ...")
+        raise ValueError(f"No LoRA layer matches the current model: {missing[:5]} ...")
     if missing:
         logger.warning(
             "int8 merge: %d LoRA layer(s) have no matching layer in the model and "
@@ -107,12 +110,13 @@ def merge_loras_into_int8_model(
         )
 
     modules = dict(model.named_modules())
-    # 运算设备：block swap 下换出层的权重是 CPU pinned 主副本，weight_scale 恒在计算
-    # 设备。统一在 GPU 上算，写回时 copy_() 跨设备落回主副本（同 Krea2 fp8 merge）
+    # Compute device: under block swap the offloaded weights are CPU-pinned masters, while
+    # weight_scale always lives on the compute device. Compute on the GPU; copy_() writes back
+    # across devices into the masters (same as the Krea2 fp8 merge)
     merge_device = next(
         (p.device for p in model.parameters() if p.device.type == "cuda"), None,
     )
-    # 反量化的 fp32 矩阵乘与 ComfyUI 一样不用 TF32（torch 默认即关闭；此处兜底）
+    # Like ComfyUI, the dequantized fp32 matmul does not use TF32 (off by default in torch; enforced here)
     tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     backup: dict[str, tuple[Tensor, Tensor | None]] = {}
@@ -122,7 +126,7 @@ def merge_loras_into_int8_model(
             lins = [modules[n] for n in members]
             groups = {int(m._convrot_groupsize) for m in lins}
             if len(groups) != 1:
-                raise ValueError(f"int8 merge：{unit} 的成员 convrot 组大小不一致 {sorted(groups)}")
+                raise ValueError(f"int8 merge: members of {unit} have different convrot group sizes {sorted(groups)}")
             group = groups.pop()
             if keep_backup:
                 for n, m in zip(members, lins):

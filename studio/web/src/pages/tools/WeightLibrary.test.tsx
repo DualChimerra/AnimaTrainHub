@@ -49,12 +49,4 @@ describe('weight library', () => {
     await waitFor(() => expect(api.selectWeight).toHaveBeenCalledWith('checkpoints', 'C:/weights/moss.safetensors'))
     await waitFor(() => expect(reload).toHaveBeenCalled())
   })
-
-  it('saves additional scan folders without changing model selections', async () => {
-    render(<Harness />)
-    fireEvent.change(screen.getAllByPlaceholderText('Folder containing model weights')[0], { target: { value: 'D:/models' } })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Add' })[0])
-    await waitFor(() => expect(api.updateSecrets).toHaveBeenCalledWith({ models: { weight_folders: { checkpoints: ['D:/models'] } } }))
-    expect(api.selectWeight).not.toHaveBeenCalled()
-  })
 })

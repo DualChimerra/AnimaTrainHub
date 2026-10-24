@@ -25,10 +25,11 @@ ADJUST_LR_FNS = ("original", "match_rms_adamw")
 
 
 def zeropower_via_newtonschulz5(g: Tensor, steps: int = 5, eps: float = NS_EPS) -> Tensor:
-    """把 ``g``（[..., m, n]）的奇异值近似推到 1，保留奇异向量（≈ U Vᵀ）。
+    """Push the singular values of ``g`` ([..., m, n]) to about 1, keeping its singular vectors (≈ U Vᵀ).
 
-    支持前置 batch 维；每个矩阵独立归一化。全程 bf16，结果奇异值约落在 [0.7, 1.2]，
-    并非精确 1（系数刻意追求零点斜率，见 Keller 博客）。
+    Leading batch dimensions are supported; each matrix is normalized separately. Runs in bf16;
+    the resulting singular values land roughly in [0.7, 1.2], not exactly 1 (the coefficients
+    deliberately maximize the slope at zero, see Keller's post).
     """
     if g.ndim < 2:
         raise ValueError(f"Newton-Schulz needs a matrix, got shape {tuple(g.shape)}")
@@ -40,7 +41,7 @@ def zeropower_via_newtonschulz5(g: Tensor, steps: int = 5, eps: float = NS_EPS) 
         x = x.mT
     x = x / x.norm(dim=(-2, -1), keepdim=True).clamp(min=eps)
     for _ in range(steps):
-        # 与 torch.optim.Muon 相同的融合乘加（addmm → baddbmm），bf16 舍入路径一致
+        # Same fused multiply-add as torch.optim.Muon (addmm -> baddbmm), same bf16 rounding
         gram = x @ x.mT
         gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
         x = torch.baddbmm(x, gram_update, x, beta=a)
@@ -50,11 +51,11 @@ def zeropower_via_newtonschulz5(g: Tensor, steps: int = 5, eps: float = NS_EPS) 
 
 
 def adjust_lr_ratio(adjust_lr_fn: str, rows: int, cols: int) -> float:
-    """按矩阵形状缩放 lr。
+    """Scale lr by matrix shape.
 
-    - original（Keller）：sqrt(max(1, rows/cols))
-    - match_rms_adamw（Moonshot）：0.2·sqrt(max(rows, cols))，让每元素更新 RMS ≈ 0.2，
-      与 AdamW 典型更新同量级，可沿用 AdamW 的 lr
+    - original (Keller): sqrt(max(1, rows/cols))
+    - match_rms_adamw (Moonshot): 0.2·sqrt(max(rows, cols)), a per-element update RMS ≈ 0.2,
+      the scale of a typical AdamW update, so AdamW learning rates carry over
     """
     if adjust_lr_fn == "original":
         return math.sqrt(max(1.0, rows / cols))
@@ -64,10 +65,11 @@ def adjust_lr_ratio(adjust_lr_fn: str, rows: int, cols: int) -> float:
 
 
 def is_muon_param(p: Tensor) -> bool:
-    """真矩阵才走 Muon：ndim>=2 且摊平后两个维度都 >1。
+    """Only true matrices use Muon: ndim >= 2 and both flattened dimensions > 1.
 
-    形如 (1, r) / (r, 1) 的「矩阵」（Ortho-Hydra 的 lambda_layer 等）本质是向量：
-    正交化后只剩一个单位方向，等价于 sign 式更新，与 1D 参数一样交给 AdamW。
+    "Matrices" shaped (1, r) / (r, 1) (Ortho-Hydra's lambda_layer and similar) are vectors:
+    orthogonalization leaves one unit direction, a sign-like update, so they go to AdamW
+    like 1D parameters.
     """
     if p.ndim < 2:
         return False
@@ -77,16 +79,16 @@ def is_muon_param(p: Tensor) -> bool:
 
 
 def _as_matrix(t: Tensor) -> Tensor:
-    """ndim>2（卷积核）摊平成 [out, rest]；2D 原样返回。"""
+    """Flatten ndim > 2 (conv kernels) to [out, rest]; return 2D tensors unchanged."""
     return t if t.ndim == 2 else t.reshape(t.shape[0], -1)
 
 
 class MuonWithAuxAdam(Optimizer):
-    """真矩阵参数走 Muon，其余（1D / 向量形状）走 AdamW；两者共享 lr / weight_decay / scheduler。
+    """True matrices use Muon, the rest (1D / vector-shaped) AdamW; both share lr / weight_decay / scheduler.
 
-    构造时把每个传入的 param group 按维度拆成 Muon / AdamW 两组（空组丢弃），
-    group 上的 ``use_muon`` 标记分派。所以 ``param_groups`` 数可能多于传入数，
-    lr_scheduler 对每组独立缩放，行为不受影响。
+    Each given param group is split by shape into a Muon and an AdamW group (empty groups are
+    dropped) and dispatched by the group's ``use_muon`` flag, so ``param_groups`` may outnumber
+    the groups passed in. lr_scheduler scales each group independently, so behavior is unchanged.
     """
 
     def __init__(

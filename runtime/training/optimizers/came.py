@@ -12,6 +12,7 @@ from __future__ import annotations
 
 def build(args, params, lr: float, weight_decay: float):
     """Build a CAME instance; reads the came_* args."""
+    from training.optimizers.extra_args import with_optimizer_args
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(
@@ -19,14 +20,16 @@ def build(args, params, lr: float, weight_decay: float):
         params=params,
         learning_rate=lr,
         weight_decay=weight_decay,
-        betas=(
-            float(getattr(args, "came_beta1", 0.9)),
-            float(getattr(args, "came_beta2", 0.999)),
-            float(getattr(args, "came_beta3", 0.9999)),
-        ),
-        eps=(
-            float(getattr(args, "came_eps1", 1e-30)),
-            float(getattr(args, "came_eps2", 1e-16)),
-        ),
-        clip_threshold=float(getattr(args, "came_clip_threshold", 1.0)),
+        **with_optimizer_args(args, dict(
+            betas=(
+                float(getattr(args, "came_beta1", 0.9)),
+                float(getattr(args, "came_beta2", 0.999)),
+                float(getattr(args, "came_beta3", 0.9999)),
+            ),
+            eps=(
+                float(getattr(args, "came_eps1", 1e-30)),
+                float(getattr(args, "came_eps2", 1e-16)),
+            ),
+            clip_threshold=float(getattr(args, "came_clip_threshold", 1.0)),
+        )),
     )

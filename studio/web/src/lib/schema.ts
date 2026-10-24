@@ -102,6 +102,7 @@ export const SCHEMA_GROUP_LABEL_KEYS: Record<string, string> = {
   dataset: 'schema.groups.dataset',
   caption: 'schema.groups.caption',
   lora: 'schema.groups.lora',
+  optimizer_args: 'schema.groups.optimizerArgs',
   training: 'schema.groups.training',
   noise_augmentation: 'schema.groups.noiseAugmentation',
   timestep_sampling: 'schema.groups.timestepSampling',
@@ -209,10 +210,11 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
 }
 
-/** Human label of a schema field: schema.labels.<field> when the locale has
- *  one, else the key in title case ("lora_rank" -> "Lora Rank"). */
+/** Human label of a schema field: the English schema.labels.<field> when
+ *  present, else the key in title case ("lora_rank" -> "Lora Rank"). Setting
+ *  names stay English in every UI language; descriptions are translated. */
 export function schemaFieldLabel(name: string, t: TFunction): string {
-  return t(`schema.labels.${name}`, { defaultValue: fieldLabel(name) })
+  return t(`schema.labels.${name}`, { lng: 'en', defaultValue: fieldLabel(name) })
 }
 
 export function schemaGroupLabel(key: string, fallback: string, t: TFunction): string {

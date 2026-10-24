@@ -13,6 +13,7 @@ def build(args, params, lr: float, weight_decay: float):
     if getattr(args, "use_riemannian", False):
         from .riemannion import build as build_riemannian
         return build_riemannian(args, params, lr, weight_decay)
+    from training.optimizers.extra_args import with_optimizer_args
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(
@@ -20,7 +21,9 @@ def build(args, params, lr: float, weight_decay: float):
         params=params,
         learning_rate=lr,
         weight_decay=weight_decay,
-        momentum=float(getattr(args, "muon_momentum", 0.95)),
-        ns_steps=int(getattr(args, "muon_ns_steps", 5)),
-        adjust_lr_fn=str(getattr(args, "muon_adjust_lr", "match_rms_adamw")),
+        **with_optimizer_args(args, dict(
+            momentum=float(getattr(args, "muon_momentum", 0.95)),
+            ns_steps=int(getattr(args, "muon_ns_steps", 5)),
+            adjust_lr_fn=str(getattr(args, "muon_adjust_lr", "match_rms_adamw")),
+        )),
     )

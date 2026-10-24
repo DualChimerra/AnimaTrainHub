@@ -442,16 +442,17 @@ class MossImage(nn.Module):
 
     def forward_packed(self, latents, timesteps: torch.Tensor, contexts, *,
                        use_checkpoint: bool = False) -> list[torch.Tensor]:
-        """NaViT 打包前向：G 张尺寸各异的图（各带自己的文本）拼成一条序列一次算完。
+        """NaViT packed forward: G images of different sizes (each with its own text) in one sequence.
 
-        每个样本段 = [图像 token, 文本 token]，RoPE 与 ``forward`` 的单样本序列相同；
-        联合注意力与 text refiner 按段块对角，调制按段展开到 token，Linear 在整条序列
-        上一次算。与逐样本 ``forward`` 数学等价，且每层只调用一次（block swap 每层每步
-        只搬一次权重）。
+        Each sample segment = [image tokens, text tokens], with the same RoPE as the single-sample
+        sequence in ``forward``. Joint attention and the text refiner are block-diagonal per
+        segment, modulation is expanded per segment to its tokens, and Linear layers run once on
+        the whole sequence. Mathematically equivalent to per-sample ``forward``, with each layer
+        called once (block swap moves each layer's weights once per step).
 
-        ``latents``: G 个 ``[32, H, W]`` / ``[1, 32, H, W]`` / ``[1, 32, 1, H, W]``，H/W 可各不相同；
-        ``timesteps``: ``[G]``，σ∈[0,1]；``contexts``: G 个 ``[L, text_dim]`` 或
-        ``[1, L, text_dim]``（只含有效 token）。返回 G 个与对应输入同形的速度预测。
+        ``latents``: G tensors of ``[32, H, W]`` / ``[1, 32, H, W]`` / ``[1, 32, 1, H, W]``, H/W may differ;
+        ``timesteps``: ``[G]``, σ∈[0,1]; ``contexts``: G tensors of ``[L, text_dim]`` or
+        ``[1, L, text_dim]`` (valid tokens only). Returns G velocity predictions shaped like the inputs.
         """
         from .vae import patchify_latents as patchify, unpatchify_latents as unpatchify
         if use_checkpoint and not self.layers[0].gradient_checkpointing:
@@ -460,10 +461,10 @@ class MossImage(nn.Module):
             self.disable_gradient_checkpointing()
         count = len(latents)
         if count == 0 or len(contexts) != count:
-            raise ValueError("MOSS forward_packed 需要非空且一一对应的 latents / contexts")
+            raise ValueError("MOSS forward_packed needs non-empty, matching latents / contexts")
         timesteps = torch.as_tensor(timesteps).reshape(-1)
         if timesteps.numel() != count:
-            raise ValueError(f"MOSS forward_packed 需要 {count} 个 timestep，实际 {timesteps.numel()}")
+            raise ValueError(f"MOSS forward_packed needs {count} timesteps, got {timesteps.numel()}")
         device = latents[0].device
 
         shapes, grids, videos, texts, ropes = [], [], [], [], []
@@ -472,15 +473,15 @@ class MossImage(nn.Module):
             z = latent.reshape(1, *latent.shape[-3:]) if latent.ndim == 3 else latent
             if z.ndim == 5:
                 if z.shape[2] != 1:
-                    raise ValueError("MOSS 只支持 T==1 的 5D latent")
+                    raise ValueError("MOSS only supports 5D latents with T==1")
                 z = z.squeeze(2)
             if z.ndim != 4 or z.shape[:2] != (1, (self.latent_channels // 4)):
-                raise ValueError(f"MOSS 打包 latent 应为单样本 [1, {(self.latent_channels // 4)}, H, W]，实际 {tuple(latent.shape)}")
+                raise ValueError(f"MOSS packed latent must be a single sample [1, {(self.latent_channels // 4)}, H, W], got {tuple(latent.shape)}")
             if z.shape[-2] % 2 or z.shape[-1] % 2:
-                raise ValueError("MOSS latent 高宽须为 2 的倍数（像素须为 16 的倍数）")
+                raise ValueError("MOSS latent height and width must be multiples of 2 (pixels multiples of 16)")
             context = context.reshape(1, -1, context.shape[-1])
             if context.shape[1] == 0:
-                raise ValueError("MOSS 每个样本至少需要 1 个有效文本 token")
+                raise ValueError("MOSS needs at least 1 valid text token per sample")
             hidden = patchify(z)
             height, width = hidden.shape[-2:]
             grids.append((height, width))

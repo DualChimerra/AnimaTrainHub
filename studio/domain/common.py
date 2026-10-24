@@ -26,7 +26,7 @@ FAMILY_CAPABILITIES: dict[str, frozenset] = {
         "navit", "sra", "leap", "compile_blocks",
         "caption_tag_ops", "online_text", "masked_loss", "block_swap",
     }),
-    "krea2": frozenset({"masked_loss", "text_cache", "block_swap", "navit"}),
+    "krea2": frozenset({"masked_loss", "text_cache", "block_swap"}),
     "moss_image": frozenset({"masked_loss", "text_cache", "block_swap", "navit"}),
 }
 
@@ -206,6 +206,7 @@ GROUP_ORDER: list[tuple[str, str, bool]] = [
     ("dataset", "Dataset", False),
     ("caption", "Caption Processing", False),
     ("lora", "Network Settings", False),
+    ("optimizer_args", "Optimizer Arguments", False),
     ("training", "Training Parameters", False),
     ("noise_augmentation", "Noise Augmentation", False),
     ("timestep_sampling", "Timestep Sampling", False),

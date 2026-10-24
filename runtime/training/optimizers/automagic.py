@@ -17,15 +17,18 @@ def build(args, params, lr: float, weight_decay: float):
         clip_threshold=float(getattr(args, "automagic_clip_threshold", 1.0)),
         beta2=float(getattr(args, "automagic_beta2", 0.999)),
     )
+    from training.optimizers.extra_args import with_optimizer_args
     if variant == "v2":
         from utils.optimizer_utils import create_automagic_v2
         return create_automagic_v2(
             params=params, lr=lr, weight_decay=weight_decay,
-            agreement_threshold=float(getattr(args, "automagic_agreement_threshold", 0.5)),
-            **common,
+            **with_optimizer_args(args, dict(
+                common,
+                agreement_threshold=float(getattr(args, "automagic_agreement_threshold", 0.5)),
+            )),
         )
     from utils.optimizer_utils import create_automagic
-    return create_automagic(params=params, lr=lr, weight_decay=weight_decay, **common)
+    return create_automagic(params=params, lr=lr, weight_decay=weight_decay, **with_optimizer_args(args, common))
 
 
 def validate(args) -> None:

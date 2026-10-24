@@ -91,7 +91,6 @@ def parse_comfy_quant_spec(key: str, tensor: torch.Tensor) -> dict:
         raise ValueError(
             f"Unsupported comfy_quant format for {key}: {spec}. Only ConvRot INT8"
             f' ("{COMFY_QUANT_FORMAT_INT8}" with "convrot": true) is supported.'
-            f" / {key} の comfy_quant 形式はサポートされていません。ConvRot INT8 のみ対応しています。"
         )
     groupsize = spec.get("convrot_groupsize")
     if not isinstance(groupsize, int) or not _is_power_of_4(groupsize):

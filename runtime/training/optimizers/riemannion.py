@@ -18,12 +18,13 @@ def validate(args) -> None:
 
 
 def build(args, params, lr: float, weight_decay: float):
+    from training.optimizers.extra_args import with_optimizer_args
     from utils.riemannion_optimizer import RiemannionWithAuxAdam
 
     validate(args)
-    momentum = float(getattr(args, "riemannion_momentum", 0.9))
-    optimizer = RiemannionWithAuxAdam(params, lr=lr, weight_decay=weight_decay, momentum=momentum)
+    kwargs = with_optimizer_args(args, {"momentum": float(getattr(args, "riemannion_momentum", 0.9))})
+    optimizer = RiemannionWithAuxAdam(params, lr=lr, weight_decay=weight_decay, **kwargs)
     logging.getLogger(__name__).info(
-        "Created Riemannion: lr=%s momentum=%s weight_decay=%s", lr, momentum, weight_decay,
+        "Created Riemannion: lr=%s momentum=%s weight_decay=%s", lr, kwargs["momentum"], weight_decay,
     )
     return optimizer

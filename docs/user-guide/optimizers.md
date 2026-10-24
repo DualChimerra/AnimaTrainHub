@@ -133,6 +133,18 @@ SOAP (Vyas et al. 2024, [arxiv 2409.11321](https://arxiv.org/abs/2409.11321)) is
 
 **Short-run caveat**: Schedule-Free's Polyak averaging lags badly on very short runs (≤ ~100 steps) — x ends up ≈ the centroid of the trajectory, i.e. underfit. In that regime use plain `soap`, not `soap_sf`; for runs in the thousands of steps, SF behaves normally, and it's best to judge sample quality after roughly step 880.
 
+## Optimizer arguments
+
+**Optimizer arguments** is the last block of the Model tab. Each line is one `name=value` passed to the selected optimizer, as in kohya's `--optimizer_args`:
+
+```
+betas=(0.9, 0.99)
+eps=1e-6
+nesterov=False
+```
+
+Values are Python literals; a plain word such as `original` is a string. These lines override the matching optimizer fields on the Training tab. Learning rate and weight decay keep their own fields and are rejected here. An unknown name stops training at startup, so typos do not pass silently.
+
 ## Which one to pick
 
 - **No strong preference, want something reliable**: AdamW + cosine_with_warmup, follow the Anima default preset

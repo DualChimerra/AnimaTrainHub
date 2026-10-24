@@ -23,6 +23,7 @@ def validate(args) -> None:
 
 def build(args, params, lr: float, weight_decay: float):
     """Build a PPSF instance; reads the 7 ppsf_* args plus the betas override."""
+    from training.optimizers.extra_args import with_optimizer_args
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(
@@ -30,15 +31,17 @@ def build(args, params, lr: float, weight_decay: float):
         params=params,
         learning_rate=lr,
         weight_decay=weight_decay,
-        betas=(
-            float(getattr(args, "ppsf_beta1", 0.9)),
-            float(getattr(args, "ppsf_beta2", 0.99)),
-        ),
-        d_coef=float(getattr(args, "ppsf_d_coef", 1.0)),
-        prodigy_steps=int(getattr(args, "ppsf_prodigy_steps", 0)),
-        split_groups=bool(getattr(args, "ppsf_split_groups", True)),
-        split_groups_mean=bool(getattr(args, "ppsf_split_groups_mean", False)),
-        use_speed=bool(getattr(args, "ppsf_use_speed", False)),
-        fused_back_pass=bool(getattr(args, "ppsf_fused_back_pass", False)),
-        use_stableadamw=bool(getattr(args, "ppsf_use_stableadamw", True)),
+        **with_optimizer_args(args, dict(
+            betas=(
+                float(getattr(args, "ppsf_beta1", 0.9)),
+                float(getattr(args, "ppsf_beta2", 0.99)),
+            ),
+            d_coef=float(getattr(args, "ppsf_d_coef", 1.0)),
+            prodigy_steps=int(getattr(args, "ppsf_prodigy_steps", 0)),
+            split_groups=bool(getattr(args, "ppsf_split_groups", True)),
+            split_groups_mean=bool(getattr(args, "ppsf_split_groups_mean", False)),
+            use_speed=bool(getattr(args, "ppsf_use_speed", False)),
+            fused_back_pass=bool(getattr(args, "ppsf_fused_back_pass", False)),
+            use_stableadamw=bool(getattr(args, "ppsf_use_stableadamw", True)),
+        )),
     )

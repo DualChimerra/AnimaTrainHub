@@ -32,6 +32,7 @@ from .common import (
     sampling_option_gates,
 )
 from .migrations import migrate_legacy_save_keys, migrate_noise_enhancement_type
+from .optimizer_args import parse_optimizer_args
 
 
 class TrainingConfig(BaseModel):
@@ -86,6 +87,7 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta(
             "system", show_when=cap_gate("text_cache"),
             disable_when="low_vram==true", disable_value=True,
+            disable_hint="Low VRAM keeps caption caching on",
         ),
     )
 
@@ -252,14 +254,15 @@ class TrainingConfig(BaseModel):
             "system",
             disable_when="navit_packing==true||low_vram==true",
             disable_value=True,
-            disable_hint="NaViT packing budgets by latent token count, so pre-encoded caching is mandatory",
+            disable_hint="NaViT packing budgets by latent token count, and Low VRAM encodes before training, so caching is mandatory",
         ),
     )
     vae_cache_batch_size: int = Field(
         0, ge=0,
         description="Batch size for VAE latent cache encoding; 0 = follow the training batch size, set to 1 for one-at-a-time encoding if VRAM is tight",
         json_schema_extra=_meta("system", show_when="cache_latents==true", advanced=True,
-                                disable_when="low_vram==true", disable_value=1),
+                                disable_when="low_vram==true", disable_value=1,
+                                disable_hint="Low VRAM encodes latents one image at a time"),
     )
     # Grouped under "system" rather than "training": it only changes where the
     # weights live, not any training value — swapping out more layers has
@@ -511,7 +514,8 @@ class TrainingConfig(BaseModel):
     grad_checkpoint: bool = Field(
         True,
         description="Gradient checkpointing (saves VRAM, adds roughly 1/3 more compute)",
-        json_schema_extra=_meta("training", disable_when="low_vram==true", disable_value=True),
+        json_schema_extra=_meta("training", disable_when="low_vram==true", disable_value=True,
+                                disable_hint="Low VRAM keeps gradient checkpointing on"),
     )
     grad_accum: int = Field(
         4, ge=1,
@@ -683,6 +687,12 @@ class TrainingConfig(BaseModel):
         0.9, ge=0.0, lt=1.0,
         description="Riemannion momentum: how much previous updates influence the next one. Default 0.9.",
         json_schema_extra=_meta("training", show_when="optimizer_type==muon&&use_riemannian==true", advanced=True),
+    )
+    optimizer_args: list[str] = Field(
+        default_factory=list,
+        description="Extra optimizer arguments, one name=value per line (e.g. betas=(0.9, 0.99), eps=1e-6). Values are Python literals; plain words are strings. They override the optimizer fields above. Learning rate and weight decay use their own fields",
+        examples=[["betas=(0.9, 0.99)", "eps=1e-6"]],
+        json_schema_extra=_meta("optimizer_args", "string-list"),
     )
     prodigy_d_coef: float = Field(
         1.0, ge=0.1, le=10.0,
@@ -942,7 +952,8 @@ class TrainingConfig(BaseModel):
         description="VAE tiled decode: auto=automatically tile when available VRAM is tight (recommended); on=always tile (saves VRAM, ~30% slower); "
                     "off=full-image decode, falls back only on a genuine OOM. On high-VRAM cards, full-image decode near the VRAM ceiling can trigger a "
                     "system-memory fallback, degrading a single decode from under a second to over a hundred — auto avoids this",
-        json_schema_extra=_meta("system", advanced=True, disable_when="low_vram==true", disable_value="on"),
+        json_schema_extra=_meta("system", advanced=True, disable_when="low_vram==true", disable_value="on",
+                                disable_hint="Low VRAM keeps VAE tiling on"),
     )
     noise_enhancement_type: Literal["none", "offset", "pyramid"] = Field(
         "none",
@@ -1399,6 +1410,13 @@ class TrainingConfig(BaseModel):
         description="Number of parallel data-loading threads; higher = faster loading but more RAM use. Must be 0 on Windows",
         json_schema_extra=_meta("system", advanced=True),
     )
+
+    @field_validator("optimizer_args")
+    @classmethod
+    def _check_optimizer_args(cls, v: list[str]) -> list[str]:
+        lines = [line.strip() for line in v if line.strip()]
+        parse_optimizer_args(lines)
+        return lines
 
     @field_validator("resolution", mode="before")
     @classmethod

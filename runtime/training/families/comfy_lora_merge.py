@@ -1,20 +1,21 @@
-"""量化底模 LoRA merge 的 ComfyUI 通用语义（族无关中立层）。
+"""ComfyUI semantics for merging LoRA into quantized bases (family-neutral layer).
 
-ComfyUI 从不在量化存储上算 LoRA：加载时把 LoRA merge 进权重
-（``model_patcher.patch_weight_to_device`` → ``comfy.lora.calculate_weight``），
-再按各量化格式重新量化回写。本模块只放与存储格式无关、多个族共用的部分：
+ComfyUI never computes LoRA on quantized storage: at load time it merges LoRA into the weights
+(``model_patcher.patch_weight_to_device`` -> ``comfy.lora.calculate_weight``),
+then re-quantizes them in each storage format. This module holds only the format-independent
+parts shared by several families:
 
-- :func:`string_to_seed`：重新量化随机舍入的种子（``comfy.utils.string_to_seed``）
-- :func:`group_lora_layers`：kohya / PEFT 两种 LoRA 键格式按层归并
-- :func:`apply_lora_delta`：``weight += ((strength * alpha) * diff).type(dtype)``
-  （comfy ``weight_adapter`` 的 lora / loha / lokr 三种形态）
-- :class:`QuantizedMergeAdapter`：merge 回写的备份 / 还原句柄
+- :func:`string_to_seed`: seed for stochastic rounding during re-quantization (``comfy.utils.string_to_seed``)
+- :func:`group_lora_layers`: groups kohya / PEFT LoRA keys by layer
+- :func:`apply_lora_delta`: ``weight += ((strength * alpha) * diff).type(dtype)``
+  (the lora / loha / lokr forms of comfy ``weight_adapter``)
+- :class:`QuantizedMergeAdapter`: backup / restore handle for merged weights
 
-各族的反量化 / 重新量化（Krea2 fp8、MOSS int8 convrot）留在族内。原先这些
-代码在 Krea2 的 ``lora_fp8_merge`` 里，MOSS 接入时按「后来的族不 import 先来的
-族」的边界纪律抽到这里，Krea2 行为不变。
+Each family's dequantization / re-quantization (Krea2 fp8, MOSS int8 convrot) stays in the
+family. This code used to live in Krea2's ``lora_fp8_merge``; when MOSS was added it moved here
+under the rule that a later family does not import an earlier one. Krea2 behavior is unchanged.
 
-派生署名见 THIRD_PARTY_NOTICES（ComfyUI GPL-3.0 + comfy_kitchen）。
+Attribution in THIRD_PARTY_NOTICES (ComfyUI GPL-3.0 + comfy_kitchen).
 """
 
 from __future__ import annotations
@@ -26,10 +27,10 @@ from torch import Tensor
 
 LORA_PREFIX = "lora_unet_"
 COMFY_PREFIX = "diffusion_model."
-# PEFT/comfy 键后缀 → kohya/lycoris 命名（civitai 生态 LoRA 常见形态：
-# ``diffusion_model.{点分层名}.lora_A/lora_B``，lora_A=down、lora_B=up，
-# 通常无 alpha 键——comfy 对缺省 alpha 按缩放 1.0 处理，与 apply_lora_delta
-# 的 "alpha" 缺省分支一致）
+# PEFT/comfy key suffix -> kohya/lycoris naming (the common civitai form:
+# ``diffusion_model.{dotted layer}.lora_A/lora_B``, lora_A=down, lora_B=up,
+# usually without an alpha key; comfy treats a missing alpha as scale 1.0, matching the
+# "alpha" default branch of apply_lora_delta)
 _PEFT_SUFFIXES = (
     ("lora_A.weight", "lora_down.weight"),
     ("lora_B.weight", "lora_up.weight"),
@@ -41,22 +42,22 @@ _PEFT_SUFFIXES = (
 
 
 def string_to_seed(key: str) -> int:
-    """comfy.utils.string_to_seed 等价：标准 CRC-32（0xEDB88320）。
+    """Equivalent of comfy.utils.string_to_seed: standard CRC-32 (0xEDB88320).
 
-    comfy 手写实现对 str 逐字符 ord() 异或——层名均为 ASCII，与 utf-8 字节
-    序列一致，zlib.crc32 逐位相同（单测对拍手写参考实现）。
+    Comfy's hand-written version XORs ord() of each character; layer names are ASCII, so this
+    matches the utf-8 bytes and zlib.crc32 is bit-identical (unit-tested against the reference).
     """
     if not key.isascii():
-        raise ValueError(f"seed key 必须是 ASCII（comfy 层名域）：{key!r}")
+        raise ValueError(f"seed key must be ASCII (comfy layer names): {key!r}")
     return zlib.crc32(key.encode("utf-8"))
 
 
 def group_lora_layers(sd: dict[str, Tensor]) -> dict[str, dict[str, Tensor]]:
-    """按层聚合，两种键格式归一到 {layer_underscored: {kohya_suffix: tensor}}：
+    """Group by layer, normalizing both key formats to {layer_underscored: {kohya_suffix: tensor}}:
 
-    - kohya/lycoris：``lora_unet_{层名下划线}.{suffix}``（本 app 训练产物）
-    - PEFT/comfy：``diffusion_model.{层名点分}.{lora_A|lora_B|alpha}``
-      （civitai / musubi / comfy 生态）
+    - kohya/lycoris: ``lora_unet_{underscored layer}.{suffix}`` (this app's training output)
+    - PEFT/comfy: ``diffusion_model.{dotted layer}.{lora_A|lora_B|alpha}``
+      (civitai / musubi / comfy ecosystem)
     """
     layers: dict[str, dict[str, Tensor]] = {}
     for key, tensor in sd.items():
@@ -72,7 +73,7 @@ def group_lora_layers(sd: dict[str, Tensor]) -> dict[str, dict[str, Tensor]]:
                     break
             else:
                 raise ValueError(
-                    f"量化底模 merge 无法识别 comfy 形态 LoRA 键的后缀：{key}"
+                    f"Quantized-base merge cannot recognize the suffix of a comfy-style LoRA key: {key}"
                 )
     return layers
 
@@ -86,17 +87,17 @@ def apply_lora_delta(
     compute_dtype: torch.dtype = torch.float32,
     chunk_rows: int | None = None,
 ) -> Tensor:
-    """单层单 LoRA merge：可选 fp32/bf16 算 diff，在 ``w16`` 的精度域相加（原地）。"""
+    """Merge one LoRA into one layer: diff in fp32/bf16, added in ``w16``'s precision (in place)."""
     device = w16.device
     if "dora_scale" in tensors:
         raise ValueError(
-            f"量化底模 merge 不支持 DoRA（weight_decompose）LoRA：{source} 层 {layer}。"
-            f"请改用 bf16 版本底模挂载。"
+            f"Quantized-base merge does not support DoRA (weight_decompose) LoRA: {source} layer {layer}. "
+            f"Use the bf16 base model instead."
         )
 
     if "lora_down.weight" in tensors:  # plain LoRA / LoCon Linear
         if "lora_mid.weight" in tensors:
-            raise ValueError(f"量化底模 merge 不支持 LoCon mid（tucker）形态：{source} 层 {layer}")
+            raise ValueError(f"Quantized-base merge does not support LoCon mid (tucker): {source} layer {layer}")
         mat1 = tensors["lora_up.weight"].to(device=device, dtype=compute_dtype)
         mat2 = tensors["lora_down.weight"].to(device=device, dtype=compute_dtype)
         alpha = float(tensors["alpha"]) / mat2.shape[0] if "alpha" in tensors else 1.0
@@ -124,7 +125,7 @@ def apply_lora_delta(
 
     if "hada_w1_a" in tensors:  # LoHa
         if "hada_t1" in tensors or "hada_t2" in tensors:
-            raise ValueError(f"量化底模 merge 不支持 LoHa tucker（t1/t2）形态：{source} 层 {layer}")
+            raise ValueError(f"Quantized-base merge does not support LoHa tucker (t1/t2): {source} layer {layer}")
         m1 = torch.mm(
             tensors["hada_w1_a"].to(device=device, dtype=compute_dtype),
             tensors["hada_w1_b"].to(device=device, dtype=compute_dtype),
@@ -133,7 +134,7 @@ def apply_lora_delta(
             tensors["hada_w2_a"].to(device=device, dtype=compute_dtype),
             tensors["hada_w2_b"].to(device=device, dtype=compute_dtype),
         )
-        # dim 语义照 comfy weight_adapter/loha.py：divisor = w1_b 的 rank 维
+        # dim follows comfy weight_adapter/loha.py: divisor = rank dimension of w1_b
         alpha = float(tensors["alpha"]) / tensors["hada_w1_b"].shape[0] if "alpha" in tensors else 1.0
         lora_diff = (m1 * m2).reshape(w16.shape)
         w16 += ((strength * alpha) * lora_diff).type(w16.dtype)
@@ -141,10 +142,10 @@ def apply_lora_delta(
 
     if "lokr_w1" in tensors or "lokr_w1_a" in tensors:  # LoKr
         if "lokr_t2" in tensors:
-            raise ValueError(f"量化底模 merge 不支持 LoKr tucker（t2）形态：{source} 层 {layer}")
-        # dim 语义照 comfy weight_adapter/lokr.py：w1/w2 各自分解时都会赋值，
-        # 两者都分解时 w2_b 的赋值在后、生效（覆盖），两者都是全矩阵时保持
-        # None → alpha 系数取 1.0
+            raise ValueError(f"Quantized-base merge does not support LoKr tucker (t2): {source} layer {layer}")
+        # dim follows comfy weight_adapter/lokr.py: set whenever w1/w2 is factorized;
+        # if both are, the w2_b assignment comes last and wins; if both are full
+        # matrices it stays None -> alpha factor 1.0
         dim = None
         if "lokr_w1" in tensors:
             w1 = tensors["lokr_w1"].to(device=device, dtype=compute_dtype)
@@ -171,19 +172,19 @@ def apply_lora_delta(
         return w16
 
     raise ValueError(
-        f"量化底模 merge 无法识别 LoRA 层形态：{source} 层 {layer}（{sorted(tensors)}）"
+        f"Quantized-base merge cannot recognize the LoRA layer form: {source} layer {layer} ({sorted(tensors)})"
     )
 
 
 class QuantizedMergeAdapter:
-    """merge 回写的生命周期句柄——daemon adapters 列表的 duck-type 成员。
+    """Lifecycle handle for merged weights, a duck-typed member of the daemon adapters list.
 
-    - ``detach()``：从 CPU 备份逐位还原原始权重与 scale（换 LoRA / 卸载）
-    - ``network = None``：让 lycoris 侧的 multiplier 设值路径安全 no-op
-    - ``supports_hot_reload = False``：merge 无常驻 network，禁用 daemon
-      的权重热换路径（必须走 detach → 重 merge）
+    - ``detach()``: restores the original weights and scales bit for bit from CPU backups (swap / unload LoRA)
+    - ``network = None``: makes lycoris-side multiplier setters a safe no-op
+    - ``supports_hot_reload = False``: a merge has no resident network, so the daemon's hot
+      weight swap is disabled (must go detach -> merge again)
 
-    ``backup``：``{Linear 模块名: (weight 的 CPU 副本, weight_scale 的 CPU 副本或 None)}``。
+    ``backup``: ``{Linear module name: (CPU copy of weight, CPU copy of weight_scale or None)}``.
     """
 
     network = None
@@ -194,16 +195,16 @@ class QuantizedMergeAdapter:
                  *, can_restore: bool = True) -> None:
         self._model = model
         self._backup = backup
-        #: 是否留了备份。False = 换 LoRA 时无法就地还原，detach() 返回 False
-        #: 让 daemon 走「重载模型」兜底（省下与整个模型等大的一份 CPU 备份）。
+        #: Whether backups were kept. False = changing LoRA cannot restore in place; detach()
+        #: returns False so the daemon falls back to reloading the model (saves a model-sized CPU backup).
         self._can_restore = can_restore
 
     def detach(self) -> bool:
         if not self._can_restore:
-            # 没留备份：告诉调用方「还不了」，由它重载模型保证干净状态。
-            # 模型引用必须一并丢掉——这个句柄还被 _run_generate/_run_xy 的
-            # 局部 adapters 变量持着，不置空则重载兜底期间旧模型整份钉在
-            # 显存里（XY 逐格换 LoRA 时最多三份模型同驻，直接 OOM）
+            # No backup: tell the caller it cannot restore, so it reloads the model for a clean state.
+            # The model reference must be dropped too: _run_generate/_run_xy still hold this handle
+            # in their local adapters variable, and without clearing it the old model stays pinned in
+            # VRAM during the reload (XY swapping LoRA per cell could keep three models, straight OOM)
             self._model = None
             return False
         if not self._backup:
