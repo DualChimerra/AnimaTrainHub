@@ -102,6 +102,7 @@ export const SCHEMA_GROUP_LABEL_KEYS: Record<string, string> = {
   dataset: 'schema.groups.dataset',
   caption: 'schema.groups.caption',
   lora: 'schema.groups.lora',
+  optimizer_args: 'schema.groups.optimizerArgs',
   training: 'schema.groups.training',
   noise_augmentation: 'schema.groups.noiseAugmentation',
   timestep_sampling: 'schema.groups.timestepSampling',
@@ -124,6 +125,7 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     loha: 'schema.enums.loraType.loha',
     ortho: 'schema.enums.loraType.ortho',
     tlora: 'schema.enums.loraType.tlora',
+    riemann: 'schema.enums.loraType.riemann',
   },
   lr_scheduler: {
     none: 'schema.enums.lrScheduler.none',
@@ -142,9 +144,25 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     automagic: 'schema.enums.optimizerType.automagic',
     came: 'schema.enums.optimizerType.came',
     lion: 'schema.enums.optimizerType.lion',
+    muon: 'schema.enums.optimizerType.muon',
+    riemannion: 'schema.enums.optimizerType.riemannion',
     prodigy: 'schema.enums.optimizerType.prodigy',
     prodigy_plus_schedulefree: 'schema.enums.optimizerType.prodigyPlusSchedulefree',
     simplified_ademamix: 'schema.enums.optimizerType.simplifiedAdemamix',
+  },
+  muon_adjust_lr: {
+    match_rms_adamw: 'schema.enums.muonAdjustLr.matchRmsAdamw',
+    original: 'schema.enums.muonAdjustLr.original',
+  },
+  transformer_quantization: {
+    none: 'schema.enums.transformer_quantization.none',
+    convrot_int8: 'schema.enums.transformer_quantization.convrot_int8',
+    qfloat8: 'schema.enums.transformer_quantization.qfloat8',
+  },
+  text_encoder_quantization: {
+    none: 'schema.enums.text_encoder_quantization.none',
+    convrot_int8: 'schema.enums.text_encoder_quantization.convrot_int8',
+    qfloat8: 'schema.enums.text_encoder_quantization.qfloat8',
   },
   timestep_sampling: {
     logit_normal: 'schema.enums.timestepSampling.logitNormal',
@@ -192,10 +210,11 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
 }
 
-/** Human label of a schema field: schema.labels.<field> when the locale has
- *  one, else the key in title case ("lora_rank" -> "Lora Rank"). */
+/** Human label of a schema field: the English schema.labels.<field> when
+ *  present, else the key in title case ("lora_rank" -> "Lora Rank"). Setting
+ *  names stay English in every UI language; descriptions are translated. */
 export function schemaFieldLabel(name: string, t: TFunction): string {
-  return t(`schema.labels.${name}`, { defaultValue: fieldLabel(name) })
+  return t(`schema.labels.${name}`, { lng: 'en', defaultValue: fieldLabel(name) })
 }
 
 export function schemaGroupLabel(key: string, fallback: string, t: TFunction): string {

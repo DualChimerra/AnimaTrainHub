@@ -33,14 +33,14 @@ def test_adapter_builders_dict_has_lokr_loha_lora() -> None:
     assert set(BUILDERS) == {"lokr", "loha", "lora", "ortho", "tlora"}
 
 
-def test_optimizer_builders_dict_has_10_variants() -> None:
+def test_optimizer_builders_dict_has_11_variants() -> None:
     from training.optimizers import BUILDERS, VALIDATORS
     assert set(BUILDERS) == {
-        "adamw", "adamw8bit", "automagic", "came", "lion", "prodigy",
+        "adamw", "adamw8bit", "automagic", "came", "lion", "muon", "prodigy",
         "prodigy_plus_schedulefree", "simplified_ademamix", "soap", "soap_sf",
     }
     assert set(VALIDATORS) == {
-        "adamw8bit", "automagic", "prodigy_plus_schedulefree", "soap_sf",
+        "adamw8bit", "automagic", "muon", "prodigy_plus_schedulefree", "soap_sf",
     }
 
 

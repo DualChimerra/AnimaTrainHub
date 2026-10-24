@@ -804,6 +804,7 @@ def compute_navit_pack_estimate(
     drop_last: bool = False,
     over_budget: str = "downscale",
     seed: int = 42,
+    training_config: dict | None = None,
 ) -> dict[str, Any]:
     """Estimate the number of packs per epoch for NaViT packing mode (= the numerator of optimizer steps/epoch).
 
@@ -866,6 +867,48 @@ def compute_navit_pack_estimate(
     token_counts: list[int] = []
     size_hist: dict[tuple[int, int], int] = {}
     downscaled = 0
+
+    if (training_config or {}).get("model_family") == "moss_image":
+        # MOSS attends jointly to image and text. Use the actual caption
+        # resolver/tokenizer and sizing policy, without loading encoder weights.
+        from runtime.training.families.moss_image.text_encoding import MossTextStack
+        from runtime.training.dataset import BucketManager
+        cfg = training_config
+        try:
+            text = MossTextStack(cfg.get("text_encoder_path") or "", "cpu")
+            empty_count = text.token_count("")
+        except Exception as exc:  # noqa: BLE001  encoder/tokenizer not downloaded yet
+            import logging
+            logging.getLogger(__name__).warning("MOSS pack estimate without caption tokens: %s", exc)
+            text = None
+        counts = {}
+        def count_tokens(caption):
+            if text is None:
+                return 0
+            if caption not in counts:
+                counts[caption] = max(empty_count, text.token_count(caption))
+            return counts[caption]
+        bucket_options = {dest: int(cfg[src]) for src, dest in (
+            ("bucket_min_reso", "min_reso"), ("bucket_max_reso", "max_reso"), ("bucket_step", "step"),
+        ) if cfg.get(src) is not None}
+        for index, directory in enumerate(data_dirs):
+            ds = ImageDataset(directory, base_resos[0],
+                BucketManager(base_resos[0], aspect_ratio_limit=aspect_ratio_limit, **bucket_options),
+                resolutions=base_resos, aspect_ratio_limit=aspect_ratio_limit, prefer_json=prefer_json,
+                caption_override=(cfg.get("reg_caption") or None) if index else None,
+                native_resolution=native_resolution, native_token_budget=token_budget,
+                native_over_budget=over_budget, native_text_tokens=count_tokens)
+            for sample, size in zip(ds.samples, ds.bucket_for_index):
+                if size is None:
+                    continue
+                w, h = size
+                token_counts.append((w // 16) * (h // 16) + count_tokens(ds.caption_for_sample(sample)))
+                if native_resolution:
+                    size_hist[size] = size_hist.get(size, 0) + 1
+                    with Image.open(sample["image"]) as im:
+                        downscaled += int(w < im.width // 16 * 16 or h < im.height // 16 * 16)
+        # The shared return/packing code below consumes these counts.
+        data_dirs = []
 
     def add_image(img_path: Path, repeat: int, resos: list[int]) -> None:
         nonlocal downscaled

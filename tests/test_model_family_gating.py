@@ -70,7 +70,7 @@ def test_schema_literal_matches_families():
 
 
 def test_cap_gate_renders_field_comparison():
-    assert cap_gate("navit") == "model_family==anima"
+    assert cap_gate("navit") == "model_family==anima||model_family==moss_image"
     with pytest.raises(ValueError):
         cap_gate("warp_drive")
 
@@ -118,9 +118,10 @@ def test_option_gates_render_expressions():
     assert sampling_option_gates("samplers") == {
         "er_sde": "model_family==anima",
         "dpmpp_3m_sde": "model_family==anima",
-        "euler": "model_family==krea2",
+        "euler": "model_family==krea2||model_family==moss_image",
     }
     assert option_gates(TIMESTEP_SAMPLING_OPTION_FAMILIES) == {
+        "moss_logit_normal": "model_family==moss_image",
         "krea2_shift": "model_family==krea2",
     }
 
@@ -200,7 +201,8 @@ def test_prune_keeps_gated_fields_for_default_dump():
 
     dumped = prune_inactive_fields(TrainingConfig().model_dump(mode="python"))
     assert dumped.get("model_family") == "anima"
-    for field in ("t5_tokenizer_path", "shuffle_caption", "masked_loss",
+    # t5_tokenizer_path is hidden, so a default value is pruned too.
+    for field in ("shuffle_caption", "masked_loss",
                   "navit_packing", "leap_enabled", "sra_enabled"):
         assert field in dumped, field
 

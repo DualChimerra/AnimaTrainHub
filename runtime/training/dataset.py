@@ -46,6 +46,22 @@ LATENT_CACHE_LAYOUT_VERSION = 1
 _LEGACY_CACHE_FINGERPRINT = "wan21-f8c16"
 
 
+def _npz_leading_dim(data, key: str):
+    """Read cached channels from the array header without loading the tensor."""
+    import numpy as np
+
+    with data.zip.open(f"{key}.npy") as handle:
+        version = np.lib.format.read_magic(handle)
+        read_header = {
+            (1, 0): np.lib.format.read_array_header_1_0,
+            (2, 0): np.lib.format.read_array_header_2_0,
+        }.get(version)
+        if read_header is None:
+            return None
+        shape, _, _ = read_header(handle)
+    return int(shape[0]) if shape else None
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -279,7 +295,7 @@ class ImageDataset(Dataset):
                  native_resolution=False, native_token_budget=0,
                  native_over_budget="downscale", native_max_side_tokens=0,
                  native_align=_ANIMA_LATENT.align_px, load_masks=False,
-                 control_dir=None):
+                 control_dir=None, native_text_tokens=None):
         self.data_dir = Path(data_dir)
         # Edit training: each target image has a same-named input image in every
         # control dir (mirrored subfolders, or flat) -- one dir per reference frame,
@@ -309,6 +325,8 @@ class ImageDataset(Dataset):
         # are inert and the code path is byte-identical to the bucket path.
         self.native_resolution = bool(native_resolution)
         self.native_token_budget = int(native_token_budget or 0)
+        self.native_text_tokens = native_text_tokens
+        self._native_text_reserve = {}
         self.native_over_budget = str(native_over_budget or "downscale").lower()
         self.native_max_side_tokens = int(native_max_side_tokens or 0)
         self.native_align = int(native_align or _ANIMA_LATENT.align_px)
@@ -421,11 +439,23 @@ class ImageDataset(Dataset):
                     except Exception:
                         dims[path] = None
                 wh = dims[path]
-                by_key[key] = self._target_size_for(*wh, target_reso=target_reso) if wh else None
+                by_key[key] = self._target_size_for(*wh, target_reso=target_reso, image=s["image"]) if wh else None
             out.append(by_key[key])
         return out
 
-    def _target_size_for(self, img_w, img_h, target_reso=None):
+    def _native_image_budget(self, image):
+        if self.native_text_tokens is None or not self.native_token_budget:
+            return self.native_token_budget
+        key = str(image)
+        if key not in self._native_text_reserve:
+            sample = next(s for s in self.samples if str(s["image"]) == key)
+            self._native_text_reserve[key] = self.native_text_tokens(self.caption_for_sample(sample))
+        budget = self.native_token_budget - self._native_text_reserve[key]
+        if budget < 1:
+            raise ValueError(f"NaViT token budget leaves no space for image tokens: {image}")
+        return budget
+
+    def _target_size_for(self, img_w, img_h, target_reso=None, *, image=None):
         """Target pixel size ``(tw, th)`` for one image (a multiple of 16),
         shared by the fixed-size path and cache validation so they use one
         common rule.
@@ -442,7 +472,7 @@ class ImageDataset(Dataset):
         if self.native_resolution:
             plan = plan_native_fit_image(
                 img_w, img_h,
-                max_tokens=self.native_token_budget,
+                max_tokens=self._native_image_budget(image),
                 max_side_tokens=self.native_max_side_tokens,
                 align=self.native_align,
                 over_budget=self.native_over_budget,
@@ -852,7 +882,7 @@ class ImageDataset(Dataset):
         # None (base entry with no bucketing) falls back to a target_reso
         # square bucket.
         target_reso = sample.get("target_reso")
-        size = self._target_size_for(img.width, img.height, target_reso)
+        size = self._target_size_for(img.width, img.height, target_reso, image=sample["image"])
         if size is not None:
             tw, th = size
         else:
@@ -1181,7 +1211,7 @@ class CachedLatentDataset(Dataset):
                 # actual encode size. Under native this yields the native
                 # floor-16 size.
                 if hasattr(base, "_target_size_for"):
-                    size = base._target_size_for(img.width, img.height, target_reso)
+                    size = base._target_size_for(img.width, img.height, target_reso, image=img_path)
                     if size is not None:
                         return size
                 elif hasattr(base, "_bucket_mgr_for"):
@@ -1256,8 +1286,13 @@ class CachedLatentDataset(Dataset):
                     if "layout_version" in data.files
                     else LATENT_CACHE_LAYOUT_VERSION
                 )
+                # Older MOSS caches could carry an Anima fingerprint. Check
+                # actual channels as well, in both directions when switching models.
+                cache_channels = _npz_leading_dim(data, "latent")
                 if (cache_fp != self.latent_spec.fingerprint
-                        or cache_ver != LATENT_CACHE_LAYOUT_VERSION):
+                        or cache_ver != LATENT_CACHE_LAYOUT_VERSION
+                        or (cache_channels is not None and cache_channels != self.latent_spec.channels)):
+                    data.close()  # Windows cannot unlink an open NPZ file.
                     npz_path.unlink()
                     logger.debug(
                         f"deleted cache with mismatched fingerprint: {npz_path.name} "
@@ -1826,6 +1861,19 @@ def dataset_token_counts(dataset, patch_spatial=_ANIMA_LATENT.patch_spatial):
     return [int(_lookup_token_count_walk(dataset, i) or 0) for i in range(len(dataset))]
 
 
+def dataset_captions(dataset):
+    """Captions in exact dataset order, including repeats and regularization."""
+    if isinstance(dataset, MergedDataset):
+        return dataset_captions(dataset.main_dataset) + dataset_captions(dataset.reg_dataset)
+    if isinstance(dataset, RepeatDataset):
+        return dataset_captions(dataset.dataset) * dataset.repeats
+    if isinstance(dataset, CachedLatentDataset):
+        return [dataset.base_image_dataset.caption_for_sample(s) for s in dataset.samples]
+    if isinstance(dataset, ImageDataset):
+        return [dataset.caption_for_sample(s) for s in dataset.samples]
+    raise TypeError(f"Unsupported caption dataset: {type(dataset).__name__}")
+
+
 class NavitPackBatchSampler:
     """Produces dataset index packs for NaViT/Patch-n-Pack block-diagonal training.
 
@@ -1839,7 +1887,7 @@ class NavitPackBatchSampler:
 
     def __init__(self, dataset, token_budget, max_images_per_pack=0,
                  shuffle=True, seed=42, drop_last=False,
-                 strategy="next_fit", ffd_window=256):
+                 strategy="next_fit", ffd_window=256, text_token_counts=None):
         self.dataset = dataset
         self.token_budget = int(token_budget)
         self.max_images_per_pack = int(max_images_per_pack or 0)
@@ -1854,6 +1902,12 @@ class NavitPackBatchSampler:
         self.ffd_window = int(ffd_window or 0)
         self.epoch = 0
         self.token_counts = dataset_token_counts(dataset)
+        if text_token_counts is not None:
+            if len(text_token_counts) != len(self.token_counts) or any(n < 0 for n in text_token_counts):
+                raise ValueError("NaViT text counts must match the image dataset")
+            self.token_counts = [n + int(t) for n, t in zip(self.token_counts, text_token_counts)]
+            if self.token_counts and max(self.token_counts) > self.token_budget:
+                raise ValueError("MOSS image + caption exceeds the NaViT token budget; increase it or enable native downscaling")
         self._cached_packs = None
         # Fail-fast: an all-zero token count means no image's size could be
         # resolved (neither token_count_for_index nor bucket_for_index is

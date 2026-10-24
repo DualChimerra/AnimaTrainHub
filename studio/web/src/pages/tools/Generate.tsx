@@ -121,7 +121,7 @@ function normalizePrefs(p: GeneratePrefs): GeneratePrefs {
   // or the persisted sampler doesn't match the current family's whitelist (a
   // cross-family value gets a 422 from the backend), fall back to the family default (first item).
   const family: GenerateFamily =
-    merged.modelFamily === 'krea2' ? 'krea2' : 'anima'
+    merged.modelFamily === 'moss_image' ? 'moss_image' : merged.modelFamily === 'krea2' ? 'krea2' : 'anima'
   const samplers = SAMPLER_OPTIONS_BY_FAMILY[family] as readonly string[]
   const schedulers = SCHEDULER_OPTIONS_BY_FAMILY[family] as readonly string[]
   return {
@@ -1105,6 +1105,7 @@ export default function GeneratePage() {
                 >
                   <option value="anima">{schemaEnumLabel('model_family', 'anima', t)}</option>
                   <option value="krea2">{schemaEnumLabel('model_family', 'krea2', t)}</option>
+                  <option value="moss_image">MOSS-Image Base</option>
                 </select>
                 <div>
                   <div className="ds-cap" style={{ marginBottom: 6 }}>

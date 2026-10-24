@@ -271,7 +271,7 @@ class ModelCache:
             cfg, force_exact_ksampler_backend=False,
         )
         family_id = str(cfg.get("model_family") or "anima")
-        if family_id != "krea2":
+        if _T.get_family(family_id).spec.text.strategy != "cached_varlen":
             return
         repo_root = _T.find_diffusion_pipe_root()
         bases = [Path.cwd(), _THIS_DIR, repo_root]
@@ -403,7 +403,7 @@ class ModelCache:
         # matches, reuse it -- preserving the precache LRU, avoiding a
         # duplicate load.
         if (
-            family_id == "krea2"
+            family.spec.text.strategy == "cached_varlen"
             and self.text_stack is not None
             and self._text_ready_key == (family_id, text_encoder_path)
         ):
@@ -1171,7 +1171,7 @@ def _run_xy(
     if CACHE.model is not None:
         from training.families.krea2.quant_fp8 import model_has_fp8_layers
 
-        fp8_model = model_has_fp8_layers(CACHE.model)
+        fp8_model = (model_has_fp8_layers(CACHE.model) and not getattr(CACHE.model, "is_qfloat8", False)) or bool(getattr(CACHE.model, "is_convrot_int8", False))
 
     if base_seed == 0:
         base_seed = random.randint(0, 2**31 - 1)

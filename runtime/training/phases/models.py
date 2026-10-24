@@ -84,6 +84,8 @@ def _load_dit(ctx: TrainingContext) -> None:
         )
     logger.info("Loading Transformer...")
     extra = {}
+    if hasattr(ctx.family, "load_options"):
+        extra.update(ctx.family.load_options(args).get("dit", {}))
     blocks_to_swap = int(getattr(args, "blocks_to_swap", 0) or 0)
     if blocks_to_swap > 0:
         # The capability bit is already gated by cap_gate on the schema side; a bare CLI /
@@ -145,6 +147,7 @@ def _load_text(ctx: TrainingContext) -> None:
         ctx.dtype,
         t5_tokenizer_path=args.t5_tokenizer_path,
         cache_enabled=bool(getattr(args, "text_encoder_cache", True)),
+        **(ctx.family.load_options(args).get("text", {}) if hasattr(ctx.family, "load_options") else {}),
     )
 
 
@@ -184,6 +187,12 @@ def _inject_adapter(ctx: TrainingContext) -> None:
     logger.info("Injecting %s...", args.lora_type.upper())
     from training.adapters import build_adapter
 
+    quantized_base = getattr(ctx.model, "is_convrot_int8", False) or getattr(ctx.model, "is_qfloat8", False)
+    uses_ortho = args.lora_type == "ortho" or (
+        args.lora_type == "tlora" and getattr(args, "tlora_use_ortho", True)
+    )
+    if quantized_base and (uses_ortho or getattr(args, "lora_dora", False)):
+        raise ValueError("ConvRot INT8 / qfloat8 require DoRA and orthogonal initialization to be disabled")
     ctx.injector = build_adapter(args, preset=ctx.family.lora_preset())
     ctx.injector.metadata_extra = ctx.family.lora_metadata()
     if getattr(args, "edit_mode", False):
@@ -289,6 +298,15 @@ def run(ctx: TrainingContext) -> None:
     if ctx.family is None:
         ctx.family = resolve_family(ctx.args)
     _resolve_paths(ctx)
+    if getattr(ctx.args, "low_vram", False):
+        # Do this before load/preflight: the streaming loader must leave the
+        # selected blocks on the CPU instead of first allocating them on CUDA.
+        if not getattr(ctx.args, "blocks_to_swap", 0) and "block_swap" in ctx.family.spec.capabilities:
+            count = ctx.family.swappable_blocks(checkpoint_path=ctx.args.transformer_path)
+            ctx.args.blocks_to_swap = max(1, count // 2) if count else 0
+        if ctx.family.spec.family_id == "moss_image" and not ctx.args.text_encoder_layers_to_offload:
+            ctx.args.text_encoder_layers_to_offload = 16
+        logger.info("Low VRAM: %d transformer blocks offloaded", ctx.args.blocks_to_swap)
     _validate_fp8_base(ctx)
     # block swap preflight: answer "can this blocks_to_swap value actually run"
     # before dataset scanning / latent cache / text encoding, and exit with a
@@ -298,7 +316,7 @@ def run(ctx: TrainingContext) -> None:
 
     if _defer_dit_for_text_cache(ctx):
         logger.info(
-            "text cache enabled: loading VAE/Qwen3-VL first, will load the Transformer after caching and releasing the TE"
+            "text cache enabled: loading VAE/text encoder first, will load the Transformer after caching and releasing the TE"
         )
         # Segmented budget: this segment only loads VAE + TE (the DiT gets its own budget in the finish segment).
         # The switch comes from Settings -> Training -> Training Params (injected by the supervisor via env, default on).

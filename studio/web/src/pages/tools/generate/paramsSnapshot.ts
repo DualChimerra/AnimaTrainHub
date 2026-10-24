@@ -40,7 +40,7 @@ export interface XYCellOrigin {
 export interface GenerateParamsSnapshot {
   schema_version: number
   mode: 'single' | 'xy' | 'compare'
-  model_family?: 'anima' | 'krea2'
+  model_family?: 'anima' | 'krea2' | 'moss_image'
   prompts: string[]
   negative_prompt: string
   width: number
@@ -115,7 +115,7 @@ export type SnapshotLoraResolver = (snap: SnapshotLora) => Promise<LoraEntry>
  */
 export interface AppliedSnapshot {
   mode: 'single' | 'xy'
-  modelFamily: 'anima' | 'krea2'
+  modelFamily: 'anima' | 'krea2' | 'moss_image'
   prompts: string[]
   negPrompt: string
   width: number
@@ -147,13 +147,13 @@ function mergeTagsIntoFirstPrompt(prompts: string[], tags: string[]): string[] {
 
 /** Normalize the snapshot's sampler/scheduler to valid values: old snapshots missing fields, or external
  *  PNGs with values we don't support, fall back to the family default instead of putting invalid values into prefs. */
-function coerceSampler(v: string | undefined, family: 'anima' | 'krea2'): SamplerName {
+function coerceSampler(v: string | undefined, family: 'anima' | 'krea2' | 'moss_image'): SamplerName {
   const allowed = SAMPLER_OPTIONS_BY_FAMILY[family] as readonly string[]
   return allowed.includes(v ?? '')
     ? (v as SamplerName)
     : (allowed[0] as SamplerName)
 }
-function coerceScheduler(v: string | undefined, family: 'anima' | 'krea2'): SchedulerName {
+function coerceScheduler(v: string | undefined, family: 'anima' | 'krea2' | 'moss_image'): SchedulerName {
   const allowed = SCHEDULER_OPTIONS_BY_FAMILY[family] as readonly string[]
   return allowed.includes(v ?? '')
     ? (v as SchedulerName)
@@ -176,8 +176,8 @@ export async function applySnapshot(
     datasetPick = null
   }
 
-  const family: 'anima' | 'krea2' =
-    snap.model_family === 'krea2' ? 'krea2' : 'anima'
+  const family: 'anima' | 'krea2' | 'moss_image' =
+    snap.model_family === 'moss_image' ? 'moss_image' : snap.model_family === 'krea2' ? 'krea2' : 'anima'
   const applied: AppliedSnapshot = {
     mode,
     modelFamily: family,

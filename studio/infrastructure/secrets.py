@@ -572,6 +572,7 @@ class ModelsConfig(BaseModel):
     # can carry both keys — the inbound selected_anima takes priority, overriding the old selected
     # merged in).
     selected: dict[str, str] = Field(default_factory=lambda: {"anima": "1.0"})
+    active_family: str = "anima"
     # Per-family selected text encoder: an official variant key (krea2: "bf16"|"fp8", missing=bf16)
     # **or** an absolute path to a user-registered local text-encoder directory (custom CLIP /
     # Qwen encoder). Determines the text_encoder_path default when a new training version is
@@ -583,6 +584,10 @@ class ModelsConfig(BaseModel):
     # local .safetensors path (one of domain "vae"'s candidates). Also falls back to the official
     # location when invalid.
     selected_vae: str = ""
+    # Different latent formats must never silently share a selected VAE.
+    selected_vae_by_family: dict[str, str] = Field(default_factory=dict)
+    # Additional folders scanned by the three generic weight lists.
+    weight_folders: dict[str, list[str]] = Field(default_factory=dict)
     # Per-family local main-model paths. The old custom_anima_paths key is migrated by the
     # validator; the computed_field keeps a read surface for older clients.
     custom: dict[str, list[str]] = Field(default_factory=dict)

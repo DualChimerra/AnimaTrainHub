@@ -55,7 +55,7 @@ from studio.services.models import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Download the models + tokenizer required to train Anima / Krea 2",
+        description="Download the models + tokenizer required to train Anima / Krea 2 / MOSS-Image",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""\
 Anima main model versions (--variant):
@@ -76,7 +76,7 @@ Note: as of the 0.8.2 hotfix, hf-mirror.com is temporarily unavailable (see docs
 """,
     )
     parser.add_argument(
-        "--family", default="anima", choices=["anima", "krea2"],
+        "--family", default="anima", choices=["anima", "krea2", "moss_image"],
         help="model family (default: anima)",
     )
     parser.add_argument(
@@ -121,6 +121,18 @@ Note: as of the 0.8.2 hotfix, hf-mirror.com is temporarily unavailable (see docs
 
     out_root = Path(args.output) if args.output else models_root()
     print(f"📁 Target root directory: {out_root.absolute()}")
+
+    if args.family == "moss_image":
+        from studio.services.models.downloader import download_moss_asset
+        if args.variant not in ("latest", "bf16"):
+            parser.error("MOSS-Image supports --variant bf16 / latest")
+        ok = True
+        for skip, component in ((args.skip_main, "main"), (args.skip_vae, "vae"),
+                                (args.skip_qwen, "text_encoder")):
+            if not skip:
+                ok &= download_moss_asset(out_root, f"moss_image_{component}")
+        print("All MOSS downloads complete." if ok else "Some MOSS downloads failed; see the log above.")
+        return 0 if ok else 1
 
     variants = ANIMA_VARIANTS if args.family == "anima" else KREA2_VARIANTS
     latest = LATEST_ANIMA if args.family == "anima" else LATEST_KREA2

@@ -33,7 +33,7 @@ class RegAiConfig(BaseModel):
     # Model family (read server-side from the version config — prior generation
     # is a version-level operation; the family follows that version's training
     # config, it's not a per-request user choice)
-    model_family: Literal["anima", "krea2"] = Field("anima")
+    model_family: Literal["anima", "krea2", "moss_image"] = Field("anima")
 
     # Model paths (filled server-side from secrets)
     transformer_path: str = Field("")

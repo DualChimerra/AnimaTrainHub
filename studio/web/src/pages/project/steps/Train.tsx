@@ -691,7 +691,7 @@ export default function TrainPage() {
       })
     : t('steps.train.subtitle')
 
-  const triggerRow = config ? (
+  const triggerRow = config?.dop_enabled ? (
     <TriggerWordCard
       projectId={project.id}
       version={activeVersion}
@@ -995,7 +995,7 @@ type TrainTabId = 'model' | 'data' | 'optim' | 'system' | 'finish'
 const LORA_TYPE_LABEL: Record<string, string> = { lora: 'LoRA', lokr: 'LoKr', loha: 'LoHa', ortho: 'OrthoLoRA', tlora: 'T-LoRA' }
 
 const TRAIN_TABS = [
-  { id: 'model', groups: ['model', 'lora'] },
+  { id: 'model', groups: ['model', 'lora', 'optimizer_args'] },
   { id: 'data', groups: ['dataset', 'caption'] },
   { id: 'optim', groups: ['training', 'timestep_sampling', 'loss', 'noise_augmentation'] },
   { id: 'system', groups: ['system', 'output', 'sample', 'eval_validation', 'monitor'] },

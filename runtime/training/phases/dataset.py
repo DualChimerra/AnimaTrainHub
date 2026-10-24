@@ -68,6 +68,10 @@ def _native_dataset_kwargs(args, ctx) -> dict:
         native_over_budget=str(getattr(args, "navit_native_over_budget", "downscale") or "downscale"),
         native_max_side_tokens=_rope_max_side_tokens(ctx),
     )
+    count = getattr(ctx.family, "navit_text_token_count", None)
+    if count is not None:
+        empty_count = count(ctx.text_stack, "")
+        kwargs["native_text_tokens"] = lambda caption: max(empty_count, count(ctx.text_stack, caption))
     logger.info(
         "[navit-native] native resolution enabled: per-image floor-aligned to 16px, zero padding, "
         "bypasses ARB bucket quantization; over-budget strategy=%s, token budget=%d, "
@@ -219,6 +223,7 @@ def run(ctx: TrainingContext) -> None:
             encode_tile_px=getattr(args, "cache_encode_tile_px", 1024),
             encode_tile_overlap=getattr(args, "cache_encode_tile_overlap", 128),
             encode_max_pixels=getattr(args, "cache_encode_max_pixels", 0),
+            latent_spec=ctx.family.spec.latent,
             label="training set",
         )
     if ctx.reg_dataset is not None and ctx.use_cached:
@@ -229,6 +234,7 @@ def run(ctx: TrainingContext) -> None:
             encode_tile_px=getattr(args, "cache_encode_tile_px", 1024),
             encode_tile_overlap=getattr(args, "cache_encode_tile_overlap", 128),
             encode_max_pixels=getattr(args, "cache_encode_max_pixels", 0),
+            latent_spec=ctx.family.spec.latent,
             label="regularization set",
         )
 
@@ -246,6 +252,13 @@ def run(ctx: TrainingContext) -> None:
         # NaViT / Patch-n-Pack block-diagonal packing: fits multiple differently-sized images
         # into one training sequence within a token budget (zero padding), replacing ARB
         # fixed-bucket batching. Requires cache_latents.
+        text_counts = None
+        count = getattr(ctx.family, "navit_text_token_count", None)
+        if count is not None:
+            from training.dataset import dataset_captions
+            captions = dataset_captions(ctx.dataset)
+            counts = {c: count(ctx.text_stack, c) for c in set(captions) | {""}}
+            text_counts = [max(counts[c], counts[""]) for c in captions]
         batch_sampler = NavitPackBatchSampler(
             ctx.dataset,
             token_budget=int(getattr(args, "navit_token_budget", 16384) or 16384),
@@ -256,6 +269,7 @@ def run(ctx: TrainingContext) -> None:
             strategy=getattr(args, "navit_pack_strategy", "next_fit"),
             # Not `or 256`: 0 is a valid value (global FFD, fixed packs per epoch), which `or` would swallow as falsy.
             ffd_window=int(getattr(args, "navit_pack_ffd_window", 256)),
+            text_token_counts=text_counts,
         )
         ctx.dataloader = DataLoader(
             ctx.dataset, batch_sampler=batch_sampler,

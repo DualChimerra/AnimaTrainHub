@@ -173,6 +173,7 @@ def main() -> None:
         t5_fast=t5_tokenizer_backend == "fast",
         purpose="generate",
         cache_enabled=False,
+        **(family.load_options(cfg).get("text", {}) if hasattr(family, "load_options") else {}),
     )
 
     # TE-first ordering (krea2, same as the daemon): pre-encode all prompts
@@ -199,6 +200,7 @@ def main() -> None:
         transformer_path, device, dtype,
         attention_backend=("flash_attn" if use_flash else "none"), repo_root=repo_root,
         purpose="generate",
+        **(family.load_options(cfg).get("dit", {}) if hasattr(family, "load_options") else {}),
     )
     if use_xformers and not _T.enable_xformers(model):
         raise RuntimeError(
@@ -401,7 +403,7 @@ def _run_xy_matrix(
     if x_spec.get("axis") == "lora_scale" or (y_spec and y_spec.get("axis") == "lora_scale"):
         from training.families.krea2.quant_fp8 import model_has_fp8_layers
 
-        if model_has_fp8_layers(model):
+        if (model_has_fp8_layers(model) and not getattr(model, "is_qfloat8", False)) or getattr(model, "is_convrot_int8", False):
             raise NotImplementedError(
                 "an fp8 base model's LoRA strength axis needs a per-cell re-merge; use the "
                 "daemon path (runtime/anima_daemon.py); the CLI runner should use a bf16 base model instead."

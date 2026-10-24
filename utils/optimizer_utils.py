@@ -84,7 +84,9 @@ _USER_EXPOSED_PPSF_KWARGS = frozenset({
 })
 
 
-def _filter_kwargs_by_signature(cls_or_fn, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def _filter_kwargs_by_signature(
+    cls_or_fn, kwargs: Dict[str, Any], strict: frozenset = _USER_EXPOSED_PPSF_KWARGS,
+) -> Dict[str, Any]:
     try:
         sig = inspect.signature(cls_or_fn)
     except (TypeError, ValueError):
@@ -103,14 +105,14 @@ def _filter_kwargs_by_signature(cls_or_fn, kwargs: Dict[str, Any]) -> Dict[str, 
     filtered = {k: v for k, v in kwargs.items() if k in accepted}
     dropped = [k for k in kwargs if k not in accepted]
     if dropped:
-        exposed_dropped = [k for k in dropped if k in _USER_EXPOSED_PPSF_KWARGS]
+        exposed_dropped = [k for k in dropped if k in strict]
         if exposed_dropped:
             cls_name = getattr(cls_or_fn, "__name__", str(cls_or_fn))
             raise RuntimeError(
                 f"[optimizer] {cls_name} does not support the following user-configured kwargs: "
-                f"{exposed_dropped}. This is likely a prodigy-plus-schedule-free library version "
-                f"mismatch (check the version with pip show prodigy-plus-schedule-free). "
-                f"Upgrade/downgrade the dependency, or disable the corresponding field in the yaml."
+                f"{exposed_dropped}. Check optimizer_args for typos; otherwise this is likely a "
+                f"prodigy-plus-schedule-free library version mismatch (check the version with pip show "
+                f"prodigy-plus-schedule-free). Upgrade/downgrade the dependency, or disable the corresponding field in the yaml."
             )
         logger.warning(
             f"[optimizer] Dropped unsupported kwargs for "
@@ -247,6 +249,21 @@ def create_optimizer(
             **kwargs,
         )
 
+    elif optimizer_type == "muon":
+        from utils.muon_optimizer import MuonWithAuxAdam
+
+        optimizer = MuonWithAuxAdam(
+            params, lr=learning_rate, weight_decay=weight_decay,
+            adam_betas=betas, adam_eps=eps, **kwargs,
+        )
+        logger.info(
+            "Created Muon: lr=%s weight_decay=%s matrix_tensors=%d aux_adamw_tensors=%d",
+            learning_rate, weight_decay,
+            sum(len(g["params"]) for g in optimizer.param_groups if g["use_muon"]),
+            sum(len(g["params"]) for g in optimizer.param_groups if not g["use_muon"]),
+        )
+        return optimizer
+
     elif optimizer_type == "simplified_ademamix":
         return create_simplified_ademamix(
             params=params,
@@ -260,7 +277,7 @@ def create_optimizer(
     else:
         raise ValueError(
             f"Unknown optimizer type: {optimizer_type}. "
-            f"Choose from: adamw, automagic, automagic_v2, came, lion, prodigy, "
+            f"Choose from: adamw, automagic, automagic_v2, came, lion, muon, prodigy, "
             f"prodigy_plus_schedulefree, simplified_ademamix, soap, soap_sf"
         )
 
@@ -1011,7 +1028,7 @@ def create_automagic_v2(
     optimizer = Automagic2(
         param_list, lr=lr, min_lr=min_lr, max_lr=max_lr, lr_bump=lr_bump,
         eps=eps, clip_threshold=clip_threshold, beta2=beta2, weight_decay=weight_decay,
-        agreement_threshold=agreement_threshold,
+        agreement_threshold=agreement_threshold, **kwargs,
     )
     logger.info(
         f"Creating Automagic v2 (lr={lr}, min_lr={min_lr}, max_lr={max_lr}, "
@@ -1667,7 +1684,10 @@ def create_prodigy_plus_schedulefree(
         use_stableadamw=use_stableadamw,
         **kwargs,
     )
-    safe_kwargs = _filter_kwargs_by_signature(ProdigyPlusScheduleFree, candidate)
+    # Extra kwargs only come from the user's optimizer_args: never drop them silently.
+    safe_kwargs = _filter_kwargs_by_signature(
+        ProdigyPlusScheduleFree, candidate, strict=_USER_EXPOSED_PPSF_KWARGS | frozenset(kwargs),
+    )
 
     param_list = params if _is_param_groups(params) else list(params)
 

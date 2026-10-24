@@ -42,6 +42,7 @@ def build(args, params, lr: float, weight_decay: float):
     the other builders so the registry can dispatch uniformly (same as
     adamw.py).
     """
+    from training.optimizers.extra_args import with_optimizer_args
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(
@@ -49,4 +50,5 @@ def build(args, params, lr: float, weight_decay: float):
         params=params,
         learning_rate=lr,
         weight_decay=weight_decay,
+        **with_optimizer_args(args, {}),
     )

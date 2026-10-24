@@ -17,6 +17,49 @@ Recommended starting lr / weight_decay for each optimizer, plus conversion rules
 
 > VRAM note: AdamW8bit (bitsandbytes) is the real VRAM-saving baseline (≈ 25% of AdamW fp32). Lion / Automagic save about half compared to fp32 AdamW, but **don't save more than AdamW8bit**.
 
+## Muon
+
+Select **Muon** under **Optimization → Learning rate and optimizer**. It works with the existing LoRA, LoKr,
+LoHa, OrthoLoRA and T-LoRA adapters, including MOSS Image Base. Matrix parameters
+use Muon; vector parameters use auxiliary AdamW in the same optimizer.
+
+The default `muon_adjust_lr=match_rms_adamw` allows an AdamW-scale starting
+learning rate; it does not guarantee the same best learning rate or result.
+Momentum defaults to `0.95`, and internal adjustment iterations to `5`.
+The `original` scaling option requires separate learning-rate tuning.
+Normal learning-rate schedules and training-state checkpoints are supported.
+
+## Riemann LoRA + Riemannion (experimental)
+
+Select **Muon**, then enable **Use Riemannian** at the bottom of the optimizer card.
+This selects the fixed-rank adapter internally; no separate Riemann adapter or
+optimizer choice is needed. Config: `optimizer_type: muon`, `use_riemannian: true`.
+Old configs with `riemann` / `riemannion` are migrated on load.
+
+This adapter updates the combined LoRA correction. Its learning rate has a
+different meaning from AdamW's; there is no established automatic conversion.
+The application keeps the entered learning rate. Momentum defaults to `0.9`.
+This implementation uses random initialization instead of the paper's LOI
+initialization. It is experimental and has no demonstrated advantage for MOSS
+style LoRAs in this project. It also adds computation compared with ordinary LoRA.
+
+- Works through the shared adapter path for Anima, Krea 2 and MOSS Image Base.
+  MOSS ConvRot INT8 and block swapping keep the frozen base separate from the adapter.
+- Saved `.safetensors` files are ordinary LoRA files; generation needs no
+  Riemannion optimizer or special loader.
+- Full training-state snapshots preserve the moving bases and optimizer state.
+  `resume_lora` can load an ordinary LoRA with the same rank and layer sizes;
+  use a full state snapshot to continue with optimizer history.
+- Alpha, rs-LoRA, network dropout and per-layer rank controls do not apply and are hidden.
+  Caption Dropout remains available because it changes the training text, not the adapter.
+  DoRA, normalization training, text encoder training and weight EMA are disabled.
+  Normal checkpoints and samples remain available.
+
+Adapted from upstream [Muon](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio/commit/039b3c445e06a7119d391b3bf703753d9c3008d7)
+and [Riemannion](https://github.com/WalkingMeatAxolotl/AnimaLoraStudio/commit/42f510faa6e0a74676541393ca44fb506d8c2093).
+Research: [Muon](https://kellerjordan.github.io/posts/muon/) and
+[LoRA meets Riemannion](https://arxiv.org/abs/2507.12142).
+
 ## AdamW8bit — the only VRAM-saving option that needs no re-tuning
 
 The update math is identical to AdamW; what it saves is **state storage**: `exp_avg` / `exp_avg_sq` are quantized to int8 in blocks (8 bytes per parameter → 2 bytes). So `lr` / `betas` / `weight_decay` carry over from AdamW **unchanged, with no conversion needed** — this is its real advantage over Lion (lr needs to be divided by 3) and Automagic (lr must be 1e-6).
@@ -89,6 +132,18 @@ SOAP (Vyas et al. 2024, [arxiv 2409.11321](https://arxiv.org/abs/2409.11321)) is
 - Combine with `soap_precond_in_state: false` to keep the recomputable GG/Q out of the checkpoint, keeping state small (zero cost when training from scratch without resuming; resuming requires a cold rebuild of the eigenbasis, with a few transitional steps).
 
 **Short-run caveat**: Schedule-Free's Polyak averaging lags badly on very short runs (≤ ~100 steps) — x ends up ≈ the centroid of the trajectory, i.e. underfit. In that regime use plain `soap`, not `soap_sf`; for runs in the thousands of steps, SF behaves normally, and it's best to judge sample quality after roughly step 880.
+
+## Optimizer arguments
+
+**Optimizer arguments** is the last block of the Model tab. Each line is one `name=value` passed to the selected optimizer, as in kohya's `--optimizer_args`:
+
+```
+betas=(0.9, 0.99)
+eps=1e-6
+nesterov=False
+```
+
+Values are Python literals; a plain word such as `original` is a string. These lines override the matching optimizer fields on the Training tab. Learning rate and weight decay keep their own fields and are rejected here. An unknown name stops training at startup, so typos do not pass silently.
 
 ## Which one to pick
 

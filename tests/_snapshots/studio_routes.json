@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_from": "studio.server.app",
-  "count": 241,
+  "count": 242,
   "routes": [
     {
       "path": "/",
@@ -511,6 +511,14 @@
         "GET"
       ],
       "name": "get_models_path_defaults",
+      "type": "APIRoute"
+    },
+    {
+      "path": "/api/models/select-weight",
+      "methods": [
+        "POST"
+      ],
+      "name": "select_weight",
       "type": "APIRoute"
     },
     {

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 
 def build(args, params, lr: float, weight_decay: float):
+    from training.optimizers.extra_args import with_optimizer_args
     from utils.optimizer_utils import create_optimizer
 
     return create_optimizer(
@@ -18,11 +19,13 @@ def build(args, params, lr: float, weight_decay: float):
         params=params,
         learning_rate=lr,
         weight_decay=weight_decay,
-        betas=(
-            float(getattr(args, "ademamix_beta1", 0.99)),
-            float(getattr(args, "ademamix_beta2", 0.999)),
-        ),
-        alpha=float(getattr(args, "ademamix_alpha", 0.0)),
-        beta1_warmup=int(getattr(args, "ademamix_beta1_warmup", 0) or 0),
-        min_beta1=float(getattr(args, "ademamix_min_beta1", 0.9)),
+        **with_optimizer_args(args, dict(
+            betas=(
+                float(getattr(args, "ademamix_beta1", 0.99)),
+                float(getattr(args, "ademamix_beta2", 0.999)),
+            ),
+            alpha=float(getattr(args, "ademamix_alpha", 0.0)),
+            beta1_warmup=int(getattr(args, "ademamix_beta1_warmup", 0) or 0),
+            min_beta1=float(getattr(args, "ademamix_min_beta1", 0.9)),
+        )),
     )

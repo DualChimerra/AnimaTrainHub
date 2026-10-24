@@ -32,6 +32,7 @@ from .common import (
     sampling_option_gates,
 )
 from .migrations import migrate_legacy_save_keys, migrate_noise_enhancement_type
+from .optimizer_args import parse_optimizer_args
 
 
 class TrainingConfig(BaseModel):
@@ -54,7 +55,7 @@ class TrainingConfig(BaseModel):
     # frontend intercepts changes to this field as a "switch action": paths
     # are recalculated via /api/models/family-switch + family-specific fields
     # reset + only written after confirmation.
-    model_family: Literal["anima", "krea2"] = Field(
+    model_family: Literal["anima", "krea2", "moss_image"] = Field(
         "anima",
         description="Model family. Determines which model implementation training uses; other fields show/hide automatically based on family capabilities. Switching recalculates model paths and resets family-specific defaults",
         json_schema_extra=_meta("model"),
@@ -71,24 +72,55 @@ class TrainingConfig(BaseModel):
     )
     text_encoder_path: str = Field(
         "models/text_encoders",
-        description="Qwen text encoder directory",
+        description="Text encoder directory (MOSS also accepts a single ConvRot safetensors file)",
         json_schema_extra=_meta("model", "path", cli_alias="--qwen"),
     )
     t5_tokenizer_path: str = Field(
         "models/t5_tokenizer",
         description="T5 tokenizer directory (Anima family only)",
         json_schema_extra=_meta("model", "path", cli_alias="--t5-tokenizer",
-                                show_when="model_family==anima"),
+                                show_when="model_family==anima", hidden=True),
     )
     text_encoder_cache: bool = Field(
         True,
-        description="Precompute and cache text conditioning, then free the text encoder (recommended, saves roughly 9GB VRAM); when off, text sidecars aren't read or written and Qwen3-VL stays resident, encoding per batch — suited to high-VRAM but disk-constrained cloud setups",
+        description="Precompute caption features, then release the text encoder before loading the transformer. Recommended on small GPUs. When disabled, captions are encoded during training without disk caches, requiring more memory.",
         json_schema_extra=_meta(
-            "model", show_when=cap_gate("text_cache"), advanced=True,
+            "system", show_when=cap_gate("text_cache"),
+            disable_when="low_vram==true", disable_value=True,
+            disable_hint="Low VRAM keeps caption caching on",
         ),
     )
 
     # ----------------------------------------------------------------- Dataset
+    transformer_quantization: Literal["none", "convrot_int8", "qfloat8"] = Field(
+        "none", description="Frozen MOSS weights: none, ConvRot INT8, or qfloat8 (scaled FP8 E4M3). Computation keeps the training precision. Choose a BF16 checkpoint for on-load quantization; pre-quantized ConvRot checkpoints are detected automatically.",
+        json_schema_extra=_meta("model", show_when="model_family==moss_image"),
+    )
+    text_encoder_quantization: Literal["none", "convrot_int8", "qfloat8"] = Field(
+        "none", description="Qwen3.5 frozen weights: none, ConvRot INT8, or qfloat8 (scaled FP8 E4M3). Computation remains BF16. Choose BF16 weights for on-load quantization; pre-quantized ConvRot files are detected automatically.",
+        json_schema_extra=_meta("model", show_when="model_family==moss_image"),
+    )
+    text_encoder_layers_to_offload: int = Field(
+        0, ge=0, le=32, description="Text Encoder Layer Offloading: number of frozen Qwen3.5 layers kept in RAM and loaded only when needed (0=off, 32=all). Saves memory while caching captions; independent of Transformer Layer Offloading.",
+        json_schema_extra=_meta("system", show_when="model_family==moss_image"),
+    )
+    moss_sample_shift: float = Field(
+        5.0, gt=0, allow_inf_nan=False, description="MOSS generation schedule shift. This affects sample images, independently of the training timestep distribution.",
+        json_schema_extra=_meta("sample", show_when="model_family==moss_image", advanced=True),
+    )
+    moss_uncond_skip_layers: list[int] = Field(
+        default_factory=lambda: [22], description="MOSS layers skipped in the negative CFG branch. Official default: 22 (zero-based). Empty list disables skipping.",
+        json_schema_extra=_meta("sample", show_when="model_family==moss_image", advanced=True),
+    )
+    moss_timestep_mean: float = Field(
+        -1.09, allow_inf_nan=False, description="Mean of the MOSS training logit-normal distribution.",
+        json_schema_extra=_meta("timestep_sampling", show_when="timestep_sampling==moss_logit_normal", advanced=True),
+    )
+    moss_timestep_std: float = Field(
+        0.95, gt=0, allow_inf_nan=False, description="Standard deviation of the MOSS training logit-normal distribution.",
+        json_schema_extra=_meta("timestep_sampling", show_when="timestep_sampling==moss_logit_normal", advanced=True),
+    )
+
     data_dir: str = Field(
         "./dataset",
         description="Dataset directory (supports Kohya-style N_xxx subfolders for setting repeats)",
@@ -208,22 +240,29 @@ class TrainingConfig(BaseModel):
                     "sampling previews; recommended to keep on); turning it off falls back to the "
                     "old per-tag encoding, useful for A/B comparisons between old and new encoding, "
                     "or to continue training from a checkpoint saved under the old encoding",
-        json_schema_extra=_meta("caption", advanced=True),
+        json_schema_extra=_meta("caption", show_when="model_family==anima", advanced=True),
+    )
+    low_vram: bool = Field(
+        False,
+        description="Save GPU memory using checkpointing, cached latents/text, tiled VAE and automatic half-model block swapping when no swap count is set. Uses more RAM and can be slower.",
+        json_schema_extra=_meta("system"),
     )
     cache_latents: bool = Field(
         True,
         description="Cache VAE latents to speed up training",
         json_schema_extra=_meta(
             "system",
-            disable_when="navit_packing==true",
+            disable_when="navit_packing==true||low_vram==true",
             disable_value=True,
-            disable_hint="NaViT packing budgets by latent token count, so pre-encoded caching is mandatory",
+            disable_hint="NaViT packing budgets by latent token count, and Low VRAM encodes before training, so caching is mandatory",
         ),
     )
     vae_cache_batch_size: int = Field(
         0, ge=0,
         description="Batch size for VAE latent cache encoding; 0 = follow the training batch size, set to 1 for one-at-a-time encoding if VRAM is tight",
-        json_schema_extra=_meta("system", show_when="cache_latents==true", advanced=True),
+        json_schema_extra=_meta("system", show_when="cache_latents==true", advanced=True,
+                                disable_when="low_vram==true", disable_value=1,
+                                disable_hint="Low VRAM encodes latents one image at a time"),
     )
     # Grouped under "system" rather than "training": it only changes where the
     # weights live, not any training value — swapping out more layers has
@@ -231,7 +270,7 @@ class TrainingConfig(BaseModel):
     # like vae_tiling / cache_latents)
     blocks_to_swap: int = Field(
         0, ge=0,
-        description="Block swapping: number of DiT layers swapped out to system RAM (0=off; Anima accepts 0-28, about 0.13GB per layer; "
+        description="Transformer Layer Offloading: number of DiT layers kept in system RAM (0=off; MOSS has 42 layers; Anima accepts 0-28, about 0.13GB per layer; "
                     "Krea 2 accepts 0-28, about 0.4GB per layer for the fp8 base model / 0.8GB for bf16). "
                     "Higher values use less VRAM and more RAM",
         json_schema_extra=_meta(
@@ -247,7 +286,7 @@ class TrainingConfig(BaseModel):
                     "instead of OOMing after the dataset and cache have already finished. Turn this off if the estimate produces false rejections",
         json_schema_extra=_meta(
             "system",
-            show_when=cap_gate("block_swap"),
+            show_when="model_family==anima||model_family==krea2",
             advanced=True,
         ),
     )
@@ -270,7 +309,7 @@ class TrainingConfig(BaseModel):
     )
     navit_token_budget: int = Field(
         16384, ge=1,
-        description="Token budget ceiling for a single packed sequence (sum of all image token counts ≤ this value)",
+        description="Token budget ceiling for a packed sequence. MOSS includes image and caption tokens; Anima counts image tokens.",
         json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
     )
     navit_max_images_per_pack: int = Field(
@@ -281,7 +320,7 @@ class TrainingConfig(BaseModel):
     navit_text_trim_padding: bool = Field(
         False,
         description="Trim cross-attention text padding (data-layer flag, only takes effect with navit_packing)",
-        json_schema_extra=_meta("system", show_when="navit_packing==true", advanced=True),
+        json_schema_extra=_meta("system", show_when="navit_packing==true&&model_family==anima", advanced=True),
     )
     navit_pack_strategy: Literal["next_fit", "ffd"] = Field(
         "next_fit",
@@ -349,11 +388,11 @@ class TrainingConfig(BaseModel):
         "lora",
         description="Adapter algorithm. lora: classic low-rank, general-purpose (default); lokr: Kronecker factorization, most parameter-efficient; loha: Hadamard product, higher expressiveness but more parameters; ortho: orthogonal parameterization, very few trainable parameters, resists overfitting — good for small character/subject datasets; tlora: rank shrinks as noise increases, purpose-built to resist overfitting on single-image/very-small subject datasets",
         json_schema_extra=_meta(
-            "lora",
+            "lora", disable_when="use_riemannian==true", disable_value="lora",
             # Option-level forbid (R2 v2): navit is a B=1 packed sequence with
             # per-image t; T-LoRA's rank mask matches timestep along the
             # batch dimension, so the dimensions don't line up
-            option_disable_when={"tlora": "navit_packing==true"},
+            option_disable_when={"tlora": "navit_packing==true", "ortho": "model_family==moss_image&&transformer_quantization!=none"},
             disable_hint="T-LoRA's rank mask matches timestep along the batch dimension, which is incompatible with NaViT packing (B=1, per-image t)",
         ),
     )
@@ -365,7 +404,7 @@ class TrainingConfig(BaseModel):
     lora_alpha: float = Field(
         32.0, ge=0.0,
         description="Alpha: LoRA scaling factor — higher means a stronger LoRA effect. Usually equal to rank; when rs_lora is on, commonly set to √rank",
-        json_schema_extra=_meta("lora"),
+        json_schema_extra=_meta("lora", show_when="use_riemannian!=true"),
     )
     lokr_factor: int = Field(
         8, ge=2,
@@ -377,7 +416,7 @@ class TrainingConfig(BaseModel):
         description="Also train Anima attention normalization weights. Saves their changes in the LoRA; the exported tensor count is calculated automatically (112 for Anima 2B).",
         json_schema_extra=_meta(
             "lora", show_when="model_family==anima",
-            disable_when="model_family!=anima||lora_type==ortho||lora_type==tlora",
+            disable_when="model_family!=anima||lora_type==ortho||lora_type==tlora||use_riemannian==true",
             disable_value=False,
             disable_hint="Normalization training supports Anima with LoRA, LoKr or LoHa",
         ),
@@ -399,38 +438,47 @@ class TrainingConfig(BaseModel):
     tlora_use_ortho: bool = Field(
         True,
         description="T-LoRA-specific: stack OrthoLoRA orthogonal parameterization on top (the paper's full recipe, on by default); when off, plain T-LoRA is used",
-        json_schema_extra=_meta("lora", show_when="lora_type==tlora", advanced=True),
+        json_schema_extra=_meta(
+            "lora", show_when="lora_type==tlora", advanced=True,
+            disable_when="lora_type==tlora&&model_family==moss_image&&transformer_quantization!=none",
+            disable_value=False, disable_hint="Orthogonal initialization requires unquantized weights",
+        ),
     )
     lora_dora: bool = Field(
         False,
         description="DoRA: decomposes weights into direction + magnitude trained independently; usually converges more steadily, at a slight VRAM cost",
-        json_schema_extra=_meta("lora", advanced=True),
+        json_schema_extra=_meta("lora", advanced=True, show_when="use_riemannian!=true&&transformer_quantization==none&&lora_type!=ortho", disable_when="use_riemannian==true||transformer_quantization!=none||lora_type==ortho", disable_value=False, disable_hint="DoRA requires unquantized base weights and a compatible adapter (no Riemannian or OrthoLoRA)"),
     )
     lora_rs: bool = Field(
         False,
         description="rs-LoRA: scale=α/√r instead of α/r, more stable training at high rank (>32)",
-        json_schema_extra=_meta("lora", advanced=True),
+        json_schema_extra=_meta("lora", advanced=True, show_when="use_riemannian!=true"),
+    )
+    caption_dropout: float = Field(
+        0.0, ge=0.0, le=1.0,
+        description="Probability of training an image with an empty caption. Applied per image during training, including with text caching; regularization captions are preserved. 0 = off.",
+        json_schema_extra=_meta("lora"),
     )
     lora_dropout: float = Field(
         0.0, ge=0.0, le=1.0,
         description="Random drop probability for LoRA input features: higher = stronger regularization, slower convergence; 0 = off",
-        json_schema_extra=_meta("lora", advanced=True),
+        json_schema_extra=_meta("lora", advanced=True, show_when="use_riemannian!=true"),
     )
     lora_rank_dropout: float = Field(
         0.0, ge=0.0, le=1.0,
         description="Random drop probability for LoRA's internal rank dimension (randomly activates a subset of ranks each step): higher = stronger regularization; 0 = off",
-        json_schema_extra=_meta("lora", advanced=True),
+        json_schema_extra=_meta("lora", advanced=True, show_when="use_riemannian!=true"),
     )
     lora_module_dropout: float = Field(
         0.0, ge=0.0, le=1.0,
         description="Random skip probability for an entire LoRA module (stochastic depth): with this probability, the module is skipped entirely for a step; higher = stronger regularization; 0 = off",
-        json_schema_extra=_meta("lora", advanced=True),
+        json_schema_extra=_meta("lora", advanced=True, show_when="use_riemannian!=true"),
     )
     lora_reg_dims: Optional[dict[str, int]] = Field(
         None,
         description="Per-layer rank: a dict mapping regex → rank, overriding the default rank for modules whose full name matches (e.g. {\"lora_unet_.*double.*\": 16})",
         examples=[{"lora_unet_.*double.*": 16}],
-        json_schema_extra=_meta("lora", "code", advanced=True),
+        json_schema_extra=_meta("lora", "code", advanced=True, show_when="use_riemannian!=true"),
     )
 
     # ------------------------------------------------------------------ Training
@@ -466,7 +514,8 @@ class TrainingConfig(BaseModel):
     grad_checkpoint: bool = Field(
         True,
         description="Gradient checkpointing (saves VRAM, adds roughly 1/3 more compute)",
-        json_schema_extra=_meta("training"),
+        json_schema_extra=_meta("training", disable_when="low_vram==true", disable_value=True,
+                                disable_hint="Low VRAM keeps gradient checkpointing on"),
     )
     grad_accum: int = Field(
         4, ge=1,
@@ -489,7 +538,7 @@ class TrainingConfig(BaseModel):
         description="Train an adapter in Anima's Qwen text encoder together with the image model. Uses more memory; both sets of weights are saved in one LoRA.",
         json_schema_extra=_meta(
             "training", show_when="model_family==anima",
-            disable_when="model_family!=anima||lora_type==ortho||lora_type==tlora||dop_enabled==true",
+            disable_when="model_family!=anima||lora_type==ortho||lora_type==tlora||use_riemannian==true||dop_enabled==true",
             disable_value=False,
             disable_hint="Text encoder training supports Anima with LoRA, LoKr or LoHa and DOP disabled",
         ),
@@ -607,10 +656,43 @@ class TrainingConfig(BaseModel):
         description="constant_then_cosine: LR at the very end of training",
         json_schema_extra=_meta("training", show_when="lr_scheduler==constant_then_cosine"),
     )
-    optimizer_type: Literal["adamw", "adamw8bit", "automagic", "came", "lion", "prodigy", "prodigy_plus_schedulefree", "simplified_ademamix", "soap", "soap_sf"] = Field(
+    optimizer_type: Literal["adamw", "adamw8bit", "automagic", "came", "lion", "muon", "prodigy", "prodigy_plus_schedulefree", "simplified_ademamix", "soap", "soap_sf"] = Field(
         "adamw",
-        description="Optimizer. adamw standard baseline; adamw8bit same as AdamW but with state quantized to int8 (state VRAM ~1/4 of AdamW, hyperparameters carry over directly, requires bitsandbytes); automagic adaptive per-parameter lr (recommended lr=1e-6); came confidence-guided + factored second moment (lower state VRAM than AdamW, lr on the same scale as AdamW); lion roughly half AdamW's VRAM (recommended lr=AdamW lr / 3); prodigy / prodigy_plus_schedulefree adaptively estimates lr (set lr to 1.0); simplified_ademamix one raw-gradient momentum + current-gradient mix (lr ≈ AdamW lr × (1 − β1), e.g. 1e-6 at β1=0.99); soap Adam-in-Shampoo-eigenbasis second-order preconditioning (fits faster, lr on the same scale as AdamW); soap_sf SOAP + Schedule-Free (lr_scheduler fixed to none)",
+        description="Optimizer. adamw standard baseline; adamw8bit same as AdamW but with state quantized to int8 (state VRAM ~1/4 of AdamW, hyperparameters carry over directly, requires bitsandbytes); automagic adaptive per-parameter lr (recommended lr=1e-6); came confidence-guided + factored second moment (lower state VRAM than AdamW, lr on the same scale as AdamW); lion roughly half AdamW's VRAM (recommended lr=AdamW lr / 3); prodigy / prodigy_plus_schedulefree adaptively estimates lr (set lr to 1.0); simplified_ademamix one raw-gradient momentum + current-gradient mix (lr ≈ AdamW lr × (1 − β1), e.g. 1e-6 at β1=0.99); soap Adam-in-Shampoo-eigenbasis second-order preconditioning (fits faster, lr on the same scale as AdamW); soap_sf SOAP + Schedule-Free (lr_scheduler fixed to none); muon matrix updates with auxiliary AdamW for vectors; Muon also offers the experimental Use Riemannian switch",
         json_schema_extra=_meta("training"),
+    )
+    use_riemannian: bool = Field(
+        False,
+        description="Use Riemannian updates with Muon. Automatically uses the fixed-rank LoRA adapter; saved weights remain ordinary LoRA.",
+        json_schema_extra=_meta("training", show_when="optimizer_type==muon",
+            disable_when="optimizer_type!=muon", disable_value=False,
+            disable_hint="Use Riemannian requires Muon"),
+    )
+    muon_momentum: float = Field(
+        0.95, ge=0.0, lt=1.0,
+        description="Muon momentum: how much previous updates influence the next one. Default 0.95.",
+        json_schema_extra=_meta("training", show_when="optimizer_type==muon&&use_riemannian!=true", advanced=True),
+    )
+    muon_ns_steps: int = Field(
+        5, ge=1, le=20,
+        description="Muon matrix adjustment iterations. More costs time; 5 is the default.",
+        json_schema_extra=_meta("training", show_when="optimizer_type==muon&&use_riemannian!=true", advanced=True),
+    )
+    muon_adjust_lr: Literal["match_rms_adamw", "original"] = Field(
+        "match_rms_adamw",
+        description="Muon update scaling. match_rms_adamw uses an AdamW-like learning-rate scale; original requires separate tuning.",
+        json_schema_extra=_meta("training", show_when="optimizer_type==muon&&use_riemannian!=true", advanced=True),
+    )
+    riemannion_momentum: float = Field(
+        0.9, ge=0.0, lt=1.0,
+        description="Riemannion momentum: how much previous updates influence the next one. Default 0.9.",
+        json_schema_extra=_meta("training", show_when="optimizer_type==muon&&use_riemannian==true", advanced=True),
+    )
+    optimizer_args: list[str] = Field(
+        default_factory=list,
+        description="Extra optimizer arguments, one name=value per line (e.g. betas=(0.9, 0.99), eps=1e-6). Values are Python literals; plain words are strings. They override the optimizer fields above. Learning rate and weight decay use their own fields",
+        examples=[["betas=(0.9, 0.99)", "eps=1e-6"]],
+        json_schema_extra=_meta("optimizer_args", "string-list"),
     )
     prodigy_d_coef: float = Field(
         1.0, ge=0.1, le=10.0,
@@ -838,7 +920,10 @@ class TrainingConfig(BaseModel):
         description="[Weight EMA] Maintain an exponential moving average of the adapter weights during training, saved alongside normal checkpoints "
                     "as an extra *_ema.safetensors. The smoothed copy is more stable than any single point, overfitting degrades more gracefully, and "
                     "the \"which epoch is best\" guessing game mostly disappears. VRAM cost = one fp32 copy of the adapter parameters (small)",
-        json_schema_extra=_meta("training", advanced=True),
+        json_schema_extra=_meta(
+            "training", advanced=True, disable_when="use_riemannian==true", disable_value=False,
+            disable_hint="Weight EMA does not support Riemann LoRA's changing bases",
+        ),
     )
     ema_decay: float = Field(
         0.999, ge=0.9, le=0.99999,
@@ -860,14 +945,15 @@ class TrainingConfig(BaseModel):
     kv_trim: bool = Field(
         False,
         description="Cross-attention KV trim: trims to the nearest bucket (64/128/256/512) by actual token count, reducing padding compute",
-        json_schema_extra=_meta("system", advanced=True),
+        json_schema_extra=_meta("system", show_when="model_family!=moss_image", advanced=True),
     )
     vae_tiling: Literal["auto", "on", "off"] = Field(
         "auto",
         description="VAE tiled decode: auto=automatically tile when available VRAM is tight (recommended); on=always tile (saves VRAM, ~30% slower); "
                     "off=full-image decode, falls back only on a genuine OOM. On high-VRAM cards, full-image decode near the VRAM ceiling can trigger a "
                     "system-memory fallback, degrading a single decode from under a second to over a hundred — auto avoids this",
-        json_schema_extra=_meta("system", advanced=True),
+        json_schema_extra=_meta("system", advanced=True, disable_when="low_vram==true", disable_value="on",
+                                disable_hint="Low VRAM keeps VAE tiling on"),
     )
     noise_enhancement_type: Literal["none", "offset", "pyramid"] = Field(
         "none",
@@ -895,6 +981,7 @@ class TrainingConfig(BaseModel):
         json_schema_extra=_meta("noise_augmentation", show_when="noise_enhancement_type==pyramid", advanced=True),
     )
     timestep_sampling: Literal[
+        "moss_logit_normal",
         "logit_normal",
         "uniform",
         "logit_normal_low",
@@ -926,7 +1013,7 @@ class TrainingConfig(BaseModel):
             "timestep_sampling",
             # style_friendly's shift is fully determined by style_snr_mean;
             # stacking both would double-shift
-            show_when="timestep_sampling!=uniform&&timestep_sampling!=style_friendly&&timestep_sampling!=dual_peak",
+            show_when="timestep_sampling!=uniform&&timestep_sampling!=style_friendly&&timestep_sampling!=dual_peak&&timestep_sampling!=moss_logit_normal",
             alt_description="When InfoNoise is on, acts as the warmup-phase baseline shift — the adaptive CDF takes over for the main phase; when Leap is enabled, the leap path always uses U(0,1), and this field only applies to the (1-leap_ratio) fraction of standard steps",
             alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
@@ -937,7 +1024,7 @@ class TrainingConfig(BaseModel):
         description="Fraction of samples routed to the biased end under mixed_* modes: 0 = fully uniform; typical range 0.15-0.30",
         json_schema_extra=_meta(
             "timestep_sampling",
-            show_when="timestep_sampling!=uniform&&timestep_sampling!=dual_peak",
+            show_when="timestep_sampling!=uniform&&timestep_sampling!=dual_peak&&timestep_sampling!=moss_logit_normal",
             alt_description="With InfoNoise on + a mixed_* baseline, this is the warmup-phase mix ratio — the adaptive CDF takes over for the main phase; when Leap is enabled, the leap path always uses U(0,1), and this field only applies to the (1-leap_ratio) fraction of standard steps",
             alt_description_when="infonoise_enabled==true||leap_enabled==true",
             advanced=True,
@@ -1063,14 +1150,16 @@ class TrainingConfig(BaseModel):
         description="[InfoNoise] Enable adaptive timestep sampling: during training, the t distribution is automatically adjusted based on information content, focusing on the most informative training range",
         json_schema_extra=_meta(
             "timestep_sampling",
+            show_when="model_family!=moss_image",
             advanced=True,
             disable_when=(
-                "noise_enhancement_type!=none"
+                "model_family==moss_image||noise_enhancement_type!=none"
                 "||loss_weighting!=none"
                 "||loss_type==huber"
                 "||timestep_schedule_shift!=1"
                 "||leap_enabled==true"
                 "||navit_packing==true"
+                "||timestep_sampling==moss_logit_normal"
             ),
             disable_hint="Cannot be enabled while a mutually exclusive field (noise_enhancement / loss_weighting / loss_type / schedule_shift / leap / navit) is non-default (mutually exclusive by schema)",
         ),
@@ -1078,37 +1167,37 @@ class TrainingConfig(BaseModel):
     infonoise_K: int = Field(
         64, ge=16, le=256,
         description="[InfoNoise] Number of log-σ bins (16-256): higher = finer resolution but sparser samples per bin",
-        json_schema_extra=_meta("timestep_sampling", show_when="infonoise_enabled==true", advanced=True),
+        json_schema_extra=_meta("timestep_sampling", show_when="model_family!=moss_image&&infonoise_enabled==true", advanced=True),
     )
     infonoise_N_warm: int = Field(
         0, ge=0,
         description="[InfoNoise] Warmup steps: 0 = automatically 1/5 of total steps (minimum 200)",
-        json_schema_extra=_meta("timestep_sampling", show_when="infonoise_enabled==true", advanced=True),
+        json_schema_extra=_meta("timestep_sampling", show_when="model_family!=moss_image&&infonoise_enabled==true", advanced=True),
     )
     infonoise_M: int = Field(
         100, ge=10,
         description="[InfoNoise] Sampling-distribution refresh period: recompute every M steps. Higher = less compute overhead but more lag in the distribution update",
-        json_schema_extra=_meta("timestep_sampling", show_when="infonoise_enabled==true", advanced=True),
+        json_schema_extra=_meta("timestep_sampling", show_when="model_family!=moss_image&&infonoise_enabled==true", advanced=True),
     )
     infonoise_B: int = Field(
         256, ge=32,
         description="[InfoNoise] FIFO buffer capacity per bin: higher = steadier average but slower to respond",
-        json_schema_extra=_meta("timestep_sampling", show_when="infonoise_enabled==true", advanced=True),
+        json_schema_extra=_meta("timestep_sampling", show_when="model_family!=moss_image&&infonoise_enabled==true", advanced=True),
     )
     infonoise_beta: float = Field(
         0.9, ge=0.1, le=0.999,
         description="[InfoNoise] EMA weight for the new value (per the paper, β multiplies the new value, not the standard EMA direction): 0.9 means the new value carries 90% weight; higher = faster response to the latest distribution",
-        json_schema_extra=_meta("timestep_sampling", show_when="infonoise_enabled==true", advanced=True),
+        json_schema_extra=_meta("timestep_sampling", show_when="model_family!=moss_image&&infonoise_enabled==true", advanced=True),
     )
     infonoise_N_min: int = Field(
         50, ge=1,
         description="[InfoNoise] Refresh trigger: minimum samples required per bin before recomputing the distribution (must be ≤ infonoise_B)",
-        json_schema_extra=_meta("timestep_sampling", show_when="infonoise_enabled==true", advanced=True),
+        json_schema_extra=_meta("timestep_sampling", show_when="model_family!=moss_image&&infonoise_enabled==true", advanced=True),
     )
     infonoise_gate_pivot_c: float = Field(
         0.15, ge=0.0, le=10.0,
         description="[InfoNoise] Gate function pivot c: default 0.15 (the paper's §5 CIFAR-reported value, robust across datasets); set to 0 for adaptive selection (literal implementation of paper Eq 87); other positive values are custom c. Keep the default in most cases",
-        json_schema_extra=_meta("timestep_sampling", show_when="infonoise_enabled==true", advanced=True),
+        json_schema_extra=_meta("timestep_sampling", show_when="model_family!=moss_image&&infonoise_enabled==true", advanced=True),
     )
     loss_type: Literal["mse", "huber"] = Field(
         "mse",
@@ -1302,7 +1391,8 @@ class TrainingConfig(BaseModel):
     mixed_precision: Literal["bf16", "fp16", "no"] = Field(
         "bf16",
         description="Training precision. bf16 recommended (same dynamic range as fp32, stable); fp16 uses the same VRAM but has a smaller dynamic range and gradients overflow more easily; no uses fp32, most stable but doubles VRAM use",
-        json_schema_extra=_meta("system"),
+        json_schema_extra=_meta("system", option_disable_when={"fp16": "model_family==moss_image"},
+                                disable_hint="MOSS Base requires BF16 or FP32; original weights can overflow in FP16"),
     )
 
     attention_backend: AttentionBackend = Field(
@@ -1320,6 +1410,13 @@ class TrainingConfig(BaseModel):
         description="Number of parallel data-loading threads; higher = faster loading but more RAM use. Must be 0 on Windows",
         json_schema_extra=_meta("system", advanced=True),
     )
+
+    @field_validator("optimizer_args")
+    @classmethod
+    def _check_optimizer_args(cls, v: list[str]) -> list[str]:
+        lines = [line.strip() for line in v if line.strip()]
+        parse_optimizer_args(lines)
+        return lines
 
     @field_validator("resolution", mode="before")
     @classmethod
@@ -1346,6 +1443,24 @@ class TrainingConfig(BaseModel):
                 seen.add(n)
                 out.append(n)
         return out or [1024]
+
+    @model_validator(mode="after")
+    def _validate_moss_settings(self):
+        if self.model_family != "moss_image":
+            return self
+        if any(i < 0 or i >= 42 for i in self.moss_uncond_skip_layers):
+            raise ValueError("MOSS negative-branch layer indices must be between 0 and 41")
+        if self.blocks_to_swap > 42:
+            raise ValueError("MOSS has 42 transformer layers")
+        if self.blocks_to_swap and not self.grad_checkpoint:
+            raise ValueError("MOSS Transformer Layer Offloading requires gradient checkpointing")
+        if self.bucket_step and self.bucket_step % 16:
+            raise ValueError("MOSS bucket_step must be a multiple of 16")
+        if self.cache_encode_tiled and (self.cache_encode_tile_px % 16 or self.cache_encode_tile_overlap % 16):
+            raise ValueError("MOSS VAE tiles and overlap must be multiples of 16 pixels")
+        if self.transformer_quantization == "convrot_int8" and (self.lora_dora or self.lora_type == "ortho"):
+            raise ValueError("MOSS ConvRot INT8 supports LoRA, LoKr, LoHa and T-LoRA without DoRA")
+        return self
 
     @model_validator(mode="after")
     def _validate_family_capabilities(self):
@@ -1724,7 +1839,8 @@ class TrainingConfig(BaseModel):
         False,
         description="After training finishes, generate images from a held-out validation set and compute CLIP-T / CLIP-I / DINO-I metrics. "
                     "The validation set is split off from the training set and never trains — it lives in validation/, alongside train/.",
-        json_schema_extra=_meta("eval_validation", disable_when="edit_mode==true"),
+        json_schema_extra=_meta("eval_validation", disable_when="edit_mode==true",
+                                disable_hint="Validation generation does not support edit reference images"),
     )
     eval_validation_split_ratio: float = Field(
         0.0, ge=0.0, le=1.0,
@@ -1781,3 +1897,11 @@ class TrainingConfig(BaseModel):
         description="Terminal log output interval (only takes effect when the rich progress bar is disabled)",
         json_schema_extra=_meta("monitor", hidden=True),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_riemann_selection(cls, data):
+        if isinstance(data, dict) and (data.get("optimizer_type") == "riemannion" or data.get("lora_type") == "riemann"):
+            data = dict(data)
+            data.update(optimizer_type="muon", lora_type="lora", use_riemannian=True)
+        return data

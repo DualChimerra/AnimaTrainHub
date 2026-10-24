@@ -277,11 +277,12 @@ def apply_loras(
     # name) -- injecting fp8 weights directly via a lycoris hook would either
     # crash on dtype or produce values inconsistent with Comfy. Currently only
     # the krea2 loader produces fp8 weights (the Anima loader rejects fp8).
+    int8_merge = bool(specs) and family_id == "moss_image" and bool(getattr(model, "is_convrot_int8", False))
     fp8_merge = False
     if specs:
         from training.families.krea2.quant_fp8 import model_has_fp8_layers  # noqa: PLC0415
 
-        fp8_merge = model_has_fp8_layers(model)
+        fp8_merge = family_id == "krea2" and model_has_fp8_layers(model)
 
     merge_sources: list[tuple[dict, float, str]] = []
     adapters: list[Any] = []
@@ -323,7 +324,7 @@ def apply_loras(
             alpha = float(rank)   # per-layer alpha is already filled into sd; the global value is only for building the network
             algo = "lora"         # PEFT's two matrices = plain LoRA
 
-        if fp8_merge:
+        if fp8_merge or int8_merge:
             # merge is a weight-level linear operation, so it only honors
             # per-layer alpha/dim scaling. rs_lora artifacts need no special
             # case: lycoris bakes the sqrt(rank) correction into the per-layer
@@ -336,7 +337,7 @@ def apply_loras(
             # stays rejected.
             if meta.weight_decompose:
                 raise ValueError(
-                    f"An fp8-quantized base model cannot load a LoRA trained with DoRA (weight_decompose): "
+                    f"A quantized base model cannot load a LoRA trained with DoRA (weight_decompose): "
                     f"LoRA: {Path(path).name}. Use a bf16 base model instead."
                 )
             merge_sources.append((sd_raw, float(spec.scale), Path(path).name))
@@ -398,6 +399,9 @@ def apply_loras(
         adapters.append(adapter)
 
     if merge_sources:
+        if int8_merge:
+            from training.families.moss_image.lora_int8_merge import merge_loras_into_int8_model
+            return [merge_loras_into_int8_model(model, merge_sources)]
         from training.families.krea2.lora_fp8_merge import (  # noqa: PLC0415
             merge_loras_into_fp8_model,
         )

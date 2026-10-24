@@ -27,6 +27,7 @@ FAMILY_CAPABILITIES: dict[str, frozenset] = {
         "caption_tag_ops", "online_text", "masked_loss", "block_swap",
     }),
     "krea2": frozenset({"masked_loss", "text_cache", "block_swap"}),
+    "moss_image": frozenset({"masked_loss", "text_cache", "block_swap", "navit"}),
 }
 
 # Single source of truth for family default overlays (ModelSpec.config_defaults
@@ -35,6 +36,16 @@ FAMILY_CAPABILITIES: dict[str, frozenset] = {
 # `_apply_family_config_defaults` (studio and the trainer now share this one
 # loading path, R1).
 FAMILY_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
+    "moss_image": {
+        "shuffle_caption": False, "keep_tokens": 0, "tag_dropout": 0.0,
+        "text_encoder_cache": True, "attention_backend": "none",
+        "timestep_sampling": "logit_normal", "timestep_shift": 3.5, "timestep_shift_resolution_aware": False,
+        "sample_sampler_name": "euler", "sample_scheduler": "simple",
+        "sample_infer_steps": 50, "sample_cfg_scale": 3.0,
+        "mixed_precision": "bf16",
+        "transformer_quantization": "none", "text_encoder_quantization": "none",
+        "text_encoder_layers_to_offload": 0,
+    },
     "anima": {},
     "krea2": {
         "shuffle_caption": False,
@@ -63,6 +74,7 @@ MODEL_FAMILIES: tuple[str, ...] = tuple(FAMILY_CAPABILITIES)
 # in families/anima/sampling.py; krea2: same in families/krea2/sampling.py),
 # so a cross-family value errors out at the config layer (fail-fast).
 FAMILY_SAMPLING: dict[str, dict[str, tuple[str, ...]]] = {
+    "moss_image": {"samplers": ("euler",), "schedulers": ("simple", "sgm_uniform")},
     "anima": {
         "samplers": ("er_sde", "dpmpp_3m_sde"),
         "schedulers": ("simple", "sgm_uniform"),
@@ -95,6 +107,7 @@ LEGACY_SAMPLING_FAMILIES: frozenset = frozenset({"anima"})
 #: sets no gate (A1: identical code isn't restricted). When a 3rd
 #: resolution-aware family reuses this strategy, just add it to the tuple.
 TIMESTEP_SAMPLING_OPTION_FAMILIES: dict[str, tuple[str, ...]] = {
+    "moss_logit_normal": ("moss_image",),
     "krea2_shift": ("krea2",),
 }
 
@@ -189,10 +202,11 @@ AttentionBackend = Literal["none", "xformers", "flash_attn"]
 # the frontend start it collapsed. The read-only model path group shows an
 # "Auto - Global Settings" badge and is never collapsed.
 GROUP_ORDER: list[tuple[str, str, bool]] = [
-    ("model", "Model Path", False),
+    ("model", "Model", False),
     ("dataset", "Dataset", False),
     ("caption", "Caption Processing", False),
     ("lora", "Network Settings", False),
+    ("optimizer_args", "Optimizer Arguments", False),
     ("training", "Training Parameters", False),
     ("noise_augmentation", "Noise Augmentation", False),
     ("timestep_sampling", "Timestep Sampling", False),

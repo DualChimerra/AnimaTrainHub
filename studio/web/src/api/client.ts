@@ -520,6 +520,8 @@ export interface ModelsConfig {
   /** Selected VAE: empty string = the official qwen_image_vae location, otherwise a local
    * .safetensors absolute path (family-agnostic, both families share one selection). */
   selected_vae?: string
+  selected_vae_by_family?: Record<string, string>
+  weight_folders?: Record<string, string[]>
   /** User-registered local custom base models (.safetensors absolute paths). Used for fine-tune
    * training / test generation on fine-tuned weights; only registers the path, doesn't download or copy. */
   custom_anima_paths: string[]
@@ -887,6 +889,16 @@ export interface FamilySwitchResponse {
 }
 
 export interface ModelsCatalog {
+  moss_image_main?: FamilyMainCatalog
+  weight_library?: Record<string, {
+    folders: string[]; errors: string[]; rows: Array<{
+      path: string; label: string; value: string; families: string[]; exists: boolean
+      is_current: boolean; size: number; download_id: string | null
+      purpose?: string
+      domain?: string; candidate?: ModelSourceCandidate | null
+      download_variant: string | null; status_key: string | null
+    }>
+  }>
   models_root: string
   anima_main: FamilyMainCatalog
   anima_vae: AnimaVaeCatalog
@@ -1573,7 +1585,7 @@ export interface XYMatrixSpec {
 export interface GenerateRequest {
   prompts: string[]
   /** Model family the base model belongs to (multi-model P4-4); omitted = anima. */
-  model_family?: 'anima' | 'krea2'
+  model_family?: 'anima' | 'krea2' | 'moss_image'
   /** Base model temporarily selected for this generation (an official variant key or a local
    *  custom path); omitted -> the server uses that family's selected from Settings. */
   base_model?: string
@@ -2355,6 +2367,7 @@ export const api = {
 
   // Models management (PP7) ------------------------------------------------
   getModelsCatalog: () => req<ModelsCatalog>('/api/models/catalog'),
+  selectWeight: (category: string, path: string) => req<ModelsCatalog>('/api/models/select-weight', { method: 'POST', body: JSON.stringify({ category, path }) }),
   /** Absolute paths for the 4 model fields as currently computed by Settings. Used by the presets page's reset / new. */
   getModelPathDefaults: () => req<Record<string, string>>('/api/models/path-defaults'),
   /** YAML preview (R4): serializes the current form config through the same path used when saving to disk,

@@ -27,6 +27,7 @@ from .spec import (  # noqa: F401  (re-export)
 )
 from .anima import ANIMA_SPEC
 from .krea2 import KREA2_SPEC
+from .moss_image import MOSS_SPEC
 
 SPECS: dict[str, ModelSpec] = {}
 
@@ -40,6 +41,7 @@ def _register(spec: ModelSpec) -> None:
 
 _register(ANIMA_SPEC)
 _register(KREA2_SPEC)
+_register(MOSS_SPEC)
 
 
 _FAMILIES: dict[str, object] = {}
@@ -58,6 +60,10 @@ def get_family(family_id: str):
             from .krea2 import Krea2Family
 
             fam = Krea2Family()
+        elif family_id == "moss_image":
+            from .moss_image.family import MossFamily
+
+            fam = MossFamily()
         else:  # pragma: no cover - registry is kept in sync with SPECS
             raise ValueError(f"Model family '{family_id}' has no ModelFamily implementation")
         _FAMILIES[family_id] = fam
