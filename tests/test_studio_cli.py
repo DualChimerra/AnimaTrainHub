@@ -411,7 +411,7 @@ def test_report_lycoris_kernels_prints_preferred_backend(
     import types
 
     versions = {
-        "lycoris-lora": "4.0.0",
+        "lycoris-lora": "4.1.3",
         "triton-windows": "3.6.0.post26",
     }
 
@@ -431,7 +431,7 @@ def test_report_lycoris_kernels_prints_preferred_backend(
 
     cli._report_lycoris_kernels()
     out = capsys.readouterr()
-    assert "LyCORIS 4.0.0" in out.out
+    assert "LyCORIS 4.1.3" in out.out
     assert "preferred=triton" in out.out
     assert "fused=triton" in out.out
     assert "Triton 3.6.0.post26" in out.out

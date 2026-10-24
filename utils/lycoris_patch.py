@@ -34,9 +34,11 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 # lycoris-lora versions confirmed to be affected by the rank_dropout device bug.
-# Verified in practice: 3.4.0 / 4.0.0's `lycoris/modules/lokr.py:get_weight` goes
+# Verified in practice: 3.4.0 / 4.0.0 / 4.1.0-4.1.3's `lycoris/modules/lokr.py:get_weight` goes
 # through `torch.rand(weight.size(0))` (a CPU mask), which fails when multiplied with a CUDA weight.
-KNOWN_AFFECTED_VERSIONS: frozenset[str] = frozenset({"3.4.0", "4.0.0"})
+KNOWN_AFFECTED_VERSIONS: frozenset[str] = frozenset({
+    "3.4.0", "4.0.0", "4.1.0", "4.1.1", "4.1.2", "4.1.3",
+})
 
 PatchStatus = Literal[
     "applied",  # matched an affected version, patch applied

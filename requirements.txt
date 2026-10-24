@@ -17,9 +17,10 @@ wandb>=0.16.0
                         #           (optimizers/adamw8bit.py validate) instead of blowing up
                         #           mid-run. Install with: pip install bitsandbytes
 # LyCORIS 4 brings fused adapter kernels and keeps the wrapper/module API used
-# by this project.  Pin the major migration so internal compatibility patches
-# remain auditable instead of silently running against a future breaking API.
-lycoris-lora==4.0.0
+# by this project; 4.1 adds second-generation kernels and per-GPU tuning.  Pin the
+# exact version so internal compatibility patches (utils/lycoris_patch.py) remain
+# auditable instead of silently running against a future breaking API.
+lycoris-lora==4.1.3
 # Windows PyTorch does not bring Triton itself.  The Studio bootstrap narrows
 # this broad range to the minor paired with the installed PyTorch (for example,
 # torch 2.10/2.11 -> Triton 3.6) before importing flash-attn/xformers.

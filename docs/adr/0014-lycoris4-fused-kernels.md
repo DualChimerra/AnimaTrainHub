@@ -44,3 +44,10 @@ Approach 3 leaves as much of the external algorithm implementation to upstream a
 - [LyCORIS 4.0 fused kernels](https://github.com/KohakuBlueleaf/LyCORIS/blob/v4.0.0/docs/kernels/README.md)
 - [LyCORIS backend selection](https://github.com/KohakuBlueleaf/LyCORIS/blob/v4.0.0/docs/kernels/backends.md)
 - [triton-windows PyTorch compatibility](https://github.com/triton-lang/triton-windows#3-pytorch)
+
+## Update 2026-10-24: LyCORIS 4.1.3
+
+- The pin moves to `lycoris-lora==4.1.3`: second-generation Triton kernels (LoRA bypass, LoHa, LoKr, DoRA), a LoKr bypass GEMM layout that is about 2x faster on most shapes, and a fixed Triton LoRA merge-backward kernel.
+- 4.1 times kernel configs on first use and stores the winners per GPU in `~/.cache/lycoris_kernels/tuning.json` (`LYCORIS_KERNEL_CACHE_DIR` moves it, `LYCORIS_KERNEL_TUNE=off` disables timing). The first steps of a run on a new shape are therefore slower. Since 4.1.2 tuning leaves the CPU/CUDA RNG untouched, so seeds stay reproducible.
+- 4.1.3's LoKr `get_weight` still builds the rank-dropout mask on the CPU, so the device patch now also covers 4.1.0-4.1.3.
+- The APIs this project calls (`LoConModule.bypass_forward_diff`, `functional.locon.diff_weight` / `bypass_forward_diff`, `lycoris.kernels.available_backends` / `resolve_backend`) keep their signatures. The removed `policy=` argument is not used here.
