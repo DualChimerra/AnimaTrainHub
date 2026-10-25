@@ -277,7 +277,7 @@ def apply_loras(
     # name) -- injecting fp8 weights directly via a lycoris hook would either
     # crash on dtype or produce values inconsistent with Comfy. Currently only
     # the krea2 loader produces fp8 weights (the Anima loader rejects fp8).
-    int8_merge = bool(specs) and family_id == "moss_image" and bool(getattr(model, "is_convrot_int8", False))
+    int8_merge = bool(specs) and bool(getattr(model, "is_convrot_int8", False))
     fp8_merge = False
     if specs:
         from training.families.krea2.quant_fp8 import model_has_fp8_layers  # noqa: PLC0415
@@ -285,6 +285,8 @@ def apply_loras(
         fp8_merge = family_id == "krea2" and model_has_fp8_layers(model)
 
     merge_sources: list[tuple[dict, float, str]] = []
+    # Detachable hooks that live beside a merged base (MOSS per-block modulation)
+    extra_handles: list[Any] = []
     adapters: list[Any] = []
     for spec in specs:
         path = spec.path or ""
@@ -309,8 +311,18 @@ def apply_loras(
             )
         sd_raw: dict = {}
         with safe_open(str(path), framework="pt", device="cpu") as f:
+            file_meta = f.metadata() or {}
             for k in f.keys():
                 sd_raw[k] = f.get_tensor(k)
+        # MOSS experimental image-tokens-only LoRA: the diff must be masked on text tokens,
+        # which only an injected (bypass) adapter can do
+        image_tokens_only = family_id == "moss_image" and file_meta.get("moss_image_tokens_only") == "true"
+        # MOSS experimental per-block modulation: its own parameters, attached as hooks
+        block_mod_sd: dict = {}
+        if family_id == "moss_image":
+            from training.families.moss_image.experimental import BLOCK_MOD_PREFIX  # noqa: PLC0415
+            block_mod_sd = {k: v for k, v in sd_raw.items() if k.startswith(BLOCK_MOD_PREFIX)}
+            sd_raw = {k: v for k, v in sd_raw.items() if not k.startswith(BLOCK_MOD_PREFIX)}
 
         # Normalize external-ecosystem PEFT key format (common with civitai):
         # convert to kohya keys + infer rank/reg_dims from tensor shapes (these
@@ -340,12 +352,27 @@ def apply_loras(
                     f"A quantized base model cannot load a LoRA trained with DoRA (weight_decompose): "
                     f"LoRA: {Path(path).name}. Use a bf16 base model instead."
                 )
+            if image_tokens_only:
+                logger.warning(
+                    "%s was trained image-tokens-only; a merged quantized base applies it to all "
+                    "tokens, so the result differs from training samples (use a bf16 base to match)",
+                    Path(path).name,
+                )
             merge_sources.append((sd_raw, float(spec.scale), Path(path).name))
+            if block_mod_sd:
+                from training.families.moss_image.experimental import (  # noqa: PLC0415
+                    BlockModulationHandle,
+                    attach_block_modulation_from_state_dict,
+                )
+                module = attach_block_modulation_from_state_dict(model, block_mod_sd, lambda: 1.0)
+                extra_handles.append(BlockModulationHandle(module, float(spec.scale)))
             continue
         from training.families import get_family  # noqa: PLC0415
 
+        family = get_family(family_id)
+        preset_for_sd = getattr(family, "lora_preset_for_state_dict", None)
         adapter = AnimaLycorisAdapter(
-            preset=get_family(family_id).lora_preset(),
+            preset=preset_for_sd(sd_raw.keys()) if callable(preset_for_sd) else family.lora_preset(),
             algo=algo,
             rank=rank,
             alpha=alpha,
@@ -354,8 +381,13 @@ def apply_loras(
             rs_lora=meta.rs_lora,
             lora_reg_dims=reg_dims,
         )
+        if image_tokens_only:
+            adapter.force_bypass = True
         try:
             adapter.inject(model)
+            if image_tokens_only:
+                from training.families.moss_image.experimental import install_image_token_mask  # noqa: PLC0415
+                install_image_token_mask(model, adapter.network)
             if meta.has_text_encoder:
                 family = get_family(family_id)
                 target = getattr(family, "text_adapter_target", None)
@@ -375,6 +407,13 @@ def apply_loras(
             sd = sd_raw
 
             result = adapter.load_state_dict(sd, strict=False)
+            if block_mod_sd:
+                from training.families.moss_image.experimental import (  # noqa: PLC0415
+                    attach_block_modulation_from_state_dict,
+                )
+                network = adapter.network
+                adapter.extras.append(attach_block_modulation_from_state_dict(
+                    model, block_mod_sd, lambda: float(getattr(network, "multiplier", 1.0))))
             missing = len(getattr(result, "missing_keys", []) or [])
             unexpected = len(getattr(result, "unexpected_keys", []) or [])
             if sd and unexpected >= len(sd):
@@ -400,8 +439,12 @@ def apply_loras(
 
     if merge_sources:
         if int8_merge:
-            from training.families.moss_image.lora_int8_merge import merge_loras_into_int8_model
-            return [merge_loras_into_int8_model(model, merge_sources)]
+            if family_id == "moss_image":
+                # MOSS merges its fused qkv as one ComfyUI weight
+                from training.families.moss_image.lora_int8_merge import merge_loras_into_int8_model
+            else:
+                from training.families.lora_int8_merge import merge_loras_into_int8_model
+            return [merge_loras_into_int8_model(model, merge_sources), *extra_handles]
         from training.families.krea2.lora_fp8_merge import (  # noqa: PLC0415
             merge_loras_into_fp8_model,
         )

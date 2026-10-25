@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .... import secrets
-from ..paths import custom_text_encoder_dir, models_root, safe_dir_name
+from ..paths import custom_text_encoder_dir, model_type_dir, models_root, safe_dir_name
 from ..paths import qwen_image_vae_target, resolve_vae_path
 
 KREA2_VARIANTS: dict[str, dict[str, Any]] = {
@@ -106,17 +106,17 @@ def krea2_main_target(root: Path, variant: str) -> Path:
         filename = str(KREA2_VARIANTS[variant]["filename"])
     except KeyError:
         raise ValueError(f"unknown Krea 2 variant {variant!r}") from None
-    return root / "diffusion_models" / filename
+    return model_type_dir(root, "diffusion_models") / filename
 
 
 def qwen3_vl_dir(root: Path) -> Path:
     """Krea 2's text encoder directory; isolated from Anima's legacy flat directory."""
-    return root / "text_encoders" / safe_dir_name(QWEN3_VL_REPO)
+    return model_type_dir(root, "text_encoders") / safe_dir_name(QWEN3_VL_REPO)
 
 
 def qwen3_vl_fp8_dir(root: Path) -> Path:
     """Directory for the official single-file fp8_scaled TE (includes small config/tokenizer files)."""
-    return root / "text_encoders" / "qwen3vl-4b-fp8"
+    return model_type_dir(root, "text_encoders") / "qwen3vl-4b-fp8"
 
 
 #: TE variant -> directory resolution (bf16 first = default and UI order)
@@ -348,7 +348,8 @@ def catalog_sections(root: Path, models_cfg: Any) -> dict[str, Any]:
             "description": (
                 "Raw training base model / Turbo inference base model, each "
                 "available in bf16 (26.3 GB) and official fp8 (13.1 GB, half "
-                "the weight VRAM) versions"
+                "the weight VRAM) versions; ComfyUI ConvRot INT8 files placed "
+                "in diffusion_models are picked up too"
             ),
             "repo": "krea/Krea-2-{Raw,Turbo}",
             "variants": variants,

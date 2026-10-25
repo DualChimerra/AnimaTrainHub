@@ -27,6 +27,7 @@ from .paths import (
     cltagger_required_files,
     cltagger_target_root,
     eval_model_target_dir,
+    model_type_dir,
     models_root,
     qwen_image_vae_target,
     selected_upscaler,
@@ -494,7 +495,7 @@ def build_catalog(root: Optional[Path] = None) -> dict[str, Any]:
         for c in source_cfg.get(family_id, []):
             if c.kind == "download":
                 save_name = Path(c.filename).name
-                target = r / "diffusion_models" / save_name
+                target = model_type_dir(r, "diffusion_models") / save_name
                 st = _file_status(target)
                 fam_rows.append(_source_row(
                     kind="download", value=str(target), label=save_name,

@@ -18,6 +18,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from training.anti_fade import anti_fade_loss
 from training.context import TrainingContext
 from training.loss_weighting import compute_loss_weight
 from training.noise import make_noise, noise_params_from_args
@@ -703,6 +704,18 @@ def run(ctx: TrainingContext) -> None:
                     else:
                         loss = loss_per_sample.mean()
                     denoise_loss_log = loss.detach()
+                    # Anti-fade: contrast / edge terms on the x0 estimate (standard path only;
+                    # leap / navit are excluded at the schema level)
+                    if bool(getattr(args, "anti_fade", False)):
+                        loss = loss + anti_fade_loss(
+                            pred, noisy, latents, t,
+                            contrast_weight=float(getattr(args, "anti_fade_contrast", 0.1)),
+                            edge_weight=float(getattr(args, "anti_fade_edges", 0.1)),
+                            max_t=float(getattr(args, "anti_fade_max_t", 0.9)),
+                            range_weight=float(getattr(args, "anti_fade_range", 0.0) or 0.0),
+                            spatial_mask=spatial_mask,
+                            sample_weight=batch.get("loss_weight"),
+                        )
 
                 # SRA v2 representation-alignment loss (standard path only; not applicable to leap / navit)
                 if ctx.sra_aligner is not None and not use_leap_this_step and navit_latents is None:

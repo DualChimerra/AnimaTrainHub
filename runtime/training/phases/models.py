@@ -193,12 +193,27 @@ def _inject_adapter(ctx: TrainingContext) -> None:
     )
     if quantized_base and (uses_ortho or getattr(args, "lora_dora", False)):
         raise ValueError("ConvRot INT8 / qfloat8 require DoRA and orthogonal initialization to be disabled")
-    ctx.injector = build_adapter(args, preset=ctx.family.lora_preset())
+    # Families with experimental adapter options (MOSS) extend the preset and per-module ranks
+    prepare_args = getattr(ctx.family, "prepare_adapter_args", None)
+    if callable(prepare_args):
+        prepare_args(args)
+    preset_for_args = getattr(ctx.family, "lora_preset_for_args", None)
+    preset = preset_for_args(args) if callable(preset_for_args) else ctx.family.lora_preset()
+    reg_dims_for_args = getattr(ctx.family, "adapter_reg_dims", None)
+    extra_dims = reg_dims_for_args(args) if callable(reg_dims_for_args) else {}
+    if extra_dims:
+        args.lora_reg_dims = {**extra_dims, **(getattr(args, "lora_reg_dims", None) or {})}
+    ctx.injector = build_adapter(args, preset=preset)
     ctx.injector.metadata_extra = ctx.family.lora_metadata()
+    if getattr(args, "moss_image_tokens_only", False):
+        ctx.injector.force_bypass = True
     if getattr(args, "edit_mode", False):
         # Tells generation tools this LoRA expects a source image (cosmos temporal reference).
         ctx.injector.metadata_extra["edit_reference"] = "cosmos_temporal"
     ctx.injector.inject(ctx.model)
+    after_inject = getattr(ctx.family, "after_adapter_inject", None)
+    if callable(after_inject):
+        after_inject(ctx.model, ctx.injector, args)
 
     if getattr(args, "train_text_encoder", False):
         text_model, text_preset = ctx.family.text_adapter_target(ctx.text_stack)

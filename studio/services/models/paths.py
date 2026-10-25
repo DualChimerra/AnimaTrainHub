@@ -248,6 +248,28 @@ def models_root() -> Path:
     return REPO_ROOT / "models"
 
 
+#: Model types whose folder can be moved out of the root (Settings, `secrets.models.type_dirs`)
+MODEL_TYPE_DIRS = ("diffusion_models", "vae", "text_encoders")
+
+
+def model_type_dir(root: Path, kind: str) -> Path:
+    """Folder of one model type: the user's own folder for it (e.g. ComfyUI's
+    ``models/diffusion_models``, so weights are not stored twice) or
+    ``{root}/{kind}``.
+
+    Used for both scanning and downloads, so official files land where the
+    lists look. Read live, like ``models_root()``.
+    """
+    if kind not in MODEL_TYPE_DIRS:
+        raise ValueError(f"unknown model type {kind!r}")
+    try:
+        custom = secrets.load().models.type_dirs.get(kind)
+    except Exception:
+        custom = None
+    text = str(custom or "").strip()
+    return Path(text).expanduser() if text else root / kind
+
+
 def qwen_image_vae_target(root: Path) -> Path:
     """Local landing spot for the Qwen-Image VAE -- a **family-agnostic shared
     asset**, not owned by any model family.
@@ -258,7 +280,7 @@ def qwen_image_vae_target(root: Path) -> Path:
     from) is still each family's asset-manifest knowledge; this function only
     answers "where does the file go / what should the training config point at".
     """
-    return root / "vae" / "qwen_image_vae.safetensors"
+    return model_type_dir(root, "vae") / "qwen_image_vae.safetensors"
 
 
 #: Readiness marker for a local text-encoder directory. transformers

@@ -1,7 +1,7 @@
 """Official MOSS assets. VAE and text defaults are isolated from other families."""
 from pathlib import Path
 from .... import secrets
-from ..paths import models_root
+from ..paths import model_type_dir, models_root
 
 REPO = "OpenMOSS-Team/MOSS-Image-Base"
 TRANSFORMER_FILES = [f"diffusion_pytorch_model-{i:05d}-of-00003.safetensors" for i in range(1, 4)]
@@ -12,12 +12,12 @@ TOKENIZER_FILES = ["tokenizer.json", "tokenizer_config.json", "chat_template.jin
 
 def asset_files(root, model_id):
     if model_id == "moss_image_main":
-        return [(f"transformer/{f}", root / "diffusion_models/moss-image-base" / f) for f in TRANSFORMER_FILES]
+        return [(f"transformer/{f}", model_type_dir(root, "diffusion_models") / "moss-image-base" / f) for f in TRANSFORMER_FILES]
     if model_id == "moss_image_vae":
-        return [("vae/diffusion_pytorch_model.safetensors", root / "vae/flux2-vae.safetensors")]
+        return [("vae/diffusion_pytorch_model.safetensors", model_type_dir(root, "vae") / "flux2-vae.safetensors")]
     if model_id == "moss_image_text_encoder":
-        return ([(f"text_encoder/{f}", root / "text_encoders/moss-qwen35-9b" / f) for f in TEXT_FILES]
-                + [(f"tokenizer/{f}", root / "text_encoders/moss-qwen35-9b" / f) for f in TOKENIZER_FILES])
+        return ([(f"text_encoder/{f}", model_type_dir(root, "text_encoders") / "moss-qwen35-9b" / f) for f in TEXT_FILES]
+                + [(f"tokenizer/{f}", model_type_dir(root, "text_encoders") / "moss-qwen35-9b" / f) for f in TOKENIZER_FILES])
     raise ValueError(f"Unknown MOSS asset: {model_id}")
 
 
@@ -29,22 +29,22 @@ def transformer_path_for(sel=None):
     selected = sel or secrets.load().models.selected.get("moss_image", "bf16")
     if selected not in ("bf16", "latest"):
         return str(Path(selected).expanduser())
-    return str(models_root() / "diffusion_models/moss-image-base" / TRANSFORMER_FILES[0])
+    return str(model_type_dir(models_root(), "diffusion_models") / "moss-image-base" / TRANSFORMER_FILES[0])
 
 
 def default_paths_for_new_version(base_model=None):
     root = models_root()
     cfg = secrets.load().models
     return {"transformer_path": transformer_path_for(base_model),
-            "vae_path": cfg.selected_vae_by_family.get("moss_image") or str(root / "vae/flux2-vae.safetensors"),
-            "text_encoder_path": cfg.selected_te.get("moss_image") or str(root / "text_encoders/moss-qwen35-9b"),
+            "vae_path": cfg.selected_vae_by_family.get("moss_image") or str(model_type_dir(root, "vae") / "flux2-vae.safetensors"),
+            "text_encoder_path": cfg.selected_te.get("moss_image") or str(model_type_dir(root, "text_encoders") / "moss-qwen35-9b"),
             "t5_tokenizer_path": ""}
 
 
 def text_encoder_presets(root):
     return [{"value": "", "label": "Qwen3.5-9B", "description": "MOSS text encoder (BF16)",
              "download_id": "moss_image_text_encoder", "status_key": "moss_image_text_encoder",
-             "path": str(root / "text_encoders/moss-qwen35-9b"),
+             "path": str(model_type_dir(root, "text_encoders") / "moss-qwen35-9b"),
              "files": [{"name": p.name, **_status(p)} for _, p in asset_files(root, "moss_image_text_encoder")]}]
 
 

@@ -189,6 +189,11 @@ def comfy_forward(model, x: Tensor, timestep: Tensor, context: Tensor, *,
     """
     b, _, h, w = x.shape
     dtype, device = x.dtype, x.device
+    # Image-tokens-only LoRA (experimental.py): this forward bypasses MossImage.forward and
+    # its pre-hook, so publish the image length here
+    mask_state = getattr(model, "_moss_token_mask_state", None)
+    if mask_state is not None:
+        mask_state["img_len"] = h * w
     heads = model.num_heads
     backend = getattr(model, "attn_mode", SDPA)
     pe = _rope(model.dim // heads, h, w, context.shape[1], device)
@@ -204,10 +209,16 @@ def comfy_forward(model, x: Tensor, timestep: Tensor, context: Tensor, *,
     del txt
 
     skip = frozenset(skip_layers or ())
+    # Per-block modulation offsets (experimental.BlockModulation); empty for ordinary LoRAs
+    block_mods = getattr(model, "_moss_block_mods", None) or ()
     for index, block in enumerate(model.layers):
         if index in skip:
             continue
-        hidden = _dit_block(block, hidden, mod, pe, backend)
+        block_mod = mod
+        for adapter in block_mods:
+            delta = adapter.delta(index, vec).unbind(1)
+            block_mod = tuple(m + d.unsqueeze(1).to(m.dtype) for m, d in zip(block_mod, delta))
+        hidden = _dit_block(block, hidden, block_mod, pe, backend)
 
     out = model.final_linear_video(
         _rms_adaln(hidden[:, :h * w], model.final_norm_video.weight, head_scale, head_shift)

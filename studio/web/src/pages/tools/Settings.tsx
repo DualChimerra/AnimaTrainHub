@@ -19,6 +19,7 @@ import {
   type TunnelState,
 } from '../../api/client'
 import { useDialog } from '../../components/Dialog'
+import PathPicker from '../../components/PathPicker'
 import FieldLabel from '../../components/ds/FieldLabel'
 import { useToast } from '../../components/Toast'
 import { useRuntimeModeOptional } from '../../lib/RuntimeMode'
@@ -1177,14 +1178,16 @@ export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogErro
   const [autoSyncPaths, setAutoSyncPaths] = useState<boolean>(true)
   const [savingAutoSync, setSavingAutoSync] = useState(false)
   const [secretsLoaded, setSecretsLoaded] = useState(false)
+  const [typeDirs, setTypeDirs] = useState<Record<string, string>>({})
 
   // One-time fetch of secrets to get models.root + selected (per family) +
-  // auto_sync_paths (these go through their own PUT, not the SettingsPage's global
+  // auto_sync_paths + type_dirs (these go through their own PUT, not the SettingsPage's global
   // dirty flow). The catalog is injected by the parent.
   useEffect(() => {
     void api.getSecrets().then((sec) => {
       setServerRoot(sec.models?.root ?? null)
       setAutoSyncPaths(sec.models?.auto_sync_paths ?? true)
+      setTypeDirs(sec.models?.type_dirs ?? {})
       setSecretsLoaded(true)
     }).catch(() => { setSecretsLoaded(true) })
   }, [])
@@ -1285,6 +1288,12 @@ export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogErro
             return (
               <ModelGroupCard key={category} title={{ checkpoints: 'Checkpoints', vae: 'VAE', text_encoders: 'Text Encoders' }[category]}
                 helpTooltip={t('settings.weightLibraryHelp')}
+                folder={<TypeFolderRow kind={TYPE_DIR_OF[category]} saved={typeDirs[TYPE_DIR_OF[category]] ?? ''}
+                  effective={library.folders[0] ?? ''}
+                  onSaved={async (value) => {
+                    setTypeDirs((prev) => ({ ...prev, [TYPE_DIR_OF[category]]: value }))
+                    await reloadCatalog()
+                  }} />}
                 add={library.errors.map((error) => <p className="ds-note ds-err" key={error}>{error}</p>)}>
                 {library.rows.map((row) => {
                   const key = row.status_key ?? row.path
@@ -1339,21 +1348,86 @@ export function ModelsSection({ catalog, busy, start, reloadCatalog, catalogErro
 }
 
 function ModelGroupCard({
-  title, helpTooltip, add, children,
+  title, helpTooltip, folder, add, children,
 }: {
   title: string
   helpTooltip?: React.ReactNode
+  /** The folder this list scans, above the list. */
+  folder?: React.ReactNode
   /** "Pick a file / folder" entry for own weights, under the list. */
   add?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
     <SettingsSection title={title} tip={helpTooltip}>
+      {folder}
       <div className="ds-set-pad">
         <ul className="ds-set-list">{children}</ul>
         {add}
       </div>
     </SettingsSection>
+  )
+}
+
+/** Settings `models.type_dirs` key of each weight list. */
+const TYPE_DIR_OF = { checkpoints: 'diffusion_models', vae: 'vae', text_encoders: 'text_encoders' } as const
+
+/** Folder of one model type (e.g. ComfyUI's), shared by its list and studio downloads. */
+function TypeFolderRow({ kind, saved, effective, onSaved }: {
+  kind: string
+  /** Saved custom folder, '' = the default under the models root. */
+  saved: string
+  /** Folder actually scanned now (placeholder). */
+  effective: string
+  onSaved: (value: string) => Promise<unknown>
+}) {
+  const { t } = useTranslation()
+  const { toast } = useToast()
+  const [draft, setDraft] = useState(saved)
+  const [saving, setSaving] = useState(false)
+  const [picking, setPicking] = useState(false)
+  useEffect(() => { setDraft(saved) }, [saved])
+  const dirty = draft.trim() !== saved
+
+  const save = async (value: string) => {
+    setSaving(true)
+    try {
+      await api.updateSecrets({ models: { type_dirs: { [kind]: value } } })
+      toast(value ? t('settings.typeFolderSaved', { path: value }) : t('settings.typeFolderDefault'), 'success')
+      await onSaved(value)
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="ds-fgrid">
+      <SetCell label={t('settings.typeFolder')} tip={t('settings.typeFolderHelp')} full>
+        <div className="ds-set-inline">
+          <input type="text" value={draft} placeholder={effective}
+            onChange={(e) => setDraft(e.target.value)}
+            className={`${textInputClass} ds-mono`} />
+          <button className="ds-ctl ds-ghost" onClick={() => setPicking(true)} disabled={saving}>
+            {t('common.browse')}
+          </button>
+          <button className="ds-ctl" onClick={() => void save(draft.trim())} disabled={!dirty || saving}
+            title={dirty ? t('settings.savePathConfig') : t('settings.notModified')}>
+            {saving ? t('common.saving') : t('common.save')}
+          </button>
+          {saved && (
+            <button className="ds-iconbtn" onClick={() => void save('')} disabled={saving}
+              aria-label={t('common.reset')} title={t('common.reset')}>↺</button>
+          )}
+        </div>
+      </SetCell>
+      {picking && (
+        <PathPicker dirOnly initialPath={draft.trim() || effective}
+          onClose={() => setPicking(false)}
+          onPick={(p) => { setPicking(false); setDraft(p) }} />
+      )}
+    </div>
   )
 }
 
