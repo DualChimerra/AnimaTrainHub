@@ -31,7 +31,7 @@ class MossFamily:
         model.moss_comfy_forward = purpose == "generate"
         if model.moss_comfy_forward and model.is_convrot_int8:
             import torch
-            from .quant_int8 import patch_int8_linear
+            from ..quant_int8 import patch_int8_linear
             for module in model.modules():
                 if isinstance(module, torch.nn.Linear) and module.weight.dtype == torch.int8:
                     patch_int8_linear(module, module.scale_weight, module._convrot_groupsize, forward="w8a8")
@@ -90,6 +90,40 @@ class MossFamily:
 
     def lora_preset(self):
         return dict(MOSS_PRESET)
+
+    def lora_preset_for_args(self, args):
+        """Training: preset with the experimental targets (tone head / timestep modulation / image-only)."""
+        from .experimental import adapt_preset
+        return adapt_preset(self.lora_preset(), args)
+
+    def lora_preset_for_state_dict(self, keys):
+        """Inference: preset extended with the extra targets present in a LoRA file."""
+        from .experimental import preset_for_state_dict
+        return preset_for_state_dict(self.lora_preset(), keys)
+
+    def adapter_reg_dims(self, args):
+        from .experimental import extra_reg_dims
+        return extra_reg_dims(args)
+
+    def prepare_adapter_args(self, args):
+        # Per-block norms go through the shared TrainNorm path (ComfyUI .diff export)
+        if getattr(args, "moss_block_norms", False):
+            args.train_norm = True
+
+    def after_adapter_inject(self, model, injector, args):
+        from .experimental import BlockModulation, IMAGE_TOKENS_ONLY_KEY, install_image_token_mask
+        if getattr(args, IMAGE_TOKENS_ONLY_KEY, False):
+            install_image_token_mask(model, injector.network)
+            injector.metadata_extra[IMAGE_TOKENS_ONLY_KEY] = "true"
+        if getattr(args, "moss_block_modulation", False):
+            network = injector.network
+            module = BlockModulation(
+                len(model.layers), model.dim, int(getattr(args, "moss_block_modulation_rank", 4)),
+                lambda: float(getattr(network, "multiplier", 1.0)),
+                device=next(model.parameters()).device,
+            )
+            module.attach(model)
+            injector.extras.append(module)
 
     def lora_metadata(self):
         return {"model_family": "moss_image", "ss_base_model_version": "moss_image",

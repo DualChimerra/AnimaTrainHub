@@ -13,6 +13,7 @@ from typing import Any, Optional
 from .... import secrets
 from ..paths import (
     custom_text_encoder_dir,
+    model_type_dir,
     models_root,
     qwen_image_vae_target,
     resolve_vae_path,
@@ -57,11 +58,11 @@ def anima_main_target(root: Path, variant: str) -> Path:
         variant = LATEST_ANIMA
     if variant not in ANIMA_VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
-    return root / "diffusion_models" / Path(ANIMA_VARIANTS[variant]).name
+    return model_type_dir(root, "diffusion_models") / Path(ANIMA_VARIANTS[variant]).name
 
 
 def qwen_dir(root: Path) -> Path:
-    return root / "text_encoders"
+    return model_type_dir(root, "text_encoders")
 
 
 def t5_tokenizer_dir(root: Path) -> Path:

@@ -137,6 +137,10 @@ class LycorisAdapter:
         self.rs_lora = rs_lora
         self.train_norm = train_norm
         self.norms = None
+        # Family-owned extra trainable modules saved in the same file (MOSS per-block
+        # modulation). Each provides parameters(), state_dict(), load(sd) -> remaining sd
+        # and detach(); see training/families/moss_image/experimental.py.
+        self.extras: list[Any] = []
         self.text_adapter = None
         self._text_model = None
         self.text_encoder_lr = text_encoder_lr
@@ -226,6 +230,12 @@ class LycorisAdapter:
         # bypass forward doesn't go through the wd branch, which would silently disable
         # DoRA; guarded here. See lycoris docs/Network-Args.md "Bypass Mode".
         if self.algo in {"lora", "tlora"} and not self.weight_decompose:
+            extra["bypass_mode"] = True
+        # Callers that patch the LoRA diff per token (MOSS image-tokens-only) need the
+        # separate diff path for every algorithm, LoKr / LoHa included.
+        if getattr(self, "force_bypass", False):
+            if self.weight_decompose:
+                raise ValueError("A token-masked LoRA needs the bypass forward, which DoRA does not use")
             extra["bypass_mode"] = True
 
         # Krea2 FP8 checkpoints keep frozen Linear weights in float8 and
@@ -573,6 +583,9 @@ class LycorisAdapter:
         if self.norms is not None:
             self.norms.detach()
             self.norms = None
+        for extra in self.extras:
+            extra.detach()
+        self.extras = []
         if self.network is None:
             return True
 
@@ -617,7 +630,7 @@ class LycorisAdapter:
             return []
         return [p for p in self.network.parameters() if p.requires_grad] + (
             self.norms.parameters() if self.norms is not None else []
-        )
+        ) + [p for extra in self.extras for p in extra.parameters() if p.requires_grad]
 
     def get_param_groups(self, weight_decay: float) -> list[dict]:
         groups = self._main_param_groups(weight_decay)
@@ -650,6 +663,7 @@ class LycorisAdapter:
                     decay.append(p)
         if self.norms is not None:
             decay.extend(self.norms.parameters())
+        decay.extend(p for extra in self.extras for p in extra.parameters() if p.requires_grad)
         return [
             {"params": decay, "weight_decay": weight_decay},
             {"params": no_decay, "weight_decay": 0.0},
@@ -666,6 +680,8 @@ class LycorisAdapter:
         sd = self.network.state_dict()
         if self.norms is not None:
             sd.update(self.norms.state_dict())
+        for extra in self.extras:
+            sd.update(extra.state_dict())
         if self.text_adapter is not None:
             sd.update(self.text_adapter.state_dict())
         return sd
@@ -684,6 +700,14 @@ class LycorisAdapter:
         missing_norms = []
         if self.norms is not None:
             sd, missing_norms = self.norms.load(sd)
+        for extra in self.extras:
+            sd = extra.load(sd)
+        # Extra-module keys nobody consumed (e.g. a Generate hot-swap onto an adapter built
+        # without them): fail so the caller rebuilds the adapter instead of dropping them
+        leftover = sorted({key.split(".", 1)[0] for key in sd if key.startswith("moss_block_mod.")})
+        if leftover:
+            raise ValueError("This LoRA contains MOSS per-block modulation weights; rebuild the adapter "
+                             "with per-block modulation enabled to load them")
         result = self.network.load_state_dict(sd, strict=strict)
         if strict and missing_norms:
             raise RuntimeError(f"Missing normalization weights: {missing_norms}")

@@ -1,5 +1,7 @@
 """Residency and forward for ComfyUI ``int8_tensorwise + convrot`` weights (MOSS design §5.4).
 
+Family-neutral: MOSS and Krea2 both load ConvRot INT8 checkpoints through this module.
+
 Format (comfy-kitchen 0.2.38 ``tensor/int8_utils.py`` /
 ``backends/eager/quantization.py``, Apache-2.0, see THIRD_PARTY_NOTICES):
 
@@ -67,15 +69,20 @@ def hadamard(size: int, *, device=None, dtype: torch.dtype = torch.float32) -> T
 
 
 def parse_comfy_quant(blob: Tensor | bytes) -> dict:
-    """Parse a ``{layer}.comfy_quant`` U8 blob; raise unless it is int8_tensorwise + convrot."""
+    """Parse a ``{layer}.comfy_quant`` U8 blob; raise unless it is int8_tensorwise + convrot.
+
+    ComfyUI-INT8-Fast writes the spec without ``format`` (``{"convrot": true, "convrot_groupsize": 256,
+    "per_row": true}``); the int8 weight dtype already implies int8_tensorwise, so a missing format is accepted.
+    """
     raw = bytes(blob.tolist()) if isinstance(blob, Tensor) else bytes(blob)
     try:
         conf = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError(f"comfy_quant config is not valid JSON: {exc}") from exc
-    if conf.get("format") != INT8_CONVROT_FORMAT or not conf.get("convrot"):
+    if not isinstance(conf, dict) or conf.get("format", INT8_CONVROT_FORMAT) != INT8_CONVROT_FORMAT \
+            or not conf.get("convrot"):
         raise ValueError(
-            f"MOSS only supports {INT8_CONVROT_FORMAT} + convrot int8 weights, got {conf}"
+            f"Only {INT8_CONVROT_FORMAT} + convrot int8 weights are supported, got {conf}"
         )
     group = int(conf.get("convrot_groupsize", 256))
     hadamard(group)  # validates the group size

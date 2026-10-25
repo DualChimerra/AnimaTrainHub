@@ -216,4 +216,6 @@ GROUP_ORDER: list[tuple[str, str, bool]] = [
     ("sample", "Sampling", False),
     ("eval_validation", "Post-training Metrics", True),
     ("monitor", "Monitoring & Progress", False),
+    ("experimental", "Experimental", False),
+    ("experimental_blocks", "Per-block tone (MOSS)", False),
 ]

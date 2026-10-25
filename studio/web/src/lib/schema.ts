@@ -112,6 +112,8 @@ export const SCHEMA_GROUP_LABEL_KEYS: Record<string, string> = {
   sample: 'schema.groups.sample',
   eval_validation: 'schema.groups.evalValidation',
   monitor: 'schema.groups.monitor',
+  experimental: 'schema.groups.experimental',
+  experimental_blocks: 'schema.groups.experimentalBlocks',
 }
 
 export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {

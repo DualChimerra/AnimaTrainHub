@@ -47,8 +47,8 @@ def load_frozen_weights(model, path, *, rename, split=None, quantize=False,
                         quant_target=lambda key: False, device='cpu', layer_prefix='layers.',
                         offload_layers=0, dtype=torch.bfloat16, qfloat8=False):
     """Assign one tensor at a time; quantization never materializes the full bf16 model."""
-    from .convrot import quantize_weight_convrot, parse_comfy_quant_spec
-    from .convrot import _patch_convrot_int8_linear, _patch_convrot_int8_embedding
+    from modeling.convrot import quantize_weight_convrot, parse_comfy_quant_spec
+    from modeling.convrot import _patch_convrot_int8_linear, _patch_convrot_int8_embedding
     device = torch.device(device)
     model.requires_grad_(False)
     expected = set(model.state_dict())

@@ -19,7 +19,7 @@ repository.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -55,6 +55,13 @@ _FLOAT_DTYPES = {
 # are supported -- weights are never silently upcast back to bf16 (that would
 # lose precision for zero VRAM benefit, A7'/C13).
 _FP8_DTYPES = {"F8_E4M3", "F8_E5M2"}
+# ComfyUI ConvRot INT8 (``int8_tensorwise`` + convrot, e.g. ComfyUI-INT8-Fast's
+# Krea2 files): ``{layer}.weight`` I8 in the rotated basis + row-wise F32
+# ``{layer}.weight_scale`` [out, 1] + ``{layer}.comfy_quant`` U8 JSON spec.
+# int8 stays resident as-is, same as fp8 (training: fused ConvRot autograd
+# forward, generation: comfy-kitchen W8A8, see _patch_int8_layers).
+_INT8_DTYPE = "I8"
+_COMFY_QUANT_SUFFIX = ".comfy_quant"
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,8 @@ class Krea2CheckpointInfo:
     prefix: str
     key_count: int
     parameter_count: int
+    #: ConvRot INT8 layer -> group size (empty for bf16 / fp8 checkpoints)
+    convrot_groups: dict[str, int] = field(default_factory=dict)
 
 
 def _checkpoint_path(path: str | Path) -> Path:
@@ -131,11 +140,13 @@ def _inspect(
     expected_shapes: dict[str, tuple[int, ...]] | None = None,
     allow_fp8: bool = False,
 ) -> tuple[Krea2CheckpointInfo, dict[str, str], dict[str, str]]:
-    """Validate the checkpoint and return (info, weight key mapping, fp8 scale key mapping).
+    """Validate the checkpoint and return (info, weight key mapping, scale key mapping).
 
-    When ``allow_fp8=True`` (the inference path): fp8 weights are accepted;
-    ``{layer}.weight_scale`` F32 scalar keys are collected separately (the
-    fp8_scaled form) and excluded from the key-set comparison.
+    When ``allow_fp8=True`` (every real load): quantized weights are accepted --
+    fp8 (``{layer}.weight_scale`` F32 scalar, the fp8_scaled form) and ConvRot
+    INT8 (``{layer}.weight_scale`` F32 [out, 1] + ``{layer}.comfy_quant``).
+    Scale and spec keys are collected separately and excluded from the key-set
+    comparison; INT8 group sizes come back in ``info.convrot_groups``.
     """
     checkpoint = _checkpoint_path(path)
     if expected_shapes is None:
@@ -153,6 +164,7 @@ def _inspect(
         # that explicitly pass allow_fp8=False still get them flagged as
         # "unexpected".
         scale_to_source: dict[str, str] = {}
+        spec_to_source: dict[str, str] = {}
         source_keys = []
         for source_key in all_source_keys:
             normalized = _normalize_key(source_key, prefix)
@@ -160,6 +172,11 @@ def _inspect(
                 layer = normalized[: -len(".weight_scale")]
                 if f"{layer}.weight" in expected_keys:
                     scale_to_source[layer] = source_key
+                    continue
+            if allow_fp8 and normalized.endswith(_COMFY_QUANT_SUFFIX):
+                layer = normalized[: -len(_COMFY_QUANT_SUFFIX)]
+                if f"{layer}.weight" in expected_keys:
+                    spec_to_source[layer] = source_key
                     continue
             source_keys.append(source_key)
         normalized_to_source: dict[str, str] = {}
@@ -181,6 +198,7 @@ def _inspect(
         shape_mismatches = []
         dtype_mismatches = []
         fp8_keys = []
+        int8_keys = []
         for normalized in sorted(expected_keys & actual_keys):
             source_key = normalized_to_source[normalized]
             tensor_slice = handle.get_slice(source_key)
@@ -193,6 +211,8 @@ def _inspect(
             actual_dtype = tensor_slice.get_dtype()
             if actual_dtype in _FP8_DTYPES:
                 fp8_keys.append(normalized)
+            elif actual_dtype == _INT8_DTYPE and allow_fp8 and normalized.endswith(".weight"):
+                int8_keys.append(normalized)
             elif actual_dtype not in _FLOAT_DTYPES:
                 dtype_mismatches.append(f"{normalized}: {actual_dtype}")
         if fp8_keys and not allow_fp8:
@@ -200,16 +220,53 @@ def _inspect(
                 f"Krea2 checkpoint contains fp8 params ({len(fp8_keys)}, e.g. "
                 f"{fp8_keys[0]}), but the caller requires full-precision weights."
             )
-        # fp8_scaled consistency: a layer with a scale must have fp8 weights;
-        # a layer declared in metadata with neither fp8 weights nor a scale is a malformed file
+        convrot_groups: dict[str, int] = {}
+        # fp8_scaled / ConvRot INT8 consistency: a layer with a scale must have
+        # fp8 or int8 weights; an int8 layer needs both its scale and its
+        # comfy_quant spec; a layer declared in metadata with neither fp8
+        # weights nor a scale is a malformed file
         if allow_fp8:
             fp8_set = set(fp8_keys)
+            int8_set = set(int8_keys)
+            if fp8_set and int8_set:
+                errors.append(
+                    f"mixes fp8 ({len(fp8_set)}) and int8 ({len(int8_set)}) layers; "
+                    "use a checkpoint with a single quantization format"
+                )
             for layer in scale_to_source:
-                if f"{layer}.weight" not in fp8_set:
-                    errors.append(f"{layer} has weight_scale but its weight isn't fp8")
+                weight = f"{layer}.weight"
+                if weight not in fp8_set and weight not in int8_set:
+                    errors.append(f"{layer} has weight_scale but its weight isn't fp8 or int8")
             for layer in quant_meta:
                 if f"{layer}.weight" not in fp8_set:
                     errors.append(f"metadata declares quantized layer {layer} but its weight isn't fp8")
+            for layer in spec_to_source:
+                if f"{layer}.weight" not in int8_set:
+                    errors.append(f"{layer} has comfy_quant but its weight isn't int8")
+            if int8_set:
+                from training.families.quant_int8 import parse_comfy_quant
+
+                for weight in sorted(int8_set):
+                    layer = weight[: -len(".weight")]
+                    scale_key = scale_to_source.get(layer)
+                    spec_key = spec_to_source.get(layer)
+                    if scale_key is None or spec_key is None:
+                        errors.append(f"int8 layer {layer} is missing its weight_scale or comfy_quant")
+                        continue
+                    out_features = expected_shapes[weight][0]
+                    scale_shape = tuple(handle.get_slice(scale_key).get_shape())
+                    if scale_shape not in ((out_features, 1), (out_features,)):
+                        errors.append(f"int8 layer {layer} weight_scale shape {scale_shape} != ({out_features}, 1)")
+                        continue
+                    try:
+                        group = parse_comfy_quant(handle.get_tensor(spec_key))["convrot_groupsize"]
+                    except ValueError as exc:
+                        errors.append(f"int8 layer {layer}: {exc}")
+                        continue
+                    if expected_shapes[weight][1] % group:
+                        errors.append(f"int8 layer {layer} in_features is not divisible by convrot group size {group}")
+                        continue
+                    convrot_groups[layer] = group
         if shape_mismatches:
             sample = "; ".join(shape_mismatches[:5])
             suffix = " ..." if len(shape_mismatches) > 5 else ""
@@ -230,6 +287,7 @@ def _inspect(
             prefix=prefix,
             key_count=len(source_keys),
             parameter_count=parameter_count,
+            convrot_groups=convrot_groups,
         ),
         normalized_to_source,
         scale_to_source,
@@ -250,7 +308,7 @@ def inspect_krea2_checkpoint(
 ) -> Krea2CheckpointInfo:
     """Validate keys and shapes from the safetensors header without reading payloads.
 
-    Both bf16 and fp8 (scaled / plain cast) are valid checkpoint forms.
+    bf16, fp8 (scaled / plain cast) and ConvRot INT8 are valid checkpoint forms.
     """
     info, _, _ = _inspect(path, config, allow_fp8=True)
     return info
@@ -390,7 +448,7 @@ def _swapped_pinned_bytes(
 
     Differs from ``_swapped_bytes_from_checkpoint`` (whose convention is the
     budget-guardrail figure = the checkpoint's raw bytes): this must mirror
-    ``load_krea2_model``'s actual write-out rule -- fp8 tensors are pinned
+    ``load_krea2_model``'s actual write-out rule -- fp8 / int8 tensors are pinned
     as-is (at checkpoint dtype), everything else is first cast to the
     compute dtype and then pinned (at ``dtype``). The planned number needs to
     be **exact**: overestimating wastes pinned memory (the packer
@@ -411,7 +469,11 @@ def _swapped_pinned_bytes(
                 for dim in slice_.get_shape():
                     numel *= dim
                 name = str(slice_.get_dtype()).upper()
-                per_elem = _dtype_size(name) if name.startswith("F8_") else compute_size
+                per_elem = (
+                    _dtype_size(name)
+                    if name.startswith("F8_") or name == _INT8_DTYPE
+                    else compute_size
+                )
                 total += numel * per_elem
     except Exception:  # noqa: BLE001
         return 0
@@ -480,8 +542,10 @@ def load_krea2_model(
     peak at the full model's size. Once loaded, these CPU tensors are taken
     over in place by ``training.block_swap.PinnedBlockSwap``.
 
-    ``purpose`` currently doesn't affect loading behavior; kept for semantic
-    annotation at call sites.
+    ConvRot INT8 checkpoints are handled the same way (int8 resident as-is,
+    swapped layers pinned at 1 byte/param). ``purpose`` only picks their
+    Linear forward: ``"generate"`` uses comfy-kitchen's W8A8 (ComfyUI parity),
+    anything else the fused ConvRot autograd forward used for training.
     """
     if dtype not in {torch.float16, torch.bfloat16, torch.float32, torch.float64}:
         raise ValueError(f"Krea2 loader does not support dtype={dtype}")
@@ -491,15 +555,17 @@ def load_krea2_model(
     allow_fp8 = True
 
     model, expected_shapes = _expected_state(config)
-    _, normalized_to_source, scale_to_source = _inspect(
+    info, normalized_to_source, scale_to_source = _inspect(
         path,
         config,
         expected_shapes=expected_shapes,
         allow_fp8=allow_fp8,
     )
+    convrot_groups = info.convrot_groups
 
     state_dict = {}
     fp8_scales: dict[str, torch.Tensor | None] = {}
+    int8_scales: dict[str, torch.Tensor] = {}
     checkpoint = _checkpoint_path(path)
 
     swapped_prefixes = _swapped_block_prefixes(config, blocks_to_swap)
@@ -524,13 +590,24 @@ def load_krea2_model(
     with safe_open(str(checkpoint), framework="pt", device="cpu") as handle:
         for normalized, source_key in normalized_to_source.items():
             tensor = handle.get_tensor(source_key)
-            if not tensor.is_floating_point():
+            int8_layer = (
+                normalized[: -len(".weight")]
+                if tensor.dtype == torch.int8 and normalized.endswith(".weight")
+                else None
+            )
+            if int8_layer not in convrot_groups and not tensor.is_floating_point():
                 raise ValueError(
                     f"Krea2 checkpoint contains a non-float param {source_key}: {tensor.dtype}"
                 )
             # Swapped-out layers never go to the GPU: they land directly in CPU pinned memory (see docstring)
             swapped = normalized.startswith(swapped_prefixes) if swapped_prefixes else False
-            if allow_fp8 and tensor.dtype in (
+            if int8_layer is not None:
+                # int8 stays resident as-is, like fp8
+                state_dict[normalized] = (
+                    packer.pin(tensor) if swapped
+                    else tensor.to(device=target_device)
+                )
+            elif allow_fp8 and tensor.dtype in (
                 torch.float8_e4m3fn, torch.float8_e5m2,
             ):
                 # fp8 stays resident as-is (this is where the VRAM savings come from), no dtype cast
@@ -549,13 +626,18 @@ def load_krea2_model(
                     dtype=dtype,
                 )
         for layer, source_key in scale_to_source.items():
-            fp8_scales[layer] = handle.get_tensor(source_key).to(
-                device=target_device,
-            )
+            # scale always goes on the compute device (block swap only streams parameters)
+            scale = handle.get_tensor(source_key).to(device=target_device)
+            if layer in convrot_groups:
+                int8_scales[layer] = scale
+            else:
+                fp8_scales[layer] = scale
 
+    # Freeze before the assign load: it re-wraps incoming tensors with the meta
+    # params' requires_grad, and int8 tensors cannot require grad
+    model.requires_grad_(False)
     model.load_state_dict(state_dict, strict=True, assign=True)
     del state_dict
-    model.requires_grad_(False)
     if packer is not None:
         logger.info(
             "block swap pinned: %.2f GB of weights packed into %d chunks, %.2f GB actually locked (%d overflow chunks)",
@@ -567,4 +649,43 @@ def load_krea2_model(
         # are on CPU right now, and following them would cause a device
         # mismatch at forward time (see patch_fp8_linears docstring)
         patch_fp8_linears(model, fp8_scales, device=target_device)
+    if int8_scales:
+        _patch_int8_layers(model, int8_scales, convrot_groups, purpose=purpose)
+    model.is_convrot_int8 = bool(int8_scales)
     return model
+
+
+def _patch_int8_layers(
+    model: SingleStreamDiT,
+    scales: dict[str, torch.Tensor],
+    groups: dict[str, int],
+    *,
+    purpose: str,
+) -> None:
+    """Attach the ConvRot INT8 forward to every int8 Linear (scale = non-persistent buffer).
+
+    - generation: comfy-kitchen eager W8A8 (bit-exact ComfyUI parity, same as MOSS)
+    - training: the fused Triton ConvRot autograd forward (sd-scripts / musubi),
+      backward ``bf16`` = transient dequant, the base stays frozen; without
+      triton it falls back to an eager dequant forward
+    """
+    modules = dict(model.named_modules())
+    if purpose == "generate":
+        from training.families.quant_int8 import patch_int8_linear
+
+        for layer, scale in scales.items():
+            patch_int8_linear(modules[layer], scale, groups[layer], forward="w8a8")
+    else:
+        from modeling.convrot import _patch_convrot_int8_linear, _validate_convrot_bwd_mode
+
+        _validate_convrot_bwd_mode("bf16")
+        for layer, scale in scales.items():
+            module = modules[layer]
+            module.register_buffer(
+                "scale_weight", scale.reshape(-1, 1).to(torch.float32), persistent=False,
+            )
+            _patch_convrot_int8_linear(module, groups[layer], "bf16")
+    logger.info(
+        "Krea2 ConvRot INT8: attached %s forward to %d Linear layers",
+        "W8A8" if purpose == "generate" else "training", len(scales),
+    )

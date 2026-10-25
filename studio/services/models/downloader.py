@@ -58,6 +58,7 @@ from .paths import (
     cltagger_required_files,
     cltagger_target_root,
     eval_model_target_dir,
+    model_type_dir,
     models_root,
     qwen_image_vae_target,
     selected_upscaler,
@@ -363,7 +364,7 @@ def download_main_custom(
         on_log(f"✗ Only .safetensors is supported, got {save_name!r}")
         return False
     r = root or models_root()
-    target = r / "diffusion_models" / save_name
+    target = model_type_dir(r, "diffusion_models") / save_name
     on_log(f"\n\U0001F4E5 Custom base model {repo_id}/{filename} -> {target}")
     return _sources.download_flat(repo_id, filename, target, on_log=on_log)
 
@@ -732,7 +733,7 @@ def delete_asset(model_id: str, variant: Optional[str] = None) -> None:
         if not variant:
             raise ValueError(f"{model_id} needs variant=filename")
         key = f"{model_id}:{variant}"
-        target = root / "diffusion_models" / Path(variant).name
+        target = model_type_dir(root, "diffusion_models") / Path(variant).name
     else:
         raise ValueError(f"asset {model_id!r} does not support deletion")
 

@@ -1248,6 +1248,91 @@ class TrainingConfig(BaseModel):
             disable_hint="Leap (per-sample loss has no spatial dimension) / NaViT packing paths don't support masks (mutually exclusive by schema)",
         ),
     )
+    # ------------------------------------------------------------ Experimental
+    anti_fade: bool = Field(
+        False,
+        description="Anti-fade: adds two small penalties on the clean-image estimate (x0 = x_t - t·v) so the model can't hedge with a pale, blurry average — contrast (per-channel spread below the real image's) and edges (line / shadow-border strength below the real image's). Latent-space approximation, no VAE decode",
+        json_schema_extra=_meta(
+            "experimental",
+            disable_when="leap_enabled==true||navit_packing==true",
+            disable_hint="Leap / NaViT packing use their own loss paths without a single x0 estimate (mutually exclusive by schema)",
+        ),
+    )
+    anti_fade_contrast: float = Field(
+        0.1, ge=0.0, le=1.0,
+        description="Anti-fade: contrast penalty strength relative to the main loss. 0.05–0.2 is the working range; higher values push toward over-saturation",
+        json_schema_extra=_meta("experimental", show_when="anti_fade==true"),
+    )
+    anti_fade_edges: float = Field(
+        0.1, ge=0.0, le=1.0,
+        description="Anti-fade: edge penalty strength relative to the main loss. 0.05–0.2 is the working range; higher values give harsh, noisy sharpening",
+        json_schema_extra=_meta("experimental", show_when="anti_fade==true"),
+    )
+    anti_fade_range: float = Field(
+        0.0, ge=0.0, le=1.0,
+        description="Anti-fade: shadow / highlight depth penalty — the darkest and brightest 5% of each latent channel pulled inward compared with the real image. The contrast term mostly sees mid-tones; this one looks only at the ends of the range. 0 = off, 0.05–0.15 working range; higher values crush shadows and blow highlights",
+        json_schema_extra=_meta("experimental", show_when="anti_fade==true"),
+    )
+    anti_fade_max_t: float = Field(
+        0.9, gt=0.0, le=1.0,
+        description="Anti-fade: apply only to steps with noise level t at or below this value. Near pure noise the clean-image estimate is a legitimately blurry guess, and forcing contrast there adds noise",
+        json_schema_extra=_meta("experimental", show_when="anti_fade==true", advanced=True),
+    )
+    moss_tone_head: bool = Field(
+        False,
+        description="MOSS tone head: also train the output layer (final_linear_video) and its per-timestep scale/shift (video_head_modulation). These turn the transformer's result into latent colors, so the LoRA gets a direct handle on palette, saturation, shadow depth and contrast instead of reaching them through 42 blocks",
+        json_schema_extra=_meta("experimental", show_when="model_family==moss_image"),
+    )
+    moss_tone_head_rank: int = Field(
+        16, ge=1, le=128,
+        description="MOSS tone head: LoRA rank of the output layer and head modulation. The output layer has only 128 channels, so 8–32 is plenty",
+        json_schema_extra=_meta("experimental", show_when="model_family==moss_image&&moss_tone_head==true"),
+    )
+    moss_time_modulation: bool = Field(
+        False,
+        description="MOSS timestep modulation: also train shared_block_modulation, the single per-noise-level control (shift / scale / gate) that all 42 blocks share. Lets the LoRA act differently at early steps (palette, composition) and late steps (lines, detail). It changes the whole model at once, so keep the rank small",
+        json_schema_extra=_meta("experimental", show_when="model_family==moss_image"),
+    )
+    moss_time_modulation_rank: int = Field(
+        4, ge=1, le=64,
+        description="MOSS timestep modulation: LoRA rank of shared_block_modulation. Its input is only the timestep embedding, so 2–8 is enough; larger ranks risk destabilising every block",
+        json_schema_extra=_meta("experimental", show_when="model_family==moss_image&&moss_time_modulation==true"),
+    )
+    moss_block_norms: bool = Field(
+        False,
+        description="MOSS per-block norms: also train the norm1 / norm2 weights of all 42 blocks — a per-block, per-channel gain in front of attention and the FFN (how loud each feature is at each depth: early blocks set the overall tone, late blocks the contrast of fine detail). 84 small vectors; exported as ComfyUI .diff keys, so it works in ComfyUI too",
+        json_schema_extra=_meta(
+            "experimental_blocks",
+            show_when="model_family==moss_image",
+            disable_when="lora_type==ortho||lora_type==tlora||use_riemannian==true",
+            disable_hint="Norm training works with LoRA, LoKr and LoHa; OrthoLoRA, T-LoRA and Riemannian take other paths",
+        ),
+    )
+    moss_block_modulation: bool = Field(
+        False,
+        description="MOSS per-block modulation: give every block its own small, timestep-dependent offset to the shared shift / scale / gate (Anima has a separate modulation in each block, MOSS shares one). Lets the LoRA set tone per depth and per noise level — e.g. richer palette on early steps, darker lines on late ones. New parameters: works in training, training samples and the studio's Generate, ComfyUI ignores it",
+        json_schema_extra=_meta(
+            "experimental_blocks",
+            show_when="model_family==moss_image",
+            disable_when="use_riemannian==true||navit_packing==true",
+            disable_hint="Needs the standard MOSS forward: Riemannian and NaViT packing take other paths",
+        ),
+    )
+    moss_block_modulation_rank: int = Field(
+        4, ge=1, le=32,
+        description="MOSS per-block modulation: rank of each block's offset. Its input is only the timestep, so 2–8 is enough; it changes every block, so larger ranks risk destabilising the model",
+        json_schema_extra=_meta("experimental_blocks", show_when="model_family==moss_image&&moss_block_modulation==true"),
+    )
+    moss_image_tokens_only: bool = Field(
+        False,
+        description="MOSS image-tokens-only LoRA: the LoRA correction is applied only to image tokens; text tokens pass through the blocks exactly as in the base model, and the text refiner is not trained. The model reads the prompt like the base and the LoRA changes only how it draws. Works in training, training samples and Generate with a bf16 base; ComfyUI and the INT8 merge apply the LoRA to all tokens",
+        json_schema_extra=_meta(
+            "experimental",
+            show_when="model_family==moss_image",
+            disable_when="use_riemannian==true||navit_packing==true||lora_dora==true",
+            disable_hint="Needs the LyCORIS bypass forward on a single image sequence: Riemannian, NaViT packing and DoRA take other paths",
+        ),
+    )
     min_snr_gamma: float = Field(
         5.0, ge=0.1, le=20.0,
         description="Min-SNR threshold: weight-suppression threshold for high-SNR, easy steps (low-t end). Default 5.0; smaller = stronger suppression",

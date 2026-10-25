@@ -988,7 +988,7 @@ export default function TrainPage() {
 // TrainSystem / TrainOutput)
 // ---------------------------------------------------------------------------
 
-type TrainTabId = 'model' | 'data' | 'optim' | 'system' | 'finish'
+type TrainTabId = 'model' | 'data' | 'optim' | 'system' | 'experimental' | 'finish'
 
 /** Which schema groups each tab of the form shows. */
 /** How the network type reads in the page subtitle (the mockup writes "LoKr r32"). */
@@ -999,6 +999,7 @@ const TRAIN_TABS = [
   { id: 'data', groups: ['dataset', 'caption'] },
   { id: 'optim', groups: ['training', 'timestep_sampling', 'loss', 'noise_augmentation'] },
   { id: 'system', groups: ['system', 'output', 'sample', 'eval_validation', 'monitor'] },
+  { id: 'experimental', groups: ['experimental', 'experimental_blocks'] },
   { id: 'finish', groups: ['output'] },
 ] as const satisfies ReadonlyArray<{ id: TrainTabId; groups: readonly string[] }>
 

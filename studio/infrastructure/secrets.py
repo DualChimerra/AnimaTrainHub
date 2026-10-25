@@ -10,7 +10,7 @@ import json
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from .paths import STUDIO_DATA
 
@@ -588,11 +588,29 @@ class ModelsConfig(BaseModel):
     selected_vae_by_family: dict[str, str] = Field(default_factory=dict)
     # Additional folders scanned by the three generic weight lists.
     weight_folders: dict[str, list[str]] = Field(default_factory=dict)
+    # Per-type model folders that replace `{root}/<type>` (e.g. ComfyUI/models/diffusion_models, so
+    # weights are not stored twice): "diffusion_models" | "vae" | "text_encoders" -> absolute path,
+    # missing/empty = under root. Both the weight lists and the studio's own downloads use them.
+    type_dirs: dict[str, str] = Field(default_factory=dict)
     # Per-family local main-model paths. The old custom_anima_paths key is migrated by the
     # validator; the computed_field keeps a read surface for older clients.
     custom: dict[str, list[str]] = Field(default_factory=dict)
     selected_upscaler: str = "4x-AnimeSharp"
     auto_sync_paths: bool = True
+
+    @field_validator("type_dirs")
+    @classmethod
+    def _validate_type_dirs(cls, value: dict[str, str]) -> dict[str, str]:
+        out = {}
+        for kind, path in value.items():
+            if kind not in ("diffusion_models", "vae", "text_encoders"):
+                raise ValueError(f"unknown model type folder {kind!r}")
+            text = str(path or "").strip()
+            if text and not is_abs_path(text):
+                raise ValueError(f"{kind} folder must be an absolute path: {text!r}")
+            if text:
+                out[kind] = text
+        return out
 
     @model_validator(mode="before")
     @classmethod

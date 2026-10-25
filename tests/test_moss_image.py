@@ -161,7 +161,7 @@ def test_discovery_reads_headers_and_keeps_families_separate(tmp_path):
 
 
 def test_prequantized_checkpoint_preserves_boundary_compute_dtype(tmp_path):
-    from modeling.moss_image.convrot import quantize_weight_convrot
+    from modeling.convrot import quantize_weight_convrot
     model = tiny_model().eval().requires_grad_(False)
     state = dict(model.state_dict())
     for key in ('video_embedder.weight', 'layers.0.proj.q.weight'):

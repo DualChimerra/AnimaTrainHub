@@ -90,7 +90,7 @@ def load_text_model(path, device, *, quantization="none", offload_layers=0):
         offload_layers=offload_layers, quantize=quantization == "convrot_int8",
         quant_target=lambda key: any(part in key for part in targets), qfloat8=quantization == "qfloat8")
     if getattr(model, 'is_convrot_int8', False):
-        from .quant_int8 import patch_int8_linear
+        from ..quant_int8 import patch_int8_linear
         for module in model.modules():
             if isinstance(module, torch.nn.Linear) and module.weight.dtype == torch.int8:
                 patch_int8_linear(module, module.scale_weight, module._convrot_groupsize, forward="dequant")

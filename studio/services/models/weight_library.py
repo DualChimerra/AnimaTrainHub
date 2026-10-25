@@ -80,6 +80,7 @@ def identify(path, category):
 def build_library(root, cfg, sections, sources):
     from .families import FAMILY_ASSETS
     from .families.moss_image import asset_files
+    from .paths import model_type_dir
     result = {}
     active_family = cfg.active_family
     for section in sections.values():
@@ -87,7 +88,8 @@ def build_library(root, cfg, sections, sources):
             for custom in section.get("custom", []):
                 custom["name"] = weight_label(Path(custom["path"]))
     for category, subdir in CATEGORIES.items():
-        folders = [str(root / subdir)]
+        # The type's own folder from Settings (e.g. ComfyUI's), otherwise {root}/<type>
+        folders = [str(model_type_dir(root, subdir))]
         rows, errors, seen = [], [], set()
 
         def add(path, families, *, source=None, value=None, exists=None):
@@ -152,7 +154,11 @@ def build_library(root, cfg, sections, sources):
                     p = base / name
                     try:
                         families = identify(p, category)
-                        target = base if category == "text_encoders" and (base / "config.json").is_file() else p
+                        # A shared folder (ComfyUI's) holds many models of other architectures:
+                        # list only the ones the studio can train or generate with
+                        if not families and directory != root / subdir:
+                            continue
+                        target =base if category == "text_encoders" and (base / "config.json").is_file() else p
                         # Official encoder directories also cover all their shards.
                         if os.path.normcase(str(target.resolve())) in seen:
                             continue

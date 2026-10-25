@@ -522,6 +522,9 @@ export interface ModelsConfig {
   selected_vae?: string
   selected_vae_by_family?: Record<string, string>
   weight_folders?: Record<string, string[]>
+  /** Per-type model folders replacing `{root}/<type>` ("diffusion_models" | "vae" | "text_encoders"),
+   * e.g. ComfyUI's, so weights aren't stored twice. Used for scanning and for studio downloads. */
+  type_dirs?: Record<string, string>
   /** User-registered local custom base models (.safetensors absolute paths). Used for fine-tune
    * training / test generation on fine-tuned weights; only registers the path, doesn't download or copy. */
   custom_anima_paths: string[]
