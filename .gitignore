@@ -116,3 +116,15 @@ _ui_backup/
 
 # Local research notes (contain private training names)
 /docs/research/
+
+# noise_gap_probe outputs
+noise_probe_out/
+
+# Downloaded text encoder folders (multi-GB weights)
+models/text_encoders/*/
+
+# Local-only files: shortcuts, scan dumps, one-off scripts, third-party article images
+*.lnk
+scan*.txt
+fix_paths_after_rename.py
+article_translation_assets/

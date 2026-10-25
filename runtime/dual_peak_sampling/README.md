@@ -15,7 +15,7 @@ AnimaTrainHub: its runtime directory already exposes this package.
 import torch
 from dual_peak_sampling import DualPeakConfig, sample_timesteps, density
 
-config = DualPeakConfig(peak1_position=0.525, peak2_position=0.85)
+config = DualPeakConfig(peak1_position=0.54, peak2_position=0.85)
 generator = torch.Generator(device="cpu").manual_seed(42)
 t = sample_timesteps(4096, "cpu", config, generator=generator)
 x = torch.linspace(0.001, 0.999, 10000, dtype=torch.float64)
@@ -36,10 +36,22 @@ coefficient with noise-to-signal sigma `t/(1-t)`, or a width in log-SNR units.
 
 | Component | Location | Width in log-SNR | Relative weight |
 |---|---|---|---|
-| First peak | component mode t=0.525 | 0.55 | 0.15 |
-| Second peak | component mode t=0.850 | 1.20 | 0.35 |
-| Broad Style-Friendly background | log-SNR mean=-3.2 | 2.20 | 0.45 |
-| Uniform coverage | entire interval | — | 0.05 |
+| First peak | component mode t=0.540 | 0.80 | 0.24 |
+| Second peak | component mode t=0.850 | 1.20 | 0.36 |
+| Broad Style-Friendly background | log-SNR mean=-2.8 | 2.40 | 0.34 |
+| Uniform coverage | entire interval | — | 0.06 |
+
+Why this shape (a working hypothesis for style LoRAs, not a measured optimum):
+
+- **t ≈ 0.75–0.92, second peak**: colour placement, lighting, large masses
+  (the ~900–800 band the Anima experiment found necessary for colour/lines).
+- **t ≈ 0.45–0.75, first peak**: the artist's shape language — eyes, ears,
+  noses, tails, proportions, line — the "slightly above 500" sweet spot.
+- **t ≈ 0.2–0.45, background left slope**: colour rendering in shadows and
+  highlights, edges, finish; too little here reads as "plastic" colour.
+- **t > 0.92, kept small**: composition, pose and the global colour mean.
+  Heavy mass here (Style-Friendly at mean -6 puts ~52% above 0.95) copies
+  dataset poses and burns colour under CFG.
 
 For each sample, choose **one** component with normalized weights, then draw
 from that component. Do not average component samples: that produces a different
@@ -60,16 +72,16 @@ The last equation places the **individual component's density mode** at
 to `(0, 2.8]` so that each peak remains unimodal; the broad background allows
 widths up to 6 and is specified by mean, not mode.
 
-The sum has different maxima: with defaults, approximately **540 and 870**.
+The sum has different maxima: with defaults, approximately **577 and 861**.
 The broad background contributes over the whole interval, not only the tail.
 Expected masses before optional trainer shifts (rounded):
 
 | t interval | Probability |
 |---|---|
-| 0–0.3 | 2.09% |
-| 0.3–0.6 | 21.46% |
-| 0.6–0.9 | 58.64% |
-| 0.9–1 | 17.80% |
+| 0–0.3 | 3.00% |
+| 0.3–0.6 | 26.61% |
+| 0.6–0.9 | 56.98% |
+| 0.9–1 | 13.42% |
 
 The sampler clamps results to `[1e-4, 1-1e-4]` for numerical safety. `density`
 describes the continuous mixture before that clamp, excluding its endpoint atoms.
@@ -87,16 +99,16 @@ prefixed with `dual_peak_` in the trainer:
 
 ```yaml
 timestep_sampling: dual_peak
-dual_peak_peak1_position: 0.525
-dual_peak_peak1_width: 0.55
-dual_peak_peak1_weight: 0.15
+dual_peak_peak1_position: 0.54
+dual_peak_peak1_width: 0.80
+dual_peak_peak1_weight: 0.24
 dual_peak_peak2_position: 0.85
 dual_peak_peak2_width: 1.20
-dual_peak_peak2_weight: 0.35
-dual_peak_background_mean: -3.2
-dual_peak_background_width: 2.20
-dual_peak_background_weight: 0.45
-dual_peak_uniform_weight: 0.05
+dual_peak_peak2_weight: 0.36
+dual_peak_background_mean: -2.8
+dual_peak_background_width: 2.40
+dual_peak_background_weight: 0.34
+dual_peak_uniform_weight: 0.06
 
 # Preserve the agreed curve for a controlled comparison:
 timestep_schedule_shift: 1.0

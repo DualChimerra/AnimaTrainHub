@@ -563,6 +563,7 @@ class TrainingConfig(BaseModel):
         "polynomial",
         "rex",
         "rex_annealing_warm_restarts",
+        "licatron",
     ] = Field(
         "none",
         description="Learning rate schedule (none = constant; Prodigy / PPSF / Automagic / SOAP-SF are fixed to none)",
@@ -588,7 +589,7 @@ class TrainingConfig(BaseModel):
         description="Learning rate floor: cosine / polynomial / rex / RAWR schedules stop decreasing once they reach this value; usually much smaller than the initial lr (e.g. 1e-4 initial with 1e-6 floor)",
         json_schema_extra=_meta(
             "training",
-            show_when="lr_scheduler==cosine||lr_scheduler==cosine_with_restart||lr_scheduler==cosine_with_warmup||lr_scheduler==polynomial||lr_scheduler==rex||lr_scheduler==rex_annealing_warm_restarts",
+            show_when="lr_scheduler==cosine||lr_scheduler==cosine_with_restart||lr_scheduler==cosine_with_warmup||lr_scheduler==polynomial||lr_scheduler==rex||lr_scheduler==rex_annealing_warm_restarts||lr_scheduler==licatron",
             advanced=True,
         ),
     )
@@ -610,6 +611,21 @@ class TrainingConfig(BaseModel):
         0.9, gt=0.0, le=1.0,
         description="rex / RAWR curve shape d: factor = z / ((1 - d) + d·z), z = remaining fraction. 0.5 = the REX paper; 0.9 (LoRA Easy Training Scripts default) holds the peak longer and drops more sharply at the end",
         json_schema_extra=_meta("training", show_when="lr_scheduler==rex||lr_scheduler==rex_annealing_warm_restarts", advanced=True),
+    )
+    lr_scheduler_licatron_warmup_ratio: float = Field(
+        0.05, ge=0.0, lt=1.0,
+        description="licatron: fraction of training spent on the linear warmup to the peak lr; 0.05 = the first 5%",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==licatron"),
+    )
+    lr_scheduler_licatron_constant_ratio: float = Field(
+        0.55, ge=0.0, lt=1.0,
+        description="licatron: fraction of training held at the peak lr after warmup; the remaining share decays with REX (0.05 warmup + 0.55 constant leaves 40% for REX)",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==licatron"),
+    )
+    lr_scheduler_licatron_rex_d: float = Field(
+        0.5, gt=0.0, le=1.0,
+        description="licatron: REX decay shape d, factor = z / ((1 - d) + d·z). 0.5 = the REX paper curve; higher values hold the lr longer and drop harder at the end",
+        json_schema_extra=_meta("training", show_when="lr_scheduler==licatron", advanced=True),
     )
     lr_scheduler_cycle_multiplier: float = Field(
         1.0, gt=0.0,
@@ -1064,21 +1080,21 @@ class TrainingConfig(BaseModel):
         ),
     )
     dual_peak_peak1_position: float = Field(
-        0.525, gt=0.0, lt=1.0, allow_inf_nan=False,
-        description="First component peak in flow t: 0.525 = timestep 525/1000. The mixture maximum can move.",
+        0.54, gt=0.0, lt=1.0, allow_inf_nan=False,
+        description="First component peak in flow t: 0.54 = timestep 540/1000. Defaults put the mixture maximum near 577.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
     )
     dual_peak_peak1_width: float = Field(
-        0.55, gt=0.0, le=2.8, allow_inf_nan=False,
+        0.8, gt=0.0, le=2.8, allow_inf_nan=False,
         description="First peak width (log-SNR standard deviation). Larger = wider, lower peak at the same weight.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
     )
     dual_peak_peak1_weight: float = Field(
-        0.15, ge=0.0, le=1.0, allow_inf_nan=False,
+        0.24, ge=0.0, le=1.0, allow_inf_nan=False,
         description="First peak relative weight. All four weights are normalized together; zero disables this component.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
@@ -1086,7 +1102,7 @@ class TrainingConfig(BaseModel):
     )
     dual_peak_peak2_position: float = Field(
         0.85, gt=0.0, lt=1.0, allow_inf_nan=False,
-        description="Second component peak in flow t: 0.85 = timestep 850/1000. Defaults put the mixture maximum near 870.",
+        description="Second component peak in flow t: 0.85 = timestep 850/1000. Defaults put the mixture maximum near 861.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
@@ -1099,36 +1115,36 @@ class TrainingConfig(BaseModel):
         ),
     )
     dual_peak_peak2_weight: float = Field(
-        0.35, ge=0.0, le=1.0, allow_inf_nan=False,
+        0.36, ge=0.0, le=1.0, allow_inf_nan=False,
         description="Second peak relative weight. Normalized with the other three weights.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
     )
     dual_peak_background_mean: float = Field(
-        -3.2, ge=-12.0, le=6.0, allow_inf_nan=False,
+        -2.8, ge=-12.0, le=6.0, allow_inf_nan=False,
         description="Broad Style-Friendly component log-SNR mean. Lower moves it toward high noise. This covers the whole interval, not only the right tail.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
     )
     dual_peak_background_width: float = Field(
-        2.2, gt=0.0, le=6.0, allow_inf_nan=False,
+        2.4, gt=0.0, le=6.0, allow_inf_nan=False,
         description="Broad Style-Friendly component log-SNR standard deviation.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
     )
     dual_peak_background_weight: float = Field(
-        0.45, ge=0.0, le=1.0, allow_inf_nan=False,
+        0.34, ge=0.0, le=1.0, allow_inf_nan=False,
         description="Broad background relative weight. Zero removes the broad component.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
     )
     dual_peak_uniform_weight: float = Field(
-        0.05, ge=0.0, le=1.0, allow_inf_nan=False,
-        description="Uniform coverage relative weight. Default 0.05, normalized with other weights.",
+        0.06, ge=0.0, le=1.0, allow_inf_nan=False,
+        description="Uniform coverage relative weight. Default 0.06, normalized with other weights.",
         json_schema_extra=_meta(
             "timestep_sampling", show_when="timestep_sampling==dual_peak", advanced=True,
         ),
@@ -1660,6 +1676,15 @@ class TrainingConfig(BaseModel):
             raise ValueError(
                 "lr_scheduler_decay_min_lr cannot exceed learning_rate for "
                 "constant_then_cosine"
+            )
+
+        if (
+            self.lr_scheduler == "licatron"
+            and self.lr_scheduler_licatron_warmup_ratio + self.lr_scheduler_licatron_constant_ratio >= 1.0
+        ):
+            raise ValueError(
+                "licatron: warmup ratio + constant ratio must be less than 1 "
+                "to leave room for the REX decay"
             )
         return self
 
