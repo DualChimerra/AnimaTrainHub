@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Optional
 
 import torch
 from torch.utils.data import Dataset
@@ -1126,10 +1129,15 @@ class CachedLatentDataset(Dataset):
     #: Class-level default = Anima; overridable via __init__.
     #: From PR-2b onward it's passed in via ctx.family.spec.latent.
     latent_spec = _ANIMA_LATENT
+    #: training.dataset_cache.SharedCacheRouter -- images curated from a shared
+    #: dataset keep their npz in that dataset's cache/ (content-addressed);
+    #: None = every npz is a sidecar next to its image (the classic layout).
+    shared_cache = None
 
     def __init__(self, base_dataset, vae, device, dtype, cache_dir=None, cache_batch_size=1,
                  encode_tiled=False, encode_tile_px=1024, encode_tile_overlap=128,
-                 encode_max_pixels=0, latent_spec=None, label=""):
+                 encode_max_pixels=0, latent_spec=None, label="", shared_cache=None,
+                 cache_meta=None):
         import numpy as np
         if latent_spec is not None:
             self.latent_spec = latent_spec
@@ -1171,6 +1179,15 @@ class CachedLatentDataset(Dataset):
         # ..._flipped, K = 2.. for extra inputs), keeping one cache entry per example.
         self.n_controls = len(getattr(self.base_image_dataset, "control_dirs", None) or [])
         self.has_control = self.n_controls > 0
+        # Shared cache only for plain images: a mask or a reference frame is
+        # version-specific state the content hash of the image doesn't cover.
+        self.shared_cache = (
+            shared_cache if shared_cache is not None
+            and not self.load_masks and not self.has_control else None
+        )
+        self._shared_npz: dict[tuple[str, Any], Optional[Path]] = {}
+        self._shared_set: set[Path] = set()
+        self._cache_meta = dict(cache_meta or {})
         # cache_encode_tiled (opt-in): oversized images switch to tiled
         # encode + latent feather-blend; peak VRAM proportional to a single
         # tile's pixel count. Images within the threshold keep the old path
@@ -1231,10 +1248,64 @@ class CachedLatentDataset(Dataset):
         ``img.r{reso}.npz``, so different-resolution latents don't overwrite
         each other.
         """
+        shared = self._shared_npz_path(img_path, target_reso)
+        if shared is not None:
+            return shared
         img_path = Path(img_path)
         if target_reso is not None and str(img_path) in getattr(self, "_multi_reso", set()):
             return img_path.with_suffix(f".r{int(target_reso)}.npz")
         return img_path.with_suffix(".npz")
+
+    def _shared_npz_path(self, img_path, target_reso=None) -> Optional[Path]:
+        """Content-addressed npz in the source dataset's cache, or None.
+
+        The bucket size is part of the name, so a different resolution /
+        bucketing setup writes a new file next to the old one. Memoised: the
+        training loop asks for every sample on every step.
+        """
+        router = getattr(self, "shared_cache", None)
+        if router is None:
+            return None
+        key = (str(img_path), target_reso)
+        memo = self._shared_npz
+        if key in memo:
+            return memo[key]
+        path = None
+        if router.root_for(img_path) is not None:
+            bucket = self._expected_bucket_size(img_path, target_reso)
+            if bucket is not None:
+                try:
+                    path = router.latent_path(
+                        img_path,
+                        fingerprint=self.latent_spec.fingerprint,
+                        layout_version=LATENT_CACHE_LAYOUT_VERSION,
+                        bucket=bucket,
+                    )
+                except OSError:
+                    path = None
+        memo[key] = path
+        if path is not None:
+            self._shared_set.add(path)
+        return path
+
+    def _is_shared_npz(self, npz_path) -> bool:
+        return Path(npz_path) in getattr(self, "_shared_set", ())
+
+    def _save_npz(self, npz_path, **arrays):
+        """Atomic npz write: two runs caching the same shared dataset at once
+        must never see (or leave) a half-written file."""
+        npz_path = Path(npz_path)
+        npz_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = npz_path.with_name(f"{npz_path.stem}.{os.getpid()}.{threading.get_ident()}.tmp.npz")
+        try:
+            self.np.savez(tmp, **arrays)
+            os.replace(tmp, npz_path)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     def _is_cache_valid(self, img_path, npz_path, target_reso=None):
         """Check whether the cache is valid (the image hasn't been modified,
@@ -1265,7 +1336,10 @@ class CachedLatentDataset(Dataset):
         """
         if not npz_path.exists():
             return False
-        if npz_path.stat().st_mtime < img_path.stat().st_mtime:
+        # A shared entry is named by the image's content hash: an older npz is
+        # still the right one for a freshly copied (newer mtime) identical image.
+        if (not self._is_shared_npz(npz_path)
+                and npz_path.stat().st_mtime < Path(img_path).stat().st_mtime):
             return False
         mask_path = None
         if getattr(self, "load_masks", False) and self.base_image_dataset is not None:
@@ -1369,11 +1443,34 @@ class CachedLatentDataset(Dataset):
             if not self._is_cache_valid(img_path, npz_path, sample.get("target_reso")):
                 to_encode.append(i)
 
+        shared_total = sum(1 for p in seen_npz if self._is_shared_npz(p))
+        if shared_total:
+            shared_missing = sum(
+                1 for i in to_encode
+                if self._is_shared_npz(self._get_npz_path(
+                    self.samples[i]["image"], self.samples[i].get("target_reso")))
+            )
+            logger.info(
+                f"shared dataset cache{tag}: {shared_total - shared_missing}/{shared_total} "
+                f"latents reused from the dataset folder"
+            )
+
         if to_encode:
             logger.info(f"need to encode {len(to_encode)}/{unique_total} images{tag}...")
             self._encode_and_save(to_encode, vae, device, dtype)
         else:
             logger.info(f"all {unique_total} images already cached{tag}")
+
+        if shared_total:
+            groups = {p.parent for p in seen_npz if self._is_shared_npz(p)}
+            for group in groups:
+                self.shared_cache.touch_group(group, {
+                    "kind": "latents",
+                    "fingerprint": self.latent_spec.fingerprint,
+                    "layout_version": LATENT_CACHE_LAYOUT_VERSION,
+                    "flip_copies": bool(self.flip_augment),
+                    **self._cache_meta,
+                })
 
         self._fill_bucket_for_index()
 
@@ -1486,7 +1583,7 @@ class CachedLatentDataset(Dataset):
                     _entry_sample = self.samples[entry["index"]]
                     npz_path = self._get_npz_path(
                         _entry_sample["image"], _entry_sample.get("target_reso"))
-                    self.np.savez(
+                    self._save_npz(
                         npz_path,
                         bucket_w=entry["bucket_w"],
                         bucket_h=entry["bucket_h"],
@@ -1523,7 +1620,7 @@ class CachedLatentDataset(Dataset):
                 _entry_sample = self.samples[entry["index"]]
                 npz_path = self._get_npz_path(
                     _entry_sample["image"], _entry_sample.get("target_reso"))
-                self.np.savez(
+                self._save_npz(
                     npz_path,
                     bucket_w=entry["bucket_w"],
                     bucket_h=entry["bucket_h"],

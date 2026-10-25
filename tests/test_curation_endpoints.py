@@ -78,6 +78,7 @@ def test_curation_view_initial_empty(client: TestClient) -> None:
         "left": [],
         "right": {"1_data": []},
         "download_total": 0,
+        "sources": [],
         "train_total": 0,
         "folders": ["1_data"],
     }

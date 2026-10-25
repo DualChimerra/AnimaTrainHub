@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useOutletContext } from 'react-router-dom'
 import {
   api,
+  poolFileName,
   type CropWorkspaceItem,
   type DuplicateRemovedItem,
   type ProjectDetail,
@@ -154,7 +155,7 @@ export default function PreprocessOverviewPage() {
       // duplicate_removed is physically deleted; thumbnails go through the download bucket + im.source (origin)
       thumbUrl: api.projectThumbUrl(project.id, im.source, 'download', 256, im.mtime, true),
       previewUrl: api.projectThumbUrl(project.id, im.source, 'download', 1600, im.mtime, true),
-      caption: im.w && im.h ? `${im.source}, ${im.w}×${im.h}` : im.source,
+      caption: im.w && im.h ? `${poolFileName(im.source)}, ${im.w}×${im.h}` : poolFileName(im.source),
     })),
     [removed, project.id],
   )

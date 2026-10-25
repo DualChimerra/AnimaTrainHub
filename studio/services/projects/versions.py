@@ -551,6 +551,13 @@ def create_version(
                 # a corrupt source config shouldn't block creating the new version; the user can switch presets on the Train page
                 pass
 
+    # Shared datasets carry over: from the fork source, else from the version
+    # the user was on (a new training usually curates from the same pools).
+    from ..dataset import library as _library  # deferred: library imports this module
+    inherit_from = fork_from_version_id or p.get("active_version_id")
+    if inherit_from:
+        _library.copy_links(conn, int(inherit_from), vid)
+
     v = _must_get(conn, vid)
     _write_version_json(v, vdir)
 

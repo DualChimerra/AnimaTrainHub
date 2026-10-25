@@ -23,6 +23,8 @@ import {
 import { useSettingsDrawer } from './lib/SettingsDrawer'
 import ProjectsPage from './pages/Projects'
 import EditLoraPage from './pages/EditLora'
+import DatasetsPage from './pages/datasets/DatasetsPage'
+import DatasetPage from './pages/datasets/DatasetPage'
 import QueuePage from './pages/Queue'
 import QueueDetailPage from './pages/QueueDetail'
 import ProjectLayout from './pages/project/Layout'
@@ -164,6 +166,8 @@ const router = createBrowserRouter(
       children: [
         { path: '/', element: <ProjectsPage /> },
         { path: '/edit', element: <EditLoraPage /> },
+        { path: '/datasets', element: <DatasetsPage /> },
+        { path: '/datasets/:did', element: <DatasetPage /> },
         { path: '/queue', element: <QueuePage /> },
         { path: '/queue/:id', element: <QueueDetailPage /> },
         { path: '/queue/:id/log', element: <QueueDetailRedirect tab="log" /> },
@@ -197,7 +201,6 @@ const router = createBrowserRouter(
         { path: '/wiki', element: <WikiPage /> }, // Wiki (experimental)
         { path: '/configs', element: <Navigate to="/tools/presets" replace /> },
         { path: '/monitor', element: <Navigate to="/tools/monitor" replace /> },
-        { path: '/datasets', element: <Navigate to="/" replace /> },
       ],
     },
   ],

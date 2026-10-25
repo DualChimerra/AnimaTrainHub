@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 
 from training.context import TrainingContext
-from training.text_cache import TextCacheEntry
+from training.text_cache import TEXT_CACHE_FORMAT_VERSION, TextCacheEntry, text_cache_key
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,34 @@ def _image_dataset(dataset):
     return None
 
 
+def _entry_for(ctx: TrainingContext, image: Path, caption: str) -> TextCacheEntry:
+    """Sidecar next to the image, or -- for an image from a shared dataset -- a
+    caption-addressed file in that dataset's cache folder (same caption + same
+    text encoder = same file, whichever training wrote it)."""
+
+    router = getattr(ctx, "shared_cache", None)
+    if router is not None:
+        # The text stack's store knows the exact encoder identity (fp8 vs bf16
+        # TE, checkpoint hash); the spec value is only the family-level default.
+        store = getattr(ctx.text_stack, "store", None)
+        fingerprint = str(getattr(store, "text_fingerprint", "") or ctx.family.spec.text.fingerprint)
+        path = router.text_path(
+            image,
+            cache_key=text_cache_key(caption, fingerprint),
+            text_fingerprint=fingerprint,
+            format_version=TEXT_CACHE_FORMAT_VERSION,
+        )
+        if path is not None:
+            router.touch_group(path.parent, {
+                "kind": "text",
+                "fingerprint": fingerprint,
+                "format_version": TEXT_CACHE_FORMAT_VERSION,
+                "family": ctx.family.spec.family_id,
+            })
+            return TextCacheEntry(image_path=image, caption=caption, cache_path=path)
+    return TextCacheEntry.for_image(image, caption)
+
+
 def _collect_entries(ctx: TrainingContext) -> list[TextCacheEntry]:
     """Dedup main + regularization sets by image; resolution fan-out/repeat never re-encodes text."""
 
@@ -55,7 +83,7 @@ def _collect_entries(ctx: TrainingContext) -> list[TextCacheEntry]:
                         f"same image resolved to two different captions, cannot build text cache: {image}"
                     )
                 continue
-            by_image[key] = TextCacheEntry.for_image(image, caption)
+            by_image[key] = _entry_for(ctx, image, caption)
     return list(by_image.values())
 
 

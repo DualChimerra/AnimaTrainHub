@@ -112,6 +112,21 @@ def entry_origin(entry: dict[str, Any], fallback_name: str) -> str:
     return entry.get("origin") or fallback_name
 
 
+def origin_path(project_dir: Path, origin: str) -> Path:
+    """The original bytes an origin points at: `download/{origin}` for a bare
+    name, the shared dataset's download/ for a pool key `@{id}/{file}`."""
+    from ..dataset.library import origin_source_path  # deferred: library imports projects
+
+    return origin_source_path(project_dir, origin)
+
+
+def origin_file_name(origin: str) -> str:
+    """The file-name part of an origin (a pool key minus its `@{id}/`)."""
+    from ..dataset.library import pool_file_name
+
+    return pool_file_name(origin)
+
+
 def is_duplicate_removed_entry(entry: Optional[dict[str, Any]]) -> bool:
     """Whether a manifest entry was manually reviewed and confirmed as a skip during dedup."""
     return bool(entry and entry.get("kind") == DUPLICATE_REMOVED_KIND)
@@ -584,7 +599,6 @@ def train_restore_duplicate_removed(
     no_origin: list[str] = []
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)
-    download_dir = project_dir / "download"
     train_dir = _train_dir(project_dir, version_label)
     with _LOCK:
         m = _read_train_target(target)
@@ -594,7 +608,7 @@ def train_restore_duplicate_removed(
                 missing.append(name)
                 continue
             origin = entry_origin(entry, name)
-            src = download_dir / origin
+            src = origin_path(project_dir, origin)
             if not src.is_file():
                 no_origin.append(name)
                 continue
@@ -606,9 +620,8 @@ def train_restore_duplicate_removed(
                 no_origin.append(name)
                 continue
             # caption follows along: download/{origin_stem}.{ext} -> train/{name_stem}.{ext}
-            origin_stem = Path(origin).stem
             for ext in (".txt", ".json"):
-                cap_src = download_dir / f"{origin_stem}{ext}"
+                cap_src = src.parent / f"{src.stem}{ext}"
                 if cap_src.is_file():
                     try:
                         shutil.copy2(cap_src, dst.with_suffix(ext))
@@ -654,7 +667,6 @@ def train_restore(
     no_origin: list[str] = []
     ensure_train_manifest(project_dir, version_label)
     target = train_manifest_path(project_dir, version_label)
-    download_dir = project_dir / "download"
     train_dir = _train_dir(project_dir, version_label)
     # siblings already handled within this batch (avoid duplicate copies / false missing)
     handled: set[str] = set()
@@ -670,7 +682,7 @@ def train_restore(
                 continue
             origin = entry_origin(entry, name)
             folder = name.rsplit("/", 1)[0] if "/" in name else ""
-            src = download_dir / origin
+            src = origin_path(project_dir, origin)
             if not src.is_file():
                 no_origin.append(name)
                 continue
@@ -680,7 +692,13 @@ def train_restore(
                 if (k.rsplit("/", 1)[0] if "/" in k else "") == folder
                 and entry_origin(e, k) == origin
             ]
-            dst_rel = f"{folder}/{origin}" if folder else origin
+            fname = origin_file_name(origin)
+            dst_rel = f"{folder}/{fname}" if folder else fname
+            other = m["images"].get(dst_rel)
+            if other is not None and entry_origin(other, dst_rel) != origin:
+                # another source's copy owns that name (two datasets, same file
+                # name): restore in place of the requested entry instead
+                dst_rel = name
             dst = train_dir / dst_rel
             # delete sibling physical files + captions (leave dst itself alone - the copy below overwrites it)
             for sib in group:
@@ -706,9 +724,8 @@ def train_restore(
                 no_origin.append(name)
                 continue
             # caption sidecar follows along
-            origin_stem = Path(origin).stem
             for ext in (".txt", ".json"):
-                cap_src = download_dir / f"{origin_stem}{ext}"
+                cap_src = src.parent / f"{src.stem}{ext}"
                 if cap_src.is_file():
                     try:
                         shutil.copy2(cap_src, dst.with_suffix(ext))

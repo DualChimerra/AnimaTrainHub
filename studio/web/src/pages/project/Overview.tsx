@@ -448,6 +448,18 @@ function PipelineCard({ project, version, latestTrain, trainProgress }: {
   const preparing = version?.status === 'preparing'
   const ci = version ? (preparing ? phaseIndex(version.phase) : PHASE_ORDER.length) : -1
   const tagsDone = train > 0 && tagged >= train
+  // New projects take their images from shared datasets picked per version;
+  // only old projects keep a download/ of their own.
+  const ownImages = project.download_image_count ?? 0
+  const [linkedCount, setLinkedCount] = useState<number | null>(null)
+  useEffect(() => {
+    if (!version || ownImages > 0) { setLinkedCount(null); return }
+    let cancelled = false
+    void api.getVersionDatasets(project.id, version.id)
+      .then((items) => { if (!cancelled) setLinkedCount(items.length) })
+      .catch(() => { if (!cancelled) setLinkedCount(null) })
+    return () => { cancelled = true }
+  }, [project.id, version, ownImages])
 
   type State = 'done' | 'cur' | 'todo'
   const phaseState = (phase: VersionPhase): State => {
@@ -487,12 +499,18 @@ function PipelineCard({ project, version, latestTrain, trainProgress }: {
     key: string; label: string; badge: string; state: State; pct: number
     cell: string; cellTitle?: string; live?: boolean; to: string | null
   }> = [
-    {
+    ownImages > 0 ? {
       key: 'download', label: t('overview.stepDownload'), badge: '·',
-      state: (project.download_image_count ?? 0) > 0 || train > 0 ? 'done' : 'todo',
-      pct: (project.download_image_count ?? 0) > 0 || train > 0 ? 100 : 0,
-      cell: t('projects.images', { n: (project.download_image_count ?? 0).toLocaleString() }),
+      state: 'done' as State,
+      pct: 100,
+      cell: t('projects.images', { n: ownImages.toLocaleString() }),
       to: `/projects/${project.id}/download`,
+    } : {
+      key: 'download', label: t('overview.stepDatasets'), badge: '·',
+      state: (linkedCount ?? 0) > 0 || train > 0 ? 'done' as State : 'todo' as State,
+      pct: (linkedCount ?? 0) > 0 || train > 0 ? 100 : 0,
+      cell: linkedCount != null ? t('overview.cellDatasets', { count: linkedCount }) : '—',
+      to: version ? `/projects/${project.id}/v/${version.id}/curate` : '/datasets',
     },
     {
       key: 'curate', label: t('overview.stepCurate'), badge: '1', state: phaseState('curating'),

@@ -5,6 +5,8 @@ import { VirtuosoGrid } from 'react-virtuoso'
 export interface ImageGridItem {
   name: string
   thumbUrl: string
+  /** Display name (tooltip / alt) when `name` is an internal key, e.g. a dataset pool key `@7/001.png`. */
+  label?: string
   /** Small text shown on the corner badge on hover (optional): e.g. a tag preview. */
   meta?: string
   /** Always-visible small badge, bottom-right of the cell (optional). E.g. "processed", used to distinguish state in a merged view. */
@@ -224,7 +226,7 @@ const Cell = memo(function Cell({
       aria-selected={selected}
       onMouseEnter={onHover ? () => onHover(item.name) : undefined}
       onClick={handleCellClick}
-      title={item.meta ? `${item.name}\n${item.meta}` : item.name}
+      title={item.meta ? `${item.label ?? item.name}\n${item.meta}` : item.label ?? item.name}
       style={bg ? { background: bg } : undefined}
       className={'ds-thumb group aspect-square cursor-pointer select-none' + (borderHighlight ? ' ds-sel' : '')}
     >
@@ -235,7 +237,7 @@ const Cell = memo(function Cell({
       <img
         ref={imgRef}
         src={item.thumbUrl}
-        alt={item.name}
+        alt={item.label ?? item.name}
         decoding="async"
         draggable={false}
         // Lets thumb requests that haven't started yet queue behind data fetches, so in-page actions aren't starved by images.
@@ -251,7 +253,7 @@ const Cell = memo(function Cell({
       <button
         type="button"
         onClick={handleSelectionClick}
-        aria-label={`${selected ? t('common.deselect') : t('common.select')} ${item.name}`}
+        aria-label={`${selected ? t('common.deselect') : t('common.select')} ${item.label ?? item.name}`}
         className={'ds-mark flex transition-opacity ' + (selected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100')}
       >
         <span className={'ds-cbox' + (selected ? ' ds-on' : '')}>
@@ -266,7 +268,7 @@ const Cell = memo(function Cell({
             e.stopPropagation()
             onPreview(item.name)
           }}
-          aria-label={`${t('common.preview')} ${item.name}`}
+          aria-label={`${t('common.preview')} ${item.label ?? item.name}`}
           className={
             'absolute w-5 h-5 rounded-[5px] bg-black/60 text-white text-[11px] opacity-0 group-hover:opacity-100 hover:bg-black/80 ' +
             // the pin owns the top-right corner when there is one

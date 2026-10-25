@@ -84,6 +84,9 @@ class TrainingContext:
     reg_dataset: Any = None
     use_cached: bool = False
     dataloader: Any = None
+    # training.dataset_cache.SharedCacheRouter when Studio routed images to a
+    # shared dataset's cache folder (latents + text sidecars); None otherwise.
+    shared_cache: Any = None
 
     # --- filled by optimizer_phase ---
     weight_decay: float = 0.0

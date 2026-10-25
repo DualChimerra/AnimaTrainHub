@@ -1,0 +1,63 @@
+/* ===========================================================================
+   Shared dataset library: the Datasets list, a dataset's Files tab and the
+   curation source picker. Same tokens and card language as ds.css (cards,
+   badges, chips, tables); only the pieces those pages don't already have.
+   =========================================================================== */
+
+/* ---------- list ---------- */
+.ds-lib-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.ds-lib-card{display:flex;flex-direction:column;overflow:hidden;color:inherit;transition:border-color .15s,box-shadow .15s}
+.ds-lib-card:hover{border-color:var(--line-3);box-shadow:0 1px 2px rgba(20,22,20,.05),0 10px 26px -16px rgba(20,22,20,.28)}
+.ds-lib-card:focus-visible{outline:2px solid var(--green-600);outline-offset:2px}
+
+.ds-lib-cover{display:grid;gap:3px;height:156px;padding:6px 6px 0;grid-template-columns:minmax(0,2fr) minmax(0,1fr);grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
+.ds-lib-cover>span{position:relative;border-radius:10px;overflow:hidden;background:var(--sunken)}
+.ds-lib-cover>span:first-child{grid-row:span 2}
+.ds-lib-cover.ds-n1{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+.ds-lib-cover.ds-n2{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+.ds-lib-cover.ds-n2>span:first-child{grid-row:auto}
+.ds-lib-cover img{width:100%;height:100%;object-fit:cover;display:block}
+.ds-lib-more{position:absolute;right:6px;bottom:6px;height:19px;padding:0 7px;border-radius:999px;background:rgba(20,22,20,.72);color:#fff;font-size:10.5px;font-weight:500;display:flex;align-items:center;font-variant-numeric:tabular-nums}
+.ds-lib-empty-cover{height:156px;margin:6px 6px 0;border-radius:10px;background:var(--sunken);background-image:repeating-linear-gradient(135deg,rgba(20,22,20,.035) 0 8px,transparent 8px 16px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--ink-4);font-size:11.5px}
+
+.ds-lib-body{padding:12px 15px 13px;display:flex;flex-direction:column;gap:9px;flex:1;min-width:0}
+.ds-lib-head{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.ds-lib-title{display:block;font-size:14px;font-weight:600;letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ds-lib-note{font-size:12px;color:var(--ink-3);line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ds-lib-foot{display:flex;align-items:center;gap:8px;padding:9px 15px;border-top:1px solid var(--line);background:var(--area);font-size:11.5px;color:var(--ink-3);min-width:0}
+.ds-lib-foot>span:first-child{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- dataset page: files tab ---------- */
+.ds-lib-files{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start}
+.ds-lib-files>.ds-lib-col{display:flex;flex-direction:column;gap:14px;min-width:0}
+.ds-lib-path{display:flex;align-items:center;gap:8px;margin:0 17px 14px;padding:7px 8px 7px 11px;border-radius:var(--r-ctl);background:var(--sunken);min-width:0}
+.ds-lib-path code{flex:1;min-width:0;font-family:var(--code);font-size:11.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+.ds-lib-sizebar{display:flex;gap:3px;height:10px;margin:0 17px 10px}
+.ds-lib-sizebar>span{min-width:3px}
+.ds-lib-sizebar>span:first-child{border-radius:4px 0 0 4px}
+.ds-lib-sizebar>span:last-child{border-radius:0 4px 4px 0}
+.ds-lib-sizebar>span:only-child{border-radius:4px}
+.ds-lib-legend{display:flex;gap:16px;flex-wrap:wrap;padding:0 17px 14px}
+.ds-lib-folder{display:flex;align-items:center;gap:9px;min-width:0}
+.ds-lib-folder code{font-family:var(--code);font-size:12px;color:var(--ink)}
+.ds-lib-fp{font-family:var(--code);font-size:11px;color:var(--ink-3);max-width:220px;display:inline-block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.ds-lib-use{display:flex;align-items:center;gap:10px;padding:9px 17px;border-top:1px solid var(--line);color:inherit;min-width:0}
+.ds-lib-use:hover{background:var(--hover)}
+.ds-lib-use>span:nth-child(2){flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px}
+
+/* ---------- curation: pool sources ---------- */
+.ds-src-row{padding:0 17px 10px;display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.ds-src-pick{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px;border-radius:8px;text-align:left;color:var(--ink)}
+.ds-src-pick:hover{background:var(--hover)}
+.ds-src-pick img,.ds-src-pick .ds-src-thumb{width:34px;height:34px;border-radius:8px;object-fit:cover;background:var(--sunken);flex:none}
+.ds-src-pick .ds-cbox{flex:none}
+.ds-src-name{display:block;font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ds-src-sub{display:block;font-size:11px;color:var(--ink-3)}
+
+@media (max-width:1100px){
+  .ds-lib-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ds-lib-files{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:700px){
+  .ds-lib-grid{grid-template-columns:minmax(0,1fr)}
+}

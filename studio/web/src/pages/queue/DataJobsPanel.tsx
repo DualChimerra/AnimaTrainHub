@@ -70,7 +70,7 @@ export default function DataJobsPanel({
 
   // Project-name mapping (shows the project title on the row; falls back to #pid if unavailable).
   useEffect(() => {
-    api.listProjects()
+    api.listProjects({ includeDatasets: true })
       .then((items) => setProjectTitles(
         Object.fromEntries(items.map((p) => [p.id, p.title])),
       ))

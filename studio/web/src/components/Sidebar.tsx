@@ -68,6 +68,7 @@ const I = {
   cog:      svg(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   image:    svg(<><rect x="3" y="3" width="16" height="16" rx="2" /><circle cx="9" cy="9" r="1.6" fill="currentColor" /><path d="m21 15-5-5L5 21" /></>),
   soup:     svg(<><path d="M3 11h18a9 9 0 0 1-9 9 9 9 0 0 1-9-9Z" /><path d="M2 21h20" /><path d="M8 7c0-1.2 1-1.8 1-3" /><path d="M12 6c0-1.2 1-1.8 1-3" /><path d="M16 7c0-1.2 1-1.8 1-3" /></>),
+  datasets: svg(<><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 13 9 5 9-5" /></>),
   wiki:     svg(<><path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z" /><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z" /></>), // Wiki (experimental)
   edit:     svg(<><rect x="3" y="5" width="7" height="14" rx="1.5" /><rect x="14" y="5" width="7" height="14" rx="1.5" /><path d="M10.5 12h3m-1.2-1.6 1.6 1.6-1.6 1.6" /></>),
   graph:    svg(<><circle cx="6" cy="6" r="2.2" /><circle cx="18" cy="8" r="2.2" /><circle cx="9" cy="18" r="2.2" /><circle cx="19" cy="18" r="1.8" /><path d="M8.1 6.5 15.8 7.6M6.9 8.1l1.4 7.7M16.7 9.9l-6.3 6.3M11.2 18h6" /></>),
@@ -211,7 +212,7 @@ function ProjectSwitcher({ project }: { project: ProjectCtxValue['project'] }) {
   }
 
   const edit = isEditProject(project)
-  const others = (items ?? []).filter((p) => p.archived_at == null && isEditProject(p) === edit)
+  const others = (items ?? []).filter((p) => p.archived_at == null && isEditProject(p) === edit && p.kind !== 'dataset')
   return (
     <>
       <button
@@ -373,7 +374,7 @@ function ProjectStepperNav({ pid, activeVid, currentStep, version, collapsed, in
       {!collapsed && project && <ProjectSwitcher project={project} />}
 
       <NavItem to={`/projects/${pid}`} label={t('nav.overview')} icon={I.overview} active={overviewActive} collapsed={collapsed} />
-      {!isEdit && (
+      {!isEdit && ((project?.download_image_count ?? 0) > 0 || currentStep === 'download') && (
         <NavItem
           to={`/projects/${pid}/download`}
           label={t('nav.download')}
@@ -584,6 +585,8 @@ export default function Sidebar({
         <NavItem to="/" label={t('nav.projects')} icon={I.folder} active={!inProject && location.pathname === '/'} collapsed={collapsed} />
 
         {inProject && !inEditProject && pid && stepper}
+
+        <NavItem to="/datasets" label={t('nav.datasets')} icon={I.datasets} active={isMain('/datasets')} collapsed={collapsed} />
 
         <NavItem to="/edit" label={t('nav.editLora')} icon={I.edit} active={!inProject && isMain('/edit')} collapsed={collapsed} />
 

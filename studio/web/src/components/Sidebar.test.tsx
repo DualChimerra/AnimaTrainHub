@@ -120,9 +120,9 @@ describe('Sidebar (PP0)', () => {
     expect(queue.className).not.toMatch(/ds-is-active/)
   })
 
-  it('does not include the removed Datasets link', () => {
+  it('links the shared dataset library under Projects', () => {
     renderAt('/')
-    expect(screen.queryByRole('link', { name: /Datasets/ })).toBeNull()
+    expect(screen.getByRole('link', { name: /Datasets/ })).toHaveAttribute('href', '/datasets')
     expect(screen.queryByRole('link', { name: /Config/ })).toBeNull()
   })
 

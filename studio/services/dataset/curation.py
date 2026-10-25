@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ..projects import projects, versions
+from . import library
 from .scan import IMAGE_EXTS
 from ..preprocess import manifest as preprocess_manifest
 from ..preprocess import masks as train_masks
@@ -63,11 +64,38 @@ def _validate_folder(name: str) -> None:
 
 
 def _validate_filename(name: str) -> None:
-    if not _FILE_PATTERN.fullmatch(name) or ".." in name:
+    """A bare file name, or a pool key `@{dataset_id}/{file name}`."""
+    bare = library.pool_file_name(name)
+    if not _FILE_PATTERN.fullmatch(bare) or ".." in bare:
         raise CurationError(
             f'Invalid file name: "{name}"',
             code="curation.file_name_invalid", details={"name": name},
         )
+
+
+def _source_file(pdir: Path, key: str) -> Path:
+    """The original image for a pool key (dataset) or bare name (own download/)."""
+    return library.origin_source_path(pdir, key)
+
+
+def _physical_name(dst_dir: Path, key: str, taken_by_other) -> str:
+    """File name for a new copy in train/validation.
+
+    Normally the original's own name. Two datasets can both have `001.png`; the
+    second copy into the same folder becomes `001-d{id}.png` (its origin in the
+    manifest still says where it came from).
+    """
+    dataset_id, name = library.parse_pool_key(key)
+    if not (dst_dir / name).exists() or not taken_by_other(name):
+        return name
+    stem, ext = Path(name).stem, Path(name).suffix
+    tag = f"d{dataset_id}" if dataset_id is not None else "p"
+    candidate = f"{stem}-{tag}{ext}"
+    n = 2
+    while (dst_dir / candidate).exists():
+        candidate = f"{stem}-{tag}-{n}{ext}"
+        n += 1
+    return candidate
 
 
 def _project_dir(conn, project_id: int) -> tuple[dict[str, Any], Path]:
@@ -138,6 +166,39 @@ def _list_image_entries(d: Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # views
 # ---------------------------------------------------------------------------
+
+
+def list_pool(conn, project_id: int, version_id: int) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]]
+]:
+    """The curation candidate pool: the project's own download/ plus every
+    shared dataset linked to the version.
+
+    Returns `(entries, sources)`. Own images keep their bare file name as `name`;
+    dataset images use the pool key `@{id}/{file}` so names never collide across
+    sources. Each entry: `{name, mtime, file, source}` (source = dataset id or
+    None). `sources` = `[{id, title, total}]`, own download/ first (only when it
+    has images -- new projects curate from datasets only).
+    """
+    own = list_download(conn, project_id)
+    entries: list[dict[str, Any]] = [
+        {**e, "file": e["name"], "source": None} for e in own
+    ]
+    sources: list[dict[str, Any]] = []
+    if own:
+        sources.append({"id": None, "title": None, "total": len(own)})
+    for d in library.linked_datasets(conn, version_id):
+        ddir = projects.project_dir(d["id"], d["slug"]) / "download"
+        items = _list_image_entries(ddir)
+        for e in items:
+            entries.append({
+                "name": library.pool_key(d["id"], e["name"]),
+                "mtime": e["mtime"],
+                "file": e["name"],
+                "source": d["id"],
+            })
+        sources.append({"id": d["id"], "title": d["title"], "total": len(items)})
+    return entries, sources
 
 
 def list_download(conn, project_id: int) -> list[dict[str, Any]]:
@@ -228,6 +289,8 @@ def list_train(
             items_by_origin[origin] = {
                 "name": origin,
                 "origin": origin,
+                "file": raw["name"],
+                "source": library.parse_pool_key(origin)[0],
                 "mtime": raw["mtime"],
             }
         out[sub.name] = sorted(items_by_origin.values(), key=lambda e: e["name"])
@@ -251,10 +314,15 @@ def list_validation(
     _, _, val = _version_validation_dir(conn, project_id, version_id)
     if not val.exists():
         return []
+    origins = library.read_validation_origins(val)
     out: list[dict[str, Any]] = []
     for sub in sorted(p for p in val.iterdir() if p.is_dir()):
         for e in _list_image_entries(sub):
-            out.append({"name": e["name"], "mtime": e["mtime"], "folder": sub.name})
+            origin = origins.get(f"{sub.name}/{e['name']}", e["name"])
+            out.append({
+                "name": e["name"], "mtime": e["mtime"], "folder": sub.name,
+                "origin": origin, "source": library.parse_pool_key(origin)[0],
+            })
     return out
 
 
@@ -268,7 +336,7 @@ def _used_names(train: dict[str, list[dict[str, Any]]],
     the same pool.
     """
     used = {e["name"] for files in train.values() for e in files}
-    used |= {e["name"] for e in val}
+    used |= {e.get("origin") or e["name"] for e in val}
     return used
 
 
@@ -289,7 +357,7 @@ def curation_view(conn, project_id: int, version_id: int) -> dict[str, Any]:
     validation both fixes this and lets the train / validation curation views
     share the same candidate pool.
     """
-    left = list_download(conn, project_id)
+    left, sources = list_pool(conn, project_id, version_id)
     train = list_train(conn, project_id, version_id)
     val = list_validation(conn, project_id, version_id)
     used = _used_names(train, val)
@@ -297,8 +365,9 @@ def curation_view(conn, project_id: int, version_id: int) -> dict[str, Any]:
         "left": [e for e in left if e["name"] not in used],
         "right": train,
         # download_total keeps its historical meaning: total left-side candidate
-        # count (kept for API compatibility)
+        # count (kept for API compatibility) -- now across every pool source
         "download_total": len(left),
+        "sources": sources,
         "train_total": sum(len(v) for v in train.values()),
         "folders": list(train.keys()),
     }
@@ -314,7 +383,7 @@ def curation_validation_view(
     folder concept, see `list_validation`). Used by the frontend to render the
     right column in validation-set mode.
     """
-    left = list_download(conn, project_id)
+    left, sources = list_pool(conn, project_id, version_id)
     train = list_train(conn, project_id, version_id)
     val = list_validation(conn, project_id, version_id)
     used = _used_names(train, val)
@@ -322,6 +391,7 @@ def curation_validation_view(
         "left": [e for e in left if e["name"] not in used],
         "right": val,
         "download_total": len(left),
+        "sources": sources,
         "val_total": len(val),
     }
 
@@ -357,42 +427,62 @@ def copy_download_to_train(
     - Does not consume or know about preprocess derivatives (under the new model,
       multi-crop fan-out happens during the preprocess phase, after curation)
 
-    `files` is a flat list of image names from the download pool, without a folder
-    prefix.
+    `files` is a flat list of pool names without a folder prefix: a bare name for
+    the project's own download/, `@{dataset_id}/{file}` for a shared dataset
+    (that key becomes the manifest origin).
     """
     _validate_folder(dest_folder)
     p, v, train = _version_train_dir(conn, project_id, version_id)
     pdir = projects.project_dir(p["id"], p["slug"])
-    download_dir = pdir / "download"
     dst_dir = train / dest_folder
     dst_dir.mkdir(parents=True, exist_ok=True)
     preprocess_manifest.ensure_train_manifest(pdir, v["label"])
+
+    # Origins already in this folder (a pool image is copied at most once per
+    # folder) and which origin owns each physical name (collision check).
+    entries = preprocess_manifest.train_load(pdir, v["label"]).get("images", {})
+    origin_of: dict[str, str] = {}
+    for rel_key, entry in entries.items():
+        folder, _, filename = rel_key.partition("/")
+        if folder == dest_folder and filename:
+            origin_of[filename] = preprocess_manifest.entry_origin(entry, filename)
+    present = set(origin_of.values())
 
     copied: list[str] = []
     skipped: list[str] = []
     missing: list[str] = []
     for name in files:
         _validate_filename(name)
-        src = download_dir / name
+        src = _source_file(pdir, name)
         if not src.exists():
             missing.append(name)
             continue
-        dst = dst_dir / name
+        if name in present:
+            skipped.append(name)
+            continue
+        target = _physical_name(
+            dst_dir, name,
+            lambda fn, key=name: origin_of.get(fn, fn) != key,
+        )
+        dst = dst_dir / target
         if dst.exists():
             skipped.append(name)
             continue
         shutil.copy2(src, dst)
-        # carry along caption metadata
-        stem = Path(name).stem
+        # carry along caption metadata (named after the copy, read from the source)
+        src_stem = src.stem
+        stem = Path(target).stem
         for ext in _META_EXTS:
-            sm = download_dir / f"{stem}{ext}"
+            sm = src.parent / f"{src_stem}{ext}"
             if sm.exists():
                 try:
                     shutil.copy2(sm, dst_dir / f"{stem}{ext}")
                 except OSError:
                     pass
-        # write the train manifest entry, key = "{folder}/{name}"
-        rel = f"{dest_folder}/{name}"
+        origin_of[target] = name
+        present.add(name)
+        # write the train manifest entry, key = "{folder}/{file}"
+        rel = f"{dest_folder}/{target}"
         meta: dict[str, Any] = {"origin": name}
         try:
             st = dst.stat()
@@ -450,7 +540,7 @@ def remove_from_train(
         if not rels:
             # not recorded in the manifest -> fall back to deleting fdir / origin_name
             # directly (a same-name scenario from legacy projects)
-            pp = fdir / origin_name
+            pp = fdir / library.pool_file_name(origin_name)
             if pp.exists():
                 pp.unlink()
                 for ext in _META_EXTS:
@@ -460,7 +550,7 @@ def remove_from_train(
                             mp.unlink()
                         except OSError:
                             pass
-                train_masks.delete_mask(train, f"{folder}/{origin_name}")
+                train_masks.delete_mask(train, f"{folder}/{pp.name}")
                 removed.append(origin_name)
             else:
                 missing.append(origin_name)
@@ -522,7 +612,6 @@ def copy_download_to_validation(
     """
     p, v, val = _version_validation_dir(conn, project_id, version_id)
     pdir = projects.project_dir(p["id"], p["slug"])
-    download_dir = pdir / "download"
     dst_dir = val / versions.DEFAULT_TRAIN_FOLDER
     dst_dir.mkdir(parents=True, exist_ok=True)
 
@@ -531,6 +620,8 @@ def copy_download_to_validation(
     train = list_train(conn, project_id, version_id)
     existing_val = list_validation(conn, project_id, version_id)
     used = _used_names(train, existing_val)
+    origins = library.read_validation_origins(val)
+    folder = versions.DEFAULT_TRAIN_FOLDER
 
     copied: list[str] = []
     skipped: list[str] = []
@@ -540,25 +631,33 @@ def copy_download_to_validation(
         if name in used:
             skipped.append(name)
             continue
-        src = download_dir / name
+        src = _source_file(pdir, name)
         if not src.exists():
             missing.append(name)
             continue
-        dst = dst_dir / name
+        target = _physical_name(
+            dst_dir, name,
+            lambda fn, key=name: origins.get(f"{folder}/{fn}", fn) != key,
+        )
+        dst = dst_dir / target
         if dst.exists():
             skipped.append(name)
             continue
         shutil.copy2(src, dst)
-        stem = Path(name).stem
+        src_stem = src.stem
+        stem = Path(target).stem
         for ext in _META_EXTS:
-            sm = download_dir / f"{stem}{ext}"
+            sm = src.parent / f"{src_stem}{ext}"
             if sm.exists():
                 try:
                     shutil.copy2(sm, dst_dir / f"{stem}{ext}")
                 except OSError:
                     pass
+        if name != target:
+            origins[f"{folder}/{target}"] = name
         used.add(name)
         copied.append(name)
+    library.write_validation_origins(val, origins)
     return {"copied": copied, "skipped": skipped, "missing": missing}
 
 
@@ -576,6 +675,7 @@ def remove_from_validation(
     (folder, name) rather than by name across all folders.
     """
     _, _, val = _version_validation_dir(conn, project_id, version_id)
+    origins = library.read_validation_origins(val)
     removed: list[str] = []
     missing: list[str] = []
     for item in items:
@@ -599,7 +699,9 @@ def remove_from_validation(
                     mp.unlink()
                 except OSError:
                     pass
+        origins.pop(f"{folder}/{name}", None)
         removed.append(name)
+    library.write_validation_origins(val, origins)
     return {"removed": removed, "missing": missing}
 
 

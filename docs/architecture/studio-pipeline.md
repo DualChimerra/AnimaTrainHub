@@ -30,6 +30,11 @@ studio_data/
 ├── presets/                              ★ Global preset pool
 │   ├── train_baseline.yaml
 │   └── proj_42_baseline.yaml             A preset pushed back from a version
+├── datasets/{id}-{slug}/                 ★ Shared datasets (ADR 0017): projects rows with kind='dataset'
+│   ├── download/                         Images + caption sidecars; any version can link the dataset
+│   └── cache/
+│       ├── latents/<fp>-v<n>/<sha>_<w>x<h>.npz      VAE latents, content-addressed, one folder per format
+│       └── text/<te fp>-v<n>/<key>.safetensors      Caption encodings (cached_varlen families)
 ├── projects/{id}-{slug}/
 │   ├── project.json                      title / stage / active_version_id / ts
 │   ├── download/                         Project-level shared, full backup

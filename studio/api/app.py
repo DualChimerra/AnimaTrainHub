@@ -25,6 +25,7 @@ from .routers import (
     browse,
     client_errors,
     data_exports,
+    datasets as datasets_router,
     events_sse,
     generate,
     graph,
@@ -118,6 +119,8 @@ app.include_router(queue_lifecycle.router)
 app.include_router(queue_outputs.router)
 # PR-6.5 commit 1: first cut of the projects/versions CRUD subpackage (16 routes)
 app.include_router(projects_crud.router)
+# Shared dataset library (datasets are projects rows with kind='dataset')
+app.include_router(datasets_router.router)
 # ADR-0011: eval sample runs + manual run trigger (task-scoped)
 app.include_router(projects_eval_samples.router)
 # ADR-0011: metric result endpoints and concrete metric runner triggers

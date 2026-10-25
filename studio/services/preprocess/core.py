@@ -194,6 +194,16 @@ def _train_images_listing(train_dir: Path) -> list[tuple[str, Path]]:
     return out
 
 
+def _origin_exists(pdir: Path, origin: str, download_names: set[str]) -> bool:
+    """Own download/ originals are checked against one directory listing; a
+    shared-dataset origin (pool key) is a single stat in that dataset."""
+    if origin in download_names:
+        return True
+    if origin.startswith("@"):
+        return preprocess_manifest.origin_path(pdir, origin).is_file()
+    return False
+
+
 def list_train_images(
     p: dict[str, Any], version_label: str
 ) -> list[dict[str, Any]]:
@@ -249,7 +259,7 @@ def list_train_images(
             "w": w, "h": h,
             "origin": origin,
             "source": origin,
-            "orphan": origin not in download_names,
+            "orphan": not _origin_exists(pdir, origin, download_names),
             "duplicate_removed": is_dup,
             # ADR 0010 fixup (2026-06-04): reads the manifest entry.processed field directly
             "processed": not is_dup and _is_processed(entry),
@@ -276,7 +286,7 @@ def list_train_images(
             "w": None, "h": None,
             "origin": origin,
             "source": origin,
-            "orphan": origin not in download_names,
+            "orphan": not _origin_exists(pdir, origin, download_names),
             "duplicate_removed": True,
             "processed": False,
             "model": None, "scale": None, "action": None,
@@ -517,14 +527,13 @@ def list_duplicate_removed_workspace_train(
     from PIL import Image
 
     pdir = project_root(p)
-    download_dir = pdir / "download"
     removed = preprocess_manifest.train_duplicate_removed(pdir, version_label)
 
     items: list[dict[str, Any]] = []
     for name in sorted(removed.keys()):
         entry = removed[name]
         origin = preprocess_manifest.entry_origin(entry, name)
-        src = download_dir / origin
+        src = preprocess_manifest.origin_path(pdir, origin)
         if not src.is_file():
             items.append({
                 "name": name,
