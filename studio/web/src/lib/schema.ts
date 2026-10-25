@@ -137,6 +137,7 @@ export const SCHEMA_ENUM_LABEL_KEYS: Record<string, Record<string, string>> = {
     polynomial: 'schema.enums.lrScheduler.polynomial',
     rex: 'schema.enums.lrScheduler.rex',
     rex_annealing_warm_restarts: 'schema.enums.lrScheduler.rexAnnealingWarmRestarts',
+    licatron: 'schema.enums.lrScheduler.licatron',
   },
   optimizer_type: {
     adamw: 'schema.enums.optimizerType.adamw',

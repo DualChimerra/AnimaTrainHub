@@ -663,6 +663,9 @@ class Supervisor:
             # (moved, not used for training). Failure here doesn't block training,
             # only gets logged.
             self._maybe_split_validation(task, cfg_path, log_fp)
+            # Images from shared datasets cache into those datasets' folders;
+            # the trainer finds them through train/.cache_routes.json.
+            self._maybe_write_cache_routes(task, log_fp)
 
             cmd = self._cmd_builder(task, cfg_path)
             # ADR 0006 PR-1: injecting LORA_TASK_ID makes the training child process
@@ -745,6 +748,32 @@ class Supervisor:
                     f"validation/ (train={summary['train']}, "
                     f"validation={summary['validation']})\n".encode("utf-8")
                 )
+                log_fp.flush()
+            except Exception:
+                pass
+
+    def _maybe_write_cache_routes(self, task: dict[str, Any], log_fp: Any) -> None:
+        """Refresh the version's shared-dataset cache routes right before a
+        training run (after the validation split, so moved images drop out).
+        Failure only costs cache reuse: the trainer falls back to sidecars."""
+        if (task.get("task_type") or "train") != "train" or not task.get("version_id"):
+            return
+        try:
+            from ..services.dataset import library
+            from ..services.projects import projects, versions
+
+            with db.connection_for(self._db_path) as conn:
+                v = versions.get_version(conn, int(task["version_id"]))
+                p = projects.get_project(conn, int(v["project_id"])) if v else None
+            if not v or not p:
+                return
+            path = library.write_cache_routes(p, v)
+        except Exception:
+            logger.exception("cache routes failed for task=%s", task.get("id"))
+            return
+        if path is not None:
+            try:
+                log_fp.write(f"[dataset-cache] routes: {path}\n".encode("utf-8"))
                 log_fp.flush()
             except Exception:
                 pass

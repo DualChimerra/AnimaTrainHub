@@ -32,7 +32,7 @@ def fresh_patch_module(monkeypatch: pytest.MonkeyPatch):
             delattr(LokrModule, mod._PATCHED_FLAG)
 
 
-@pytest.mark.parametrize("affected_version", ["3.4.0", "4.0.0"])
+@pytest.mark.parametrize("affected_version", ["3.4.0", "4.0.0", "4.1.3"])
 def test_apply_on_known_affected_version_patches_get_weight(
     fresh_patch_module, monkeypatch: pytest.MonkeyPatch, affected_version: str,
 ) -> None:

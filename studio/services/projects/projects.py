@@ -42,12 +42,17 @@ class ProjectError(DomainError):
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 
 
-#: 'lora' = the regular pipeline; 'edit' = edit LoRA trained on source/target pairs.
-PROJECT_KINDS = ("lora", "edit")
+#: 'lora' = the regular pipeline; 'edit' = edit LoRA trained on source/target pairs;
+#: 'dataset' = a shared image library (no versions) that any version can curate from.
+PROJECT_KINDS = ("lora", "edit", "dataset")
 
 
 def is_edit_project(p: dict[str, Any]) -> bool:
     return str(p.get("kind") or "lora") == "edit"
+
+
+def is_dataset(p: dict[str, Any]) -> bool:
+    return str(p.get("kind") or "lora") == "dataset"
 
 
 def slugify(title: str) -> str:
@@ -73,8 +78,24 @@ def _unique_slug(conn: sqlite3.Connection, base: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def datasets_root() -> Path:
+    """Shared datasets live next to projects/ (derived at call time, so tests that
+    monkeypatch PROJECTS_DIR get an isolated datasets/ too)."""
+    return PROJECTS_DIR.parent / "datasets"
+
+
 def project_dir(project_id: int, slug: str) -> Path:
-    return PROJECTS_DIR / f"{project_id}-{slug}"
+    """`{id}-{slug}` under projects/, or under datasets/ for a shared dataset.
+
+    ids are unique across both kinds (one table), so a dataset directory with this
+    name can only belong to this row; every download/upload/thumb path that takes a
+    project id therefore works for datasets unchanged.
+    """
+    name = f"{project_id}-{slug}"
+    shared = datasets_root() / name
+    if shared.is_dir():
+        return shared
+    return PROJECTS_DIR / name
 
 
 def _write_project_json(p: dict[str, Any]) -> None:
@@ -128,10 +149,15 @@ def create_project(
     )
     conn.commit()
     pid = int(cur.lastrowid)
-    pdir = project_dir(pid, final_slug)
-    (pdir / "download").mkdir(parents=True, exist_ok=True)
-    (pdir / "preprocess").mkdir(parents=True, exist_ok=True)
-    (pdir / "versions").mkdir(parents=True, exist_ok=True)
+    if kind == "dataset":
+        # Shared dataset: only the image pool; caches appear under cache/ on first use.
+        pdir = datasets_root() / f"{pid}-{final_slug}"
+        (pdir / "download").mkdir(parents=True, exist_ok=True)
+    else:
+        pdir = project_dir(pid, final_slug)
+        (pdir / "download").mkdir(parents=True, exist_ok=True)
+        (pdir / "preprocess").mkdir(parents=True, exist_ok=True)
+        (pdir / "versions").mkdir(parents=True, exist_ok=True)
     p = _must_get(conn, pid)
     _write_project_json(p)
     return p

@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useOutletContext } from 'react-router-dom'
 import {
   api,
+  parsePoolKey,
+  poolFileName,
   type CurationItem,
+  type CurationSource,
   type CurationValidationView,
   type CurationView,
+  type DatasetSummary,
   type ProjectDetail,
   type ValidationItem,
   type Version,
@@ -13,6 +17,7 @@ import {
 import ImageGrid, { applySelection } from '../../../components/ImageGrid'
 import ImagePreviewModal from '../../../components/ImagePreviewModal'
 import PageHead from '../../../components/ds/PageHead'
+import Popover from '../../../components/ds/Popover'
 import { useDialog } from '../../../components/Dialog'
 import { useToast } from '../../../components/Toast'
 import { parseFolderMeta } from '../../../lib/folderMeta'
@@ -36,7 +41,8 @@ type Bucket = 'train' | 'validation'
 const BUCKET_STORAGE_KEY = 'curation:bucket'
 
 function numericIdKey(name: string): number {
-  const stem = name.replace(/\.[^.]+$/, '')
+  // Dataset images are pool keys (`@7/001.png`): sort by their file name.
+  const stem = poolFileName(name).replace(/\.[^.]+$/, '')
   return /^\d+$/.test(stem) ? Number(stem) : Number.POSITIVE_INFINITY
 }
 
@@ -89,6 +95,8 @@ interface Preview {
   list: string[]
   index: number
   resolve: (name: string) => string
+  /** Caption for a name in `list` (dataset title / file, or folder / file). */
+  label: (name: string) => string
 }
 
 type Focus =
@@ -231,6 +239,16 @@ export default function CurationPage() {
     }
   }, [bucket, fetchTrain, fetchValidation])
 
+  // Shared datasets this version curates from (the pool = own download/ + these).
+  const [linked, setLinked] = useState<DatasetSummary[] | null>(null)
+  const [sourceFilter, setSourceFilter] = useState<number | 'own' | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const fetchLinked = useCallback(async () => {
+    if (versionId == null) return
+    try { setLinked(await api.getVersionDatasets(project.id, versionId)) } catch { setLinked([]) }
+  }, [project.id, versionId])
+  useEffect(() => { void fetchLinked() }, [fetchLinked])
+
   useEventStream((evt) => {
     if (
       evt.type === 'version_state_changed' &&
@@ -239,8 +257,29 @@ export default function CurationPage() {
       evt.version_id === versionId
     ) {
       void refresh()
+    } else if (
+      evt.type === 'project_state_changed' &&
+      linked?.some((d) => d.id === evt.project_id)
+    ) {
+      // Images were added to / removed from a linked dataset elsewhere.
+      void refresh()
     }
   })
+
+  const applyDatasets = async (ids: number[]) => {
+    if (versionId == null) return
+    try {
+      setLinked(await api.setVersionDatasets(project.id, versionId, ids))
+      if (typeof sourceFilter === 'number' && !ids.includes(sourceFilter)) setSourceFilter(null)
+      setLeftSel(new Set())
+      setLeftAnchor(null)
+      setView(null)
+      setValView(null)
+      await (bucket === 'validation' ? fetchValidation() : fetchTrain())
+    } catch (e) {
+      toast(String(e), 'error')
+    }
+  }
 
   const isVal = bucket === 'validation'
   const folderNames = view?.folders ?? []
@@ -248,10 +287,34 @@ export default function CurationPage() {
   // Left-column candidates are download − train − validation, and the two buckets share the same
   // pool -- while the target view hasn't loaded yet, fall back to the other view's (same-content)
   // left column so it never goes blank or flickers on switch.
-  const currentLeft = useMemo(
+  const unfilteredLeft = useMemo(
     () => (isVal ? valView?.left ?? view?.left ?? [] : view?.left ?? valView?.left ?? []),
     [isVal, valView, view]
   )
+  // A source chip narrows the grid to one dataset (or the project's own images).
+  const currentLeft = useMemo(() => {
+    if (sourceFilter == null) return unfilteredLeft
+    return unfilteredLeft.filter((e) => {
+      const source = parsePoolKey(e.name).source
+      return sourceFilter === 'own' ? source == null : source === sourceFilter
+    })
+  }, [unfilteredLeft, sourceFilter])
+  const sources: CurationSource[] = useMemo(
+    () => (isVal ? valView?.sources ?? view?.sources : view?.sources ?? valView?.sources) ?? [],
+    [isVal, valView, view],
+  )
+  const datasetTitle = useMemo(() => {
+    const m = new Map<number, string>()
+    for (const s of sources) if (s.id != null && s.title) m.set(s.id, s.title)
+    for (const d of linked ?? []) m.set(d.id, d.title)
+    return m
+  }, [sources, linked])
+  /** "Dataset / file" for previews; bare file name for the project's own images. */
+  const describe = useCallback((key: string) => {
+    const { source, file } = parsePoolKey(key)
+    const title = source != null ? datasetTitle.get(source) : null
+    return title ? `${title} / ${file}` : file
+  }, [datasetTitle])
   const leftSortedNames = useMemo(
     () => sortItems(currentLeft, sortMode).map((e) => e.name),
     [currentLeft, sortMode]
@@ -280,6 +343,13 @@ export default function CurationPage() {
     }
     return m
   }, [trainEntries])
+  // The copy's file name inside train/{folder} (differs from the origin for
+  // dataset images and same-name collisions) -- the train-bucket preview needs it.
+  const rightFileByName = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const e of trainEntries) m.set(e.name, e.file ?? e.name)
+    return m
+  }, [trainEntries])
   // Validation images have no manifest / no origin: look up name → physical folder instead, for
   // thumbnail addressing (the version-thumb validation bucket needs a folder) + precise deletion.
   const valFolderByName = useMemo(() => {
@@ -291,9 +361,10 @@ export default function CurationPage() {
   const leftItems = useMemo(
     () => leftSortedNames.map((n) => ({
       name: n,
+      label: describe(n),
       thumbUrl: api.projectThumbUrl(project.id, n, 'download', 256, undefined, true),
     })),
-    [leftSortedNames, project.id]
+    [leftSortedNames, project.id, describe]
   )
   const rightItems = useMemo(
     () =>
@@ -301,6 +372,7 @@ export default function CurationPage() {
         ? []
         : rightSortedNames.map((n) => ({
             name: n,
+            label: isVal ? n : describe(n),
             thumbUrl: isVal
               ? api.versionThumbUrl(
                   project.id, versionId, 'validation', n, valFolderByName.get(n), 256,
@@ -310,7 +382,7 @@ export default function CurationPage() {
                   undefined, true,
                 ),
           })),
-    [rightSortedNames, project.id, versionId, isVal, rightOriginByName, valFolderByName]
+    [rightSortedNames, project.id, versionId, isVal, rightOriginByName, valFolderByName, describe]
   )
 
   const onLeftHover = useCallback(
@@ -511,10 +583,11 @@ export default function CurationPage() {
     setPreview({
       side: 'left', name,
       url: api.projectThumbUrl(project.id, name, 'download', 1600),
-      caption: name,
+      caption: describe(name),
       list: leftSortedNames,
       index: leftSortedNames.indexOf(name),
       resolve: (n) => api.projectThumbUrl(project.id, n, 'download', 1600),
+      label: describe,
     })
   }
   const openRightPreview = (name: string) => {
@@ -529,17 +602,20 @@ export default function CurationPage() {
         index: rightSortedNames.indexOf(name),
         resolve: (n) =>
           api.versionThumbUrl(project.id, versionId, 'validation', n, valFolderByName.get(n) ?? '', 1600),
+        label: (n) => n,
       })
       return
     }
     const folder = rightFolder
+    const fileOf = (n: string) => rightFileByName.get(n) ?? n
     setPreview({
       side: 'right', name, folder,
-      url: api.versionThumbUrl(project.id, versionId, 'train', name, folder, 1600),
-      caption: `${folder}/${name}`,
+      url: api.versionThumbUrl(project.id, versionId, 'train', fileOf(name), folder, 1600),
+      caption: `${folder}/${fileOf(name)}`,
       list: rightSortedNames,
       index: rightSortedNames.indexOf(name),
-      resolve: (n) => api.versionThumbUrl(project.id, versionId, 'train', n, folder, 1600),
+      resolve: (n) => api.versionThumbUrl(project.id, versionId, 'train', fileOf(n), folder, 1600),
+      label: (n) => `${folder}/${fileOf(n)}`,
     })
   }
   const stepPreview = (delta: number) => {
@@ -550,7 +626,7 @@ export default function CurationPage() {
     setPreview({
       ...preview, name,
       url: preview.resolve(name),
-      caption: preview.side === 'right' && preview.folder && !isVal ? `${preview.folder}/${name}` : name,
+      caption: preview.label(name),
       index: idx,
     })
   }
@@ -564,7 +640,7 @@ export default function CurationPage() {
     setPreview({
       ...preview, name,
       url: preview.resolve(name),
-      caption: preview.side === 'right' && preview.folder && !isVal ? `${preview.folder}/${name}` : name,
+      caption: preview.label(name),
       list, index,
     })
   }
@@ -701,22 +777,47 @@ export default function CurationPage() {
                 )}
               </div>
             </div>
+
+            <PoolSources
+              sources={sources}
+              left={unfilteredLeft}
+              filter={sourceFilter}
+              onFilter={(f) => { setSourceFilter(f); setLeftSel(new Set()); setLeftAnchor(null) }}
+              linkedIds={(linked ?? []).map((d) => d.id)}
+              onApply={(ids) => void applyDatasets(ids)}
+              pickerOpen={pickerOpen}
+              setPickerOpen={setPickerOpen}
+              disabled={busy}
+            />
+
             <div className="ds-card-body" style={{ paddingTop: 2, flex: 1, minHeight: 0 }}>
-              <div className="ds-cur-grid">
-                <ImageGrid
-                  items={leftItems}
-                  selected={leftSel}
-                  activeName={preview?.side === 'left' ? preview.name : undefined}
-                  onSelect={handleLeftClick}
-                  onHover={onLeftHover}
-                  onPreview={openLeftPreview}
-                  onActivate={openLeftPreview}
-                  clickMode="activate"
-                  columnsClass="grid-cols-[repeat(auto-fill,minmax(84px,1fr))]"
-                  ariaLabel="download-grid"
-                  emptyHint={t('curate.downloadEmptyHint')}
-                />
-              </div>
+              {sources.length === 0 && linked != null ? (
+                <div className="ds-empty" style={{ height: '100%', justifyContent: 'center', padding: '30px 22px' }}>
+                  <span className="ds-sect-icon" style={{ width: 34, height: 34, borderRadius: 10 }}>{Icon.stack}</span>
+                  <span style={{ fontWeight: 500, color: 'var(--ink-2)', marginTop: 4 }}>{t('curate.noSourcesTitle')}</span>
+                  <span style={{ maxWidth: 380 }}>{t('curate.noSourcesHint')}</span>
+                  <span style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button type="button" className="ds-btn-primary" onClick={() => setPickerOpen(true)}>{t('curate.pickDatasets')}</button>
+                    <Link className="ds-ctl" to="/datasets">{t('curate.manageDatasets')}</Link>
+                  </span>
+                </div>
+              ) : (
+                <div className="ds-cur-grid">
+                  <ImageGrid
+                    items={leftItems}
+                    selected={leftSel}
+                    activeName={preview?.side === 'left' ? preview.name : undefined}
+                    onSelect={handleLeftClick}
+                    onHover={onLeftHover}
+                    onPreview={openLeftPreview}
+                    onActivate={openLeftPreview}
+                    clickMode="activate"
+                    columnsClass="grid-cols-[repeat(auto-fill,minmax(84px,1fr))]"
+                    ariaLabel="download-grid"
+                    emptyHint={t('curate.downloadEmptyHint')}
+                  />
+                </div>
+              )}
             </div>
             <div className="ds-cardfoot">
               {isVal ? (
@@ -872,6 +973,156 @@ const Icon = {
   shield: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3Z" /></svg>,
   repeat: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M17 2l4 4-4 4" /><path d="M3 11V9a3 3 0 0 1 3-3h15" /><path d="M7 22l-4-4 4-4" /><path d="M21 13v2a3 3 0 0 1-3 3H3" /></svg>,
   x: <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>,
+  check: <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.2" strokeLinecap="round"><path d="m5 13 4 4L19 7" /></svg>,
+}
+
+/** Where the left grid's images come from: the project's own images (old
+ *  projects) and the shared datasets this version picked. A chip filters the
+ *  grid to one source; × unlinks a dataset (train copies stay); "+ Datasets"
+ *  picks several at once. */
+function PoolSources({ sources, left, filter, onFilter, linkedIds, onApply, pickerOpen, setPickerOpen, disabled }: {
+  sources: CurationSource[]
+  /** Unused pool images (all sources). */
+  left: CurationItem[]
+  filter: number | 'own' | null
+  onFilter: (f: number | 'own' | null) => void
+  linkedIds: number[]
+  onApply: (ids: number[]) => void
+  pickerOpen: boolean
+  setPickerOpen: (open: boolean) => void
+  disabled: boolean
+}) {
+  const { t } = useTranslation()
+  const addRef = useRef<HTMLButtonElement | null>(null)
+  const [datasets, setDatasets] = useState<DatasetSummary[] | null>(null)
+
+  // Load the library before the popover opens: it is positioned once, by its size.
+  useEffect(() => {
+    if (!pickerOpen) { setDatasets(null); return }
+    let cancelled = false
+    void api.listLibraryDatasets()
+      .then((items) => { if (!cancelled) setDatasets(items) })
+      .catch(() => { if (!cancelled) setDatasets([]) })
+    return () => { cancelled = true }
+  }, [pickerOpen])
+
+  const unused = useMemo(() => {
+    const m = new Map<number | 'own', number>()
+    for (const e of left) {
+      const k = parsePoolKey(e.name).source ?? 'own'
+      m.set(k, (m.get(k) ?? 0) + 1)
+    }
+    return m
+  }, [left])
+
+  return (
+    <div className="ds-src-row">
+      <span className="ds-cap" style={{ flex: 'none' }}>{t('curate.sourcesLabel')}</span>
+      {sources.length > 1 && (
+        <button type="button" className={`ds-chip${filter == null ? ' ds-is-active' : ''}`} style={{ paddingRight: 11 }} onClick={() => onFilter(null)}>
+          {t('curate.sourceAll')} <b>{left.length.toLocaleString()}</b>
+        </button>
+      )}
+      {sources.map((s) => {
+        const key: number | 'own' = s.id ?? 'own'
+        const active = filter === key
+        const free = unused.get(key) ?? 0
+        const title = s.id == null ? t('curate.sourceOwn') : s.title ?? `#${s.id}`
+        return (
+          <span key={String(key)} className={`ds-chip${active ? ' ds-is-active' : ''}`} style={s.id == null ? { paddingRight: 11 } : undefined}>
+            <button
+              type="button"
+              onClick={() => onFilter(active ? null : key)}
+              title={t('curate.sourceChipTitle', { free, total: s.total })}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 7, maxWidth: 220 }}
+            >
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
+              <b>{free.toLocaleString()}</b>
+            </button>
+            {s.id != null && (
+              <button
+                type="button"
+                className="ds-chip-x"
+                aria-label={t('curate.unlinkDataset', { title })}
+                title={t('curate.unlinkDataset', { title })}
+                disabled={disabled}
+                onClick={() => onApply(linkedIds.filter((id) => id !== s.id))}
+              >
+                {Icon.x}
+              </button>
+            )}
+          </span>
+        )
+      })}
+      <button ref={addRef} type="button" className="ds-chip-add" onClick={() => setPickerOpen(!pickerOpen)} disabled={disabled}>
+        {t('curate.addDatasets')}
+      </button>
+      {pickerOpen && datasets != null && addRef.current && (
+        <DatasetPicker
+          anchor={addRef.current}
+          datasets={datasets}
+          initial={linkedIds}
+          onClose={() => setPickerOpen(false)}
+          onApply={(ids) => { setPickerOpen(false); onApply(ids) }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Multi-select of the dataset library ("pick a batch"), applied at once. */
+function DatasetPicker({ anchor, datasets, initial, onClose, onApply }: {
+  anchor: HTMLElement
+  datasets: DatasetSummary[]
+  initial: number[]
+  onClose: () => void
+  onApply: (ids: number[]) => void
+}) {
+  const { t } = useTranslation()
+  const [picked, setPicked] = useState<number[]>(initial)
+  const toggle = (id: number) => setPicked((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id])
+  const changed = picked.length !== initial.length || picked.some((id) => !initial.includes(id))
+
+  return (
+    <Popover anchor={anchor} minWidth={330} maxHeight={460} role="dialog" ariaLabel={t('curate.pickerTitle')} onClose={onClose} style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div className="ds-menu-head">{t('curate.pickerTitle')}</div>
+      {datasets.length === 0 ? (
+        <div style={{ padding: '6px 10px 12px', fontSize: 12, color: 'var(--ink-3)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <span>{t('curate.pickerEmpty')}</span>
+          <Link className="ds-ctl" style={{ alignSelf: 'flex-start', height: 28 }} to="/datasets">{t('curate.manageDatasets')}</Link>
+        </div>
+      ) : (
+        <>
+          <div style={{ maxHeight: 300, overflowY: 'auto', padding: '0 4px' }}>
+            {datasets.map((d) => {
+              const on = picked.includes(d.id)
+              return (
+                <button key={d.id} type="button" className="ds-src-pick" role="checkbox" aria-checked={on} onClick={() => toggle(d.id)}>
+                  <span className={`ds-cbox${on ? ' ds-on' : ''}`}>{Icon.check}</span>
+                  {d.covers[0]
+                    ? <img src={api.projectThumbUrl(d.id, d.covers[0], 'download', 128, undefined, true)} alt="" />
+                    : <span className="ds-src-thumb" />}
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span className="ds-src-name">{d.title}</span>
+                    <span className="ds-src-sub">{t('projects.images', { n: d.image_count.toLocaleString() })}{d.used_by.length > 0 ? ` · ${t('curate.pickerUsed', { count: d.used_by.length })}` : ''}</span>
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          <div className="ds-menu-sep" role="separator" />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px 8px' }}>
+            <Link to="/datasets" className="ds-ctl ds-ghost" style={{ height: 28 }}>{t('curate.manageDatasets')}</Link>
+            <span style={{ flex: 1 }} />
+            <button type="button" className="ds-ctl" style={{ height: 28 }} onClick={onClose}>{t('common.cancel')}</button>
+            <button type="button" className="ds-btn-primary" style={{ height: 28 }} disabled={!changed} onClick={() => onApply(picked)}>
+              {t('curate.pickerApply', { count: picked.length })}
+            </button>
+          </div>
+        </>
+      )}
+    </Popover>
+  )
 }
 
 function AltHoverPreview({ focus, isVal }: { focus: Focus; isVal: boolean }) {
@@ -887,7 +1138,7 @@ function AltHoverPreview({ focus, isVal }: { focus: Focus; isVal: boolean }) {
         <img src={focus.url} alt={focus.name} className="max-w-[95vw] max-h-[88vh] object-contain" />
         <div className="flex items-center gap-2 shrink-0 px-3 py-1.5 border-t border-white/[0.08]">
           <span className={`ds-badge ${focus.side === 'left' ? 'ds-ok' : 'ds-info'}`}>{sourceLabel}</span>
-          <code className="ds-mono truncate flex-1 min-w-0 text-white text-sm">{focus.name}</code>
+          <code className="ds-mono truncate flex-1 min-w-0 text-white text-sm">{poolFileName(focus.name)}</code>
           <span className="text-xs shrink-0 text-white/40">{t('curate.altHoverClose')}</span>
         </div>
       </div>

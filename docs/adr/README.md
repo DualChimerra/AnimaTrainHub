@@ -17,6 +17,7 @@ Records architectural-level "**we chose X over Y**" decisions and the reasoning 
 | 0009 | [Unified logging + error system (0.12.0)](0009-logging-error-system.md) | Accepted | 2026-05-28 |
 | 0010 | [Move preprocess scope from project-level download down to version-level train](0010-preprocess-train-scope.md) | Accepted | 2026-06-03 |
 | 0014 | [LyCORIS 4 fused kernels and Windows Triton](0014-lycoris4-fused-kernels.md) | Accepted | 2026-09-20 |
+| 0017 | [Make datasets shared, with training caches inside the dataset folder](0017-shared-datasets.md) | Proposed | 2026-10-25 |
 
 ## Status values
 

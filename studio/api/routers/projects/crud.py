@@ -46,7 +46,7 @@ router = APIRouter()
 
 
 @router.get("/api/projects")
-def list_projects_endpoint() -> dict[str, Any]:
+def list_projects_endpoint(include_datasets: bool = False) -> dict[str, Any]:
     """ADR-0007 §11.8-E: enrich with active version label + status, for the card's
     top-right badge.
 
@@ -57,6 +57,11 @@ def list_projects_endpoint() -> dict[str, Any]:
     """
     with db.connection_for() as conn:
         rows = projects.list_projects(conn)
+        if not include_datasets:
+            # Shared datasets have their own list (/api/library/datasets); pickers
+            # and project lists never want them. The queue asks for them to name
+            # dataset download jobs.
+            rows = [r for r in rows if not projects.is_dataset(r)]
         enriched: list[dict[str, Any]] = []
         for r in projects.projects_with_stats(rows):
             r["active_version_label"] = None

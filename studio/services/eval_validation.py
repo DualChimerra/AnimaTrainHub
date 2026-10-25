@@ -44,6 +44,22 @@ def iter_images(root: Path):
                 yield folder.name, image
 
 
+def _train_origins(train: Path) -> dict[str, str]:
+    """`{"folder/file": origin}` from the train manifest (empty when absent)."""
+    import json
+
+    path = train / "manifest.json"
+    try:
+        images = json.loads(path.read_text(encoding="utf-8")).get("images") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {
+        str(rel): str(entry.get("origin"))
+        for rel, entry in images.items()
+        if isinstance(entry, dict) and entry.get("origin")
+    }
+
+
 def caption_sidecars(image: Path) -> list[Path]:
     return [p for suf in CAPTION_SUFFIXES if (p := image.with_suffix(suf)).exists()]
 
@@ -83,6 +99,11 @@ def ensure_validation_split(
     rng = random.Random(seed)
     picks = rng.sample(train_imgs, need)
     moved = 0
+    # Images from a shared dataset carry their pool key over, so the curation
+    # pool keeps excluding them once they are held out.
+    from .dataset import library
+    train_origins = _train_origins(train)
+    val_origins = library.read_validation_origins(val)
     for folder_name, image in picks:
         dest_folder = val / folder_name
         dest_folder.mkdir(parents=True, exist_ok=True)
@@ -91,7 +112,11 @@ def ensure_validation_split(
             if dest.exists():
                 continue
             src.replace(dest)
+        origin = train_origins.get(f"{folder_name}/{image.name}")
+        if origin and origin != image.name:
+            val_origins[f"{folder_name}/{image.name}"] = origin
         moved += 1
+    library.write_validation_origins(val, val_origins)
 
     return {
         "train": len(train_imgs) - moved,

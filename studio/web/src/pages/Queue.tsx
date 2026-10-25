@@ -142,7 +142,7 @@ export default function QueuePage() {
 
   useEffect(() => { void reload(); void reloadHold() }, [reload, reloadHold])
   useEffect(() => {
-    api.listProjects()
+    api.listProjects({ includeDatasets: true })
       .then((items) => setProjectTitles(Object.fromEntries(items.map((p) => [p.id, p.title]))))
       .catch(() => {})
   }, [])

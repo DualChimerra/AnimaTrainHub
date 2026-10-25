@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next'
 import { Link, useOutletContext } from 'react-router-dom'
 import {
   api,
+  isDataset,
   type DownloadFile,
   type Job,
   type ProjectDetail,
@@ -132,9 +133,50 @@ function useUploader(pid: number, onDone: (r: UploadResult) => void) {
 
 // ── page ─────────────────────────────────────────────────────────────────
 
+/** Project route: the project's own download/ (old projects keep their images
+ *  here). New projects pick shared datasets in curation instead. */
 export default function DownloadPage() {
   const { t } = useTranslation()
   const { project, activeVersion, reload } = useOutletContext<Ctx>()
+  const nextTo = activeVersion ? `/projects/${project.id}/v/${activeVersion.id}/curate` : `/projects/${project.id}`
+  return (
+    <DatasetWorkspace
+      project={project}
+      activeVersion={activeVersion}
+      reload={reload}
+      shareBanner
+      renderHead={(pathButton) => (
+        <PageHead
+          accent
+          eyebrow={t('dataset.eyebrow')}
+          title={t('steps.download.title')}
+          subtitle={t('dataset.subtitle')}
+          tools={
+            <>
+              {pathButton}
+              <Link className="ds-btn-primary" to={nextTo}>{t('dataset.nextCurate')}<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13m-5-6 6 6-6 6" /></svg></Link>
+            </>
+          }
+        />
+      )}
+    />
+  )
+}
+
+/** The image pool workspace: booru scraping + import, stats, the image grid
+ *  and the job log. Shared by a project's download/ step and a shared dataset
+ *  page (a dataset is a project row, so every endpoint takes its id). */
+export function DatasetWorkspace({ project, activeVersion, reload, renderHead, shareBanner = false }: {
+  project: ProjectDetail
+  /** The version whose train set marks images "in train"; null on a dataset page. */
+  activeVersion: Version | null
+  reload: () => Promise<void> | void
+  /** The page head; receives the "import from server path" button for its tools. */
+  renderHead: (pathButton: React.ReactNode) => React.ReactNode
+  /** Project pages: offer to turn the project's own images into a shared dataset. */
+  shareBanner?: boolean
+}) {
+  const { t } = useTranslation()
   const { toast } = useToast()
   const { confirm } = useDialog()
 
@@ -247,7 +289,6 @@ export default function DownloadPage() {
     }
   }
 
-  const nextTo = activeVersion ? `/projects/${project.id}/v/${activeVersion.id}/curate` : `/projects/${project.id}`
   const uploadDetail = uploader.busy ? (uploader.processing ? t('download.uploadProcessing') : t('download.uploading')) : null
   const logDetail = jobActive && job
     ? `#${job.id} ${t('dataset.logScrape')}${jobProgress ? `, ${jobProgress.n.toLocaleString()} / ${jobProgress.total.toLocaleString()}` : ''}`
@@ -255,22 +296,15 @@ export default function DownloadPage() {
       ? `${t('dataset.logUpload')}, ${uploadDetail}`
       : null
 
+  const pathButton = (
+    <button type="button" className="ds-ctl" onClick={() => setShowPathPicker(true)} disabled={uploader.busy}>
+      {t('download.uploadFromPath')}
+    </button>
+  )
+
   return (
     <div className="fade-in" style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
-      <PageHead
-        accent
-        eyebrow={t('dataset.eyebrow')}
-        title={t('steps.download.title')}
-        subtitle={t('dataset.subtitle')}
-        tools={
-          <>
-            <button type="button" className="ds-ctl" onClick={() => setShowPathPicker(true)} disabled={uploader.busy}>
-              {t('download.uploadFromPath')}
-            </button>
-            <Link className="ds-btn-primary" to={nextTo}>{t('dataset.nextCurate')}<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13m-5-6 6 6-6 6" /></svg></Link>
-          </>
-        }
-      />
+      {renderHead(pathButton)}
 
       <div className="ds-scroll" style={{ flex: '1 0 auto' }}>
         <div className="ds-ds-top">
@@ -279,6 +313,8 @@ export default function DownloadPage() {
         </div>
 
         <StatsCard project={project} files={files} selected={selected.size} />
+
+        {shareBanner && files.length > 0 && <ShareAsDatasetNote project={project} />}
 
         <div className="ds-card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div className="ds-card-head ds-pad">
@@ -385,6 +421,49 @@ export default function DownloadPage() {
           onClose={() => setShowPathPicker(false)}
           onPick={(path) => { setShowPathPicker(false); void uploader.importPath(path) }}
         />
+      )}
+    </div>
+  )
+}
+
+// ── share as a dataset ───────────────────────────────────────────────────
+
+/** Old projects keep their images inside the project. One click turns them
+ *  into a shared dataset (the files are linked, not duplicated, when the disk
+ *  allows) so new trainings can pick them; this project keeps working as is. */
+function ShareAsDatasetNote({ project }: { project: ProjectDetail }) {
+  const { t } = useTranslation()
+  const { toast } = useToast()
+  const { prompt } = useDialog()
+  const [busy, setBusy] = useState(false)
+  const [created, setCreated] = useState<{ id: number; title: string } | null>(null)
+
+  const share = async () => {
+    const title = (await prompt(t('datasets.shareTitlePrompt'), { defaultValue: project.title }))?.trim()
+    if (!title) return
+    setBusy(true)
+    try {
+      const d = await api.createDataset({ title, from_project_id: project.id })
+      setCreated({ id: d.id, title: d.title })
+      toast(t('datasets.sharedToast', { title: d.title, n: d.imported?.added.length ?? d.image_count }), 'success')
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="ds-note ds-info" style={{ alignItems: 'center' }}>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        {created ? t('datasets.sharedNote', { title: created.title }) : t('datasets.shareNote')}
+      </span>
+      {created ? (
+        <Link className="ds-ctl" style={{ height: 28, flex: 'none' }} to={`/datasets/${created.id}`}>{t('datasets.openDataset')}</Link>
+      ) : (
+        <button type="button" className="ds-ctl" style={{ height: 28, flex: 'none' }} onClick={() => void share()} disabled={busy}>
+          {busy ? t('datasets.sharing') : t('datasets.shareBtn')}
+        </button>
       )}
     </div>
   )
@@ -689,7 +768,7 @@ function StatsCard({ project, files, selected }: {
       <div className="ds-card-head ds-pad">
         <div>
           <div className="ds-card-title">{t('dataset.statsTitle')}</div>
-          <div className="ds-card-sub">{t('dataset.statsSub')}</div>
+          <div className="ds-card-sub">{t(isDataset(project) ? 'datasets.statsSub' : 'dataset.statsSub')}</div>
         </div>
       </div>
       <div className="ds-statgrid ds-ds-stats" style={{ borderTop: '1px solid var(--line)', marginTop: 13 }}>

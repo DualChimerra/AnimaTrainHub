@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from training.context import TrainingContext
+from training.dataset_cache import SharedCacheRouter
 from training.dataset import (
     BucketBatchSampler,
     BucketManager,
@@ -209,6 +210,15 @@ def run(ctx: TrainingContext) -> None:
                 weight_info = f", weight={reg_weight}" if reg_weight != 1.0 else ""
                 logger.info(f"regularization dataset: {reg_data_dir} ({len(reg_base)} samples, per-folder repeat{weight_info}){cap_preview}")
 
+    # Images curated from a shared dataset cache into that dataset's folder
+    # (Studio writes the routes next to the training set; absent = sidecars).
+    ctx.shared_cache = SharedCacheRouter.load(getattr(args, "data_dir", "") or "")
+    if ctx.shared_cache is not None:
+        logger.info(
+            "[dataset-cache] %d training images cache into their shared dataset folders",
+            len(ctx.shared_cache),
+        )
+
     # Cache VAE latents (before repeat)
     ctx.use_cached = getattr(args, "cache_latents", False)
     if ctx.use_cached:
@@ -225,6 +235,8 @@ def run(ctx: TrainingContext) -> None:
             encode_max_pixels=getattr(args, "cache_encode_max_pixels", 0),
             latent_spec=ctx.family.spec.latent,
             label="training set",
+            shared_cache=ctx.shared_cache,
+            cache_meta={"family": ctx.family.spec.family_id},
         )
     if ctx.reg_dataset is not None and ctx.use_cached:
         ctx.reg_dataset = CachedLatentDataset(

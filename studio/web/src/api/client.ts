@@ -1008,7 +1008,62 @@ export interface ProjectSummary {
   kind?: ProjectKind
 }
 
-export type ProjectKind = 'lora' | 'edit'
+export type ProjectKind = 'lora' | 'edit' | 'dataset'
+
+/** A training (version) that curates from a shared dataset. */
+export interface DatasetUsage {
+  project_id: number
+  project_title: string
+  project_kind: ProjectKind
+  version_id: number
+  version_label: string
+}
+
+/** Shared dataset (a projects row with kind='dataset'): images live in
+ *  studio_data/datasets/{id}-{slug}/download/, training caches in .../cache/. The
+ *  project routes (files, upload, booru download, thumbnails) take its id. */
+export interface DatasetSummary {
+  id: number
+  slug: string
+  title: string
+  note: string | null
+  kind: 'dataset'
+  created_at: number
+  updated_at: number
+  image_count: number
+  image_bytes: number
+  last_added_at: number | null
+  /** Up to 4 newest image names, for the card mosaic. */
+  covers: string[]
+  cache_files: number
+  cache_bytes: number
+  used_by: DatasetUsage[]
+  /** Absolute folder on the server. */
+  path: string
+  imported?: { added: string[]; skipped: string[] }
+}
+
+/** One cache format folder inside a dataset: cache/{kind}/{group}/. */
+export interface DatasetCacheGroup {
+  kind: 'latents' | 'text'
+  group: string
+  /** Model family that wrote it (anima / krea2 / moss_image), from group.json. */
+  family: string | null
+  fingerprint: string | null
+  flip_copies: boolean | null
+  files: number
+  bytes: number
+  created_at: number | null
+  last_used_at: number | null
+  path: string
+}
+
+export interface DatasetCacheInfo {
+  groups: DatasetCacheGroup[]
+  total_files: number
+  total_bytes: number
+  path: string
+}
 
 /** What an edit tool takes: image + text instruction, or image + image prompt. */
 export type EditRecipe = 'text' | 'image'
@@ -1043,6 +1098,15 @@ export interface EditPairsListing {
 }
 
 export const isEditProject = (p: { kind?: string | null } | null | undefined): boolean => p?.kind === 'edit'
+export const isDataset = (p: { kind?: string | null } | null | undefined): boolean => p?.kind === 'dataset'
+
+/** `@7/001.png` -> { source: 7, file: '001.png' }; a bare name -> { source: null, file: name }. */
+export function parsePoolKey(key: string): { source: number | null; file: string } {
+  const m = /^@(\d+)\/([^\\/]+)$/.exec(key)
+  return m ? { source: Number(m[1]), file: m[2] } : { source: null, file: key }
+}
+/** File name to show for a pool key / origin. */
+export const poolFileName = (key: string): string => parsePoolKey(key).file
 
 export interface ProjectDetail extends ProjectSummary {
   versions: Version[]
@@ -1207,12 +1271,25 @@ export interface CurationItem {
    *  making the curation page thumbnail "shift position". View processed results in Preprocess
    *  Overview instead. Missing/meaningless for left-side items (download candidates). */
   origin?: string
+  /** Shared dataset id the image comes from; null/absent = the project's own download/.
+   *  Dataset images are named by their pool key `@{id}/{file}`. */
+  source?: number | null
+  /** File name on disk (pool key without `@{id}/`; for train items the copy's name). */
+  file?: string
+}
+
+/** A curation pool source: the project's own images (id null) or a linked dataset. */
+export interface CurationSource {
+  id: number | null
+  title: string | null
+  total: number
 }
 
 export interface CurationView {
-  left: CurationItem[] // download - train - validation
+  left: CurationItem[] // pool (own download + linked datasets) - train - validation
   right: Record<string, CurationItem[]> // folder -> items
   download_total: number
+  sources?: CurationSource[]
   train_total: number
   folders: string[]
 }
@@ -1223,12 +1300,16 @@ export interface ValidationItem {
   name: string
   mtime: number
   folder: string
+  /** Pool key (`@{id}/{file}`) for an image from a shared dataset, else the name. */
+  origin?: string
+  source?: number | null
 }
 
 export interface CurationValidationView {
   left: CurationItem[] // download - train - validation (shares the candidate pool with the training set)
   right: ValidationItem[] // full flat validation list
   download_total: number
+  sources?: CurationSource[]
   val_total: number
 }
 
@@ -2441,8 +2522,9 @@ export const api = {
     }),
 
   // Projects / Versions (PP1) -------------------------------------------
-  listProjects: () =>
-    req<{ items: ProjectSummary[] }>('/api/projects').then((r) => r.items),
+  /** Shared datasets are left out unless asked for (the queue names their jobs). */
+  listProjects: (opts?: { includeDatasets?: boolean }) =>
+    req<{ items: ProjectSummary[] }>(`/api/projects${opts?.includeDatasets ? '?include_datasets=true' : ''}`).then((r) => r.items),
   getProject: (pid: number) =>
     req<ProjectDetail>(`/api/projects/${pid}`),
   createProject: (body: {
@@ -2470,6 +2552,38 @@ export const api = {
     }),
   deleteProject: (pid: number) =>
     req<{ deleted: number }>(`/api/projects/${pid}`, { method: 'DELETE' }),
+  // Shared dataset library ------------------------------------------------
+  listLibraryDatasets: () =>
+    req<{ items: DatasetSummary[] }>('/api/library/datasets').then((r) => r.items),
+  getDataset: (did: number) =>
+    req<DatasetSummary>(`/api/library/datasets/${did}`),
+  createDataset: (body: { title: string; note?: string; from_project_id?: number }) =>
+    req<DatasetSummary>('/api/library/datasets', { method: 'POST', body: JSON.stringify(body) }),
+  updateDataset: (did: number, body: Partial<{ title: string; note: string }>) =>
+    req<DatasetSummary>(`/api/library/datasets/${did}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteDataset: (did: number) =>
+    req<{ deleted: number }>(`/api/library/datasets/${did}`, { method: 'DELETE' }),
+  importProjectIntoDataset: (did: number, projectId: number) =>
+    req<{ added: string[]; skipped: string[] }>(`/api/library/datasets/${did}/import-project`, {
+      method: 'POST', body: JSON.stringify({ project_id: projectId }),
+    }),
+  getDatasetCache: (did: number) =>
+    req<DatasetCacheInfo>(`/api/library/datasets/${did}/cache`),
+  /** No kind = the whole cache; kind + group = one format folder. */
+  clearDatasetCache: (did: number, kind?: string, group?: string) => {
+    const qs = new URLSearchParams()
+    if (kind) qs.set('kind', kind)
+    if (group) qs.set('group', group)
+    const q = qs.toString()
+    return req<{ freed_bytes: number }>(`/api/library/datasets/${did}/cache${q ? `?${q}` : ''}`, { method: 'DELETE' })
+  },
+  getVersionDatasets: (pid: number, vid: number) =>
+    req<{ items: DatasetSummary[] }>(`/api/projects/${pid}/versions/${vid}/datasets`).then((r) => r.items),
+  setVersionDatasets: (pid: number, vid: number, datasetIds: number[]) =>
+    req<{ items: DatasetSummary[] }>(`/api/projects/${pid}/versions/${vid}/datasets`, {
+      method: 'PUT', body: JSON.stringify({ dataset_ids: datasetIds }),
+    }).then((r) => r.items),
+
   /** Archive (soft-hide, reversible): folders / versions / tasks are all left as-is. */
   archiveProject: (pid: number) =>
     req<ProjectDetail>(`/api/projects/${pid}/archive`, { method: 'POST' }),

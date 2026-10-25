@@ -21,16 +21,16 @@ class DualPeakConfig:
     The broad background is an unconstrained log-SNR normal component.
     """
 
-    peak1_position: float = 0.525
-    peak1_width: float = 0.55
-    peak1_weight: float = 0.15
+    peak1_position: float = 0.540
+    peak1_width: float = 0.80
+    peak1_weight: float = 0.24
     peak2_position: float = 0.850
     peak2_width: float = 1.20
-    peak2_weight: float = 0.35
-    background_mean: float = -3.2
-    background_width: float = 2.20
-    background_weight: float = 0.45
-    uniform_weight: float = 0.05
+    peak2_weight: float = 0.36
+    background_mean: float = -2.8
+    background_width: float = 2.40
+    background_weight: float = 0.34
+    uniform_weight: float = 0.06
 
     def __post_init__(self) -> None:
         for field in fields(self):

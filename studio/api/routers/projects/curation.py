@@ -38,7 +38,7 @@ from ...schemas.curation import (
 from ._shared import _publish_project_state
 from .... import db
 from ....services.projects import jobs as project_jobs, projects, versions
-from ....services.dataset import curation, scan as datasets
+from ....services.dataset import curation, library, scan as datasets
 from ....infrastructure.event_bus import bus
 from ....services.preprocess import duplicates as duplicate_finder, manifest as preprocess_manifest
 
@@ -171,7 +171,15 @@ def project_thumb(
         )
     pdir = projects.project_dir(p["id"], p["slug"])
 
-    if bucket == "preprocess":
+    dataset_id, pool_name = library.parse_pool_key(name)
+    if bucket == "download" and dataset_id is not None:
+        # Pool key `@{id}/{file}`: an image from a shared dataset (curation pool,
+        # origin of a train copy). Datasets have no preprocess layer -- always raw.
+        ddir = library.dataset_dir_by_id(dataset_id)
+        if ddir is None:
+            raise NotFoundError("Thumbnail not found", code="dataset.thumbnail_not_found")
+        f = _safe_join_or_400(ddir / "download", pool_name)
+    elif bucket == "preprocess":
         # Direct addressing — no resolve. Path traversal guard against the
         # actual preprocess/ dir (any filename including _c0/_c1 derivatives).
         _safe_join_or_400(pdir / "preprocess", name)

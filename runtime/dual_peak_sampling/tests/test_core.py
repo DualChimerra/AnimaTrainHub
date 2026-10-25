@@ -12,9 +12,9 @@ from dual_peak_sampling import DualPeakConfig, density, sample_timesteps
 def test_default_distribution_matches_agreed_curve():
     t = sample_timesteps(200_000, generator=torch.Generator().manual_seed(314))
     for lo, hi, expected in (
-        (0, .3, .02093), (.3, .6, .21464),
-        (.6, .9, .58642), (.9, 1, .17800),
-        (.45, .6, .16832), (.8, .9, .28897),
+        (0, .3, .02995), (.3, .6, .26606),
+        (.6, .9, .56983), (.9, 1, .13416),
+        (.45, .6, .19105), (.8, .9, .25258),
     ):
         measured = float(((t >= lo) & (t < hi)).float().mean())
         assert abs(measured - expected) < .005
@@ -26,8 +26,8 @@ def test_density_normalization_and_actual_mixture_peaks():
     assert abs(float(torch.trapezoid(p, t)) - 1.0) < 1e-4
     peaks = t[1:-1][(p[1:-1] > p[:-2]) & (p[1:-1] > p[2:])]
     assert peaks.numel() == 2
-    assert abs(float(peaks[0]) - .540) < .003
-    assert abs(float(peaks[1]) - .870) < .003
+    assert abs(float(peaks[0]) - .577) < .003
+    assert abs(float(peaks[1]) - .861) < .003
 
 
 @pytest.mark.parametrize("position,width", [(.2, .55), (.525, .55), (.85, 1.2), (.7, 2.8)])
@@ -55,8 +55,8 @@ def test_zero_weights_and_normalization():
     assert abs(float(t.mean()) - .5) < .01
     torch.testing.assert_close(density(torch.tensor([.1, .4, .9]), config), torch.ones(3))
     original = DualPeakConfig()
-    scaled = replace(original, peak1_weight=.3, peak2_weight=.7,
-                     background_weight=.9, uniform_weight=.1)
+    scaled = replace(original, peak1_weight=.48, peak2_weight=.72,
+                     background_weight=.68, uniform_weight=.12)
     torch.testing.assert_close(
         sample_timesteps(256, config=original, generator=torch.Generator().manual_seed(7)),
         sample_timesteps(256, config=scaled, generator=torch.Generator().manual_seed(7)),

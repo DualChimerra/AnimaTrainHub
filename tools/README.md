@@ -166,6 +166,43 @@ sampled t histogram / final gate shape). See the script's top-of-file docstring 
 design doc; don't monkey-patch the source code (the script implements fix configs by
 dynamically overriding `_refresh`).
 
+### `noise_gap_probe.py` (added in this fork)
+Picks a style timestep distribution **without training a LoRA**. Loads the base model from
+an ordinary training config (anima / krea2 / moss_image), the same cached latents and
+captions training would use, with no adapter injected. **Uses the GPU.**
+
+1. **Gap profile**: the base model's denoising error per t on the artist's images, divided
+   by its error on images it generated itself from the same captions. Bands where the
+   artist is harder than the model's own output are where a style LoRA must learn; the
+   positive gap is fitted into a suggested `dual_peak` config (blended with the shipped
+   default by `--anchor`).
+2. **Noise ladder**: each image noised to t0 and finished by the base model, for several t0
+   (plus a full generation, t0=1). Shows at which noise level palette, shapes and pose are
+   replaced by the model's defaults, with pixel metrics per rung.
+
+```
+python tools/noise_gap_probe.py --config studio_data/tasks/<id>/snapshot/config.yaml --out noise_probe_out/my_style
+python tools/noise_gap_probe.py --config ... --skip-ladder --max-images 24       # profile only, more images
+python tools/noise_gap_probe.py --config ... --skip-profile --ladder-t 0.4,0.6,0.8,0.9
+python tools/noise_gap_probe.py --config ... --reuse-reference                     # rerun without regenerating references
+python tools/noise_gap_probe.py --config <the LoRA's training config> --lora my.safetensors --out noise_probe_out/my_lora
+python tools/noise_gap_probe.py --config ... --lora my.safetensors --skip-profile --windows "!0.85-1,!0.6-0.85,!0-0.3"
+```
+
+`--lora` mode checks a trained LoRA instead: the share of denoising error it removed per t on
+its own dataset (where it learned), and generations with the LoRA switched on only inside a
+t window (`a-b`) or everywhere except it (`!a-b`), scored as the share of the full LoRA's
+palette / shapes / composition effect, plus how closely the composition copies the dataset
+image (`lora/report.md`, `lora/windows_XX.png`).
+
+Outputs `<out>/report.md`, `profile.png`/`profile.csv`, `suggested_dual_peak.yaml`,
+`reference/` (the base model's own images), `ladder/ladder_XX.png` and
+`ladder_metrics.png/.csv`. Writes nothing into the dataset folder (Krea2/MOSS prompt caches
+go to `<out>/_work`). Captions are used exactly as training sees them unless
+`--strip-trigger`. The math lives in `runtime/noise_probe/` (CPU tests:
+`tests/test_noise_probe.py`). A heuristic for choosing a sampler, not a measurement of a
+trained LoRA.
+
 ---
 
 ## Release / schema maintenance
