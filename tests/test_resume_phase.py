@@ -79,7 +79,7 @@ def _resumed_ctx(tmp_path: Path, monkeypatch, *, with_config: bool):
 
     events = []
     monkeypatch.setattr(resume, "emit_event", lambda name, payload: events.append((name, payload)))
-    monkeypatch.setattr(resume, "load_training_state", lambda *a, **k: (2, 202, [], None))
+    monkeypatch.setattr(resume, "load_training_state", lambda *a, **k: (2, 202, [], None, 0))
 
     ctx = _ctx(tmp_path, sample_every=0)
     ctx.args.resume_state = str(state)

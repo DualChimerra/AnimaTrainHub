@@ -83,6 +83,23 @@ def _native_dataset_kwargs(args, ctx) -> dict:
     return kwargs
 
 
+def build_dataloader(dataset, batch_sampler, collate_fn, *, num_workers, seed) -> DataLoader:
+    """Training DataLoader (shared by all three batch samplers).
+
+    Each DataLoader iter() (once per epoch) draws a worker base seed; without a
+    generator it comes from the global torch CPU RNG. On resume the recovery
+    point's RNG state is from after this epoch's iterator was built, so building
+    the iterator again draws once more and shifts every CPU-side random stream
+    (InfoNoise etc.) by one. A dedicated generator keeps the global RNG untouched.
+    """
+    return DataLoader(
+        dataset, batch_sampler=batch_sampler,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        generator=torch.Generator().manual_seed(int(seed)),
+    )
+
+
 def run(ctx: TrainingContext) -> None:
     """
     - Main dataset / regularization dataset + per-folder repeat
@@ -283,10 +300,9 @@ def run(ctx: TrainingContext) -> None:
             ffd_window=int(getattr(args, "navit_pack_ffd_window", 256)),
             text_token_counts=text_counts,
         )
-        ctx.dataloader = DataLoader(
-            ctx.dataset, batch_sampler=batch_sampler,
-            collate_fn=collate_fn_navit_pack,
-            num_workers=args.num_workers,
+        ctx.dataloader = build_dataloader(
+            ctx.dataset, batch_sampler, collate_fn_navit_pack,
+            num_workers=args.num_workers, seed=getattr(args, "seed", 42),
         )
     elif ctx.use_cached:
         # drop_last=False: a bucket's leftover tail shorter than batch_size becomes a short
@@ -298,10 +314,9 @@ def run(ctx: TrainingContext) -> None:
             drop_last=False, shuffle=True,
             seed=getattr(args, "seed", 42),
         )
-        ctx.dataloader = DataLoader(
-            ctx.dataset, batch_sampler=batch_sampler,
-            collate_fn=collate_fn_cached,
-            num_workers=args.num_workers,
+        ctx.dataloader = build_dataloader(
+            ctx.dataset, batch_sampler, collate_fn_cached,
+            num_workers=args.num_workers, seed=getattr(args, "seed", 42),
         )
     else:
         # The non-cached path must also batch by bucket: collate_fn uses torch.stack to
@@ -315,10 +330,9 @@ def run(ctx: TrainingContext) -> None:
             drop_last=False, shuffle=True,
             seed=getattr(args, "seed", 42),
         )
-        ctx.dataloader = DataLoader(
-            ctx.dataset, batch_sampler=batch_sampler,
-            collate_fn=collate_fn,
-            num_workers=args.num_workers,
+        ctx.dataloader = build_dataloader(
+            ctx.dataset, batch_sampler, collate_fn,
+            num_workers=args.num_workers, seed=getattr(args, "seed", 42),
         )
 
     # Pre-training self-check: VAE encode->decode roundtrip (quickly rules out VAE/scale/shape issues)

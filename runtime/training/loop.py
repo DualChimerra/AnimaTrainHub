@@ -366,16 +366,26 @@ def run(ctx: TrainingContext) -> None:
             # shuffle, so refreshing it is idempotent.
             if _has_len:
                 dl_len = len(ctx.dataloader)
+        # Mid-epoch step recovery point: the first resume_skip batches of this
+        # epoch were trained before the recovery point. The sampler replays the
+        # same seed+epoch order and skips them at the index level (no loading,
+        # no augmentation randomness used); batch_idx starts at resume_skip so
+        # the gradient accumulation tail-group check matches an uninterrupted run.
+        resume_skip = ctx.resume_batch_offset if epoch == ctx.start_epoch else 0
+        if resume_skip:
+            ctx.dataloader.batch_sampler.skip_batches(resume_skip)
         # The total step count for progress display is progressively
         # corrected based on the current epoch's actual pack count (an
         # identity for non-navit, see the function's docstring)
+        _ga = max(1, int(args.grad_accum or 1))
         _display_total = _display_total_steps(
-            ctx.global_step, dl_len, args.grad_accum, args.epochs, epoch,
+            ctx.global_step - (resume_skip + _ga - 1) // _ga,
+            dl_len, args.grad_accum, args.epochs, epoch,
             getattr(args, "max_steps", 0),
         )
         if _display_total is not None:
             ctx.total_steps_display = _display_total
-        for batch_idx, batch in enumerate(ctx.dataloader):
+        for batch_idx, batch in enumerate(ctx.dataloader, start=resume_skip):
             # Record the time at the start of the accumulation cycle
             if batch_idx % args.grad_accum == 0:
                 step_start_time = time.perf_counter()
@@ -996,7 +1006,8 @@ def run(ctx: TrainingContext) -> None:
                             sra_aligner=ctx.sra_aligner,
                             scaler=ctx.scaler,
                             model_family=ctx.family.spec.family_id,
-                        ema=ctx.ema,
+                            ema=ctx.ema,
+                            epoch_batch_offset=batch_idx + 1,
                         )
                         # Also save LoRA weights
                         lora_path = ctx.output_dir / f"{args.output_name}_step{ctx.global_step}.safetensors"

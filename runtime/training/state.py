@@ -5,7 +5,8 @@ Imported directly by tests/test_lycoris_resume.py.
 
 Public:
 - save_training_state -- saves a one-shot ckpt of LoRA / optimizer / scheduler / rng / monitor
-- load_training_state -- restores it, returns (epoch, global_step, loss_history, monitor_state)
+- load_training_state -- restores it, returns (epoch, global_step, loss_history, monitor_state,
+  epoch_batch_offset)
 """
 
 from __future__ import annotations
@@ -25,9 +26,14 @@ def save_training_state(
     path, injector, optimizer, epoch, global_step,
     loss_history=None, rng_state=None, monitor_state=None,
     scheduler=None, timestep_sampler=None, sra_aligner=None,
-    scaler=None, model_family=None, ema=None,
+    scaler=None, model_family=None, ema=None, epoch_batch_offset=0,
 ):
     """Save the full training state, to support resuming from checkpoint.
+
+    epoch_batch_offset: dataloader batches already consumed within ``epoch``.
+    A mid-epoch step recovery point passes batch_idx+1 and on resume the
+    sampler skips those batches; an end-of-epoch recovery point has ``epoch``
+    already advanced to the next round and passes 0 (start the new epoch).
 
     timestep_sampler (ADR 0006 Addendum 1): EMA / CDF / FIFO buffer for
     adaptive samplers (InfoNoise). A stateless sampler's (baseline)
@@ -38,6 +44,7 @@ def save_training_state(
         "lora_state_dict": injector.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
+        "epoch_batch_offset": int(epoch_batch_offset or 0),
         "global_step": global_step,
         "loss_history": loss_history or [],
         "rng_state": {
@@ -100,7 +107,11 @@ def save_training_state(
 
 
 def load_training_state(path, injector, optimizer, scheduler=None, timestep_sampler=None, sra_aligner=None, scaler=None, expected_family=None, ema=None):
-    """Load training state, returns (epoch, global_step, loss_history, monitor_state).
+    """Load training state, returns (epoch, global_step, loss_history, monitor_state, epoch_batch_offset).
+
+    epoch_batch_offset: batches already consumed in the recovery point's epoch
+    (see save_training_state); old recovery points without the field return 0
+    and keep the old behavior of retraining that epoch from its start.
 
     timestep_sampler (ADR 0006 Addendum 1): if the ckpt contains
     timestep_sampler_state and the sampler implements load_state_dict, pour
@@ -212,9 +223,10 @@ def load_training_state(path, injector, optimizer, scheduler=None, timestep_samp
             logger.warning(f"optimizer.train() call failed (PPSF may be broken): {e}")
 
     epoch = state.get("epoch", 0)
+    epoch_batch_offset = int(state.get("epoch_batch_offset", 0) or 0)
     global_step = state.get("global_step", 0)
     loss_history = state.get("loss_history", [])
     monitor_state = state.get("monitor_state", None)  # restore monitor data
 
     logger.info(f"Training state restored: epoch={epoch}, step={global_step}")
-    return epoch, global_step, loss_history, monitor_state
+    return epoch, global_step, loss_history, monitor_state, epoch_batch_offset

@@ -111,6 +111,7 @@ class TrainingContext:
     # --- filled by resume_phase ---
     global_step: int = 0
     start_epoch: int = 0
+    resume_batch_offset: int = 0    # batches of start_epoch already trained before the recovery point (skipped on the first loop round)
     current_epoch: int = 0
     loss_history: list = field(default_factory=list)
     speed_ema: Optional[float] = None
