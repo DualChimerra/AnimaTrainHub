@@ -145,7 +145,7 @@ export default function MonitorPage() {
   const statusText = (s: string) => t(`status.${s === 'pending' ? 'queued' : s}`)
 
   return (
-    <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="fade-in ds-fill-page" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <PageHead
         title={t('monitor.title')}
         subtitle={t('monitor.subtitle')}

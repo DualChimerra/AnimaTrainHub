@@ -460,7 +460,7 @@ export default function QueuePage() {
         {error && <div className="ds-note ds-warn font-mono">{error}</div>}
 
         <div className="ds-card" style={{ padding: '16px 18px 14px' }} data-testid="queue-summary">
-          <div style={{ display: 'grid', gridTemplateColumns: 'auto 1px minmax(0,1fr) 1px auto', alignItems: 'stretch', gap: 26 }}>
+          <div className="ds-qsum" style={{ display: 'grid', gridTemplateColumns: 'auto 1px minmax(0,1fr) 1px auto', alignItems: 'stretch', gap: 26 }}>
             <div style={{ minWidth: 150 }}>
               <div className="ds-cap">{t('queue.summaryNow')}</div>
               <div style={{ fontSize: 26, fontWeight: 600, letterSpacing: '-.035em', marginTop: 6, lineHeight: 1 }}>
@@ -515,7 +515,7 @@ export default function QueuePage() {
                   })}
                 </div>
               )}
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10.5, color: 'var(--ink-3)', fontFamily: 'var(--mono)' }}>
+              <div className="ds-qsum-ticks" style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10.5, color: 'var(--ink-3)', fontFamily: 'var(--mono)' }}>
                 <span>{t('queue.nowAt', { time: fmt.clock(now) })}</span>
                 {segments.map((s) => <span key={s.task.id}>{s.finishesAt ? fmt.clock(s.finishesAt) : '—'}</span>)}
               </div>

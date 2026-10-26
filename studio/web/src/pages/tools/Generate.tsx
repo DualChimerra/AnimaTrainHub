@@ -917,7 +917,7 @@ export default function GeneratePage() {
     SCHEDULER_OPTIONS_BY_FAMILY[modelFamily].map((sc) => ({ s, sc })))
 
   return (
-    <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="fade-in ds-fill-page ds-gen-page" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <PageHead
         title={t('generate.title')}
         subtitle={t('generate.subtitle')}

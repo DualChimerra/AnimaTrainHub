@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   createBrowserRouter,
   Navigate,
@@ -104,6 +104,12 @@ function RootLayout() {
   // opened page sits hidden behind the overlay.
   useEffect(() => { setNavOpen(false) }, [location.pathname])
 
+  // <main> outlives the routes, so its scroll offset would carry over to the
+  // next page. Desktop pages mostly scroll inside their own panes; on a phone
+  // the page scrolls here, and a new page must open at its top.
+  const mainRef = useRef<HTMLElement>(null)
+  useEffect(() => { if (mainRef.current) mainRef.current.scrollTop = 0 }, [location.pathname])
+
   // Same for the settings drawer: opening it from the nav drawer (or anywhere)
   // must not leave the nav stacked on top of it.
   const settingsDrawer = useSettingsDrawer()
@@ -140,7 +146,7 @@ function RootLayout() {
         )}
         <div className="ds-main relative overflow-hidden">
           <Topbar mobile={isMobile} onOpenNav={() => setNavOpen(true)} />
-          <main style={{ flex: 1, overflow: 'auto' }}>
+          <main ref={mainRef} style={{ flex: 1, overflow: 'auto' }}>
             {/* Each top-level page eases in; a project keeps one key so its
                 layout (and loaded project) survives step changes. */}
             <div key={pageKey(location.pathname)} className="ds-page-anim" style={{ height: '100%' }}>
