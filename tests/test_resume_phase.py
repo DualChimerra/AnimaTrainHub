@@ -65,3 +65,49 @@ def test_resume_phase_skips_baseline_when_sampling_disabled(tmp_path, monkeypatc
     resume.run(ctx)
 
     assert calls == []
+
+
+def _resumed_ctx(tmp_path: Path, monkeypatch, *, with_config: bool):
+    from training.phases import resume
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    state = state_dir / "auto_epoch_state.pt"
+    state.write_bytes(b"x")
+    if with_config:
+        (state_dir / "auto_epoch_state.config.json").write_text("{}")
+
+    events = []
+    monkeypatch.setattr(resume, "emit_event", lambda name, payload: events.append((name, payload)))
+    monkeypatch.setattr(resume, "load_training_state", lambda *a, **k: (2, 202, [], None))
+
+    ctx = _ctx(tmp_path, sample_every=0)
+    ctx.args.resume_state = str(state)
+    ctx.task_archive_state_dir = state_dir
+    ctx.family = Namespace(spec=Namespace(family_id="test"))
+    resume.run(ctx)
+    return ctx, events
+
+
+def test_resume_from_auto_epoch_state_is_pausable_immediately(tmp_path, monkeypatch):
+    """Resuming from auto_epoch_state.pt reuses it as the pause point instead of locking pause until the next epoch."""
+    pytest.importorskip("torch")
+
+    ctx, events = _resumed_ctx(tmp_path, monkeypatch, with_config=True)
+
+    assert ctx.last_auto_epoch_state_path == tmp_path / "state" / "auto_epoch_state.pt"
+    assert ctx.last_auto_epoch_config_path == tmp_path / "state" / "auto_epoch_state.config.json"
+    names = [name for name, _ in events]
+    assert names.index("auto_epoch_backup_written") < names.index("train_loop_started")
+    payload = dict(events)["auto_epoch_backup_written"]
+    assert (payload["epoch"], payload["step"]) == (2, 202)
+
+
+def test_resume_without_config_snapshot_keeps_pause_locked(tmp_path, monkeypatch):
+    """No config snapshot next to the state -> not a complete pause point, wait for the next epoch backup."""
+    pytest.importorskip("torch")
+
+    ctx, events = _resumed_ctx(tmp_path, monkeypatch, with_config=False)
+
+    assert ctx.last_auto_epoch_state_path is None
+    assert "auto_epoch_backup_written" not in [name for name, _ in events]

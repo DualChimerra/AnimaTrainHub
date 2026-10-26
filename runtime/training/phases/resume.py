@@ -15,7 +15,7 @@ from training.bootstrap import init_progress
 from training.context import TrainingContext
 from training.observability import render_curve_panel
 from training.sample_runner import run_sample
-from training.snapshot import emit_event
+from training.snapshot import build_auto_epoch_config_path, build_auto_epoch_state_path, emit_event
 from training.state import load_training_state
 
 
@@ -104,6 +104,26 @@ def run(ctx: TrainingContext) -> None:
 
         # ADR §`_on_line` recognizes this event and cleans up the previous pause file pair (wired up via PR-3 cmd_builder).
         emit_event("resume_state_loaded", {"path": str(args.resume_state)})
+
+        # The auto_epoch_state.pt we just resumed from is already a valid pause
+        # point: adopt it so pausing works right away instead of staying locked
+        # until the next epoch ends (and handle_interrupt doesn't downgrade a
+        # pause in that window to a cancel).
+        auto_state_path = build_auto_epoch_state_path(ctx.auto_state_dir())
+        auto_config_path = build_auto_epoch_config_path(ctx.auto_state_dir())
+        try:
+            same_file = Path(args.resume_state).resolve() == auto_state_path.resolve()
+        except OSError:
+            same_file = False
+        if same_file and auto_config_path.exists():
+            ctx.last_auto_epoch_state_path = auto_state_path
+            ctx.last_auto_epoch_config_path = auto_config_path
+            emit_event("auto_epoch_backup_written", {
+                "state_path": str(auto_state_path),
+                "config_path": str(auto_config_path),
+                "epoch": ctx.start_epoch,
+                "step": ctx.global_step,
+            })
 
     # Signal handling: handle_interrupt comes from TrainingContext itself, bound
     # cross-platform in two ways (ADR §`runtime/training/phases/resume.py`):

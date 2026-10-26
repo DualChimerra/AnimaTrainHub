@@ -122,12 +122,14 @@ export default function QueuePage() {
 
   useEventStream(
     (evt) => {
-      // ADR 0006 PR-4 -- train_loop_started doesn't change task.status but the UI needs to see
-      // is_pausable=true (to unlock the pause button); queue_hold_changed needs to refresh the banner.
+      // ADR 0006 PR-4 -- train_loop_started / auto_epoch_backup_written don't change task.status,
+      // but is_pausable only turns true once the first epoch backup lands (Addendum 1), so both
+      // refetch to unlock the pause button; queue_hold_changed needs to refresh the banner.
       if (
         evt.type === 'task_state_changed' ||
         evt.type === 'job_state_changed' ||
         evt.type === 'train_loop_started' ||
+        evt.type === 'auto_epoch_backup_written' ||
         evt.type === 'queue_hold_changed'
       ) {
         if (evt.type === 'queue_hold_changed') void reloadHold()
@@ -155,6 +157,14 @@ export default function QueuePage() {
   }, [tasks, dataLive])
 
   const runningTask = useMemo(() => tasks.find((x) => x.status === 'running') ?? null, [tasks])
+  // Safety net for the pause button: an SSE event dropped on a flaky link (a tunnel
+  // on a phone) would otherwise keep it hidden until the next state change.
+  const awaitingPausable = runningTask != null && !runningTask.is_pausable
+  useEffect(() => {
+    if (!awaitingPausable) return
+    const poll = window.setInterval(() => { void reload() }, 15_000)
+    return () => window.clearInterval(poll)
+  }, [awaitingPausable, reload])
   const { state: monitor } = useMonitorProgress(runningTask?.id ?? null)
 
   const forecast = useMemo(() => buildTrainingForecast(tasks, monitor), [tasks, monitor])

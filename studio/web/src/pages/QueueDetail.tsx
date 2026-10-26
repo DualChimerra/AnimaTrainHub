@@ -118,6 +118,15 @@ export default function QueueDetailPage() {
     return () => window.clearInterval(tick)
   }, [task?.status])
 
+  // Safety net for the pause button: if the auto_epoch_backup_written event is lost
+  // (a flaky tunnel on a phone), refetch until the task reports it can pause.
+  const awaitingPausable = task?.status === 'running' && !task.is_pausable
+  useEffect(() => {
+    if (!awaitingPausable) return
+    const poll = window.setInterval(() => { void reload() }, 15_000)
+    return () => window.clearInterval(poll)
+  }, [awaitingPausable, reload])
+
   const { state: monitor } = useMonitorProgress(isTrain && Number.isFinite(taskId) ? taskId : null)
 
   const tabs = tabsFor(task)
