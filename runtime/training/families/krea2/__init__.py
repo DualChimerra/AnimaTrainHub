@@ -7,6 +7,8 @@ from typing import Any, Iterable
 
 import torch
 
+from ...block_swap import find_block_swap, move_module_excluding
+
 from .preset import KREA2_PRESET
 from .sampling import (
     KREA2_BASE_IMAGE_SEQ_LEN,
@@ -283,6 +285,7 @@ class Krea2Family:
         # move the TE onto the GPU and it won't fit, DiT steps down to CPU
         # first; if all prompts hit the online LRU, this whole step is skipped.
         dit_yielded = False
+        swap = None
         if vram_policy is not None:
             needed = [prompt] + ([negative_prompt] if guidance > 0 else [])
             cached = getattr(text, "online_conditions_cached", None)
@@ -297,7 +300,12 @@ class Krea2Family:
             )
             if need_te_move and _should_yield_dit(vram_policy, device, te_need):
                 logger.info("krea2 VRAM orchestration: DiT yielding to CPU before encoding")
-                model.to("cpu")
+                # Under block swap the swapped layers belong to PinnedBlockSwap
+                # (CPU pinned master + GPU slots); a blanket .to() on the way back
+                # would push the whole master copy onto the card, so only the
+                # resident part moves. Without swap, swap=None means model.to().
+                swap = find_block_swap(model)
+                move_module_excluding(model, "cpu", swap)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 dit_yielded = True
@@ -320,7 +328,7 @@ class Krea2Family:
             if callable(offload):
                 offload()
         if dit_yielded:
-            model.to(torch.device(device))
+            move_module_excluding(model, torch.device(device), swap)
         return sample_image(
             model,
             vae,

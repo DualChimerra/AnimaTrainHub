@@ -131,3 +131,77 @@ def test_auto_te_already_resident_skips_yield(monkeypatch):
     )
     assert model.moves == []
     assert text.offload_calls == 0
+
+
+# -- per-sample yield under block swap: only the resident part moves, swapped layers never follow .to() --
+
+
+def _swap_model():
+    """Register a swap handle on a four-layer ModuleList (a stand-in is enough: this only checks finding and passing the handle)."""
+    from torch import nn
+
+    from training.block_swap import _OWNER_ATTR
+
+    blocks = nn.ModuleList([nn.Linear(4, 4) for _ in range(4)])
+    swap = object()
+    setattr(blocks, _OWNER_ATTR, swap)
+    return nn.Sequential(blocks), swap
+
+
+def test_find_block_swap_resolves_registered_handle():
+    from torch import nn
+
+    from training.block_swap import find_block_swap
+
+    model, swap = _swap_model()
+    assert find_block_swap(model) is swap
+    # plain model without swap / duck-typed stand-in (no modules()) -> None, falls back to model.to()
+    assert find_block_swap(nn.Sequential(nn.Linear(2, 2))) is None
+    assert find_block_swap(_OrchestraModel()) is None
+
+
+def test_yield_threads_swap_handle_through_both_moves(monkeypatch):
+    """Both the yield and the move back must carry the swap handle into
+    move_module_excluding -- a bare model.to() in either place pushes the
+    swapped layers' master copy onto the card.
+
+    (The real skipping of managed tensors is checked on CUDA in
+    tests/test_block_swap_krea2_yield.py.)
+    """
+    model, swap = _swap_model()
+    moves = []
+    monkeypatch.setattr(
+        krea2_module, "move_module_excluding",
+        lambda m, device, s: moves.append((m, str(device), s)),
+    )
+    monkeypatch.setattr(
+        krea2_module, "prepare_sampling_condition", lambda *a, **k: "cond",
+    )
+    monkeypatch.setattr(krea2_module, "sample_image", lambda *a, **k: "image")
+    result = Krea2Family().sample_image(
+        model, object(), _OrchestraText(), "a prompt",
+        distilled=True, device="cpu", vram_policy="save_vram",
+    )
+    assert result == "image"
+    assert moves == [(model, "cpu", swap), (model, "cpu", swap)]
+
+
+def test_yield_without_swap_passes_none(monkeypatch):
+    """No block swap: swap=None -> move_module_excluding degrades to model.to()."""
+    from torch import nn
+
+    model = nn.Sequential(nn.Linear(4, 4))
+    moves = []
+    monkeypatch.setattr(
+        krea2_module, "move_module_excluding",
+        lambda m, device, s: moves.append(s),
+    )
+    monkeypatch.setattr(
+        krea2_module, "prepare_sampling_condition", lambda *a, **k: "cond",
+    )
+    monkeypatch.setattr(krea2_module, "sample_image", lambda *a, **k: "image")
+    Krea2Family().sample_image(
+        model, object(), _OrchestraText(), "a prompt",
+        distilled=True, device="cpu", vram_policy="save_vram",
+    )
+    assert moves == [None, None]

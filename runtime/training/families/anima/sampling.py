@@ -21,6 +21,7 @@ import sys
 import torch
 import torch.nn.functional as F
 
+from training.block_swap import find_block_swap, move_module_excluding
 from training.families.anima import ANIMA_SPEC
 from training.families.anima.text_encoding import (
     build_comfy_anima_conditioning_inputs,
@@ -81,39 +82,31 @@ def _module_device(module) -> torch.device | None:
     return param.device
 
 
-def _decode_offload_targets(model, qwen_model) -> tuple:
-    """Modules allowed to be offloaded during VAE decode.
+def _offload_modules_for_vae_decode(*modules) -> list[tuple[object, torch.device, object]]:
+    """Move large, inactive modules off GPU while fp32 VAE decode runs.
 
-    When block swap is active, the DiT must be skipped: the blanket
-    ``.to(device)`` used to restore modules would move the swapped-out
-    layers' pinned CPU master copy entirely back onto the GPU -- wasting the
-    swap and hitting a peak usage equal to the full model (an immediate OOM
-    on a small card); and once swapped, what's resident on the DiT is
-    already down to a sliver, so offloading it is pointless anyway. The
-    marker is set on the model by loader.place_model_for_block_swap.
+    Under block swap the DiT's swapped layers belong to PinnedBlockSwap (CPU
+    pinned master + GPU slots); a blanket ``.to()`` on restore would push the
+    whole master copy onto the card and the peak back to the full model --
+    so only the resident part moves. Without swap, swap=None degrades to
+    ``module.to()``.
     """
-    if int(getattr(model, "blocks_to_swap", 0) or 0) > 0:
-        return (qwen_model,)
-    return (model, qwen_model)
-
-
-def _offload_modules_for_vae_decode(*modules) -> list[tuple[object, torch.device]]:
-    """Move large, inactive modules off GPU while fp32 VAE decode runs."""
-    offloaded: list[tuple[object, torch.device]] = []
+    offloaded: list[tuple[object, torch.device, object]] = []
     for module in modules:
         device = _module_device(module)
         if device is None or device.type != "cuda" or not hasattr(module, "to"):
             continue
-        module.to("cpu")
-        offloaded.append((module, device))
+        swap = find_block_swap(module)
+        move_module_excluding(module, "cpu", swap)
+        offloaded.append((module, device, swap))
     if offloaded and torch.cuda.is_available():
         torch.cuda.empty_cache()
     return offloaded
 
 
-def _restore_offloaded_modules(offloaded: list[tuple[object, torch.device]]) -> None:
-    for module, device in offloaded:
-        module.to(device)
+def _restore_offloaded_modules(offloaded: list[tuple[object, torch.device, object]]) -> None:
+    for module, device, swap in offloaded:
+        move_module_excluding(module, device, swap)
     if offloaded and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -535,7 +528,7 @@ def sample_image(
         if device_type == "cuda" and callable(_should_offload) and _should_offload(latents):
             logger.info("[Debug] VAE decode: VRAM is tight but the peak is just under the cliff, offloading inactive modules to decode the whole image at once")
             offloaded_modules = _offload_modules_for_vae_decode(
-                *_decode_offload_targets(model, qwen_model)
+                model, qwen_model
             )
         images = _decode_vae(vae, latents)
         images = images.squeeze(2)  # [B,C,H,W]

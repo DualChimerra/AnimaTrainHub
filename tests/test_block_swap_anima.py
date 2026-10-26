@@ -175,14 +175,13 @@ def test_pinned_budget_guard_fails_fast_before_any_placement(monkeypatch):
     model = _TinyDiT()
     with pytest.raises(RuntimeError, match="Not enough memory to swap out"):
         place_model_for_block_swap(model, "cuda", torch.float32, 2)
-    # fail-fast semantics: the model hasn't moved at all (still all on CPU, no marker)
+    # fail-fast semantics: the model hasn't moved at all (still all on CPU)
     assert all(p.device.type == "cpu" for p in model.parameters())
-    assert getattr(model, "blocks_to_swap", 0) == 0
 
 
 @pytest.mark.skipif(not _CUDA, reason="requires CUDA")
 def test_placement_keeps_swapped_blocks_on_cpu():
-    """Non-swapped parts go on the card, the trailing N layers stay on CPU, dtype is cast, the marker is set, out-of-range clamps."""
+    """Non-swapped parts go on the card, the trailing N layers stay on CPU, dtype is cast, out-of-range clamps."""
     model = _TinyDiT(num_blocks=4)
     num = place_model_for_block_swap(model, "cuda", torch.bfloat16, 99)
     assert num == 4  # clamps to the total layer count
@@ -190,7 +189,6 @@ def test_placement_keeps_swapped_blocks_on_cpu():
     model2 = _TinyDiT(num_blocks=4)
     num2 = place_model_for_block_swap(model2, "cuda", torch.bfloat16, 2)
     assert num2 == 2
-    assert model2.blocks_to_swap == 2
     for i, block in enumerate(model2.blocks):
         expect = "cpu" if i >= 2 else "cuda"
         for p in block.parameters():
@@ -267,20 +265,57 @@ def test_anima_forward_backward_matches_without_swap():
     swap.close()
 
 
-# ── sampling-time VAE decode offload and swap are mutually exclusive ─────────────────────────────────
+# ── sampling-time VAE decode offload: the swap handle is threaded through both moves ──
 
-def test_decode_offload_skips_swapped_dit():
-    from training.families.anima.sampling import _decode_offload_targets
+class _RecordingModule:
+    """Duck-typed non-nn.Module (Qwen stand-in): only records .to() calls."""
 
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def to(self, device):
+        self.calls.append(device)
+        return self
+
+
+def _patch_cuda_device(monkeypatch, sampling):
+    cuda = torch.device("cuda", 0)
+    monkeypatch.setattr(sampling, "_module_device", lambda m: cuda)
+    return cuda
+
+
+def test_decode_offload_threads_swap_handle_through(monkeypatch):
+    """DiT with a swap -> offload and restore both carry the same handle; Qwen without one -> None."""
+    from training.families.anima import sampling
+
+    cuda = _patch_cuda_device(monkeypatch, sampling)
     model = _TinyDiT()
-    qwen = object()
-    # no swap: both DiT and Qwen can be offloaded
-    assert _decode_offload_targets(model, qwen) == (model, qwen)
-    # swap active (marker set by the loader): only offload Qwen -- the
-    # blanket .to() during restore would move the pinned CPU master copy
-    # back onto the card, so DiT must be skipped
-    model.blocks_to_swap = 2
-    assert _decode_offload_targets(model, qwen) == (qwen,)
+    sentinel = object()
+    setattr(model.blocks, "_pinned_block_swap", sentinel)  # what PinnedBlockSwap registers on construction
+    qwen = _RecordingModule()
+    moves: list = []
+    monkeypatch.setattr(
+        sampling, "move_module_excluding",
+        lambda m, device, swap: moves.append((m, device, swap)),
+    )
+
+    offloaded = sampling._offload_modules_for_vae_decode(model, qwen)
+    assert moves == [(model, "cpu", sentinel), (qwen, "cpu", None)]
+
+    moves.clear()
+    sampling._restore_offloaded_modules(offloaded)
+    assert moves == [(model, cuda, sentinel), (qwen, cuda, None)]
+
+
+def test_decode_offload_without_swap_is_plain_to(monkeypatch):
+    """No swap: degrades to the old module.to("cpu") / module.to(device)."""
+    from training.families.anima import sampling
+
+    cuda = _patch_cuda_device(monkeypatch, sampling)
+    qwen = _RecordingModule()
+    offloaded = sampling._offload_modules_for_vae_decode(qwen)
+    sampling._restore_offloaded_modules(offloaded)
+    assert qwen.calls == ["cpu", cuda]
 
 
 # ── the NaViT packed path must also go through __call__ (otherwise the four hooks silently never fire) ─────────────

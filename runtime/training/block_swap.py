@@ -54,6 +54,12 @@ from torch import nn
 
 logger = logging.getLogger(__name__)
 
+#: Attribute name ``PinnedBlockSwap`` registers itself under on the managed
+#: ``nn.ModuleList`` once built, so callers that only hold the model (a
+#: family's sample_image) can get the handle back via ``find_block_swap``
+#: without threading the swap object through every signature.
+_OWNER_ATTR = "_pinned_block_swap"
+
 _GIB = 1024 ** 3
 
 
@@ -300,6 +306,10 @@ class PinnedBlockSwap:
         self._pinned_bytes = 0
         self._handles: list = []
         self._build(blocks)
+        # registered on the managed ModuleList (a plain attribute, not a
+        # Module/Tensor): any code holding the model can find this object,
+        # see find_block_swap
+        setattr(blocks, _OWNER_ATTR, self)
 
     # ------------------------------------------------------------------ construction
     def _build(self, blocks: nn.ModuleList) -> None:
@@ -627,6 +637,8 @@ class PinnedBlockSwap:
         self._param_specs.clear()
         self._slot_holds = []
         self._pinned_bytes = 0
+        if getattr(self.blocks, _OWNER_ATTR, None) is self:
+            delattr(self.blocks, _OWNER_ATTR)
 
     def iter_forward(self) -> Iterator[tuple[int, nn.Module]]:
         """Convenience wrapper for the forward traversal: yields (index,
@@ -672,6 +684,24 @@ def release_pinned_host_cache() -> None:
         torch._C._host_emptyCache()
     except Exception:  # noqa: BLE001
         pass
+
+
+def find_block_swap(module) -> "PinnedBlockSwap | None":
+    """Return the ``PinnedBlockSwap`` attached somewhere in ``module``'s subtree (None if there is none).
+
+    For callers that hold the model but not the swap handle (a family's
+    ``sample_image``). Together with ``move_module_excluding`` this gives a
+    swap-safe whole-model move without branching on the family. Duck-typed
+    objects that aren't an ``nn.Module`` (test doubles) return None.
+    """
+    modules = getattr(module, "modules", None)
+    if not callable(modules):
+        return None
+    for sub in modules():
+        swap = getattr(sub, _OWNER_ATTR, None)
+        if swap is not None:
+            return swap
+    return None
 
 
 def move_module_excluding(module: nn.Module, device, swap: "PinnedBlockSwap | None") -> None:
