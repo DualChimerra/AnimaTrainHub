@@ -132,11 +132,6 @@ def place_model_for_block_swap(model, device, dtype, blocks_to_swap: int) -> int
     for name, buf in model.named_buffers():
         if not name.startswith(swapped_prefixes):
             buf.data = buf.data.to(target)
-    # public marker: whole-model offload during VAE decode at sampling time
-    # must skip this model (a blanket .to() would move the CPU-resident
-    # copy back onto the GPU on restore, wasting the swap and hitting peak
-    # usage = full model); families/anima/sampling.py branches on this
-    model.blocks_to_swap = num_swap
     logger.info(
         "Block swap placement: the last %d/%d layers stay in host memory (%.2f GB), the rest go to the GPU",
         num_swap, total, need / 1024 ** 3,

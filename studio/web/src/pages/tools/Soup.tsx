@@ -178,7 +178,7 @@ export default function SoupPage() {
   const sumWeights = items.reduce((a, i) => a + i.weight, 0)
 
   return (
-    <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="fade-in ds-fill-page" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <input
         ref={fileRef} type="file" accept=".safetensors" multiple hidden
         onChange={(e) => void handleUpload(e.target.files)}

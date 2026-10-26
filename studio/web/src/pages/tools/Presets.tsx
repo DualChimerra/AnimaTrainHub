@@ -535,7 +535,7 @@ export default function PresetsPage() {
   const raw = (v: unknown) => (v === undefined || v === null || v === '' ? '—' : Array.isArray(v) ? `[${v.join(', ')}]` : String(v))
 
   return (
-    <div className="fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="fade-in ds-fill-page" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <input
         ref={fileInputRef}
         type="file"

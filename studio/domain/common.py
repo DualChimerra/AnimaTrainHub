@@ -85,8 +85,9 @@ FAMILY_SAMPLING: dict[str, dict[str, tuple[str, ...]]] = {
         # krea2 sigma convention -- shift is a model-level convention, not
         # part of the scheduler name (formerly called krea2_shift; legacy
         # values outside the Literal are merged back into "simple").
-        "samplers": ("euler",),
-        "schedulers": ("simple",),
+        # er_sde / sgm_uniform follow ComfyUI on ModelSamplingFlux.
+        "samplers": ("euler", "er_sde"),
+        "schedulers": ("simple", "sgm_uniform"),
     },
 }
 

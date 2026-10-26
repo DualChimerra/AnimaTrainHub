@@ -149,11 +149,11 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-tag.ds-gate{background:var(--blue-soft);color:var(--blue-text)}
 .ds-tag.ds-adv{background:var(--sunken);color:var(--ink-3)}
 .ds-tag.ds-edited{background:var(--green-soft);color:var(--green-text)}
-.ds-chip{display:inline-flex;align-items:center;gap:7px;height:27px;padding:0 6px 0 11px;border-radius:999px;background:var(--sunken);font-size:11.5px;color:var(--ink)}
+.ds-chip{display:inline-flex;align-items:center;gap:7px;min-height:27px;padding:3px 6px 3px 11px;border-radius:14px;background:var(--sunken);font-size:11.5px;color:var(--ink)}
 .ds-chip b{font-family:var(--mono);font-weight:500;font-size:10.5px;color:var(--ink-3)}
 .ds-chip.ds-is-active{background:var(--ink);color:#fff}
 .ds-chip.ds-is-active b{color:rgba(255,255,255,.65)}
-.ds-chip-x{width:16px;height:16px;border-radius:999px;display:grid;place-items:center;color:var(--ink-3)}
+.ds-chip-x{flex:none;width:16px;height:16px;border-radius:999px;display:grid;place-items:center;color:var(--ink-3)}
 .ds-chip-add{height:27px;padding:0 11px;border-radius:999px;border:1px dashed var(--line-3);color:var(--ink-3);font-size:11.5px}
 .ds-mono{font-family:var(--mono)}
 .ds-num{font-family:var(--mono);font-size:11.5px;font-variant-numeric:tabular-nums;text-align:right}
@@ -388,7 +388,7 @@ select.ds-inp{appearance:none;padding-right:28px;background-image:url("data:imag
 .ds-app{letter-spacing:-.01em}
 
 /* счётчик внутри чипа — такой же пилюлей, как badge во вкладках */
-.ds-chip{padding:0 5px 0 11px}
+.ds-chip{padding:3px 5px 3px 11px}
 .ds-chip b{font-family:var(--mono);font-weight:500;font-size:10px;line-height:1;color:var(--ink-3);background:rgba(20,22,20,.06);border-radius:999px;padding:3px 6px}
 .ds-chip.ds-is-active b{background:rgba(255,255,255,.2);color:rgba(255,255,255,.85)}
 .ds-chip.ds-is-active .ds-chip-x{color:rgba(255,255,255,.7)}

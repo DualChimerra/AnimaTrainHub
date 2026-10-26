@@ -33,6 +33,12 @@ KREA2_SAMPLER = "euler"
 # identical to build_krea2_sigmas; shift is a model-level convention and isn't
 # part of the scheduler name -- to reproduce this in Comfy, pick euler+simple.
 KREA2_SCHEDULER = "simple"
+#: Extra choices, as in ComfyUI on ModelSamplingFlux (er_sde comes from the
+#: shared inference_samplers registry)
+KREA2_SAMPLERS = (KREA2_SAMPLER, "er_sde")
+KREA2_SCHEDULERS = (KREA2_SCHEDULER, "sgm_uniform")
+#: ModelSamplingFlux sigma table size (sigma_min = sigma(1 / timesteps))
+_FLUX_TIMESTEPS = 10000
 KREA2_RAW_STEPS = 28
 KREA2_RAW_GUIDANCE = 4.5
 KREA2_TURBO_STEPS = 8
@@ -74,9 +80,9 @@ def resolve_sampling_settings(
 
     sampler = KREA2_SAMPLER if sampler_name is None else str(sampler_name).lower().strip()
     schedule = KREA2_SCHEDULER if scheduler is None else str(scheduler).lower().strip()
-    if sampler != KREA2_SAMPLER or schedule != KREA2_SCHEDULER:
+    if sampler not in KREA2_SAMPLERS or schedule not in KREA2_SCHEDULERS:
         raise ValueError(
-            "Krea2 only supports euler+simple, got "
+            f"Krea2 supports samplers {KREA2_SAMPLERS} with schedulers {KREA2_SCHEDULERS}, got "
             f"{sampler or '<empty>'}+{schedule or '<empty>'}"
         )
 
@@ -150,6 +156,32 @@ def build_krea2_sigmas(
     )
     shift = math.exp(mu)
     return (shift * base) / (1.0 + (shift - 1.0) * base)
+
+
+def build_krea2_sgm_sigmas(
+    steps: int,
+    *,
+    device: torch.device | str = "cpu",
+) -> Tensor:
+    """ComfyUI ``sgm_uniform`` on ModelSamplingFlux (shift = mu 1.15).
+
+    normal_scheduler(sgm=True): ``linspace(timestep(sigma_max),
+    timestep(sigma_min), steps + 1)[:-1]`` mapped through ``sigma()``, then 0.
+    For Flux ``timestep(s) = s``, ``sigma_max = sigma(1) = 1`` and
+    ``sigma_min = sigma(1 / 10000)``; the shift is applied on top of the
+    already shifted ends, which is ComfyUI's behavior and reproduced as is.
+    """
+    if int(steps) <= 0:
+        raise ValueError("Krea2 sampling steps must be positive")
+    shift = math.exp(KREA2_FIXED_MU)
+
+    def sigma(t: Tensor) -> Tensor:
+        return (shift * t) / (1.0 + (shift - 1.0) * t)
+
+    sigma_min = float(sigma(torch.tensor(1.0 / _FLUX_TIMESTEPS)))
+    ts = torch.linspace(1.0, sigma_min, int(steps) + 1, device=device, dtype=torch.float32)[:-1]
+    sigmas = sigma(ts)
+    return torch.cat([sigmas, sigmas.new_zeros(1)])
 
 
 def align_krea2_resolution(value: int, *, align: int = 16) -> int:
@@ -272,32 +304,56 @@ def sample_latents(
             f"Krea2 initial latent shape should be {expected_shape}, got {tuple(latents.shape)}"
         )
     image = latents.to(device=target, dtype=dtype)
-    sigmas = build_krea2_sigmas(
-        image_seq_len, steps, distilled=distilled, device=target,
-    )
+    sampler = KREA2_SAMPLER if sampler_name is None else str(sampler_name).lower().strip()
+    schedule = KREA2_SCHEDULER if scheduler is None else str(scheduler).lower().strip()
+    if schedule == "sgm_uniform":
+        sigmas = build_krea2_sgm_sigmas(steps, device=target)
+    else:
+        sigmas = build_krea2_sigmas(
+            image_seq_len, steps, distilled=distilled, device=target,
+        )
+
+    def predict_velocity(x: Tensor, sigma: Tensor) -> Tensor:
+        timestep = sigma.expand(x.shape[0]).to(device=target, dtype=x.dtype)
+        velocity = model(
+            x,
+            timestep,
+            positive.context,
+            attention_mask=positive.attention_mask,
+        )
+        if guidance > 0:
+            uncond_velocity = model(
+                x,
+                timestep,
+                negative.context,
+                attention_mask=negative.attention_mask,
+            )
+            # Krea convention: g=0 is conditional-only; equivalent standard
+            # CFG scale is (1 + g).
+            velocity = velocity + guidance * (velocity - uncond_velocity)
+        return velocity
 
     was_training = bool(getattr(model, "training", False))
     model.eval()
     try:
+        if sampler == "er_sde":
+            from training.inference_samplers import build_inference_sampler
+
+            def denoise(x: Tensor, sigma: Tensor) -> Tensor:
+                # CONST flow: x0 = x_t - sigma * v (float32 state, model dtype forward)
+                with _autocast_context(target, dtype):
+                    velocity = predict_velocity(x.to(dtype), sigma.reshape(1))
+                return x - sigma.to(torch.float32) * velocity.float()
+
+            # ComfyUI noise scaling: x = sigma_0 * noise (sigma_0 = 1); the
+            # first-sigma offset inside er_sde uses the Flux shift exp(mu)
+            return build_inference_sampler("er_sde")(
+                denoise, image.float() * sigmas[0], sigmas,
+                seed=seed, shift=math.exp(KREA2_FIXED_MU), step_callback=step_callback,
+            ).to(dtype)
         with _autocast_context(target, dtype):
             for index, (sigma, next_sigma) in enumerate(zip(sigmas[:-1], sigmas[1:])):
-                timestep = sigma.expand(image.shape[0]).to(device=target, dtype=image.dtype)
-                velocity = model(
-                    image,
-                    timestep,
-                    positive.context,
-                    attention_mask=positive.attention_mask,
-                )
-                if guidance > 0:
-                    uncond_velocity = model(
-                        image,
-                        timestep,
-                        negative.context,
-                        attention_mask=negative.attention_mask,
-                    )
-                    # Krea convention: g=0 is conditional-only; equivalent standard
-                    # CFG scale is (1 + g).
-                    velocity = velocity + guidance * (velocity - uncond_velocity)
+                velocity = predict_velocity(image, sigma)
 
                 if step_callback is not None:
                     denoised = image - sigma.to(dtype=image.dtype) * velocity

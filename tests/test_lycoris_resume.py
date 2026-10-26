@@ -84,11 +84,12 @@ def test_save_training_state_roundtrip(tmp_path):
     adapter2.inject(model2)
     optimizer2 = torch.optim.AdamW(adapter2.get_params(), lr=1e-3)
 
-    epoch, step, history, monitor = load_training_state(state_path, adapter2, optimizer2)
+    epoch, step, history, monitor, batch_offset = load_training_state(state_path, adapter2, optimizer2)
     assert epoch == 2
     assert step == 42
     assert history == [0.5, 0.3, 0.2]
     assert monitor == {"foo": "bar"}
+    assert batch_offset == 0  # end-of-epoch recovery point (default): the new epoch starts from the top
 
     sd1 = adapter.state_dict()
     sd2 = adapter2.state_dict()

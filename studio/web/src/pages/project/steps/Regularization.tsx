@@ -535,6 +535,7 @@ export default function RegularizationPage() {
   return (
     <StepShell
       idx={5}
+      mobilePageScroll
       eyebrow={t('reg.eyebrow')}
       title={t('steps.reg.title')}
       subtitle={<Trans i18nKey="steps.reg.subtitle" components={{ code: <code /> }} />}
@@ -553,7 +554,7 @@ export default function RegularizationPage() {
         </>
       }
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minHeight: 0, overflowY: 'auto', paddingTop: 2 }}>
+      <div className="m-page-scroll" style={{ display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minHeight: 0, overflowY: 'auto', paddingTop: 2 }}>
         <StatusCard reg={reg} existingMode={existingMode} job={job} aiTask={aiTask} />
 
         {activeTab === 'generate' ? (

@@ -404,7 +404,7 @@ export default function ProjectsPage() {
         </div>
 
         {loading ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,minmax(0,1fr))', gap: 14 }}>
+          <div className="m-grid-1" style={{ display: 'grid', gridTemplateColumns: 'repeat(3,minmax(0,1fr))', gap: 14 }}>
             {[1, 2, 3].map((i) => (
               <div key={i} className="ds-card" style={{ height: 176, padding: '15px 16px' }}>
                 <div className="w-3/5 h-4 rounded bg-sunken mb-2.5" />
@@ -418,7 +418,7 @@ export default function ProjectsPage() {
             <span>{t('projects.noProjectsHint')}</span>
           </div>
         ) : sortedItems.length > 0 ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,minmax(0,1fr))', gap: 14 }}>
+          <div className="m-grid-1" style={{ display: 'grid', gridTemplateColumns: 'repeat(3,minmax(0,1fr))', gap: 14 }}>
             {sortedItems.map((p) => (
               <ProjectCard
                 key={p.id}

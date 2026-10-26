@@ -17,6 +17,7 @@ Public API:
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import os
@@ -1027,6 +1028,7 @@ class BucketBatchSampler:
         self.shuffle = bool(shuffle)
         self.seed = int(seed)
         self.epoch = 0
+        self._skip = 0
         self._cached_dataset = self._get_cached_dataset(dataset)
         self._base_len = len(self._cached_dataset) if self._cached_dataset else 0
 
@@ -1039,6 +1041,17 @@ class BucketBatchSampler:
 
     def set_epoch(self, epoch):
         self.epoch = int(epoch)
+
+    def skip_batches(self, n):
+        """Skip the first n batches of this epoch on the next iteration (one-shot).
+
+        For resuming from a mid-epoch step recovery point: the order is set by
+        seed+epoch and the skip happens at the index level, so skipped samples
+        never go through ``__getitem__`` and use no augmentation randomness
+        (flip / caption shuffle); the data stream after resume matches an
+        uninterrupted run batch for batch. ``__len__`` stays the full epoch.
+        """
+        self._skip = max(0, int(n))
 
     def __len__(self):
         # Under ARB the actual batch count = sum_bucket f(n_b, bs); using the
@@ -1066,6 +1079,10 @@ class BucketBatchSampler:
         return total
 
     def __iter__(self):
+        skip, self._skip = self._skip, 0
+        return itertools.islice(self._iter_batches(), skip, None)
+
+    def _iter_batches(self):
         rng = random.Random(self.seed + self.epoch)
         if self._cached_dataset is None:
             indices = list(range(len(self.dataset)))
@@ -1998,6 +2015,7 @@ class NavitPackBatchSampler:
             )
         self.ffd_window = int(ffd_window or 0)
         self.epoch = 0
+        self._skip = 0
         self.token_counts = dataset_token_counts(dataset)
         if text_token_counts is not None:
             if len(text_token_counts) != len(self.token_counts) or any(n < 0 for n in text_token_counts):
@@ -2045,6 +2063,10 @@ class NavitPackBatchSampler:
         self.epoch = int(epoch)
         self._cached_packs = None
 
+    def skip_batches(self, n):
+        """Skip the first n packs of this epoch on the next iteration (one-shot); same semantics as BucketBatchSampler.skip_batches."""
+        self._skip = max(0, int(n))
+
     def _build_packs(self):
         order = list(range(len(self.token_counts)))
         if self.shuffle:
@@ -2067,8 +2089,8 @@ class NavitPackBatchSampler:
     def __iter__(self):
         packs = self._build_packs()
         self._cached_packs = packs
-        for pack in packs:
-            yield pack
+        skip, self._skip = self._skip, 0
+        return iter(packs[skip:])
 
     def __len__(self):
         if self._cached_packs is None:

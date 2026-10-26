@@ -20,13 +20,13 @@ export type GenerateFamily = 'anima' | 'krea2' | 'moss_image'
 
 export const SAMPLER_OPTIONS_BY_FAMILY = {
   anima: ['er_sde', 'dpmpp_3m_sde'],
-  krea2: ['euler'],
+  krea2: ['euler', 'er_sde'],
   moss_image: ['euler'],
 } as const satisfies Record<GenerateFamily, readonly string[]>
 
 export const SCHEDULER_OPTIONS_BY_FAMILY = {
   anima: ['simple', 'sgm_uniform'],
-  krea2: ['simple'],
+  krea2: ['simple', 'sgm_uniform'],
   moss_image: ['simple', 'sgm_uniform'],
 } as const satisfies Record<GenerateFamily, readonly string[]>
 
